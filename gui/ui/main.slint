@@ -3,6 +3,14 @@
 
 import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
 import { QuantumCanvasIntegration, CanvasDAGNetwork, CanvasEntropyStream } from "canvas_visualizations.slint";
+import { QuantumEntropyStream } from "quantum_entropy.slint";
+import { DAGConsensusVisualizer } from "dag_visualization.slint";
+import { NarwhalMempoolFlow } from "narwhal_mempool.slint";
+import { TorAnonymityVisualizer } from "tor_anonymity.slint";
+import { LVRFRandomnessOracle } from "lvrf_randomness.slint";
+import { PhaseTransitionVisualizer } from "phase_transition.slint";
+import { NetworkTopologyVisualizer } from "network_topology.slint";
+import { QuantumStorageDashboard } from "quantum_storage.slint";
 
 export component MainWindow inherits Window {
     title: "Q-NarwhalKnight - Quantum Consensus Interface";
@@ -71,34 +79,64 @@ export component MainWindow inherits Window {
             // Tab 2: Quantum Entropy Visualization
             Tab {
                 title: "🔮 Entropy";
-                EntropyVisualizer { }
+                QuantumEntropyStream { }
             }
             
             // Tab 3: DAG-Knight Consensus
             Tab {
                 title: "🕸️ Consensus";
-                ConsensusVisualizer { }
+                DAGConsensusVisualizer { }
             }
             
-            // Tab 4: Tor Anonymity
+            // Tab 4: Narwhal Mempool
+            Tab {
+                title: "🌪️ Mempool";
+                NarwhalMempoolFlow { }
+            }
+            
+            // Tab 5: Tor Anonymity
             Tab {
                 title: "🎭 Anonymity";
-                AnonymityVisualizer { }
+                TorAnonymityVisualizer { }
             }
             
-            // Tab 5: Quantum Wallet
+            // Tab 6: L-VRF Randomness
             Tab {
-                title: "💎 Wallet";
+                title: "🔮 L-VRF";
+                LVRFRandomnessOracle { }
+            }
+            
+            // Tab 7: Phase Evolution
+            Tab {
+                title: "🔄 Phases";
+                PhaseTransitionVisualizer { }
+            }
+            
+            // Tab 8: Network Topology
+            Tab {
+                title: "🌐 Network";
+                NetworkTopologyVisualizer { }
+            }
+            
+            // Tab 9: Quantum Storage
+            Tab {
+                title: "💎 Storage";
+                QuantumStorageDashboard { }
+            }
+            
+            // Tab 10: Quantum Wallet
+            Tab {
+                title: "💰 Wallet";
                 QuantumWallet { }
             }
             
-            // Tab 6: Advanced Canvas Visualizations
+            // Tab 11: Advanced Canvas Visualizations
             Tab {
                 title: "🎨 Canvas";
                 QuantumCanvasIntegration { }
             }
             
-            // Tab 7: System Analytics
+            // Tab 12: System Analytics
             Tab {
                 title: "📊 Analytics";
                 SystemAnalytics { }

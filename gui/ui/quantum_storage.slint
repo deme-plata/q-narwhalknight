@@ -1,0 +1,956 @@
+// Quantum Storage Metrics Dashboard
+// Advanced visualization of RocksDB quantum storage, encryption, and performance
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== QUANTUM STORAGE DASHBOARD ==========
+export component QuantumStorageDashboard inherits Rectangle {
+    // Properties for storage state
+    in-out property <float> storage-usage: 0.67; // 67% capacity
+    in-out property <string> total-capacity: "2.4 TB";
+    in-out property <string> used-space: "1.6 TB";
+    in-out property <string> encryption-method: "AES-256-GCM + Quantum";
+    in-out property <bool> quantum-encryption: true;
+    in-out property <float> read-performance: 1247.5; // MB/s
+    in-out property <float> write-performance: 892.3; // MB/s
+    in-out property <int> active-column-families: 12;
+    in-out property <string> compaction-status: "Active";
+    in-out property <float> hot-storage-ratio: 0.15; // 15% hot, 85% cold
+    
+    // Animation properties
+    property <float> storage-activity: 0.0;
+    property <float> encryption-rotation: 0.0;
+    property <float> performance-pulse: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b2e 100%);
+    
+    // Storage activity animation
+    animate storage-activity {
+        duration: 4000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    // Encryption visualization
+    animate encryption-rotation {
+        duration: 8000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Performance indicator pulse
+    animate performance-pulse {
+        duration: 2500ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header with encryption status
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "💎 Quantum Storage System";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            QuantumEncryptionIndicator {
+                encryption-method: encryption-method;
+                quantum-enabled: quantum-encryption;
+                rotation: encryption-rotation;
+            }
+        }
+        
+        // Main storage visualization area
+        HorizontalBox {
+            spacing: 20px;
+            height: 420px;
+            
+            // Storage capacity and usage
+            StorageCapacityView {
+                width: 35%;
+                usage: storage-usage;
+                total: total-capacity;
+                used: used-space;
+                activity: storage-activity;
+            }
+            
+            // Performance metrics
+            PerformanceMetricsPanel {
+                width: 30%;
+                read-speed: read-performance;
+                write-speed: write-performance;
+                pulse: performance-pulse;
+                compaction: compaction-status;
+            }
+            
+            // RocksDB internals
+            RocksDBInternalsPanel {
+                width: 35%;
+                column-families: active-column-families;
+                hot-ratio: hot-storage-ratio;
+                activity: storage-activity;
+            }
+        }
+        
+        // Storage operations and encryption details
+        StorageOperationsPanel {
+            height: 130px;
+            encryption-method: encryption-method;
+            quantum-encryption: quantum-encryption;
+            hot-ratio: hot-storage-ratio;
+        }
+    }
+}
+
+// ========== STORAGE CAPACITY VIEW ==========
+component StorageCapacityView inherits Rectangle {
+    in-out property <float> usage;
+    in-out property <string> total;
+    in-out property <string> used;
+    in-out property <float> activity;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #06b6d4;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📦 Storage Capacity";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 20px;
+                alignment: center;
+                
+                // Circular storage gauge
+                StorageGauge {
+                    usage: usage;
+                    activity: activity;
+                }
+                
+                // Storage details
+                VerticalBox {
+                    spacing: 12px;
+                    
+                    StorageDetailItem {
+                        label: "Total Capacity";
+                        value: total;
+                        icon: "🗄️";
+                    }
+                    
+                    StorageDetailItem {
+                        label: "Used Space";
+                        value: used;
+                        icon: "📊";
+                    }
+                    
+                    StorageDetailItem {
+                        label: "Available";
+                        value: "0.8 TB";
+                        icon: "💾";
+                    }
+                    
+                    StorageDetailItem {
+                        label: "Usage Level";
+                        value: (usage * 100).toFixed(0) + "%";
+                        icon: usage > 0.8 ? "⚠️" : "✅";
+                    }
+                }
+                
+                // Storage health indicator
+                Rectangle {
+                    width: 160px;
+                    height: 30px;
+                    background: usage > 0.8 ? #f59e0b33 : #10b98133;
+                    border-radius: 15px;
+                    border-width: 1px;
+                    border-color: usage > 0.8 ? #f59e0b : #10b981;
+                    
+                    Text {
+                        text: usage > 0.8 ? "🔸 High Usage" : "✅ Healthy";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: usage > 0.8 ? #f59e0b : #10b981;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== PERFORMANCE METRICS PANEL ==========
+component PerformanceMetricsPanel inherits Rectangle {
+    in-out property <float> read-speed;
+    in-out property <float> write-speed;
+    in-out property <float> pulse;
+    in-out property <string> compaction;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #10b981;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "⚡ Performance Metrics";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                
+                // Performance gauges
+                PerformanceGauge {
+                    metric: "Read Speed";
+                    value: read-speed.toFixed(1);
+                    unit: "MB/s";
+                    max-value: 2000.0;
+                    current-value: read-speed;
+                    color: #10b981;
+                    pulse: pulse;
+                }
+                
+                PerformanceGauge {
+                    metric: "Write Speed";
+                    value: write-speed.toFixed(1);
+                    unit: "MB/s";
+                    max-value: 1500.0;
+                    current-value: write-speed;
+                    color: #0ea5e9;
+                    pulse: pulse + 0.3;
+                }
+                
+                // Compaction status
+                CompactionStatusCard {
+                    status: compaction;
+                    activity: storage-activity;
+                }
+                
+                // Cache hit ratio
+                CacheMetricsCard {
+                    hit-ratio: 0.89;
+                    cache-size: "512 MB";
+                }
+            }
+        }
+    }
+}
+
+// ========== ROCKSDB INTERNALS PANEL ==========
+component RocksDBInternalsPanel inherits Rectangle {
+    in-out property <int> column-families;
+    in-out property <float> hot-ratio;
+    in-out property <float> activity;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #8b5cf6;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🏗️ RocksDB Internals";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                
+                // Column families visualization
+                ColumnFamiliesGrid {
+                    families: column-families;
+                    activity: activity;
+                }
+                
+                // Hot/Cold storage distribution
+                HotColdStorageView {
+                    hot-ratio: hot-ratio;
+                    cold-ratio: 1.0 - hot-ratio;
+                }
+                
+                // Internal metrics
+                VerticalBox {
+                    spacing: 8px;
+                    
+                    InternalMetric {
+                        label: "LSM Tree Levels";
+                        value: "7";
+                        icon: "🌳";
+                    }
+                    
+                    InternalMetric {
+                        label: "Bloom Filters";
+                        value: "Active";
+                        icon: "🌸";
+                    }
+                    
+                    InternalMetric {
+                        label: "Compression";
+                        value: "LZ4";
+                        icon: "🗜️";
+                    }
+                    
+                    InternalMetric {
+                        label: "WAL Size";
+                        value: "64 MB";
+                        icon: "📝";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component StorageGauge inherits Rectangle {
+    in-out property <float> usage;
+    in-out property <float> activity;
+    
+    width: 120px;
+    height: 120px;
+    
+    // Gauge background
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 60px;
+        background: #334155;
+        border-width: 6px;
+        border-color: #1e293b;
+    }
+    
+    // Usage indicator
+    Rectangle {
+        width: 100px;
+        height: 100px;
+        x: 10px;
+        y: 10px;
+        border-radius: 50px;
+        background: usage > 0.8 ? #f59e0b : usage > 0.6 ? #fbbf24 : #10b981;
+        
+        VerticalBox {
+            spacing: 4px;
+            alignment: center;
+            
+            Text {
+                text: (usage * 100).toFixed(0) + "%";
+                font-size: 16px;
+                font-weight: 700;
+                color: white;
+            }
+            
+            Text {
+                text: "Used";
+                font-size: 10px;
+                color: white;
+            }
+        }
+    }
+    
+    // Activity indicator
+    Rectangle {
+        width: 140px;
+        height: 140px;
+        x: -10px;
+        y: -10px;
+        border-radius: 70px;
+        background: transparent;
+        border-width: 2px;
+        border-color: #06b6d433;
+        opacity: sin(activity * 360deg) * 0.5 + 0.5;
+    }
+}
+
+component StorageDetailItem inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> icon;
+    
+    spacing: 8px;
+    alignment: space-between;
+    
+    HorizontalBox {
+        spacing: 6px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 12px;
+        }
+        
+        Text {
+            text: label;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+    }
+    
+    Text {
+        text: value;
+        font-size: 11px;
+        font-weight: 600;
+        color: #f1f5f9;
+    }
+}
+
+component PerformanceGauge inherits Rectangle {
+    in-out property <string> metric;
+    in-out property <string> value;
+    in-out property <string> unit;
+    in-out property <float> max-value;
+    in-out property <float> current-value;
+    in-out property <brush> color;
+    in-out property <float> pulse;
+    
+    height: 60px;
+    background: #334155;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: color;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+        alignment: space-between;
+        
+        VerticalBox {
+            spacing: 4px;
+            
+            Text {
+                text: metric;
+                font-size: 11px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: value + " " + unit;
+                font-size: 14px;
+                font-weight: 600;
+                color: color;
+            }
+        }
+        
+        // Performance bar
+        Rectangle {
+            width: 80px;
+            height: 8px;
+            background: #1e293b;
+            border-radius: 4px;
+            
+            Rectangle {
+                width: (current-value / max-value) * parent.width;
+                height: 100%;
+                background: color;
+                border-radius: 4px;
+                opacity: 0.8 + pulse * 0.2;
+            }
+        }
+    }
+}
+
+component CompactionStatusCard inherits Rectangle {
+    in-out property <string> status;
+    in-out property <float> activity;
+    
+    height: 50px;
+    background: status == "Active" ? #10b98133 : #33415533;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "Active" ? #10b981 : #475569;
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: center;
+        
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: status == "Active" ? #10b981 : #64748b;
+            
+            // Activity pulse
+            if status == "Active" : Rectangle {
+                width: 16px;
+                height: 16px;
+                x: -4px;
+                y: -4px;
+                border-radius: 8px;
+                background: radial-gradient(circle, #10b98133 0%, transparent 70%);
+                opacity: sin(activity * 360deg) * 0.5 + 0.5;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: "Compaction";
+                font-size: 10px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: status;
+                font-size: 12px;
+                font-weight: 600;
+                color: status == "Active" ? #10b981 : #64748b;
+            }
+        }
+    }
+}
+
+component CacheMetricsCard inherits Rectangle {
+    in-out property <float> hit-ratio;
+    in-out property <string> cache-size;
+    
+    height: 50px;
+    background: #8b5cf633;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #8b5cf6;
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: space-between;
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: "Cache Hit Ratio";
+                font-size: 10px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: (hit-ratio * 100).toFixed(1) + "%";
+                font-size: 12px;
+                font-weight: 600;
+                color: hit-ratio > 0.85 ? #10b981 : #fbbf24;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: "Cache Size";
+                font-size: 10px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: cache-size;
+                font-size: 12px;
+                font-weight: 600;
+                color: #8b5cf6;
+            }
+        }
+    }
+}
+
+component ColumnFamiliesGrid inherits Rectangle {
+    in-out property <int> families;
+    in-out property <float> activity;
+    
+    width: 200px;
+    height: 120px;
+    
+    VerticalBox {
+        spacing: 8px;
+        
+        Text {
+            text: "Column Families (" + families + ")";
+            font-size: 12px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Column family grid
+        VerticalBox {
+            spacing: 4px;
+            
+            for row in [0, 1, 2] : HorizontalBox {
+                spacing: 4px;
+                
+                for col in [0, 1, 2, 3] : ColumnFamilyCell {
+                    family-id: row * 4 + col;
+                    active: (row * 4 + col) < families;
+                    activity-level: activity + (row * 4 + col) * 0.1;
+                }
+            }
+        }
+    }
+}
+
+component ColumnFamilyCell inherits Rectangle {
+    in-out property <int> family-id;
+    in-out property <bool> active;
+    in-out property <float> activity-level;
+    
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    background: active ? #8b5cf6 : #334155;
+    border-width: 1px;
+    border-color: active ? #a855f7 : #475569;
+    
+    if active : Rectangle {
+        width: 24px;
+        height: 24px;
+        x: -2px;
+        y: -2px;
+        border-radius: 6px;
+        background: radial-gradient(circle, #8b5cf633 0%, transparent 70%);
+        opacity: sin(activity-level * 360deg) * 0.3 + 0.4;
+    }
+    
+    Text {
+        text: family-id;
+        font-size: 7px;
+        color: active ? white : #64748b;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component HotColdStorageView inherits Rectangle {
+    in-out property <float> hot-ratio;
+    in-out property <float> cold-ratio;
+    
+    height: 80px;
+    
+    VerticalBox {
+        spacing: 8px;
+        
+        Text {
+            text: "🔥❄️ Hot/Cold Storage Split";
+            font-size: 12px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Storage distribution bar
+        Rectangle {
+            height: 20px;
+            background: #334155;
+            border-radius: 10px;
+            
+            HorizontalBox {
+                spacing: 0px;
+                
+                // Hot storage
+                Rectangle {
+                    width: hot-ratio * parent.width;
+                    height: 100%;
+                    background: #f59e0b;
+                    border-radius: 10px 0px 0px 10px;
+                }
+                
+                // Cold storage
+                Rectangle {
+                    width: cold-ratio * parent.width;
+                    height: 100%;
+                    background: #0ea5e9;
+                    border-radius: 0px 10px 10px 0px;
+                }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            HorizontalBox {
+                spacing: 4px;
+                alignment: center;
+                
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: #f59e0b;
+                }
+                
+                Text {
+                    text: "Hot: " + (hot-ratio * 100).toFixed(0) + "%";
+                    font-size: 9px;
+                    color: #f59e0b;
+                }
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                alignment: center;
+                
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: #0ea5e9;
+                }
+                
+                Text {
+                    text: "Cold: " + (cold-ratio * 100).toFixed(0) + "%";
+                    font-size: 9px;
+                    color: #0ea5e9;
+                }
+            }
+        }
+    }
+}
+
+component InternalMetric inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> icon;
+    
+    spacing: 8px;
+    alignment: space-between;
+    
+    HorizontalBox {
+        spacing: 6px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 10px;
+        }
+        
+        Text {
+            text: label;
+            font-size: 9px;
+            color: #94a3b8;
+        }
+    }
+    
+    Text {
+        text: value;
+        font-size: 10px;
+        font-weight: 600;
+        color: #8b5cf6;
+    }
+}
+
+component QuantumEncryptionIndicator inherits Rectangle {
+    in-out property <string> encryption-method;
+    in-out property <bool> quantum-enabled;
+    in-out property <float> rotation;
+    
+    width: 260px;
+    height: 60px;
+    background: quantum-enabled ? #10b98133 : #fbbf2433;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: quantum-enabled ? #10b981 : #fbbf24;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+        alignment: center;
+        
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: quantum-enabled ? #10b981 : #fbbf24;
+            
+            // Rotation effect for quantum encryption
+            if quantum-enabled : Rectangle {
+                width: 20px;
+                height: 20px;
+                x: 5px;
+                y: 5px;
+                border-radius: 10px;
+                background: transparent;
+                border-width: 2px;
+                border-color: white;
+                // Note: Rotation would be implemented with transforms
+            }
+            
+            Text {
+                text: quantum-enabled ? "⚛️" : "🔒";
+                font-size: 16px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 4px;
+            
+            Text {
+                text: quantum-enabled ? "Quantum Encryption" : "Classical Encryption";
+                font-size: 12px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: encryption-method;
+                font-size: 10px;
+                color: #94a3b8;
+            }
+        }
+    }
+}
+
+// ========== STORAGE OPERATIONS PANEL ==========
+component StorageOperationsPanel inherits Rectangle {
+    in-out property <string> encryption-method;
+    in-out property <bool> quantum-encryption;
+    in-out property <float> hot-ratio;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "🔧 Storage Operations & Quantum Security";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 25px;
+            
+            StorageOperationCard {
+                title: "Encryption";
+                value: quantum-encryption ? "Quantum Active" : "Classical";
+                status: quantum-encryption ? "excellent" : "good";
+                description: encryption-method;
+                icon: "🔐";
+            }
+            
+            StorageOperationCard {
+                title: "Data Tiering";
+                value: "Hot/Cold Split";
+                status: "excellent";
+                description: (hot-ratio * 100).toFixed(0) + "% hot data";
+                icon: "🔥";
+            }
+            
+            StorageOperationCard {
+                title: "Backup Status";
+                value: "Synchronized";
+                status: "excellent";
+                description: "Real-time replication";
+                icon: "💾";
+            }
+            
+            StorageOperationCard {
+                title: "Integrity";
+                value: "Verified";
+                status: "excellent";
+                description: "Cryptographic checksums";
+                icon: "✅";
+            }
+            
+            StorageOperationCard {
+                title: "Compression";
+                value: "LZ4 Active";
+                status: "excellent";
+                description: "67% size reduction";
+                icon: "🗜️";
+            }
+        }
+    }
+}
+
+component StorageOperationCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    in-out property <string> icon;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 16px;
+        }
+        
+        Text {
+            text: title;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 12px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+            horizontal-alignment: center;
+        }
+    }
+}

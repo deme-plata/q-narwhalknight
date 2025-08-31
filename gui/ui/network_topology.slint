@@ -1,0 +1,955 @@
+// Real-time Network Topology Visualization
+// Advanced P2P network visualization with quantum handshakes and phase distribution
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== NETWORK TOPOLOGY VISUALIZER ==========
+export component NetworkTopologyVisualizer inherits Rectangle {
+    // Properties for network state
+    in-out property <int> total-peers: 43;
+    in-out property <int> quantum-handshakes: 1247;
+    in-out property <float> network-health: 0.987;
+    in-out property <string> node-id: "Server-Beta-001";
+    in-out property <int> active-connections: 12;
+    in-out property <float> avg-latency: 47.3;
+    in-out property <string> network-type: "Hybrid P2P";
+    in-out property <int> phase0-peers: 8;
+    in-out property <int> phase1-peers: 23;
+    in-out property <int> phase2-peers: 12;
+    
+    // Animation properties
+    property <float> network-pulse: 0.0;
+    property <float> data-flow: 0.0;
+    property <float> handshake-animation: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b2e 100%);
+    
+    // Network activity animation
+    animate network-pulse {
+        duration: 3500ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    // Data flow animation
+    animate data-flow {
+        duration: 5000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Quantum handshake effects
+    animate handshake-animation {
+        duration: 2000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header with network health indicator
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "🌐 P2P Network Topology";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            NetworkHealthIndicator {
+                health: network-health;
+                pulse: network-pulse;
+                node-id: node-id;
+            }
+        }
+        
+        // Main network visualization area
+        HorizontalBox {
+            spacing: 20px;
+            height: 420px;
+            
+            // Network graph visualization
+            NetworkGraphView {
+                width: 50%;
+                total-peers: total-peers;
+                phase0-peers: phase0-peers;
+                phase1-peers: phase1-peers;
+                phase2-peers: phase2-peers;
+                data-flow: data-flow;
+                handshake-animation: handshake-animation;
+            }
+            
+            // Peer distribution and phase analysis
+            PeerDistributionPanel {
+                width: 25%;
+                phase0-count: phase0-peers;
+                phase1-count: phase1-peers;
+                phase2-count: phase2-peers;
+                total-count: total-peers;
+            }
+            
+            // Connection analytics
+            ConnectionAnalyticsPanel {
+                width: 25%;
+                active-connections: active-connections;
+                avg-latency: avg-latency;
+                quantum-handshakes: quantum-handshakes;
+                network-type: network-type;
+            }
+        }
+        
+        // Network performance and protocol metrics
+        NetworkMetricsPanel {
+            height: 120px;
+            network-health: network-health;
+            quantum-handshakes: quantum-handshakes;
+            avg-latency: avg-latency;
+            total-peers: total-peers;
+        }
+    }
+}
+
+// ========== NETWORK GRAPH VIEW ==========
+component NetworkGraphView inherits Rectangle {
+    in-out property <int> total-peers;
+    in-out property <int> phase0-peers;
+    in-out property <int> phase1-peers;
+    in-out property <int> phase2-peers;
+    in-out property <float> data-flow;
+    in-out property <float> handshake-animation;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #0ea5e9;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🕸️ Live Network Graph";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Network graph visualization
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Central node (this server)
+            CentralNode {
+                x: parent.width / 2 - 15px;
+                y: parent.height / 2 - 15px;
+                node-id: "Beta";
+                pulse: handshake-animation;
+            }
+            
+            // Phase 2 peers (advanced)
+            for i in [0, 1, 2, 3] : NetworkPeer {
+                x: parent.width / 2 + cos(i * 90deg) * 120px - 10px;
+                y: parent.height / 2 + sin(i * 90deg) * 120px - 10px;
+                peer-id: "P2-" + i;
+                phase: "Phase 2";
+                connection-strength: 0.9;
+                data-flow: data-flow + i * 0.1;
+            }
+            
+            // Phase 1 peers (intermediate ring)
+            for i in [0, 1, 2, 3, 4, 5] : NetworkPeer {
+                x: parent.width / 2 + cos(i * 60deg) * 80px - 8px;
+                y: parent.height / 2 + sin(i * 60deg) * 80px - 8px;
+                peer-id: "P1-" + i;
+                phase: "Phase 1";
+                connection-strength: 0.7;
+                data-flow: data-flow + i * 0.05;
+            }
+            
+            // Phase 0 peers (outer ring)
+            for i in [0, 1, 2] : NetworkPeer {
+                x: parent.width / 2 + cos(i * 120deg) * 150px - 6px;
+                y: parent.height / 2 + sin(i * 120deg) * 150px - 6px;
+                peer-id: "P0-" + i;
+                phase: "Phase 0";
+                connection-strength: 0.5;
+                data-flow: data-flow + i * 0.02;
+            }
+            
+            // Data flow connections
+            for i in [0, 1, 2, 3, 4, 5, 6, 7] : DataFlowConnection {
+                connection-id: i;
+                flow-phase: data-flow + i * 0.15;
+                opacity: 0.6;
+            }
+            
+            // Quantum field overlay
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: radial-gradient(circle at 50% 50%, 
+                    #0ea5e922 0%, transparent 70%);
+                opacity: sin(handshake-animation * 180deg) * 0.3 + 0.4;
+            }
+        }
+        
+        // Network legend
+        HorizontalBox {
+            spacing: 15px;
+            
+            NetworkLegendItem { color: #10b981; label: "Phase 2"; count: phase2-peers; }
+            NetworkLegendItem { color: #0ea5e9; label: "Phase 1"; count: phase1-peers; }
+            NetworkLegendItem { color: #64748b; label: "Phase 0"; count: phase0-peers; }
+        }
+    }
+}
+
+// ========== PEER DISTRIBUTION PANEL ==========
+component PeerDistributionPanel inherits Rectangle {
+    in-out property <int> phase0-count;
+    in-out property <int> phase1-count;
+    in-out property <int> phase2-count;
+    in-out property <int> total-count;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #8b5cf6;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📊 Peer Distribution";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 20px;
+                
+                // Phase distribution chart
+                PhaseDistributionChart {
+                    phase0: phase0-count;
+                    phase1: phase1-count;
+                    phase2: phase2-count;
+                    total: total-count;
+                }
+                
+                // Detailed phase breakdown
+                VerticalBox {
+                    spacing: 12px;
+                    
+                    PeerPhaseItem {
+                        phase: "Phase 2";
+                        count: phase2-count;
+                        percentage: total-count > 0 ? (phase2-count as float / total-count as float * 100.0).toFixed(0) : "0";
+                        color: #10b981;
+                        description: "Quantum-enhanced";
+                    }
+                    
+                    PeerPhaseItem {
+                        phase: "Phase 1";
+                        count: phase1-count;
+                        percentage: total-count > 0 ? (phase1-count as float / total-count as float * 100.0).toFixed(0) : "0";
+                        color: #0ea5e9;
+                        description: "Post-quantum ready";
+                    }
+                    
+                    PeerPhaseItem {
+                        phase: "Phase 0";
+                        count: phase0-count;
+                        percentage: total-count > 0 ? (phase0-count as float / total-count as float * 100.0).toFixed(0) : "0";
+                        color: #64748b;
+                        description: "Classical crypto";
+                    }
+                }
+                
+                // Network evolution indicator
+                NetworkEvolutionIndicator {
+                    advanced-peers: phase1-count + phase2-count;
+                    total-peers: total-count;
+                }
+            }
+        }
+    }
+}
+
+// ========== CONNECTION ANALYTICS PANEL ==========
+component ConnectionAnalyticsPanel inherits Rectangle {
+    in-out property <int> active-connections;
+    in-out property <float> avg-latency;
+    in-out property <int> quantum-handshakes;
+    in-out property <string> network-type;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #f59e0b;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🔗 Connection Analytics";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 350px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                
+                // Connection quality gauge
+                ConnectionQualityGauge {
+                    latency: avg-latency;
+                    connections: active-connections;
+                }
+                
+                // Protocol statistics
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    ProtocolStat {
+                        label: "Active Connections";
+                        value: active-connections;
+                        unit: "peers";
+                        icon: "🔗";
+                        status: active-connections > 10 ? "excellent" : "good";
+                    }
+                    
+                    ProtocolStat {
+                        label: "Avg Latency";
+                        value: avg-latency.toFixed(1);
+                        unit: "ms";
+                        icon: "⚡";
+                        status: avg-latency < 50.0 ? "excellent" : "good";
+                    }
+                    
+                    ProtocolStat {
+                        label: "Quantum Handshakes";
+                        value: quantum-handshakes;
+                        unit: "total";
+                        icon: "🤝";
+                        status: "excellent";
+                    }
+                    
+                    ProtocolStat {
+                        label: "Network Type";
+                        value: network-type;
+                        unit: "";
+                        icon: "🌐";
+                        status: "active";
+                    }
+                }
+                
+                // Real-time activity indicator
+                NetworkActivityIndicator {
+                    active: true;
+                    activity-level: "High";
+                }
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component CentralNode inherits Rectangle {
+    in-out property <string> node-id;
+    in-out property <float> pulse;
+    
+    width: 30px;
+    height: 30px;
+    border-radius: 15px;
+    background: radial-gradient(circle, #0ea5e9 0%, #1e40af 100%);
+    border-width: 3px;
+    border-color: #0ea5e9;
+    
+    // Quantum pulse effect
+    Rectangle {
+        width: 50px;
+        height: 50px;
+        x: -10px;
+        y: -10px;
+        border-radius: 25px;
+        background: radial-gradient(circle, #0ea5e933 0%, transparent 80%);
+        opacity: pulse;
+    }
+    
+    Text {
+        text: node-id;
+        font-size: 8px;
+        font-weight: 700;
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component NetworkPeer inherits Rectangle {
+    in-out property <string> peer-id;
+    in-out property <string> phase;
+    in-out property <float> connection-strength;
+    in-out property <float> data-flow;
+    
+    width: phase == "Phase 2" ? 20px : phase == "Phase 1" ? 16px : 12px;
+    height: phase == "Phase 2" ? 20px : phase == "Phase 1" ? 16px : 12px;
+    border-radius: width / 2;
+    background: phase == "Phase 2" ? #10b981 : 
+               phase == "Phase 1" ? #0ea5e9 : #64748b;
+    border-width: 2px;
+    border-color: white;
+    
+    // Connection activity indicator
+    Rectangle {
+        width: parent.width + 8px;
+        height: parent.height + 8px;
+        x: -4px;
+        y: -4px;
+        border-radius: width / 2;
+        background: radial-gradient(circle, 
+            parent.background.transparentize(0.8) 0%, 
+            transparent 70%);
+        opacity: connection-strength * (sin(data-flow * 360deg) * 0.5 + 0.5);
+    }
+}
+
+component DataFlowConnection inherits Rectangle {
+    in-out property <int> connection-id;
+    in-out property <float> flow-phase;
+    
+    // This would be implemented with Canvas in production
+    // Simplified representation for now
+    width: 2px;
+    height: 60px;
+    x: 150px + connection-id * 20px;
+    y: 100px + connection-id * 15px;
+    background: #0ea5e9;
+    opacity: 0.3 + (sin(flow-phase * 360deg) * 0.2);
+}
+
+component PhaseDistributionChart inherits Rectangle {
+    in-out property <int> phase0;
+    in-out property <int> phase1;
+    in-out property <int> phase2;
+    in-out property <int> total;
+    
+    width: 120px;
+    height: 120px;
+    
+    // Pie chart representation (simplified)
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 60px;
+        background: #334155;
+        border-width: 4px;
+        border-color: #1e293b;
+    }
+    
+    // Phase 2 segment (top)
+    if phase2 > 0 : Rectangle {
+        width: 80px;
+        height: 40px;
+        x: 20px;
+        y: 10px;
+        border-radius: 40px 40px 0px 0px;
+        background: #10b981;
+    }
+    
+    // Phase 1 segment (middle)
+    if phase1 > 0 : Rectangle {
+        width: 80px;
+        height: 40px;
+        x: 20px;
+        y: 40px;
+        background: #0ea5e9;
+    }
+    
+    // Phase 0 segment (bottom)
+    if phase0 > 0 : Rectangle {
+        width: 80px;
+        height: 40px;
+        x: 20px;
+        y: 70px;
+        border-radius: 0px 0px 40px 40px;
+        background: #64748b;
+    }
+    
+    // Center text
+    Text {
+        text: total;
+        font-size: 16px;
+        font-weight: 700;
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component PeerPhaseItem inherits Rectangle {
+    in-out property <string> phase;
+    in-out property <int> count;
+    in-out property <string> percentage;
+    in-out property <brush> color;
+    in-out property <string> description;
+    
+    height: 40px;
+    background: #334155;
+    border-radius: 6px;
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: space-between;
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+                background: color;
+            }
+            
+            VerticalBox {
+                spacing: 2px;
+                
+                Text {
+                    text: phase;
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #f1f5f9;
+                }
+                
+                Text {
+                    text: description;
+                    font-size: 8px;
+                    color: #94a3b8;
+                }
+            }
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            alignment: center;
+            
+            Text {
+                text: count;
+                font-size: 12px;
+                font-weight: 600;
+                color: color;
+            }
+            
+            Text {
+                text: percentage + "%";
+                font-size: 9px;
+                color: #94a3b8;
+            }
+        }
+    }
+}
+
+component NetworkEvolutionIndicator inherits Rectangle {
+    in-out property <int> advanced-peers;
+    in-out property <int> total-peers;
+    
+    height: 50px;
+    background: #1e293b33;
+    border-radius: 6px;
+    
+    VerticalBox {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: "🔬 Network Evolution";
+            font-size: 11px;
+            color: #f1f5f9;
+        }
+        
+        Text {
+            text: advanced-peers + "/" + total-peers + " quantum-ready";
+            font-size: 12px;
+            font-weight: 600;
+            color: #8b5cf6;
+        }
+        
+        Text {
+            text: total-peers > 0 ? (advanced-peers as float / total-peers as float * 100.0).toFixed(0) + "% evolution" : "0% evolution";
+            font-size: 9px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component ConnectionQualityGauge inherits Rectangle {
+    in-out property <float> latency;
+    in-out property <int> connections;
+    
+    width: 100px;
+    height: 100px;
+    
+    // Gauge background
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 50px;
+        background: #334155;
+        border-width: 4px;
+        border-color: #1e293b;
+    }
+    
+    // Quality indicator
+    Rectangle {
+        width: 80px;
+        height: 80px;
+        x: 10px;
+        y: 10px;
+        border-radius: 40px;
+        background: latency < 30.0 ? #10b981 : 
+                   latency < 60.0 ? #fbbf24 : #f43f5e;
+        
+        VerticalBox {
+            spacing: 2px;
+            alignment: center;
+            
+            Text {
+                text: latency.toFixed(0) + "ms";
+                font-size: 12px;
+                font-weight: 700;
+                color: white;
+            }
+            
+            Text {
+                text: connections + " peers";
+                font-size: 8px;
+                color: white;
+            }
+        }
+    }
+}
+
+component ProtocolStat inherits Rectangle {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> unit;
+    in-out property <string> icon;
+    in-out property <string> status;
+    
+    height: 35px;
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #64748b;
+    
+    HorizontalBox {
+        padding: 8px;
+        spacing: 8px;
+        alignment: space-between;
+        
+        HorizontalBox {
+            spacing: 6px;
+            alignment: center;
+            
+            Text {
+                text: icon;
+                font-size: 12px;
+            }
+            
+            Text {
+                text: label;
+                font-size: 10px;
+                color: #94a3b8;
+            }
+        }
+        
+        Text {
+            text: value + (unit.length > 0 ? " " + unit : "");
+            font-size: 11px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f1f5f9;
+        }
+    }
+}
+
+component NetworkActivityIndicator inherits Rectangle {
+    in-out property <bool> active;
+    in-out property <string> activity-level;
+    
+    height: 40px;
+    background: active ? #10b98133 : #33415533;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: active ? #10b981 : #475569;
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: center;
+        
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: active ? #10b981 : #64748b;
+            
+            // Activity pulse
+            if active : Rectangle {
+                width: 16px;
+                height: 16px;
+                x: -4px;
+                y: -4px;
+                border-radius: 8px;
+                background: radial-gradient(circle, #10b98133 0%, transparent 70%);
+            }
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: "Network Activity";
+                font-size: 10px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: activity-level;
+                font-size: 12px;
+                font-weight: 600;
+                color: active ? #10b981 : #64748b;
+            }
+        }
+    }
+}
+
+component NetworkHealthIndicator inherits Rectangle {
+    in-out property <float> health;
+    in-out property <float> pulse;
+    in-out property <string> node-id;
+    
+    width: 220px;
+    height: 60px;
+    background: health > 0.95 ? #10b98133 : health > 0.90 ? #fbbf2433 : #f43f5e33;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: health > 0.95 ? #10b981 : health > 0.90 ? #fbbf24 : #f43f5e;
+    
+    // Health glow effect
+    Rectangle {
+        width: 230px;
+        height: 70px;
+        x: -5px;
+        y: -5px;
+        border-radius: 13px;
+        background: radial-gradient(circle, 
+            (health > 0.95 ? #10b981 : health > 0.90 ? #fbbf24 : #f43f5e).transparentize(0.8) 0%, 
+            transparent 70%);
+        opacity: pulse;
+    }
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 15px;
+        alignment: center;
+        
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: health > 0.95 ? #10b981 : health > 0.90 ? #fbbf24 : #f43f5e;
+            
+            Text {
+                text: "🌐";
+                font-size: 16px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 4px;
+            
+            Text {
+                text: "Network Health: " + (health * 100).toFixed(1) + "%";
+                font-size: 12px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: "Node: " + node-id;
+                font-size: 10px;
+                color: #94a3b8;
+            }
+        }
+    }
+}
+
+component NetworkLegendItem inherits HorizontalBox {
+    in-out property <brush> color;
+    in-out property <string> label;
+    in-out property <int> count;
+    
+    spacing: 6px;
+    alignment: center;
+    
+    Rectangle {
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: color;
+    }
+    
+    Text {
+        text: label + " (" + count + ")";
+        font-size: 10px;
+        color: #94a3b8;
+    }
+}
+
+// ========== NETWORK METRICS PANEL ==========
+component NetworkMetricsPanel inherits Rectangle {
+    in-out property <float> network-health;
+    in-out property <int> quantum-handshakes;
+    in-out property <float> avg-latency;
+    in-out property <int> total-peers;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "📈 Network Performance & Protocol Metrics";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 25px;
+            
+            NetworkMetricCard {
+                title: "Network Health";
+                value: (network-health * 100).toFixed(1) + "%";
+                status: network-health > 0.95 ? "excellent" : "good";
+                description: "Overall P2P network status";
+                icon: "💚";
+            }
+            
+            NetworkMetricCard {
+                title: "Quantum Handshakes";
+                value: quantum-handshakes;
+                status: "excellent";
+                description: "Post-quantum authenticated";
+                icon: "🤝";
+            }
+            
+            NetworkMetricCard {
+                title: "Average Latency";
+                value: avg-latency.toFixed(1) + "ms";
+                status: avg-latency < 50.0 ? "excellent" : "good";
+                description: "Peer communication speed";
+                icon: "⚡";
+            }
+            
+            NetworkMetricCard {
+                title: "Peer Discovery";
+                value: "Active";
+                status: "excellent";
+                description: "libp2p peer discovery";
+                icon: "🔍";
+            }
+            
+            NetworkMetricCard {
+                title: "Protocol Stack";
+                value: "QUIC/Noise";
+                status: "excellent";
+                description: "Transport layer security";
+                icon: "🔒";
+            }
+        }
+    }
+}
+
+component NetworkMetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    in-out property <string> icon;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 16px;
+        }
+        
+        Text {
+            text: title;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 13px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+            horizontal-alignment: center;
+        }
+    }
+}
