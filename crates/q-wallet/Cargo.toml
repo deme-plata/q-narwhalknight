@@ -19,7 +19,8 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-sqlx = { workspace = true }
+# Using RocksDB storage instead of SQLite
+q-storage = { path = "../q-storage" }
 async-trait = { workspace = true }
 
 # For mnemonic phrase generation

@@ -40,8 +40,8 @@ tracing-subscriber = { workspace = true }
 # Configuration
 config = { workspace = true }
 
-# Database
-sqlx = { workspace = true }
+# Database - using RocksDB quantum storage
+q-storage = { path = "../q-storage" }
 
 # Metrics
 prometheus = { workspace = true }

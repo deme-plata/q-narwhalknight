@@ -11,8 +11,10 @@ members = [
     "crates/q-quantum-rng",
     "crates/q-lattice-vrf",
     "crates/q-vdf",
+    "crates/q-fairqueue",
     "crates/q-tor-client",
     "crates/q-tor-circuit",
+    "crates/q-dandelion",
     "crates/q-storage"
 ]
 
@@ -54,8 +56,8 @@ pqcrypto-dilithium = "0.4"
 pqcrypto-kyber = "0.7"
 pqcrypto-falcon = "0.3"
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+# Database - RocksDB for quantum storage (no SQLite needed)
+# sqlx removed - we use custom RocksDB implementation
 
 # Metrics and observability
 prometheus = "0.13"
@@ -88,12 +90,14 @@ config = "0.13"
 proptest = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 
-# Tor integration
-arti-client = "0.19"
-tor-circmgr = "0.19"
-arti-netdir = "0.19"
-tor-rtcompat = "0.19"
-arti-config = "0.19"
+# Tor integration (use latest stable versions to avoid SQLite conflicts)
+arti-client = "0.5"
+tor-circmgr = "0.5" 
+arti-netdir = "0.5"
+tor-rtcompat = "0.5"
+arti-config = "0.5"
+# SQLite version override for compatibility
+rusqlite = "0.30"
 
 # High-performance storage
 rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
@@ -101,3 +105,5 @@ lz4 = "1.24"
 
 # Linear algebra and mathematics
 ndarray = { version = "0.15", features = ["serde"] }
+
+# Note: SQLite not used - we have RocksDB quantum storage
