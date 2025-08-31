@@ -1,0 +1,493 @@
+// DAG-Knight Consensus Visualization Components
+// Interactive visualization of quantum-enhanced DAG-BFT consensus
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== DAG CONSENSUS VISUALIZER ==========
+export component DAGConsensusVisualizer inherits Rectangle {
+    // Consensus state properties
+    in-out property <int> current-round: 847;
+    in-out property <string> current-anchor: "vertex_a7f3d9c2...";
+    in-out property <float> finality-latency: 47.2;
+    in-out property <int> pending-vertices: 23;
+    in-out property <float> vdf-progress: 0.73;
+    in-out property <string> lvrf-randomness: "0x2a4f8b9e...";
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    
+    HorizontalBox {
+        spacing: 20px;
+        padding: 30px;
+        
+        // Left panel - DAG structure visualization
+        VerticalBox {
+            width: 65%;
+            spacing: 15px;
+            
+            Text {
+                text: "🕸️ DAG-Knight Consensus Network";
+                font-size: 24px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            // Interactive DAG visualization
+            DAGNetworkView {
+                height: 400px;
+                current-round: current-round;
+                anchor-vertex: current-anchor;
+            }
+            
+            // Consensus progress indicators
+            ConsensusProgressPanel {
+                round: current-round;
+                finality-latency: finality-latency;
+                pending-vertices: pending-vertices;
+            }
+        }
+        
+        // Right panel - Quantum consensus details
+        VerticalBox {
+            width: 35%;
+            spacing: 15px;
+            
+            Text {
+                text: "⚛️ Quantum Enhancements";
+                font-size: 18px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            VDFComputationCard {
+                progress: vdf-progress;
+            }
+            
+            LVRFRandomnessCard {
+                randomness: lvrf-randomness;
+            }
+            
+            AnchorElectionCard {
+                anchor: current-anchor;
+                round: current-round;
+            }
+            
+            QuantumBeaconCard { }
+        }
+    }
+}
+
+// ========== DAG NETWORK VIEW ==========
+component DAGNetworkView inherits Rectangle {
+    in-out property <int> current-round;
+    in-out property <string> anchor-vertex;
+    
+    background: #0f1419;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    // Animated DAG visualization
+    Rectangle {
+        clip: true;
+        
+        // DAG nodes representing vertices
+        for i in [0, 1, 2, 3, 4, 5, 6, 7, 8] : DAGVertex {
+            x: 50px + (i % 3) * 120px + sin(i * 30deg) * 20px;
+            y: 50px + floor(i / 3) * 100px + cos(i * 30deg) * 15px;
+            vertex-id: "v" + i;
+            is-anchor: i == 4; // Center vertex as anchor
+            round: current-round - (8 - i);
+        }
+        
+        // Causal edges between vertices
+        for edge in dag-edges : DAGEdge {
+            start-x: edge.start-x;
+            start-y: edge.start-y;
+            end-x: edge.end-x;
+            end-y: edge.end-y;
+        }
+        
+        // Quantum anchor highlight
+        QuantumAnchorHighlight {
+            x: 170px; // Center position
+            y: 150px;
+            visible: true;
+        }
+    }
+    
+    // DAG legend
+    HorizontalBox {
+        x: 10px;
+        y: parent.height - 40px;
+        spacing: 15px;
+        
+        LegendItem { color: #00ff88; label: "Anchor"; }
+        LegendItem { color: #00d4ff; label: "Committed"; }
+        LegendItem { color: #fbbf24; label: "Pending"; }
+        LegendItem { color: #8b5cf6; label: "Causal Edge"; }
+    }
+}
+
+// ========== DAG VERTEX COMPONENT ==========
+component DAGVertex inherits Rectangle {
+    in-out property <string> vertex-id;
+    in-out property <bool> is-anchor;
+    in-out property <int> round;
+    
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background: is-anchor ? 
+        radial-gradient(circle, #00ff88 0%, #00d4ff 70%, transparent 100%) :
+        radial-gradient(circle, #00d4ff 0%, #1e293b 100%);
+    border-width: is-anchor ? 3px : 1px;
+    border-color: is-anchor ? #00ff88 : #475569;
+    
+    // Quantum glow for anchor
+    if is-anchor : Rectangle {
+        width: 60px;
+        height: 60px;
+        x: -10px;
+        y: -10px;
+        border-radius: 30px;
+        background: radial-gradient(circle, #00ff8833 0%, transparent 80%);
+    }
+    
+    // Vertex round number
+    Text {
+        text: round;
+        color: white;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    
+    // Tooltip on hover
+    TouchArea {
+        // Could trigger vertex details popup
+    }
+}
+
+// ========== QUANTUM ANCHOR HIGHLIGHT ==========
+component QuantumAnchorHighlight inherits Rectangle {
+    width: 80px;
+    height: 80px;
+    border-radius: 40px;
+    background: transparent;
+    
+    // Pulsing quantum effect
+    property <float> pulse-phase: 0.0;
+    animate pulse-phase {
+        duration: 3000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 40px;
+        border-width: 2px;
+        border-color: #00ff88.mix(transparent, pulse-phase);
+        background: transparent;
+    }
+    
+    Rectangle {
+        width: 60px;
+        height: 60px;
+        x: 10px;
+        y: 10px;
+        border-radius: 30px;
+        border-width: 1px;
+        border-color: #00ff88.mix(transparent, 1.0 - pulse-phase);
+        background: transparent;
+    }
+}
+
+// ========== CONSENSUS PROGRESS PANEL ==========
+component ConsensusProgressPanel inherits Rectangle {
+    in-out property <int> round;
+    in-out property <float> finality-latency;
+    in-out property <int> pending-vertices;
+    
+    background: #1e293b66;
+    border-radius: 8px;
+    height: 60px;
+    
+    HorizontalBox {
+        padding: 15px;
+        spacing: 25px;
+        alignment: space-between;
+        
+        ProgressItem {
+            label: "Round";
+            value: round;
+            icon: "🔄";
+        }
+        
+        ProgressItem {
+            label: "Latency";
+            value: finality-latency.toFixed(1) + "ms";
+            icon: "⚡";
+        }
+        
+        ProgressItem {
+            label: "Pending";
+            value: pending-vertices;
+            icon: "⏳";
+        }
+    }
+}
+
+component ProgressItem inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> icon;
+    
+    spacing: 8px;
+    alignment: center;
+    
+    Text {
+        text: icon;
+        font-size: 16px;
+    }
+    
+    VerticalBox {
+        spacing: 2px;
+        alignment: center;
+        
+        Text {
+            text: label;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 12px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+    }
+}
+
+// ========== QUANTUM ENHANCEMENT CARDS ==========
+component VDFComputationCard inherits Rectangle {
+    in-out property <float> progress: 0.73;
+    
+    background: #1e293b66;
+    border-radius: 8px;
+    height: 80px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+            
+            Text {
+                text: "⏱️ VDF Computation";
+                font-size: 14px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: (progress * 100).toFixed(0) + "%";
+                font-size: 12px;
+                color: #8b5cf6;
+            }
+        }
+        
+        // Progress bar
+        Rectangle {
+            height: 4px;
+            background: #334155;
+            border-radius: 2px;
+            
+            Rectangle {
+                width: progress * parent.width;
+                height: 100%;
+                background: linear-gradient(90deg, #8b5cf6 0%, #a855f7 100%);
+                border-radius: 2px;
+            }
+        }
+        
+        Text {
+            text: "Quantum-enhanced time-lock";
+            font-size: 10px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component LVRFRandomnessCard inherits Rectangle {
+    in-out property <string> randomness;
+    
+    background: #1e293b66;
+    border-radius: 8px;
+    height: 80px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+        
+        Text {
+            text: "🔮 L-VRF Randomness";
+            font-size: 14px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Text {
+            text: randomness;
+            font-size: 10px;
+            font-family: "Monaco", "Cascadia Code", monospace;
+            color: #00d4ff;
+        }
+        
+        Text {
+            text: "Verifiable quantum randomness";
+            font-size: 10px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component AnchorElectionCard inherits Rectangle {
+    in-out property <string> anchor;
+    in-out property <int> round;
+    
+    background: #1e293b66;
+    border-radius: 8px;
+    height: 80px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+        
+        Text {
+            text: "⚓ Anchor Election";
+            font-size: 14px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Text {
+            text: anchor;
+            font-size: 10px;
+            font-family: "Monaco", "Cascadia Code", monospace;
+            color: #00ff88;
+        }
+        
+        Text {
+            text: "Round " + round + " quantum anchor";
+            font-size: 10px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component QuantumBeaconCard inherits Rectangle {
+    background: #1e293b66;
+    border-radius: 8px;
+    height: 80px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+        
+        Text {
+            text: "📡 Quantum Beacon";
+            font-size: 14px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: #00ff88;
+                
+                // Pulsing effect
+                property <float> pulse: 0.0;
+                animate pulse {
+                    duration: 2000ms;
+                    iteration-count: -1;
+                    easing: ease-in-out;
+                }
+                
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    border-radius: 8px;
+                    background: #00ff8833.mix(transparent, pulse);
+                }
+            }
+            
+            Text {
+                text: "Active";
+                font-size: 12px;
+                color: #00ff88;
+            }
+        }
+        
+        Text {
+            text: "Phase 2 quantum-enhanced";
+            font-size: 10px;
+            color: #94a3b8;
+        }
+    }
+}
+
+// ========== SHARED COMPONENTS ==========
+component LegendItem inherits HorizontalBox {
+    in-out property <brush> color;
+    in-out property <string> label;
+    
+    spacing: 5px;
+    alignment: center;
+    
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: color;
+    }
+    
+    Text {
+        text: label;
+        font-size: 10px;
+        color: #94a3b8;
+    }
+}
+
+// Placeholder for DAG edges (would be implemented with Canvas)
+struct DAGEdgeData {
+    start-x: float,
+    start-y: float,
+    end-x: float,
+    end-y: float,
+}
+
+component DAGEdge inherits Rectangle {
+    in-out property <float> start-x;
+    in-out property <float> start-y;
+    in-out property <float> end-x;
+    in-out property <float> end-y;
+    
+    // This would be implemented with Canvas drawing
+    // For now, just a placeholder
+    width: 2px;
+    height: 20px;
+    background: #8b5cf6;
+}

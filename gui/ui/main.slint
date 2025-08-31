@@ -1,0 +1,809 @@
+// Q-NarwhalKnight Quantum Consensus Interface
+// The world's first quantum-enhanced blockchain GUI
+
+import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "Q-NarwhalKnight - Quantum Consensus Interface";
+    preferred-width: 1400px;
+    preferred-height: 900px;
+    background: #0a0e17; // Deep space background
+    
+    // ========== PROPERTIES ==========
+    // Wallet properties
+    in-out property <string> wallet-id: "Not created";
+    in-out property <float> balance: 0.0;
+    in-out property <string> wallet-status: "";
+    
+    // Transaction properties
+    in-out property <string> recipient: "";
+    in-out property <float> amount: 0.0;
+    in-out property <string> tx-hash: "";
+    in-out property <string> tx-status: "";
+    
+    // System properties
+    in-out property <string> log: "🌌 Quantum Consensus Interface Loading...\n";
+    in-out property <int> active-tab: 0;
+    
+    // Quantum metrics
+    in-out property <float> entropy-quality: 0.97;
+    in-out property <float> consensus-latency: 45.2;
+    in-out property <int> active-peers: 12;
+    in-out property <string> current-phase: "Phase 2";
+    in-out property <int> tor-circuits: 4;
+    in-out property <float> anonymity-score: 0.94;
+    
+    // ========== CALLBACKS ==========
+    callback create-wallet();
+    callback submit-tx(string, float);
+    callback append-log(string);
+    callback refresh-metrics();
+    
+    // ========== QUANTUM COLOR PALETTE ==========
+    property <brush> quantum-blue: #00d4ff;
+    property <brush> quantum-purple: #8b5cf6;
+    property <brush> quantum-green: #00ff88;
+    property <brush> quantum-gold: #fbbf24;
+    property <brush> quantum-red: #ff3366;
+    property <brush> dark-glass: #1e293b99;
+    property <brush> text-primary: #f1f5f9;
+    property <brush> text-secondary: #94a3b8;
+    property <brush> card-bg: #1e293b66;
+    
+    // ========== MAIN LAYOUT ==========
+    VerticalBox {
+        spacing: 0;
+        
+        // Quantum header with holographic effects
+        QuantumHeader { 
+            height: 80px;
+        }
+        
+        // Main content area with tabs
+        TabWidget {
+            // Tab 1: Quantum Dashboard Overview
+            Tab {
+                title: "🌌 Dashboard";
+                QuantumDashboard { }
+            }
+            
+            // Tab 2: Quantum Entropy Visualization
+            Tab {
+                title: "🔮 Entropy";
+                EntropyVisualizer { }
+            }
+            
+            // Tab 3: DAG-Knight Consensus
+            Tab {
+                title: "🕸️ Consensus";
+                ConsensusVisualizer { }
+            }
+            
+            // Tab 4: Tor Anonymity
+            Tab {
+                title: "🎭 Anonymity";
+                AnonymityVisualizer { }
+            }
+            
+            // Tab 5: Quantum Wallet
+            Tab {
+                title: "💎 Wallet";
+                QuantumWallet { }
+            }
+            
+            // Tab 6: System Analytics
+            Tab {
+                title: "📊 Analytics";
+                SystemAnalytics { }
+            }
+        }
+    }
+}
+
+// ========== HEADER COMPONENT ==========
+component QuantumHeader inherits Rectangle {
+    background: linear-gradient(90deg, #1e1b4b 0%, #312e81 50%, #1e1b4b 100%);
+    
+    HorizontalBox {
+        padding: 20px;
+        spacing: 20px;
+        alignment: space-between;
+        
+        // Left: Logo and title
+        HorizontalBox {
+            spacing: 15px;
+            alignment: start;
+            
+            // Quantum logo placeholder
+            Rectangle {
+                width: 50px;
+                height: 50px;
+                background: radial-gradient(circle, quantum-blue 0%, transparent 70%);
+                border-radius: 25px;
+                
+                Text {
+                    text: "⚛️";
+                    font-size: 24px;
+                    color: white;
+                }
+            }
+            
+            VerticalBox {
+                spacing: 2px;
+                alignment: center;
+                
+                Text {
+                    text: "Q-NarwhalKnight";
+                    font-size: 24px;
+                    font-weight: 700;
+                    color: text-primary;
+                }
+                
+                Text {
+                    text: "Quantum-Enhanced DAG-BFT Consensus";
+                    font-size: 12px;
+                    color: text-secondary;
+                }
+            }
+        }
+        
+        // Right: Live system status
+        HorizontalBox {
+            spacing: 20px;
+            alignment: end;
+            
+            StatusIndicator {
+                label: "Phase";
+                value: current-phase;
+                color: quantum-purple;
+            }
+            
+            StatusIndicator {
+                label: "Peers";
+                value: active-peers;
+                color: quantum-green;
+            }
+            
+            StatusIndicator {
+                label: "Latency";
+                value: consensus-latency + "ms";
+                color: quantum-blue;
+            }
+        }
+    }
+}
+
+// ========== DASHBOARD COMPONENTS ==========
+component QuantumDashboard inherits Rectangle {
+    background: linear-gradient(45deg, #0a0e17 0%, #1e1b4b 30%, #0a0e17 100%);
+    
+    ScrollView {
+        VerticalBox {
+            padding: 30px;
+            spacing: 25px;
+            
+            // System overview cards
+            Text {
+                text: "🌌 Quantum System Overview";
+                font-size: 28px;
+                font-weight: 700;
+                color: text-primary;
+            }
+            
+            HorizontalBox {
+                spacing: 20px;
+                
+                MetricCard {
+                    title: "Entropy Quality";
+                    value: (entropy-quality * 100).toFixed(1) + "%";
+                    status: entropy-quality > 0.95 ? "excellent" : "good";
+                    icon: "🌌";
+                }
+                
+                MetricCard {
+                    title: "Consensus Latency";
+                    value: consensus-latency.toFixed(1) + "ms";
+                    status: consensus-latency < 50 ? "excellent" : "good";
+                    icon: "⚡";
+                }
+                
+                MetricCard {
+                    title: "Tor Circuits";
+                    value: tor-circuits + " active";
+                    status: "healthy";
+                    icon: "🎭";
+                }
+                
+                MetricCard {
+                    title: "Anonymity Score";
+                    value: (anonymity-score * 100).toFixed(1) + "%";
+                    status: "maximum";
+                    icon: "🔒";
+                }
+            }
+            
+            // Live quantum processes
+            QuantumProcessMonitor { }
+            
+            // Network topology preview
+            NetworkTopologyPreview { }
+        }
+    }
+}
+
+// ========== ENTROPY VISUALIZER ==========
+component EntropyVisualizer inherits Rectangle {
+    background: radial-gradient(circle at 50% 50%, #1e1b4b 0%, #0a0e17 100%);
+    
+    VerticalBox {
+        padding: 30px;
+        spacing: 25px;
+        
+        Text {
+            text: "🔮 Quantum Entropy Generation";
+            font-size: 28px;
+            font-weight: 700;
+            color: text-primary;
+        }
+        
+        // Live entropy stream visualization
+        QuantumEntropyStream {
+            height: 200px;
+        }
+        
+        // QRNG device status
+        HorizontalBox {
+            spacing: 15px;
+            
+            QRNGDevice {
+                device-name: "Thermal Quantum";
+                bit-rate: "2.4 Mbps";
+                quality: 0.97;
+                status: "active";
+            }
+            
+            QRNGDevice {
+                device-name: "Photonic Array";
+                bit-rate: "1.8 Mbps";
+                quality: 0.95;
+                status: "active";
+            }
+            
+            QRNGDevice {
+                device-name: "Chaos Laser";
+                bit-rate: "0.0 Mbps";
+                quality: 0.0;
+                status: "standby";
+            }
+        }
+        
+        // Entropy quality analysis
+        EntropyAnalysisPanel { }
+    }
+}
+
+// ========== CONSENSUS VISUALIZER ==========
+component ConsensusVisualizer inherits Rectangle {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    
+    HorizontalBox {
+        spacing: 20px;
+        padding: 30px;
+        
+        // Left: DAG structure
+        VerticalBox {
+            width: 60%;
+            spacing: 15px;
+            
+            Text {
+                text: "🕸️ DAG-Knight Consensus";
+                font-size: 24px;
+                font-weight: 700;
+                color: text-primary;
+            }
+            
+            DAGVisualization {
+                height: 400px;
+            }
+            
+            ConsensusMetrics { }
+        }
+        
+        // Right: Consensus details
+        VerticalBox {
+            width: 40%;
+            spacing: 15px;
+            
+            Text {
+                text: "Consensus Details";
+                font-size: 18px;
+                font-weight: 600;
+                color: text-primary;
+            }
+            
+            AnchorElectionPanel { }
+            VDFComputationPanel { }
+            LVRFRandomnessPanel { }
+        }
+    }
+}
+
+// ========== SHARED COMPONENTS ==========
+component MetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> icon;
+    
+    background: card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        
+        HorizontalBox {
+            spacing: 10px;
+            alignment: space-between;
+            
+            Text {
+                text: icon;
+                font-size: 24px;
+            }
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: status == "excellent" ? quantum-green : 
+                           status == "good" ? quantum-blue : 
+                           status == "maximum" ? quantum-gold : quantum-red;
+            }
+        }
+        
+        Text {
+            text: title;
+            font-size: 14px;
+            color: text-secondary;
+        }
+        
+        Text {
+            text: value;
+            font-size: 22px;
+            font-weight: 600;
+            color: text-primary;
+        }
+    }
+}
+
+component StatusIndicator inherits VerticalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <brush> color;
+    
+    spacing: 2px;
+    alignment: center;
+    
+    Text {
+        text: label;
+        font-size: 10px;
+        color: text-secondary;
+    }
+    
+    Text {
+        text: value;
+        font-size: 14px;
+        font-weight: 600;
+        color: color;
+    }
+}
+
+// ========== PLACEHOLDER VISUALIZATIONS ==========
+// These will be implemented with actual Canvas drawings
+
+component QuantumEntropyStream inherits Rectangle {
+    background: #0f1419;
+    border-radius: 8px;
+    
+    Text {
+        text: "🌊 Quantum Entropy Stream Visualization";
+        color: quantum-blue;
+        font-size: 16px;
+    }
+}
+
+component DAGVisualization inherits Rectangle {
+    background: #0f1419;
+    border-radius: 8px;
+    
+    Text {
+        text: "🕸️ DAG-Knight Consensus Network";
+        color: quantum-purple;
+        font-size: 16px;
+    }
+}
+
+component QuantumProcessMonitor inherits Rectangle {
+    background: card-bg;
+    border-radius: 12px;
+    height: 150px;
+    
+    Text {
+        text: "⚛️ Live Quantum Processes";
+        color: text-primary;
+        font-size: 18px;
+    }
+}
+
+component NetworkTopologyPreview inherits Rectangle {
+    background: card-bg;
+    border-radius: 12px;
+    height: 200px;
+    
+    Text {
+        text: "🌐 Network Topology";
+        color: text-primary;
+        font-size: 18px;
+    }
+}
+
+// Wallet components (simplified for now)
+component QuantumWallet inherits VerticalBox {
+    padding: 30px;
+    spacing: 20px;
+    
+    Text {
+        text: "💎 Quantum Wallet";
+        font-size: 28px;
+        font-weight: 700;
+        color: text-primary;
+    }
+    
+    WalletCard { }
+    
+    SendTransactionPanel { }
+}
+
+component WalletCard inherits Rectangle {
+    background: card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 15px;
+        
+        HorizontalBox {
+            spacing: 10px;
+            
+            Text {
+                text: "Wallet ID:";
+                color: text-secondary;
+                width: 100px;
+            }
+            
+            Text {
+                text: wallet-id;
+                color: text-primary;
+                font-family: "Monaco", "Cascadia Code", monospace;
+                font-size: 12px;
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            
+            Text {
+                text: "Balance:";
+                color: text-secondary;
+                width: 100px;
+            }
+            
+            Text {
+                text: "Ξ " + balance.to-string();
+                color: quantum-green;
+                font-size: 24px;
+                font-weight: 700;
+            }
+        }
+        
+        PrimaryButton {
+            text: "Create Quantum Wallet";
+            clicked => { create-wallet(); }
+        }
+        
+        Text {
+            text: wallet-status;
+            color: wallet-status.contains("Error") ? quantum-red : quantum-green;
+            font-size: 14px;
+        }
+    }
+}
+
+component SendTransactionPanel inherits Rectangle {
+    background: card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 15px;
+        
+        Text {
+            text: "Send Transaction";
+            font-size: 20px;
+            font-weight: 600;
+            color: text-primary;
+        }
+        
+        QuantumInput {
+            placeholder-text: "Recipient Address";
+            text <=> recipient;
+        }
+        
+        QuantumInput {
+            placeholder-text: "Amount (QNK)";
+            text <=> amount;
+            input-type: "decimal";
+        }
+        
+        PrimaryButton {
+            text: "Send with Quantum Signature";
+            clicked => { submit-tx(recipient, amount); }
+        }
+        
+        if tx-hash != "" : HorizontalBox {
+            spacing: 10px;
+            
+            Text {
+                text: "TX Hash:";
+                color: text-secondary;
+            }
+            
+            Text {
+                text: tx-hash;
+                color: text-primary;
+                font-family: "Monaco", "Cascadia Code", monospace;
+                font-size: 11px;
+            }
+        }
+        
+        Text {
+            text: tx-status;
+            color: tx-status.contains("failed") || tx-status.contains("error") ? quantum-red : quantum-green;
+            font-size: 14px;
+        }
+    }
+}
+
+// System Analytics tab
+component SystemAnalytics inherits Rectangle {
+    VerticalBox {
+        padding: 30px;
+        spacing: 20px;
+        
+        Text {
+            text: "📊 Quantum System Analytics";
+            font-size: 28px;
+            font-weight: 700;
+            color: text-primary;
+        }
+        
+        // Real-time event log with quantum styling
+        Rectangle {
+            background: card-bg;
+            border-radius: 12px;
+            height: 400px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 10px;
+                
+                Text {
+                    text: "🌊 Live Event Stream";
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: text-primary;
+                }
+                
+                ScrollView {
+                    height: 350px;
+                    
+                    TextEdit {
+                        text <=> log;
+                        read-only: true;
+                        font-family: "Monaco", "Cascadia Code", monospace;
+                        font-size: 11px;
+                        color: text-secondary;
+                        background: transparent;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Anonymity visualizer placeholder
+component AnonymityVisualizer inherits Rectangle {
+    VerticalBox {
+        padding: 30px;
+        spacing: 20px;
+        
+        Text {
+            text: "🎭 Tor Circuit Anonymity";
+            font-size: 28px;
+            font-weight: 700;
+            color: text-primary;
+        }
+        
+        Rectangle {
+            background: card-bg;
+            border-radius: 12px;
+            height: 300px;
+            
+            Text {
+                text: "🌐 Tor Circuit Visualization\n4 dedicated circuits active\nAnonymity score: " + (anonymity-score * 100).to-string() + "%";
+                color: text-primary;
+                font-size: 16px;
+            }
+        }
+    }
+}
+
+// ========== REUSABLE COMPONENTS ==========
+component PrimaryButton inherits Rectangle {
+    in-out property <string> text;
+    callback clicked;
+    
+    height: 45px;
+    width: 100%;
+    background: quantum-purple;
+    border-radius: 8px;
+    
+    // Hover animation
+    states [
+        pressed when touch-area.pressed: {
+            background: #7c3aed;
+        }
+    ]
+    
+    transitions [
+        in {
+            animate background { duration: 150ms; }
+        }
+        out {
+            animate background { duration: 150ms; }
+        }
+    ]
+    
+    HorizontalBox {
+        alignment: center;
+        
+        Text {
+            text: parent.text;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+        }
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+component QuantumInput inherits Rectangle {
+    in-out property <string> placeholder-text;
+    in-out property <string> text;
+    in-out property <string> input-type: "text";
+    
+    height: 45px;
+    width: 100%;
+    background: #1e293b;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #475569;
+    
+    // Focus state
+    states [
+        focused when line-edit.has-focus: {
+            border-color: quantum-blue;
+        }
+    ]
+    
+    line-edit := LineEdit {
+        x: 15px;
+        y: 0px;
+        width: parent.width - 30px;
+        height: 100%;
+        placeholder-text: parent.placeholder-text;
+        text <=> parent.text;
+        input-type: parent.input-type;
+        background: transparent;
+        color: text-primary;
+        font-size: 14px;
+    }
+}
+
+// Placeholder components for future implementation
+component QRNGDevice inherits Rectangle {
+    in-out property <string> device-name;
+    in-out property <string> bit-rate;
+    in-out property <float> quality;
+    in-out property <string> status;
+    
+    background: card-bg;
+    border-radius: 8px;
+    height: 120px;
+    
+    Text {
+        text: device-name + "\n" + bit-rate + "\nQuality: " + (quality * 100).to-string() + "%";
+        color: text-primary;
+        font-size: 12px;
+    }
+}
+
+component EntropyAnalysisPanel inherits Rectangle {
+    background: card-bg;
+    border-radius: 8px;
+    height: 150px;
+    
+    Text {
+        text: "📈 Entropy Analysis Dashboard";
+        color: text-primary;
+        font-size: 16px;
+    }
+}
+
+component AnchorElectionPanel inherits Rectangle {
+    background: card-bg;
+    border-radius: 8px;
+    height: 100px;
+    
+    Text {
+        text: "⚓ Anchor Election\nL-VRF Enhanced";
+        color: text-primary;
+        font-size: 14px;
+    }
+}
+
+component VDFComputationPanel inherits Rectangle {
+    background: card-bg;
+    border-radius: 8px;
+    height: 100px;
+    
+    Text {
+        text: "⏱️ VDF Computation\nQuantum Enhanced";
+        color: text-primary;
+        font-size: 14px;
+    }
+}
+
+component LVRFRandomnessPanel inherits Rectangle {
+    background: card-bg;
+    border-radius: 8px;
+    height: 100px;
+    
+    Text {
+        text: "🎲 L-VRF Randomness\nVerifiable & Quantum";
+        color: text-primary;
+        font-size: 14px;
+    }
+}
+
+component ConsensusMetrics inherits Rectangle {
+    background: card-bg;
+    border-radius: 8px;
+    height: 80px;
+    
+    Text {
+        text: "📊 Round 847 | Latency: " + consensus-latency.to-string() + "ms";
+        color: text-primary;
+        font-size: 14px;
+    }
+}

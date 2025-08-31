@@ -1,0 +1,320 @@
+// Quantum Entropy Visualization Components
+// Advanced visual representations of QRNG systems
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== QUANTUM ENTROPY STREAM VISUALIZER ==========
+export component QuantumEntropyStream inherits Rectangle {
+    // Properties for real-time entropy data
+    in-out property <float> entropy-quality: 0.97;
+    in-out property <float> generation-rate: 2.4; // Mbps
+    in-out property <bool> quantum-coherence: true;
+    in-out property <int> pool-size: 2048;
+    in-out property <string> primary-source: "Thermal Quantum";
+    
+    // Visual properties
+    property <float> animation-time: 0.0;
+    property <brush> stream-color: entropy-quality > 0.95 ? #00ff88 : 
+                                   entropy-quality > 0.90 ? #00d4ff : #fbbf24;
+    
+    background: #0a0e17;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Animation timer
+    animate animation-time {
+        duration: 2000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Main visualization area
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        // Header
+        HorizontalBox {
+            spacing: 10px;
+            alignment: space-between;
+            
+            Text {
+                text: "🌊 Quantum Entropy Stream";
+                font-size: 20px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            QualityIndicator {
+                quality: entropy-quality;
+            }
+        }
+        
+        // Entropy flow visualization
+        Rectangle {
+            height: 180px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Flowing quantum particles
+            for i in [0, 1, 2, 3, 4, 5, 6, 7] : QuantumParticle {
+                x: (animation-time * 200px + i * 80px) % (parent.width + 40px) - 20px;
+                y: 20px + i * 20px + sin(animation-time * 360deg + i * 45deg) * 15px;
+                opacity: entropy-quality;
+                particle-color: stream-color;
+            }
+            
+            // Quantum field effect
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: radial-gradient(circle at 50% 50%, 
+                    stream-color.transparentize(0.9) 0%, 
+                    transparent 60%);
+            }
+        }
+        
+        // Entropy statistics
+        EntropyStatsPanel {
+            quality: entropy-quality;
+            rate: generation-rate;
+            pool-size: pool-size;
+            source: primary-source;
+        }
+        
+        // QRNG device grid
+        QRNGDeviceGrid { }
+    }
+}
+
+// ========== QUANTUM PARTICLE COMPONENT ==========
+component QuantumParticle inherits Rectangle {
+    in-out property <brush> particle-color: #00d4ff;
+    
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: radial-gradient(circle, particle-color 0%, transparent 70%);
+    
+    // Quantum glow effect
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        x: -4px;
+        y: -4px;
+        border-radius: 8px;
+        background: radial-gradient(circle, 
+            particle-color.transparentize(0.7) 0%, 
+            transparent 50%);
+    }
+}
+
+// ========== QUALITY INDICATOR ==========
+component QualityIndicator inherits Rectangle {
+    in-out property <float> quality: 0.97;
+    
+    width: 120px;
+    height: 30px;
+    background: #1e293b;
+    border-radius: 15px;
+    
+    // Quality bar background
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 15px;
+        background: #334155;
+    }
+    
+    // Quality level indicator
+    Rectangle {
+        width: quality * parent.width;
+        height: 100%;
+        border-radius: 15px;
+        background: quality > 0.95 ? #00ff88 : 
+                   quality > 0.90 ? #00d4ff : 
+                   quality > 0.80 ? #fbbf24 : #ff3366;
+    }
+    
+    // Quality text
+    Text {
+        text: (quality * 100).toFixed(1) + "%";
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ========== ENTROPY STATISTICS PANEL ==========
+component EntropyStatsPanel inherits Rectangle {
+    in-out property <float> quality;
+    in-out property <float> rate;
+    in-out property <int> pool-size;
+    in-out property <string> source;
+    
+    background: #1e293b99;
+    border-radius: 8px;
+    height: 80px;
+    
+    HorizontalBox {
+        padding: 15px;
+        spacing: 20px;
+        
+        StatItem {
+            label: "Quality";
+            value: (quality * 100).toFixed(1) + "%";
+            icon: "🎯";
+        }
+        
+        StatItem {
+            label: "Rate";
+            value: rate.toFixed(1) + " Mbps";
+            icon: "⚡";
+        }
+        
+        StatItem {
+            label: "Pool";
+            value: pool-size + " bits";
+            icon: "🌊";
+        }
+        
+        StatItem {
+            label: "Source";
+            value: source;
+            icon: "🔬";
+        }
+    }
+}
+
+component StatItem inherits VerticalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> icon;
+    
+    spacing: 3px;
+    alignment: center;
+    
+    Text {
+        text: icon;
+        font-size: 16px;
+    }
+    
+    Text {
+        text: label;
+        font-size: 10px;
+        color: #94a3b8;
+    }
+    
+    Text {
+        text: value;
+        font-size: 12px;
+        font-weight: 600;
+        color: #f1f5f9;
+    }
+}
+
+// ========== QRNG DEVICE GRID ==========
+component QRNGDeviceGrid inherits Rectangle {
+    background: #1e293b33;
+    border-radius: 8px;
+    height: 140px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "🔬 Quantum Hardware Status";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            QRNGDeviceCard {
+                device-name: "Thermal Quantum RNG";
+                status: "active";
+                bit-rate: "2.4 Mbps";
+                quality: 0.973;
+                temperature: "2.1 mK";
+            }
+            
+            QRNGDeviceCard {
+                device-name: "Photonic Array";
+                status: "active"; 
+                bit-rate: "1.8 Mbps";
+                quality: 0.951;
+                temperature: "N/A";
+            }
+            
+            QRNGDeviceCard {
+                device-name: "Chaos Laser";
+                status: "standby";
+                bit-rate: "0.0 Mbps";
+                quality: 0.0;
+                temperature: "298 K";
+            }
+        }
+    }
+}
+
+component QRNGDeviceCard inherits Rectangle {
+    in-out property <string> device-name;
+    in-out property <string> status;
+    in-out property <string> bit-rate;
+    in-out property <float> quality;
+    in-out property <string> temperature;
+    
+    background: status == "active" ? #10b98133 : #33415533;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "active" ? #10b981 : #475569;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 5px;
+        
+        Text {
+            text: device-name;
+            font-size: 11px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 5px;
+            
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: status == "active" ? #00ff88 : #475569;
+            }
+            
+            Text {
+                text: status;
+                font-size: 9px;
+                color: status == "active" ? #00ff88 : #94a3b8;
+            }
+        }
+        
+        Text {
+            text: bit-rate;
+            font-size: 10px;
+            color: #94a3b8;
+            font-family: "Monaco", "Cascadia Code", monospace;
+        }
+        
+        if status == "active" : Text {
+            text: "Q: " + (quality * 100).toFixed(1) + "%";
+            font-size: 9px;
+            color: quality > 0.95 ? #00ff88 : #fbbf24;
+        }
+    }
+}

@@ -1,0 +1,46 @@
+[package]
+name = "qnk-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "qnk-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Slint GUI framework with advanced features
+slint = "1.7"
+
+# HTTP client for API communication
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Q-NarwhalKnight types for data structures
+q-types = { path = "../crates/q-types" }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+slint-build = "1.7"
+
+[features]
+default = ["quantum-visualization"]
+quantum-visualization = []
+advanced-animations = []

@@ -15,7 +15,8 @@ members = [
     "crates/q-tor-client",
     "crates/q-tor-circuit",
     "crates/q-dandelion",
-    "crates/q-storage"
+    "crates/q-storage",
+    "gui"
 ]
 
 [workspace.package]
@@ -107,3 +108,12 @@ lz4 = "1.24"
 ndarray = { version = "0.15", features = ["serde"] }
 
 # Note: SQLite not used - we have RocksDB quantum storage
+
+# Additional dependencies for testing
+hex = "0.4"
+
+# GUI framework
+slint = "1.7"
+slint-build = "1.7"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
