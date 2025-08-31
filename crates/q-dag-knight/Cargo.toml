@@ -1,0 +1,47 @@
+[package]
+name = "q-dag-knight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization  
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Collections and utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Cryptography (Phase 0: Classical)
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+
+# VDF for quantum beacon
+vdf = { workspace = true }
+rand = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async synchronization
+async-trait = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = "0.4"

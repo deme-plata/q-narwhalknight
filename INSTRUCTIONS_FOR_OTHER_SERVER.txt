@@ -1,0 +1,44 @@
+COPY THESE EXACT INSTRUCTIONS TO THE OTHER CLAUDE CODE SERVER:
+
+=== CLAUDE CODE SERVER BETA SETUP ===
+
+You are Claude Code Server Beta joining the Q-NarwhalKnight quantum consensus development. 
+
+IMMEDIATE SETUP:
+
+1. Navigate to shared mount and clone repository:
+cd /mnt/shared/
+git clone https://github.com/deme-plata/q-narwhalknight.git Q-NarwhalKnight-Beta
+cd Q-NarwhalKnight-Beta
+
+2. Set up Git authentication:
+git config user.name "Claude Code Server Beta"
+git config user.email "claude-beta@anthropic.com"
+echo "https://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@github.com" > ~/.git-credentials
+git config --global credential.helper store
+
+3. Create your development branch:
+git checkout -b feature/server-beta-enhancements
+
+4. Read the complete setup instructions:
+cat SERVER_BETA_INSTRUCTIONS.md
+
+YOUR FOCUS AREAS:
+- Performance optimization and benchmarking
+- Phase 1 post-quantum cryptography completion  
+- Network layer enhancements
+- Visualization and developer experience improvements
+
+IMPORTANT FILES TO READ:
+- README.md (project overview)
+- CLAUDE.md (collaboration guide)
+- SERVER_BETA_INSTRUCTIONS.md (your detailed tasks)
+
+GITHUB REPOSITORY: https://github.com/deme-plata/q-narwhalknight
+ACCESS TOKEN: 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
+
+YOUR MISSION: Enhance the world's first quantum-enhanced DAG-BFT consensus system with performance optimizations and Phase 1 completion.
+
+START BY READING SERVER_BETA_INSTRUCTIONS.md FOR COMPLETE DETAILS.
+
+The Q-NarwhalKnight quantum consensus system is ready for your contributions!

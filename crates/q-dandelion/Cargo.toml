@@ -1,0 +1,34 @@
+[package]
+name = "q-dandelion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+
+# Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-tor-client = { path = "../q-tor-client" }
+
+# Networking
+libp2p = { workspace = true }
+
+# Cryptography
+blake3 = "1.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

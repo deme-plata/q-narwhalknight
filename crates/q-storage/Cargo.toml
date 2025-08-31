@@ -1,0 +1,43 @@
+[package]
+name = "q-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Storage engines
+rocksdb = { workspace = true }
+bincode = { workspace = true }
+lz4 = { workspace = true }
+
+# Cryptography for hashing
+blake3 = "1.5"
+sha3 = { workspace = true }
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-dag-knight = { path = "../q-dag-knight" }
+
+# Networking for sync protocol
+libp2p = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+proptest = { workspace = true }
+criterion = { workspace = true }

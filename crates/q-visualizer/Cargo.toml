@@ -1,0 +1,54 @@
+[package]
+name = "q-visualizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization  
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Math and visualization
+nalgebra = "0.32"
+palette = "0.7"
+image = { version = "0.24", features = ["png", "jpeg"] }
+plotters = "0.3"
+svg = "0.13"
+kurbo = "0.9"
+
+# Terminal rendering
+ratatui = "0.24"
+crossterm = "0.27"
+unicode-width = "0.1"
+
+# Web visualization
+warp = "0.3"
+tokio-tungstenite = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Math utilities
+rand = { workspace = true }
+rand_distr = "0.4"
+
+# Quantum state visualization
+ndarray = "0.15"
+num-complex = "0.4"
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,150 @@
+version: '3.8'
+
+services:
+  # Validator Node 1
+  validator-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: q-validator-1
+    environment:
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_IS_VALIDATOR=true
+      - Q_LOG_LEVEL=debug
+      - Q_NODE_ID=validator-1
+      - Q_BOOTSTRAP_PEERS=validator-2:8081,validator-3:8081,validator-4:8081
+    ports:
+      - "8080:8080"  # API port
+      - "8081:8081"  # P2P port
+    volumes:
+      - validator1_data:/app/data
+    networks:
+      - qnarwhal
+
+  # Validator Node 2
+  validator-2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: q-validator-2
+    environment:
+      - Q_API_PORT=8082
+      - Q_P2P_PORT=8083
+      - Q_IS_VALIDATOR=true
+      - Q_LOG_LEVEL=debug
+      - Q_NODE_ID=validator-2
+      - Q_BOOTSTRAP_PEERS=validator-1:8081,validator-3:8081,validator-4:8081
+    ports:
+      - "8082:8082"
+      - "8083:8083"
+    volumes:
+      - validator2_data:/app/data
+    networks:
+      - qnarwhal
+
+  # Validator Node 3
+  validator-3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: q-validator-3
+    environment:
+      - Q_API_PORT=8084
+      - Q_P2P_PORT=8085
+      - Q_IS_VALIDATOR=true
+      - Q_LOG_LEVEL=debug
+      - Q_NODE_ID=validator-3
+      - Q_BOOTSTRAP_PEERS=validator-1:8081,validator-2:8083,validator-4:8081
+    ports:
+      - "8084:8084"
+      - "8085:8085"
+    volumes:
+      - validator3_data:/app/data
+    networks:
+      - qnarwhal
+
+  # Validator Node 4
+  validator-4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: q-validator-4
+    environment:
+      - Q_API_PORT=8086
+      - Q_P2P_PORT=8087
+      - Q_IS_VALIDATOR=true
+      - Q_LOG_LEVEL=debug
+      - Q_NODE_ID=validator-4
+      - Q_BOOTSTRAP_PEERS=validator-1:8081,validator-2:8083,validator-3:8085
+    ports:
+      - "8086:8086"
+      - "8087:8087"
+    volumes:
+      - validator4_data:/app/data
+    networks:
+      - qnarwhal
+
+  # PostgreSQL Database (for persistent storage)
+  postgres:
+    image: postgres:15
+    container_name: q-postgres
+    environment:
+      - POSTGRES_DB=qnarwhal
+      - POSTGRES_USER=quser
+      - POSTGRES_PASSWORD=qpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - qnarwhal
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: q-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    networks:
+      - qnarwhal
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: q-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ../monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - qnarwhal
+
+volumes:
+  validator1_data:
+  validator2_data:
+  validator3_data:
+  validator4_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  qnarwhal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

@@ -1,0 +1,32 @@
+[package]
+name = "q-tor-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Tor client
+arti-client = { workspace = true }
+arti-config = { workspace = true }
+tor-rtcompat = { workspace = true }
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+
+# Networking
+libp2p = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

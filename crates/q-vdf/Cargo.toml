@@ -1,0 +1,65 @@
+[package]
+name = "q-vdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Cryptography
+sha3 = { workspace = true }
+blake3 = "1.5"
+ring = { workspace = true }
+
+# VDF implementation
+vdf = { workspace = true }
+
+# Post-quantum cryptography
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+
+# Mathematical operations
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time tracking
+chrono = { workspace = true }
+
+# Parallel computation
+rayon = "1.8"
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["standard"]
+standard = []
+high_security = []
+quantum_enhanced = []
+parallel = ["rayon"]

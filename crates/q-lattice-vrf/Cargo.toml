@@ -1,0 +1,72 @@
+[package]
+name = "q-lattice-vrf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+
+# Cryptography
+sha3 = { workspace = true }
+ring = { workspace = true }
+
+# Post-quantum lattice cryptography
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+
+# Mathematical operations
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+
+# Linear algebra for lattice operations
+nalgebra = "0.32"
+ndarray = { workspace = true }
+
+# Random number generation
+rand = { workspace = true }
+rand_core = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+
+# Time utilities
+chrono = { workspace = true }
+
+# Zero-knowledge proofs
+bulletproofs = "4.0"
+
+# Hex encoding/decoding
+hex = "0.4"
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = "0.4"
+criterion = { workspace = true }
+
+
+[features]
+default = ["standard"]
+standard = []           # Standard lattice parameters
+high_security = []     # High security lattice parameters (slower)
+quantum_enhanced = []  # Use quantum randomness for enhanced security

@@ -1,0 +1,58 @@
+[package]
+name = "q-quantum-rng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+
+# Cryptography and randomness
+rand = { workspace = true }
+rand_core = { workspace = true }
+sha3 = { workspace = true }
+ring = { workspace = true }
+
+# Hardware interfaces (Phase 2)
+serialport = "4.2"
+hidapi = "2.4"
+udev = "0.7"
+
+# Quantum entropy analysis
+statrs = "0.16"
+ndarray = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+tokio-util = "0.7"
+
+# Time utilities
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["simulation"]
+simulation = []          # Use simulated QRNG for Phase 0/1
+hardware = []           # Enable actual QRNG hardware support
+entropy-analysis = []   # Enable quantum entropy quality analysis

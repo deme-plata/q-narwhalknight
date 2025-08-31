@@ -1,0 +1,31 @@
+[package]
+name = "q-tor-circuit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+
+# Tor circuit management
+tor-circmgr = { workspace = true }
+arti-client = { workspace = true }
+tor-rtcompat = { workspace = true }
+
+# Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-tor-client = { path = "../q-tor-client" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
