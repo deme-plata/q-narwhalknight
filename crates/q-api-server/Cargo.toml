@@ -1,0 +1,64 @@
+[package]
+name = "q-api-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "q-api-server"
+path = "src/main.rs"
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-wallet = { path = "../q-wallet" }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# WebSocket and SSE support
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio-tungstenite = "0.21"
+tokio-stream = "0.1"
+futures-util = "0.3"
+
+# Real-time event streaming
+tokio-util = { version = "0.7", features = ["codec"] }
+pin-project-lite = "0.2"
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
