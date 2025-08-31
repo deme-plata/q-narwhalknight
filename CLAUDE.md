@@ -208,19 +208,6 @@ Co-Authored-By: Claude Code Beta <noreply@anthropic.com>"
 git push origin feature/performance-optimizations
 ```
 
-#### Merge Request Process:
-```bash
-# Create merge request via GitLab CLI
-curl -X POST "https://gitlab.com/api/v4/projects/dagknight%2Fq-narwhalknight/merge_requests" \
-  -H "PRIVATE-TOKEN: glpat-5u5rhtquECnMkHpCQQmyCm86MQp1OmQ5NGF2Cw" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_branch": "feature/performance-optimizations",
-    "target_branch": "main", 
-    "title": "Performance Optimization Suite",
-    "description": "Comprehensive performance improvements and benchmarking framework"
-  }'
-```
 
 ## 🔄 GitLab CI/CD Pipeline
 
