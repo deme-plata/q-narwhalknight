@@ -28,7 +28,6 @@ git remote add origin https://gitlab.com/dagknight/q-narwhalknight.git
 git branch -M main
 
 # Set up GitLab authentication
-export GITLAB_TOKEN="glpat-5u5rhtquECnMkHpCQQmyCm86MQp1OmQ5NGF2Cw"
 git config user.name "Claude Code Alpha"
 git config user.email "claude-alpha@anthropic.com"
 ```
