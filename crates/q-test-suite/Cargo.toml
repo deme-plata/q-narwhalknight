@@ -1,0 +1,78 @@
+[package]
+name = "q-test-suite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# All Q-NarwhalKnight crates for comprehensive testing
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-vdf = { path = "../q-vdf" }
+q-fairqueue = { path = "../q-fairqueue" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-network = { path = "../q-network" }
+q-storage = { path = "../q-storage" }
+q-api-server = { path = "../q-api-server" }
+
+# Testing framework
+tokio = { workspace = true }
+tokio-test = "0.4"
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Property-based testing
+proptest = { workspace = true }
+quickcheck = "1.0"
+
+# Benchmarking
+criterion = { workspace = true }
+
+# Metrics and monitoring
+prometheus = { workspace = true }
+
+# Serialization for test data
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Statistical analysis
+statrs = "0.16"
+
+# Performance testing
+pprof = { version = "0.13", features = ["criterion", "protobuf-codec"] }
+
+[features]
+default = ["phase0"]
+phase0 = []
+phase1 = []
+phase2 = ["quantum_enhanced"]
+phase3 = []
+quantum_enhanced = [
+    "q-quantum-rng/quantum_enhanced",
+    "q-lattice-vrf/quantum_enhanced",
+    "q-vdf/quantum_enhanced",
+    "q-fairqueue/quantum_enhanced"
+]
+
+[[bin]]
+name = "quantum-consensus-test"
+path = "src/bin/quantum_consensus_test.rs"
+
+[[bin]]
+name = "phase2-benchmark"
+path = "src/bin/phase2_benchmark.rs"
+
+[[bin]]
+name = "security-audit"
+path = "src/bin/security_audit.rs"
