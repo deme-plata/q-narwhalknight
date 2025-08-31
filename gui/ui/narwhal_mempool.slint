@@ -1,0 +1,615 @@
+// Narwhal Mempool Transaction Flow Visualization
+// Real-time visualization of transaction processing and certificate creation
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== NARWHAL MEMPOOL VISUALIZER ==========
+export component NarwhalMempoolFlow inherits Rectangle {
+    // Properties for mempool state
+    in-out property <int> pending-transactions: 847;
+    in-out property <int> batch-size: 150;
+    in-out property <float> throughput: 1250.0; // TPS
+    in-out property <string> current-leader: "Alice";
+    in-out property <int> certificate-round: 142;
+    in-out property <float> broadcast-latency: 23.4;
+    
+    // Visual animation properties
+    property <float> flow-animation: 0.0;
+    property <float> pulse-phase: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    
+    // Flow animation
+    animate flow-animation {
+        duration: 4000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Pulse for active elements
+    animate pulse-phase {
+        duration: 2500ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header section
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "🌪️ Narwhal Mempool Flow";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            MempoolStatsPanel {
+                pending: pending-transactions;
+                throughput: throughput;
+                leader: current-leader;
+            }
+        }
+        
+        // Main flow visualization
+        HorizontalBox {
+            spacing: 20px;
+            height: 400px;
+            
+            // Transaction injection stage
+            TransactionInjectionStage {
+                width: 25%;
+                pending-count: pending-transactions;
+                flow-phase: flow-animation;
+            }
+            
+            // Flow arrow
+            FlowArrow {
+                width: 8%;
+                direction: "right";
+                active: true;
+            }
+            
+            // Batching and certificate creation
+            CertificateCreationStage {
+                width: 30%;
+                batch-size: batch-size;
+                round: certificate-round;
+                pulse: pulse-phase;
+            }
+            
+            // Flow arrow
+            FlowArrow {
+                width: 8%;
+                direction: "right";
+                active: true;
+            }
+            
+            // Reliable broadcast stage
+            BroadcastStage {
+                width: 29%;
+                latency: broadcast-latency;
+                flow-phase: flow-animation;
+            }
+        }
+        
+        // Performance metrics and details
+        MempoolDetailsPanel {
+            height: 150px;
+            current-round: certificate-round;
+            broadcast-latency: broadcast-latency;
+        }
+    }
+}
+
+// ========== TRANSACTION INJECTION STAGE ==========
+component TransactionInjectionStage inherits Rectangle {
+    in-out property <int> pending-count;
+    in-out property <float> flow-phase;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #3b82f6;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📥 Transaction Pool";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Transaction flow visualization
+        Rectangle {
+            height: 200px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Flowing transaction particles
+            for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] : TransactionParticle {
+                x: (flow-phase * 150px + i * 25px) % (parent.width + 30px) - 15px;
+                y: 20px + i * 18px + sin(flow-phase * 180deg + i * 30deg) * 10px;
+                opacity: 0.8;
+            }
+            
+            // Pool visualization
+            Rectangle {
+                y: parent.height - 60px;
+                height: 50px;
+                background: linear-gradient(90deg, #3b82f644 0%, #1d4ed8aa 100%);
+                border-radius: 6px;
+                
+                Text {
+                    text: pending-count + " pending";
+                    color: white;
+                    font-size: 12px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        
+        // Injection rate indicator
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: #10b981;
+            }
+            
+            Text {
+                text: "Active injection";
+                font-size: 11px;
+                color: #10b981;
+            }
+        }
+    }
+}
+
+// ========== CERTIFICATE CREATION STAGE ==========
+component CertificateCreationStage inherits Rectangle {
+    in-out property <int> batch-size;
+    in-out property <int> round;
+    in-out property <float> pulse;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #8b5cf6;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📜 Certificate Creation";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Certificate creation visualization
+        Rectangle {
+            height: 200px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 15px;
+                spacing: 10px;
+                alignment: center;
+                
+                // Certificate being created
+                CertificateCard {
+                    round: round;
+                    batch-size: batch-size;
+                    pulse-intensity: pulse;
+                }
+                
+                // Batch formation indicator
+                BatchFormationIndicator {
+                    current-size: batch-size;
+                    target-size: 200;
+                    pulse: pulse;
+                }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: #8b5cf6;
+            }
+            
+            Text {
+                text: "Round " + round;
+                font-size: 11px;
+                color: #8b5cf6;
+            }
+        }
+    }
+}
+
+// ========== RELIABLE BROADCAST STAGE ==========
+component BroadcastStage inherits Rectangle {
+    in-out property <float> latency;
+    in-out property <float> flow-phase;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #f59e0b;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📡 Reliable Broadcast";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Broadcast visualization
+        Rectangle {
+            height: 200px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Broadcast waves
+            for i in [0, 1, 2, 3, 4] : BroadcastWave {
+                x: parent.width / 2;
+                y: parent.height / 2;
+                wave-phase: flow-phase + i * 0.3;
+                opacity: 0.6 - i * 0.1;
+            }
+            
+            // Central broadcast point
+            Rectangle {
+                x: parent.width / 2 - 8px;
+                y: parent.height / 2 - 8px;
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                background: #f59e0b;
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: latency < 50.0 ? #10b981 : #f59e0b;
+            }
+            
+            Text {
+                text: latency.toFixed(1) + "ms avg";
+                font-size: 11px;
+                color: latency < 50.0 ? #10b981 : #f59e0b;
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component TransactionParticle inherits Rectangle {
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(45deg, #3b82f6 0%, #1d4ed8 100%);
+    
+    // Glow effect
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        x: -3px;
+        y: -3px;
+        border-radius: 6px;
+        background: radial-gradient(circle, #3b82f633 0%, transparent 70%);
+    }
+}
+
+component CertificateCard inherits Rectangle {
+    in-out property <int> round;
+    in-out property <int> batch-size;
+    in-out property <float> pulse-intensity;
+    
+    width: 120px;
+    height: 60px;
+    background: #8b5cf666;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #8b5cf6.mix(white, pulse-intensity * 0.3);
+    
+    VerticalBox {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: "Certificate #" + round;
+            font-size: 11px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Text {
+            text: batch-size + " transactions";
+            font-size: 9px;
+            color: #a78bfa;
+        }
+        
+        Text {
+            text: "Ready for broadcast";
+            font-size: 8px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component BatchFormationIndicator inherits Rectangle {
+    in-out property <int> current-size;
+    in-out property <int> target-size;
+    in-out property <float> pulse;
+    
+    height: 20px;
+    background: #334155;
+    border-radius: 10px;
+    
+    // Progress bar
+    Rectangle {
+        width: (current-size as float / target-size as float) * parent.width;
+        height: 100%;
+        background: linear-gradient(90deg, #8b5cf6 0%, #a855f7 100%);
+        border-radius: 10px;
+        
+        // Pulse effect
+        opacity: 0.8 + pulse * 0.2;
+    }
+    
+    Text {
+        text: current-size + "/" + target-size;
+        color: white;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component BroadcastWave inherits Rectangle {
+    in-out property <float> wave-phase;
+    
+    width: wave-phase * 80px;
+    height: wave-phase * 80px;
+    x: -width / 2;
+    y: -height / 2;
+    border-radius: width / 2;
+    background: transparent;
+    border-width: 2px;
+    border-color: #f59e0b.transparentize(wave-phase * 0.8);
+}
+
+component FlowArrow inherits Rectangle {
+    in-out property <string> direction;
+    in-out property <bool> active;
+    
+    height: 40px;
+    
+    Rectangle {
+        width: 60%;
+        height: 3px;
+        y: parent.height / 2 - 1.5px;
+        background: active ? #00d4ff : #475569;
+        
+        // Arrow head
+        Rectangle {
+            x: parent.width - 8px;
+            y: -4px;
+            width: 0px;
+            height: 0px;
+            background: transparent;
+            border-width: 5px;
+            border-color: transparent;
+            // Note: Triangle would be implemented with Canvas in production
+        }
+    }
+}
+
+// ========== STATS AND DETAILS PANELS ==========
+component MempoolStatsPanel inherits Rectangle {
+    in-out property <int> pending;
+    in-out property <float> throughput;
+    in-out property <string> leader;
+    
+    width: 280px;
+    height: 60px;
+    background: #1e293b99;
+    border-radius: 8px;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 20px;
+        
+        StatItem {
+            label: "Pending";
+            value: pending;
+            unit: "txs";
+            icon: "📥";
+        }
+        
+        StatItem {
+            label: "Throughput";
+            value: throughput.toFixed(0);
+            unit: "TPS";
+            icon: "⚡";
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            alignment: center;
+            
+            Text {
+                text: "👑";
+                font-size: 14px;
+            }
+            
+            Text {
+                text: "Leader";
+                font-size: 9px;
+                color: #94a3b8;
+            }
+            
+            Text {
+                text: leader;
+                font-size: 11px;
+                font-weight: 600;
+                color: #fbbf24;
+            }
+        }
+    }
+}
+
+component StatItem inherits VerticalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <string> unit;
+    in-out property <string> icon;
+    
+    spacing: 2px;
+    alignment: center;
+    
+    Text {
+        text: icon;
+        font-size: 14px;
+    }
+    
+    Text {
+        text: label;
+        font-size: 9px;
+        color: #94a3b8;
+    }
+    
+    Text {
+        text: value + " " + unit;
+        font-size: 11px;
+        font-weight: 600;
+        color: #f1f5f9;
+    }
+}
+
+component MempoolDetailsPanel inherits Rectangle {
+    in-out property <int> current-round;
+    in-out property <float> broadcast-latency;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "📊 Mempool Performance Metrics";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 30px;
+            
+            MetricCard {
+                title: "Current Round";
+                value: current-round;
+                status: "active";
+                description: "Certificate creation round";
+            }
+            
+            MetricCard {
+                title: "Broadcast Latency";
+                value: broadcast-latency.toFixed(1) + "ms";
+                status: broadcast-latency < 50.0 ? "excellent" : "good";
+                description: "Average reliable broadcast time";
+            }
+            
+            MetricCard {
+                title: "Network Health";
+                value: "98.7%";
+                status: "excellent";
+                description: "Mempool synchronization rate";
+            }
+            
+            MetricCard {
+                title: "Buffer Usage";
+                value: "67%";
+                status: "good";
+                description: "Transaction buffer capacity";
+            }
+        }
+    }
+}
+
+component MetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : #f43f5e;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 4px;
+        
+        Text {
+            text: title;
+            font-size: 11px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 14px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+        }
+    }
+}

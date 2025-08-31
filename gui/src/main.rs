@@ -3,14 +3,16 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use q_types::*;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use slint::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
+use url::Url;
 
 slint::include_modules!();
 
@@ -480,8 +482,119 @@ impl AppState {
     
     /// Start WebSocket connection for real-time updates
     async fn start_websocket_stream(state: Arc<Mutex<Self>>, api_base: &str) -> Result<()> {
-        // For now, implement SSE fallback until WebSocket is fully implemented
-        Err(anyhow::anyhow!("WebSocket not yet implemented, using SSE"))
+        // Convert HTTP API base to WebSocket URL
+        let ws_url = api_base.replace("http://", "ws://").replace("https://", "wss://");
+        let ws_url = format!("{}/ws/quantum-updates", ws_url);
+        
+        info!("🔌 Connecting to WebSocket: {}", ws_url);
+        
+        match connect_async(Url::parse(&ws_url)?).await {
+            Ok((ws_stream, _)) => {
+                info!("✅ WebSocket connected to Server Alpha");
+                
+                {
+                    let state = state.lock().await;
+                    state.ui.append_log("🔌 WebSocket connected to Server Alpha\n".into());
+                }
+                
+                let (mut _ws_sender, mut ws_receiver) = ws_stream.split();
+                
+                // Listen for WebSocket messages
+                while let Some(msg_result) = ws_receiver.next().await {
+                    match msg_result {
+                        Ok(Message::Text(text)) => {
+                            // Parse Server Alpha's WebSocket message format
+                            if let Ok(ws_msg) = serde_json::from_str::<WebSocketMessage>(&text) {
+                                Self::handle_websocket_message(state.clone(), ws_msg).await;
+                            } else {
+                                debug!("Failed to parse WebSocket message: {}", text);
+                            }
+                        }
+                        Ok(Message::Close(_)) => {
+                            warn!("WebSocket connection closed by server");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("WebSocket error: {}", e);
+                            break;
+                        }
+                        _ => {} // Ignore other message types
+                    }
+                }
+                
+                {
+                    let state = state.lock().await;
+                    state.ui.append_log("⚠️ WebSocket disconnected from Server Alpha\n".into());
+                }
+                
+                Ok(())
+            }
+            Err(e) => {
+                warn!("WebSocket connection failed: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+    
+    /// Handle incoming WebSocket messages from Server Alpha
+    async fn handle_websocket_message(state: Arc<Mutex<Self>>, msg: WebSocketMessage) {
+        match msg.message_type.as_str() {
+            "quantum_metrics" => {
+                if let Ok(metrics) = serde_json::from_value::<QuantumMetricsResponse>(msg.data) {
+                    if let Ok(mut app_state) = state.try_lock() {
+                        app_state.ui.set_entropy_quality(metrics.entropy_quality);
+                        app_state.ui.set_consensus_latency(metrics.avg_evaluation_time_ms);
+                        app_state.ui.set_current_phase(metrics.phase_status.into());
+                        app_state.ui.set_anonymity_score(metrics.tor_anonymity_score);
+                        
+                        app_state.ui.append_log(format!(
+                            "📊 [WebSocket] Quality: {:.3}, L-VRF: {:.1}%, Health: {:.1}%\n",
+                            metrics.entropy_quality,
+                            metrics.lvrf_success_rate * 100.0,
+                            metrics.consensus_health * 100.0
+                        ).into());
+                    }
+                }
+            }
+            "consensus_update" => {
+                if let Ok(dag_data) = serde_json::from_value::<DAGVisualizationData>(msg.data) {
+                    if let Ok(mut app_state) = state.try_lock() {
+                        app_state.dag_data = Some(dag_data.clone());
+                        app_state.ui.append_log(format!(
+                            "🕸️ [WebSocket] DAG Round {}, Latency: {:.1}ms\n",
+                            dag_data.current_round,
+                            dag_data.finality_latency
+                        ).into());
+                    }
+                }
+            }
+            "entropy_stream" => {
+                if let Ok(entropy_data) = serde_json::from_value::<EntropyMeasurement>(msg.data) {
+                    if let Ok(mut app_state) = state.try_lock() {
+                        app_state.entropy_data.push(entropy_data.clone());
+                        
+                        // Keep only last 100 samples
+                        if app_state.entropy_data.len() > 100 {
+                            app_state.entropy_data.remove(0);
+                        }
+                        
+                        // Update UI with latest entropy quality
+                        app_state.ui.set_entropy_quality(entropy_data.quality_score);
+                    }
+                }
+            }
+            "network_update" => {
+                if let Ok(topology) = serde_json::from_value::<NetworkTopology>(msg.data) {
+                    if let Ok(mut app_state) = state.try_lock() {
+                        app_state.ui.set_active_peers(topology.peers.len() as i32);
+                        app_state.network_topology = Some(topology);
+                    }
+                }
+            }
+            _ => {
+                debug!("Unknown WebSocket message type: {}", msg.message_type);
+            }
+        }
     }
     
     /// Start Server-Sent Events stream for real-time updates
@@ -638,12 +751,13 @@ impl AppState {
                 self.ui.set_entropy_quality(avg_quality);
             }
             Err(_) => {
-                // Generate mock entropy data for visualization
+                // Generate mock entropy data for visualization using timestamp-based pseudo-random
+                let time_seed = Utc::now().timestamp_millis();
                 let mock_entropy = EntropyMeasurement {
                     timestamp: Utc::now(),
-                    value: rand::random::<f64>(),
+                    value: 0.5 + ((time_seed % 1000) as f64 / 1000.0 - 0.5),
                     provider: "MockQRNG".to_string(),
-                    quality_score: 0.97 + (rand::random::<f64>() - 0.5) * 0.04,
+                    quality_score: 0.97 + ((time_seed % 100) as f64 / 10000.0 - 0.005),
                 };
                 self.entropy_data.push(mock_entropy);
                 

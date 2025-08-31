@@ -26,6 +26,10 @@ futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
+# WebSocket support for real-time updates
+tokio-tungstenite = "0.23"
+url = "2.5"
+
 # Q-NarwhalKnight types for data structures
 q-types = { path = "../crates/q-types" }
 

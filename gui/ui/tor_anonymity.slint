@@ -1,0 +1,727 @@
+// Tor Circuit Anonymity Visualization
+// Advanced visualization of Tor circuits, Dandelion++ protocol, and anonymity metrics
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== TOR ANONYMITY VISUALIZER ==========
+export component TorAnonymityVisualizer inherits Rectangle {
+    // Properties for Tor circuit state
+    in-out property <int> active-circuits: 4;
+    in-out property <float> anonymity-score: 0.945;
+    in-out property <string> dandelion-phase: "Fluff";
+    in-out property <int> stem-length: 7;
+    in-out property <float> traffic-analysis-resistance: 0.92;
+    in-out property <string> circuit-diversity: "Global";
+    in-out property <int> guard-nodes: 3;
+    in-out property <int> exit-nodes: 12;
+    
+    // Animation properties
+    property <float> circuit-flow: 0.0;
+    property <float> dandelion-animation: 0.0;
+    property <float> anonymity-pulse: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b2e 100%);
+    
+    // Circuit flow animation
+    animate circuit-flow {
+        duration: 6000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Dandelion protocol animation
+    animate dandelion-animation {
+        duration: 8000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    // Anonymity strength pulse
+    animate anonymity-pulse {
+        duration: 3000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header section with anonymity score
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "🎭 Tor Anonymity System";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            AnonymityScoreIndicator {
+                score: anonymity-score;
+                pulse: anonymity-pulse;
+            }
+        }
+        
+        // Main visualization area
+        HorizontalBox {
+            spacing: 20px;
+            height: 380px;
+            
+            // Circuit topology visualization
+            CircuitTopologyView {
+                width: 45%;
+                circuits: active-circuits;
+                flow-phase: circuit-flow;
+                diversity: circuit-diversity;
+            }
+            
+            // Dandelion++ protocol visualization
+            DandelionProtocolView {
+                width: 30%;
+                phase: dandelion-phase;
+                stem-length: stem-length;
+                animation: dandelion-animation;
+            }
+            
+            // Traffic analysis resistance
+            TrafficAnalysisPanel {
+                width: 25%;
+                resistance: traffic-analysis-resistance;
+                guard-nodes: guard-nodes;
+                exit-nodes: exit-nodes;
+            }
+        }
+        
+        // Circuit details and metrics
+        CircuitMetricsPanel {
+            height: 120px;
+            active-circuits: active-circuits;
+            anonymity-score: anonymity-score;
+        }
+    }
+}
+
+// ========== CIRCUIT TOPOLOGY VIEW ==========
+component CircuitTopologyView inherits Rectangle {
+    in-out property <int> circuits;
+    in-out property <float> flow-phase;
+    in-out property <string> diversity;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #7c3aed;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        HorizontalBox {
+            spacing: 10px;
+            alignment: space-between;
+            
+            Text {
+                text: "🌐 Circuit Topology";
+                font-size: 16px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: diversity + " diversity";
+                font-size: 11px;
+                color: #a855f7;
+            }
+        }
+        
+        // Circuit visualization
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Four dedicated circuits
+            for i in [0, 1, 2, 3] : TorCircuitPath {
+                x: 20px + (i % 2) * 150px;
+                y: 40px + floor(i / 2) * 120px;
+                circuit-id: i;
+                circuit-type: i == 0 ? "Control" : 
+                             i == 1 ? "BlockGossip" :
+                             i == 2 ? "AckGossip" : "QuantumBeacon";
+                flow-phase: flow-phase + i * 0.25;
+            }
+            
+            // Global anonymity overlay
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: radial-gradient(circle at 50% 50%, 
+                    #7c3aed22 0%, transparent 80%);
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: circuits >= 4 ? #10b981 : #f59e0b;
+            }
+            
+            Text {
+                text: circuits + "/4 circuits active";
+                font-size: 11px;
+                color: circuits >= 4 ? #10b981 : #f59e0b;
+            }
+        }
+    }
+}
+
+// ========== DANDELION++ PROTOCOL VIEW ==========
+component DandelionProtocolView inherits Rectangle {
+    in-out property <string> phase;
+    in-out property <int> stem-length;
+    in-out property <float> animation;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #0ea5e9;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🌸 Dandelion++ Protocol";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Dandelion visualization
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            if phase == "Stem" : DandelionStemView {
+                stem-length: stem-length;
+                animation: animation;
+            }
+            
+            if phase == "Fluff" : DandelionFluffView {
+                animation: animation;
+            }
+            
+            // Phase transition visualization
+            DandelionPhaseIndicator {
+                x: parent.width - 80px;
+                y: 10px;
+                current-phase: phase;
+                stem-length: stem-length;
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: phase == "Fluff" ? #10b981 : #0ea5e9;
+            }
+            
+            Text {
+                text: phase + " phase active";
+                font-size: 11px;
+                color: phase == "Fluff" ? #10b981 : #0ea5e9;
+            }
+        }
+    }
+}
+
+// ========== TRAFFIC ANALYSIS RESISTANCE PANEL ==========
+component TrafficAnalysisPanel inherits Rectangle {
+    in-out property <float> resistance;
+    in-out property <int> guard-nodes;
+    in-out property <int> exit-nodes;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #dc2626;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🛡️ Traffic Analysis";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 15px;
+                spacing: 15px;
+                alignment: center;
+                
+                // Resistance score visualization
+                ResistanceGauge {
+                    resistance: resistance;
+                }
+                
+                VerticalBox {
+                    spacing: 8px;
+                    
+                    NodeCounter {
+                        label: "Guard Nodes";
+                        count: guard-nodes;
+                        icon: "🛡️";
+                    }
+                    
+                    NodeCounter {
+                        label: "Exit Nodes";
+                        count: exit-nodes;
+                        icon: "🚪";
+                    }
+                    
+                    MetricItem {
+                        label: "Timing Attacks";
+                        value: "Resistant";
+                        color: #10b981;
+                    }
+                    
+                    MetricItem {
+                        label: "Traffic Correlation";
+                        value: "Mitigated";
+                        color: #0ea5e9;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component TorCircuitPath inherits Rectangle {
+    in-out property <int> circuit-id;
+    in-out property <string> circuit-type;
+    in-out property <float> flow-phase;
+    
+    width: 120px;
+    height: 80px;
+    
+    VerticalBox {
+        spacing: 8px;
+        alignment: center;
+        
+        Text {
+            text: circuit-type;
+            font-size: 10px;
+            font-weight: 600;
+            color: #a855f7;
+        }
+        
+        // Circuit path visualization
+        HorizontalBox {
+            spacing: 5px;
+            alignment: center;
+            
+            for i in [0, 1, 2] : CircuitNode {
+                node-type: i == 0 ? "guard" : i == 1 ? "middle" : "exit";
+                active: true;
+                flow-phase: flow-phase + i * 0.1;
+            }
+        }
+        
+        // Circuit flow indicator
+        Rectangle {
+            width: 80px;
+            height: 2px;
+            background: #7c3aed;
+            
+            // Flow animation
+            Rectangle {
+                width: 20px;
+                height: 100%;
+                x: (flow-phase * parent.width) % (parent.width + 20px) - 10px;
+                background: #a855f7;
+            }
+        }
+    }
+}
+
+component CircuitNode inherits Rectangle {
+    in-out property <string> node-type;
+    in-out property <bool> active;
+    in-out property <float> flow-phase;
+    
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    background: node-type == "guard" ? #22d3ee :
+               node-type == "middle" ? #a855f7 : #f59e0b;
+    border-width: 1px;
+    border-color: white;
+    
+    // Activity pulse
+    if active : Rectangle {
+        width: 20px;
+        height: 20px;
+        x: -2px;
+        y: -2px;
+        border-radius: 10px;
+        background: radial-gradient(circle, 
+            parent.background.transparentize(0.7) 0%, 
+            transparent 70%);
+        
+        opacity: 0.7 + sin(flow-phase * 360deg) * 0.3;
+    }
+}
+
+component DandelionStemView inherits Rectangle {
+    in-out property <int> stem-length;
+    in-out property <float> animation;
+    
+    // Stem path visualization
+    for i in [0, 1, 2, 3, 4, 5, 6] : Rectangle {
+        x: 20px + i * 25px;
+        y: parent.height / 2 - 4px + sin(animation * 180deg + i * 30deg) * 8px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: i < stem-length ? #0ea5e9 : #475569;
+        
+        // Stem connection lines
+        if i < stem-length - 1 : Rectangle {
+            x: 8px;
+            y: 3px;
+            width: 17px;
+            height: 2px;
+            background: #0ea5e9;
+        }
+    }
+    
+    Text {
+        x: parent.width / 2 - 40px;
+        y: parent.height - 30px;
+        text: "Stem: " + stem-length + " hops";
+        font-size: 10px;
+        color: #0ea5e9;
+    }
+}
+
+component DandelionFluffView inherits Rectangle {
+    in-out property <float> animation;
+    
+    // Central broadcast point
+    Rectangle {
+        x: parent.width / 2 - 8px;
+        y: parent.height / 2 - 8px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #10b981;
+    }
+    
+    // Fluff broadcast waves
+    for i in [0, 1, 2, 3, 4] : Rectangle {
+        x: parent.width / 2;
+        y: parent.height / 2;
+        width: (animation + i * 0.2) * 100px;
+        height: (animation + i * 0.2) * 100px;
+        x: x - width / 2;
+        y: y - height / 2;
+        border-radius: width / 2;
+        background: transparent;
+        border-width: 2px;
+        border-color: #10b981.transparentize((animation + i * 0.2) * 0.8);
+    }
+    
+    Text {
+        x: parent.width / 2 - 30px;
+        y: parent.height - 30px;
+        text: "Fluff broadcast";
+        font-size: 10px;
+        color: #10b981;
+    }
+}
+
+component DandelionPhaseIndicator inherits Rectangle {
+    in-out property <string> current-phase;
+    in-out property <int> stem-length;
+    
+    width: 70px;
+    height: 50px;
+    background: #1e293b99;
+    border-radius: 6px;
+    
+    VerticalBox {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: current-phase;
+            font-size: 12px;
+            font-weight: 600;
+            color: current-phase == "Stem" ? #0ea5e9 : #10b981;
+        }
+        
+        if current-phase == "Stem" : Text {
+            text: stem-length + " hops";
+            font-size: 9px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component AnonymityScoreIndicator inherits Rectangle {
+    in-out property <float> score;
+    in-out property <float> pulse;
+    
+    width: 180px;
+    height: 50px;
+    background: #1e293b99;
+    border-radius: 8px;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 15px;
+        alignment: center;
+        
+        // Anonymity meter
+        Rectangle {
+            width: 80px;
+            height: 8px;
+            background: #334155;
+            border-radius: 4px;
+            
+            Rectangle {
+                width: score * parent.width;
+                height: 100%;
+                background: score > 0.9 ? #10b981 : score > 0.8 ? #fbbf24 : #f43f5e;
+                border-radius: 4px;
+                
+                // Pulse effect
+                opacity: 0.8 + pulse * 0.2;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: (score * 100).toFixed(1) + "%";
+                font-size: 14px;
+                font-weight: 700;
+                color: score > 0.9 ? #10b981 : score > 0.8 ? #fbbf24 : #f43f5e;
+            }
+            
+            Text {
+                text: "Anonymity";
+                font-size: 9px;
+                color: #94a3b8;
+            }
+        }
+    }
+}
+
+component ResistanceGauge inherits Rectangle {
+    in-out property <float> resistance;
+    
+    width: 80px;
+    height: 80px;
+    
+    // Circular gauge background
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 40px;
+        background: #334155;
+        border-width: 4px;
+        border-color: #1e293b;
+    }
+    
+    // Resistance level indicator
+    Rectangle {
+        width: 60px;
+        height: 60px;
+        x: 10px;
+        y: 10px;
+        border-radius: 30px;
+        background: resistance > 0.9 ? #10b981 : resistance > 0.8 ? #fbbf24 : #f43f5e;
+        
+        Text {
+            text: (resistance * 100).toFixed(0) + "%";
+            font-size: 12px;
+            font-weight: 600;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component NodeCounter inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <int> count;
+    in-out property <string> icon;
+    
+    spacing: 8px;
+    alignment: center;
+    
+    Text {
+        text: icon;
+        font-size: 12px;
+    }
+    
+    VerticalBox {
+        spacing: 2px;
+        
+        Text {
+            text: count;
+            font-size: 12px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Text {
+            text: label;
+            font-size: 8px;
+            color: #94a3b8;
+        }
+    }
+}
+
+component MetricItem inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <brush> color;
+    
+    spacing: 8px;
+    alignment: space-between;
+    
+    Text {
+        text: label;
+        font-size: 9px;
+        color: #94a3b8;
+    }
+    
+    Text {
+        text: value;
+        font-size: 9px;
+        font-weight: 600;
+        color: color;
+    }
+}
+
+// ========== CIRCUIT METRICS PANEL ==========
+component CircuitMetricsPanel inherits Rectangle {
+    in-out property <int> active-circuits;
+    in-out property <float> anonymity-score;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "📊 Anonymity Metrics & Circuit Health";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 25px;
+            
+            CircuitHealthCard {
+                title: "Circuit Status";
+                value: active-circuits + "/4 Active";
+                status: active-circuits >= 4 ? "excellent" : "degraded";
+                description: "Dedicated validator circuits";
+            }
+            
+            CircuitHealthCard {
+                title: "Anonymity Level";
+                value: (anonymity-score * 100).toFixed(1) + "%";
+                status: anonymity-score > 0.9 ? "excellent" : "good";
+                description: "Traffic analysis resistance";
+            }
+            
+            CircuitHealthCard {
+                title: "Protocol Health";
+                value: "Optimal";
+                status: "excellent";
+                description: "Dandelion++ performance";
+            }
+            
+            CircuitHealthCard {
+                title: "Guard Diversity";
+                value: "Global";
+                status: "excellent";
+                description: "Geographic distribution";
+            }
+        }
+    }
+}
+
+component CircuitHealthCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "degraded" ? #f59e0b : #f43f5e;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 4px;
+        
+        Text {
+            text: title;
+            font-size: 11px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 13px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "degraded" ? #f59e0b : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+        }
+    }
+}

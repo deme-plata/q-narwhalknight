@@ -1,0 +1,741 @@
+// L-VRF Verifiable Randomness Visualization
+// Advanced display of Lattice-based Verifiable Random Function operations
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== L-VRF RANDOMNESS ORACLE ==========
+export component LVRFRandomnessOracle inherits Rectangle {
+    // Properties for L-VRF state
+    in-out property <string> current-seed: "0x7f8a3b2c1d9e...";
+    in-out property <string> vrf-output: "0xa1b2c3d4e5f6...";
+    in-out property <string> zero-knowledge-proof: "0x9871abcd2ef3...";
+    in-out property <float> evaluation-time: 12.4; // milliseconds
+    in-out property <int> round-number: 847;
+    in-out property <float> success-rate: 0.995;
+    in-out property <string> lattice-dimension: "1024";
+    in-out property <bool> quantum-resistant: true;
+    in-out property <float> proof-size: 2.1; // KB
+    
+    // Animation properties
+    property <float> computation-progress: 0.0;
+    property <float> proof-generation-phase: 0.0;
+    property <float> quantum-field-animation: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b2e 100%);
+    
+    // VRF computation animation
+    animate computation-progress {
+        duration: 5000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    // Proof generation visualization
+    animate proof-generation-phase {
+        duration: 3000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Quantum field effects
+    animate quantum-field-animation {
+        duration: 8000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header with quantum resistance indicator
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "🔮 L-VRF Randomness Oracle";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            QuantumResistanceIndicator {
+                quantum-resistant: quantum-resistant;
+                lattice-dimension: lattice-dimension;
+            }
+        }
+        
+        // Main VRF visualization area
+        HorizontalBox {
+            spacing: 20px;
+            height: 400px;
+            
+            // Lattice-based computation visualization
+            LatticeComputationView {
+                width: 35%;
+                dimension: lattice-dimension;
+                computation-phase: computation-progress;
+                evaluation-time: evaluation-time;
+            }
+            
+            // VRF evaluation process
+            VRFEvaluationFlow {
+                width: 40%;
+                seed: current-seed;
+                output: vrf-output;
+                progress: computation-progress;
+                round: round-number;
+            }
+            
+            // Zero-knowledge proof generation
+            ZKProofVisualization {
+                width: 25%;
+                proof: zero-knowledge-proof;
+                generation-phase: proof-generation-phase;
+                proof-size: proof-size;
+            }
+        }
+        
+        // Randomness quality and performance metrics
+        RandomnessMetricsPanel {
+            height: 130px;
+            success-rate: success-rate;
+            evaluation-time: evaluation-time;
+            proof-size: proof-size;
+            round: round-number;
+        }
+    }
+}
+
+// ========== LATTICE COMPUTATION VIEW ==========
+component LatticeComputationView inherits Rectangle {
+    in-out property <string> dimension;
+    in-out property <float> computation-phase;
+    in-out property <float> evaluation-time;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #a855f7;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🔢 Lattice Computation";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Lattice structure visualization
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            clip: true;
+            
+            // Lattice grid points
+            for i in [0, 1, 2, 3, 4, 5, 6, 7, 8] : LatticePoint {
+                x: 30px + (i % 3) * 70px;
+                y: 30px + floor(i / 3) * 70px;
+                point-id: i;
+                active: computation-phase > (i as float / 9.0);
+                computation-intensity: computation-phase;
+            }
+            
+            // Lattice connections
+            for i in [0, 1, 2, 3, 4, 5] : LatticeConnection {
+                connection-id: i;
+                active: computation-phase > 0.3;
+                phase: computation-phase + i * 0.1;
+            }
+            
+            // Quantum field overlay
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: radial-gradient(circle at 50% 50%, 
+                    #a855f722 0%, transparent 70%);
+                opacity: sin(computation-phase * 180deg) * 0.5 + 0.5;
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            alignment: space-between;
+            
+            Text {
+                text: dimension + "D lattice";
+                font-size: 11px;
+                color: #a855f7;
+            }
+            
+            Text {
+                text: evaluation-time.toFixed(1) + "ms eval";
+                font-size: 11px;
+                color: evaluation-time < 15.0 ? #10b981 : #fbbf24;
+            }
+        }
+    }
+}
+
+// ========== VRF EVALUATION FLOW ==========
+component VRFEvaluationFlow inherits Rectangle {
+    in-out property <string> seed;
+    in-out property <string> output;
+    in-out property <float> progress;
+    in-out property <int> round;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #0ea5e9;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "⚙️ VRF Evaluation";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // VRF evaluation stages
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                alignment: center;
+                
+                // Input seed
+                VRFStageCard {
+                    title: "Input Seed";
+                    value: seed;
+                    stage-number: 1;
+                    active: progress > 0.0;
+                    completion: progress > 0.2 ? 1.0 : progress * 5.0;
+                }
+                
+                // Arrow down
+                VRFArrow {
+                    direction: "down";
+                    active: progress > 0.2;
+                }
+                
+                // Lattice evaluation
+                VRFStageCard {
+                    title: "Lattice Eval";
+                    value: "Computing...";
+                    stage-number: 2;
+                    active: progress > 0.2;
+                    completion: progress > 0.6 ? 1.0 : (progress - 0.2) * 2.5;
+                }
+                
+                // Arrow down
+                VRFArrow {
+                    direction: "down";
+                    active: progress > 0.6;
+                }
+                
+                // VRF output
+                VRFStageCard {
+                    title: "VRF Output";
+                    value: output;
+                    stage-number: 3;
+                    active: progress > 0.6;
+                    completion: progress > 0.8 ? 1.0 : (progress - 0.6) * 5.0;
+                }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: progress > 0.8 ? #10b981 : #0ea5e9;
+            }
+            
+            Text {
+                text: "Round " + round + " evaluation";
+                font-size: 11px;
+                color: progress > 0.8 ? #10b981 : #0ea5e9;
+            }
+        }
+    }
+}
+
+// ========== ZERO-KNOWLEDGE PROOF VISUALIZATION ==========
+component ZKProofVisualization inherits Rectangle {
+    in-out property <string> proof;
+    in-out property <float> generation-phase;
+    in-out property <float> proof-size;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #10b981;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🛡️ ZK Proof";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 280px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 15px;
+                spacing: 15px;
+                alignment: center;
+                
+                // Proof generation visualization
+                ProofGenerationIndicator {
+                    generation-phase: generation-phase;
+                }
+                
+                // Proof properties
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    ProofProperty {
+                        label: "Completeness";
+                        status: "✅ Verified";
+                        color: #10b981;
+                    }
+                    
+                    ProofProperty {
+                        label: "Soundness";
+                        status: "✅ Secure";
+                        color: #10b981;
+                    }
+                    
+                    ProofProperty {
+                        label: "Zero-Knowledge";
+                        status: "✅ Private";
+                        color: #10b981;
+                    }
+                    
+                    ProofProperty {
+                        label: "Size";
+                        status: proof-size.toFixed(1) + " KB";
+                        color: #0ea5e9;
+                    }
+                }
+                
+                // Proof hash display
+                Rectangle {
+                    width: 180px;
+                    height: 40px;
+                    background: #334155;
+                    border-radius: 6px;
+                    
+                    VerticalBox {
+                        padding: 6px;
+                        spacing: 2px;
+                        alignment: center;
+                        
+                        Text {
+                            text: "Proof Hash";
+                            font-size: 8px;
+                            color: #94a3b8;
+                        }
+                        
+                        Text {
+                            text: proof;
+                            font-size: 9px;
+                            font-family: "Monaco", "Cascadia Code", monospace;
+                            color: #10b981;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component LatticePoint inherits Rectangle {
+    in-out property <int> point-id;
+    in-out property <bool> active;
+    in-out property <float> computation-intensity;
+    
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    background: active ? 
+        linear-gradient(45deg, #a855f7 0%, #c084fc 100%) : 
+        #475569;
+    
+    // Computation intensity indicator
+    if active : Rectangle {
+        width: 20px;
+        height: 20px;
+        x: -4px;
+        y: -4px;
+        border-radius: 10px;
+        background: radial-gradient(circle, 
+            #a855f733 0%, transparent 70%);
+        opacity: computation-intensity;
+    }
+    
+    // Point identifier
+    Text {
+        x: -15px;
+        y: -20px;
+        text: point-id;
+        font-size: 7px;
+        color: #64748b;
+    }
+}
+
+component LatticeConnection inherits Rectangle {
+    in-out property <int> connection-id;
+    in-out property <bool> active;
+    in-out property <float> phase;
+    
+    // This would be implemented with Canvas in production
+    // For now, just a visual placeholder
+    width: 40px;
+    height: 2px;
+    background: active ? #a855f7 : #334155;
+    opacity: active ? (sin(phase * 360deg) * 0.3 + 0.7) : 0.3;
+}
+
+component VRFStageCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <int> stage-number;
+    in-out property <bool> active;
+    in-out property <float> completion;
+    
+    width: 200px;
+    height: 60px;
+    background: active ? #0ea5e966 : #33415533;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: active ? #0ea5e9 : #475569;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 10px;
+        alignment: center;
+        
+        // Stage number indicator
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 12px;
+            background: active ? #0ea5e9 : #64748b;
+            
+            Text {
+                text: stage-number;
+                font-size: 12px;
+                font-weight: 700;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 4px;
+            
+            Text {
+                text: title;
+                font-size: 11px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: value;
+                font-size: 9px;
+                font-family: "Monaco", "Cascadia Code", monospace;
+                color: active ? #0ea5e9 : #94a3b8;
+            }
+        }
+    }
+    
+    // Completion indicator
+    if active : Rectangle {
+        y: parent.height - 3px;
+        width: completion * parent.width;
+        height: 3px;
+        background: #10b981;
+        border-radius: 1.5px;
+    }
+}
+
+component VRFArrow inherits Rectangle {
+    in-out property <string> direction;
+    in-out property <bool> active;
+    
+    width: 20px;
+    height: 20px;
+    
+    // Arrow visualization (simplified)
+    Rectangle {
+        width: 2px;
+        height: 15px;
+        x: 9px;
+        y: 2.5px;
+        background: active ? #0ea5e9 : #475569;
+    }
+    
+    // Arrow head (simplified)
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        x: 6px;
+        y: direction == "down" ? 12px : 0px;
+        background: active ? #0ea5e9 : #475569;
+        // Note: Triangle shape would be implemented with Canvas
+    }
+}
+
+component ProofGenerationIndicator inherits Rectangle {
+    in-out property <float> generation-phase;
+    
+    width: 80px;
+    height: 80px;
+    
+    // Circular progress indicator
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 40px;
+        background: #334155;
+        border-width: 4px;
+        border-color: #1e293b;
+    }
+    
+    // Generation progress
+    Rectangle {
+        width: 60px;
+        height: 60px;
+        x: 10px;
+        y: 10px;
+        border-radius: 30px;
+        background: #10b981;
+        
+        Text {
+            text: "ZK";
+            font-size: 14px;
+            font-weight: 700;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    
+    // Generation waves
+    Rectangle {
+        width: 100px;
+        height: 100px;
+        x: -10px;
+        y: -10px;
+        border-radius: 50px;
+        background: transparent;
+        border-width: 2px;
+        border-color: #10b98133;
+        opacity: sin(generation-phase * 360deg) * 0.5 + 0.5;
+    }
+}
+
+component ProofProperty inherits HorizontalBox {
+    in-out property <string> label;
+    in-out property <string> status;
+    in-out property <brush> color;
+    
+    spacing: 10px;
+    alignment: space-between;
+    
+    Text {
+        text: label;
+        font-size: 10px;
+        color: #94a3b8;
+    }
+    
+    Text {
+        text: status;
+        font-size: 10px;
+        font-weight: 600;
+        color: color;
+    }
+}
+
+component QuantumResistanceIndicator inherits Rectangle {
+    in-out property <bool> quantum-resistant;
+    in-out property <string> lattice-dimension;
+    
+    width: 200px;
+    height: 50px;
+    background: quantum-resistant ? #10b98133 : #f43f5e33;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: quantum-resistant ? #10b981 : #f43f5e;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 10px;
+        alignment: center;
+        
+        Text {
+            text: quantum-resistant ? "🛡️" : "⚠️";
+            font-size: 16px;
+        }
+        
+        VerticalBox {
+            spacing: 2px;
+            
+            Text {
+                text: quantum-resistant ? "Quantum Resistant" : "Classical Only";
+                font-size: 12px;
+                font-weight: 600;
+                color: quantum-resistant ? #10b981 : #f43f5e;
+            }
+            
+            Text {
+                text: lattice-dimension + "D security";
+                font-size: 9px;
+                color: #94a3b8;
+            }
+        }
+    }
+}
+
+// ========== RANDOMNESS METRICS PANEL ==========
+component RandomnessMetricsPanel inherits Rectangle {
+    in-out property <float> success-rate;
+    in-out property <float> evaluation-time;
+    in-out property <float> proof-size;
+    in-out property <int> round;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "📊 L-VRF Performance & Quality Metrics";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 25px;
+            
+            RandomnessMetricCard {
+                title: "Success Rate";
+                value: (success-rate * 100).toFixed(1) + "%";
+                status: success-rate > 0.99 ? "excellent" : "good";
+                description: "L-VRF evaluation success";
+                icon: "🎯";
+            }
+            
+            RandomnessMetricCard {
+                title: "Evaluation Time";
+                value: evaluation-time.toFixed(1) + "ms";
+                status: evaluation-time < 15.0 ? "excellent" : "good";
+                description: "Lattice computation speed";
+                icon: "⚡";
+            }
+            
+            RandomnessMetricCard {
+                title: "Proof Size";
+                value: proof-size.toFixed(1) + " KB";
+                status: proof-size < 3.0 ? "excellent" : "good";
+                description: "Zero-knowledge proof size";
+                icon: "📏";
+            }
+            
+            RandomnessMetricCard {
+                title: "Randomness Quality";
+                value: "Cryptographic";
+                status: "excellent";
+                description: "Verifiable and unbiased";
+                icon: "🔮";
+            }
+            
+            RandomnessMetricCard {
+                title: "Current Round";
+                value: round;
+                status: "active";
+                description: "VRF evaluation round";
+                icon: "🔄";
+            }
+        }
+    }
+}
+
+component RandomnessMetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    in-out property <string> icon;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 16px;
+        }
+        
+        Text {
+            text: title;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 13px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #0ea5e9 : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+            horizontal-alignment: center;
+        }
+    }
+}

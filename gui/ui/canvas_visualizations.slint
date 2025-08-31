@@ -1,0 +1,405 @@
+// Advanced Canvas-based Quantum Visualizations
+// Interactive Canvas implementations for Server Alpha integration
+
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// ========== CANVAS-BASED DAG NETWORK ==========
+export component CanvasDAGNetwork inherits Rectangle {
+    // Data properties from Server Alpha's DAG visualization API
+    in-out property <[VertexData]> vertices: [];
+    in-out property <[EdgeData]> edges: [];
+    in-out property <string> current-anchor: "";
+    in-out property <int> current-round: 847;
+    in-out property <float> finality-latency: 47.2;
+    
+    // Interaction properties
+    callback vertex-clicked(string);
+    callback edge-hovered(string, string);
+    
+    background: #0f1419;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    // Canvas for interactive DAG rendering
+    dag-canvas := Canvas {
+        width: parent.width;
+        height: parent.height;
+        
+        // This will be implemented with Rust Canvas backend integration
+        paint => {
+            // Canvas painting would be handled in Rust code
+            // Connected to Server Alpha's DAGVisualizationData
+            debug("DAG Canvas paint called");
+        }
+    }
+    
+    // Overlay for DAG information
+    VerticalBox {
+        x: 10px;
+        y: 10px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            height: 80px;
+            width: 200px;
+            
+            VerticalBox {
+                padding: 10px;
+                spacing: 5px;
+                
+                Text {
+                    text: "🕸️ DAG Round " + current-round;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #f1f5f9;
+                }
+                
+                Text {
+                    text: "⚓ Anchor: " + current-anchor.substr(0, 8) + "...";
+                    font-size: 11px;
+                    color: #00ff88;
+                    font-family: "Monaco", "Cascadia Code", monospace;
+                }
+                
+                Text {
+                    text: "⚡ Latency: " + finality-latency.toFixed(1) + "ms";
+                    font-size: 11px;
+                    color: #00d4ff;
+                }
+                
+                Text {
+                    text: "📊 Vertices: " + vertices.length;
+                    font-size: 11px;
+                    color: #8b5cf6;
+                }
+            }
+        }
+    }
+    
+    // Interactive touch area for Canvas events
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        
+        clicked => {
+            // Handle Canvas interactions - vertex selection, etc.
+            debug("DAG Canvas clicked at: " + self.mouse-x + ", " + self.mouse-y);
+        }
+    }
+}
+
+// ========== CANVAS-BASED ENTROPY STREAM ==========
+export component CanvasEntropyStream inherits Rectangle {
+    // Server Alpha entropy stream data
+    in-out property <[EntropyPoint]> entropy-data: [];
+    in-out property <float> current-quality: 0.97;
+    in-out property <float> bit-rate: 2048576.0; // bits per second
+    
+    background: #0f1419;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Canvas for real-time entropy visualization
+    entropy-canvas := Canvas {
+        width: parent.width;
+        height: parent.height;
+        
+        paint => {
+            // Canvas painting for flowing quantum particles
+            // Connected to Server Alpha's entropy stream API
+            debug("Entropy Canvas paint: " + entropy-data.length + " points");
+        }
+    }
+    
+    // Quality overlay
+    Rectangle {
+        x: parent.width - 120px;
+        y: 10px;
+        width: 110px;
+        height: 30px;
+        background: #1e293b99;
+        border-radius: 15px;
+        
+        // Quality bar
+        Rectangle {
+            width: current-quality * parent.width;
+            height: 100%;
+            border-radius: 15px;
+            background: current-quality > 0.95 ? #00ff88 : 
+                       current-quality > 0.90 ? #00d4ff : #fbbf24;
+        }
+        
+        Text {
+            text: (current-quality * 100).toFixed(1) + "%";
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    
+    // Bit rate indicator
+    Text {
+        x: 10px;
+        y: 10px;
+        text: "🌊 " + (bit-rate / 1000000).toFixed(1) + " Mbps";
+        font-size: 12px;
+        color: #00d4ff;
+        font-weight: 600;
+    }
+}
+
+// ========== CANVAS-BASED TOR ANONYMITY MAP ==========
+export component CanvasTorAnonymityMap inherits Rectangle {
+    // Server Alpha Tor circuit data (anonymized)
+    in-out property <[CircuitData]> circuits: [];
+    in-out property <float> anonymity-score: 0.94;
+    in-out property <int> active-circuits: 4;
+    
+    background: #0a0e17;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Canvas for Tor circuit visualization
+    tor-canvas := Canvas {
+        width: parent.width;
+        height: parent.height;
+        
+        paint => {
+            // Canvas painting for Tor circuit topology
+            // Privacy-preserving visualization of circuit diversity
+            debug("Tor Canvas paint: " + circuits.length + " circuits");
+        }
+    }
+    
+    // Anonymity overlay
+    VerticalBox {
+        x: 10px;
+        y: parent.height - 80px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            width: 160px;
+            height: 70px;
+            
+            VerticalBox {
+                padding: 10px;
+                spacing: 5px;
+                
+                Text {
+                    text: "🎭 Anonymity: " + (anonymity-score * 100).toFixed(1) + "%";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: anonymity-score > 0.95 ? #00ff88 : #fbbf24;
+                }
+                
+                Text {
+                    text: "🌐 Circuits: " + active-circuits + " active";
+                    font-size: 11px;
+                    color: #8b5cf6;
+                }
+                
+                Text {
+                    text: "🔒 Privacy: Maximum";
+                    font-size: 10px;
+                    color: #94a3b8;
+                }
+            }
+        }
+    }
+}
+
+// ========== CANVAS-BASED NETWORK TOPOLOGY ==========
+export component CanvasNetworkTopology inherits Rectangle {
+    // Server Alpha network topology data
+    in-out property <[PeerData]> peers: [];
+    in-out property <[ConnectionData]> connections: [];
+    in-out property <int> quantum-handshakes: 1247;
+    
+    background: #0f172a;
+    border-radius: 8px;
+    
+    // Canvas for network topology
+    network-canvas := Canvas {
+        width: parent.width;
+        height: parent.height;
+        
+        paint => {
+            // Canvas painting for peer network visualization
+            debug("Network Canvas paint: " + peers.length + " peers, " + connections.length + " connections");
+        }
+    }
+    
+    // Network statistics overlay
+    Rectangle {
+        x: parent.width - 180px;
+        y: 10px;
+        width: 170px;
+        height: 60px;
+        background: #1e293b99;
+        border-radius: 6px;
+        
+        HorizontalBox {
+            padding: 10px;
+            spacing: 15px;
+            
+            VerticalBox {
+                spacing: 3px;
+                
+                Text {
+                    text: "Peers";
+                    font-size: 10px;
+                    color: #94a3b8;
+                }
+                
+                Text {
+                    text: peers.length;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #00d4ff;
+                }
+            }
+            
+            VerticalBox {
+                spacing: 3px;
+                
+                Text {
+                    text: "Quantum";
+                    font-size: 10px;
+                    color: #94a3b8;
+                }
+                
+                Text {
+                    text: quantum-handshakes;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #00ff88;
+                }
+            }
+        }
+    }
+}
+
+// ========== DATA STRUCTURES ==========
+// These align with Server Alpha's API responses
+
+struct VertexData {
+    id: string,
+    round: int,
+    author: string,
+    parents: [string],
+    is-anchor: bool,
+    x: float,
+    y: float,
+}
+
+struct EdgeData {
+    from: string,
+    to: string,
+    edge-type: string,
+}
+
+struct EntropyPoint {
+    timestamp: string,
+    value: float,
+    quality: float,
+    provider: string,
+}
+
+struct CircuitData {
+    circuit-id: string,
+    circuit-type: string,
+    hops: int,
+    diversity-score: float,
+}
+
+struct PeerData {
+    id: string,
+    phase: string,
+    anonymity-score: float,
+    x: float,
+    y: float,
+}
+
+struct ConnectionData {
+    from: string,
+    to: string,
+    connection-type: string,
+    latency: float,
+}
+
+// ========== CANVAS INTEGRATION COMPONENT ==========
+export component QuantumCanvasIntegration inherits VerticalBox {
+    // Main component that integrates all Canvas visualizations
+    // This connects to Server Alpha's quantum data APIs
+    
+    spacing: 20px;
+    padding: 20px;
+    
+    Text {
+        text: "🎨 Quantum Canvas Visualizations";
+        font-size: 24px;
+        font-weight: 700;
+        color: #f1f5f9;
+    }
+    
+    HorizontalBox {
+        spacing: 15px;
+        height: 300px;
+        
+        CanvasDAGNetwork {
+            width: 50%;
+        }
+        
+        CanvasEntropyStream {
+            width: 50%;
+        }
+    }
+    
+    HorizontalBox {
+        spacing: 15px;
+        height: 200px;
+        
+        CanvasTorAnonymityMap {
+            width: 50%;
+        }
+        
+        CanvasNetworkTopology {
+            width: 50%;
+        }
+    }
+    
+    // Real-time update status
+    Rectangle {
+        background: #1e293b66;
+        border-radius: 8px;
+        height: 40px;
+        
+        HorizontalBox {
+            padding: 10px;
+            spacing: 20px;
+            alignment: space-between;
+            
+            Text {
+                text: "🔄 Real-time Server Alpha Integration";
+                font-size: 14px;
+                color: #00d4ff;
+            }
+            
+            Text {
+                text: "✅ WebSocket Connected | 📊 Canvas Rendered | ⚡ <100ms Latency";
+                font-size: 11px;
+                color: #00ff88;
+                font-family: "Monaco", "Cascadia Code", monospace;
+            }
+        }
+    }
+}

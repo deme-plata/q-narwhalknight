@@ -2,6 +2,7 @@
 // The world's first quantum-enhanced blockchain GUI
 
 import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
+import { QuantumCanvasIntegration, CanvasDAGNetwork, CanvasEntropyStream } from "canvas_visualizations.slint";
 
 export component MainWindow inherits Window {
     title: "Q-NarwhalKnight - Quantum Consensus Interface";
@@ -91,7 +92,13 @@ export component MainWindow inherits Window {
                 QuantumWallet { }
             }
             
-            // Tab 6: System Analytics
+            // Tab 6: Advanced Canvas Visualizations
+            Tab {
+                title: "🎨 Canvas";
+                QuantumCanvasIntegration { }
+            }
+            
+            // Tab 7: System Analytics
             Tab {
                 title: "📊 Analytics";
                 SystemAnalytics { }

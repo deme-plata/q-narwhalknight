@@ -1,0 +1,842 @@
+// Phase Transition Visualization
+// Visual representation of Q-NarwhalKnight's quantum evolution phases
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ========== PHASE TRANSITION VISUALIZER ==========
+export component PhaseTransitionVisualizer inherits Rectangle {
+    // Properties for phase state
+    in-out property <string> current-phase: "Phase 2";
+    in-out property <float> phase-progress: 0.73;
+    in-out property <string> next-milestone: "QKD Integration";
+    in-out property <int> network-readiness: 87;
+    in-out property <bool> backwards-compatible: true;
+    in-out property <string> cryptographic-agility: "Active";
+    in-out property <int> phase2-nodes: 12;
+    in-out property <int> phase1-nodes: 23;
+    in-out property <int> phase0-nodes: 8;
+    
+    // Animation properties
+    property <float> phase-glow: 0.0;
+    property <float> transition-wave: 0.0;
+    property <float> crypto-rotation: 0.0;
+    
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b2e 100%);
+    
+    // Phase transition effects
+    animate phase-glow {
+        duration: 4000ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+    
+    // Transition wave animation
+    animate transition-wave {
+        duration: 6000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    // Cryptographic algorithm rotation
+    animate crypto-rotation {
+        duration: 12000ms;
+        iteration-count: -1;
+        easing: linear;
+    }
+    
+    VerticalBox {
+        padding: 25px;
+        spacing: 20px;
+        
+        // Header with current phase indicator
+        HorizontalBox {
+            spacing: 15px;
+            alignment: space-between;
+            
+            Text {
+                text: "🔄 Quantum Phase Evolution";
+                font-size: 22px;
+                font-weight: 700;
+                color: #f1f5f9;
+            }
+            
+            CurrentPhaseIndicator {
+                phase: current-phase;
+                progress: phase-progress;
+                glow: phase-glow;
+            }
+        }
+        
+        // Phase timeline and transition visualization
+        HorizontalBox {
+            spacing: 20px;
+            height: 400px;
+            
+            // Phase evolution timeline
+            PhaseTimelineView {
+                width: 50%;
+                current: current-phase;
+                progress: phase-progress;
+                wave-animation: transition-wave;
+            }
+            
+            // Cryptographic transition matrix
+            CryptographicMatrix {
+                width: 30%;
+                agility: cryptographic-agility;
+                rotation: crypto-rotation;
+                current-phase: current-phase;
+            }
+            
+            // Network readiness panel
+            NetworkReadinessPanel {
+                width: 20%;
+                readiness: network-readiness;
+                phase0-nodes: phase0-nodes;
+                phase1-nodes: phase1-nodes;
+                phase2-nodes: phase2-nodes;
+            }
+        }
+        
+        // Phase details and migration status
+        PhaseDetailsPanel {
+            height: 140px;
+            current-phase: current-phase;
+            next-milestone: next-milestone;
+            backwards-compatible: backwards-compatible;
+            network-readiness: network-readiness;
+        }
+    }
+}
+
+// ========== PHASE TIMELINE VIEW ==========
+component PhaseTimelineView inherits Rectangle {
+    in-out property <string> current;
+    in-out property <float> progress;
+    in-out property <float> wave-animation;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #6366f1;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "📈 Evolution Timeline";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        // Timeline visualization
+        Rectangle {
+            height: 320px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 25px;
+                
+                // Phase 0: Classical
+                PhaseTimelineItem {
+                    phase-name: "Phase 0";
+                    description: "Classical Cryptography";
+                    technologies: "Ed25519, QUIC, RSA";
+                    status: "complete";
+                    active: current == "Phase 0";
+                    completion: 1.0;
+                }
+                
+                // Timeline connector
+                TimelineConnector {
+                    active: current != "Phase 0";
+                    wave-phase: wave-animation;
+                }
+                
+                // Phase 1: Hybrid
+                PhaseTimelineItem {
+                    phase-name: "Phase 1";
+                    description: "Hybrid Post-Quantum";
+                    technologies: "Dilithium5, Kyber1024";
+                    status: current == "Phase 0" ? "pending" : "complete";
+                    active: current == "Phase 1";
+                    completion: current == "Phase 0" ? 0.0 : 1.0;
+                }
+                
+                // Timeline connector
+                TimelineConnector {
+                    active: current == "Phase 2" || current == "Phase 3";
+                    wave-phase: wave-animation + 0.3;
+                }
+                
+                // Phase 2: Quantum Enhanced
+                PhaseTimelineItem {
+                    phase-name: "Phase 2";
+                    description: "Quantum Enhancement";
+                    technologies: "QRNG, L-VRF, VDF";
+                    status: current == "Phase 0" || current == "Phase 1" ? "pending" : 
+                           current == "Phase 2" ? "active" : "complete";
+                    active: current == "Phase 2";
+                    completion: current == "Phase 2" ? progress : 
+                               current == "Phase 0" || current == "Phase 1" ? 0.0 : 1.0;
+                }
+                
+                // Timeline connector
+                TimelineConnector {
+                    active: current == "Phase 3" || current == "Phase 4";
+                    wave-phase: wave-animation + 0.6;
+                }
+                
+                // Phase 3: QKD Integration
+                PhaseTimelineItem {
+                    phase-name: "Phase 3";
+                    description: "QKD Integration";
+                    technologies: "Quantum Key Distribution";
+                    status: current == "Phase 3" ? "active" : 
+                           current == "Phase 4" ? "complete" : "future";
+                    active: current == "Phase 3";
+                    completion: current == "Phase 3" ? progress : 
+                               current == "Phase 4" ? 1.0 : 0.0;
+                }
+            }
+        }
+    }
+}
+
+// ========== CRYPTOGRAPHIC MATRIX ==========
+component CryptographicMatrix inherits Rectangle {
+    in-out property <string> agility;
+    in-out property <float> rotation;
+    in-out property <string> current-phase;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #10b981;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🔐 Crypto Agility";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 320px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                alignment: center;
+                
+                // Cryptographic algorithm matrix
+                CryptoAlgorithmGrid {
+                    current-phase: current-phase;
+                    rotation: rotation;
+                }
+                
+                // Algorithm transition indicators
+                VerticalBox {
+                    spacing: 8px;
+                    
+                    AlgorithmTransition {
+                        from: "Ed25519";
+                        to: "Dilithium5";
+                        status: current-phase == "Phase 0" ? "pending" : "active";
+                    }
+                    
+                    AlgorithmTransition {
+                        from: "ECDH";
+                        to: "Kyber1024";
+                        status: current-phase == "Phase 0" ? "pending" : "active";
+                    }
+                    
+                    AlgorithmTransition {
+                        from: "Classical RNG";
+                        to: "QRNG + L-VRF";
+                        status: current-phase != "Phase 2" ? "pending" : "active";
+                    }
+                }
+                
+                // Agility status
+                HorizontalBox {
+                    spacing: 8px;
+                    alignment: center;
+                    
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: agility == "Active" ? #10b981 : #475569;
+                    }
+                    
+                    Text {
+                        text: "Crypto agility: " + agility;
+                        font-size: 11px;
+                        color: agility == "Active" ? #10b981 : #94a3b8;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== NETWORK READINESS PANEL ==========
+component NetworkReadinessPanel inherits Rectangle {
+    in-out property <int> readiness;
+    in-out property <int> phase0-nodes;
+    in-out property <int> phase1-nodes;
+    in-out property <int> phase2-nodes;
+    
+    background: #1e293b66;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: #f59e0b;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 12px;
+        
+        Text {
+            text: "🌐 Network Status";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        Rectangle {
+            height: 320px;
+            background: #0f1419;
+            border-radius: 8px;
+            
+            VerticalBox {
+                padding: 15px;
+                spacing: 15px;
+                
+                // Network readiness gauge
+                NetworkReadinessGauge {
+                    readiness: readiness;
+                }
+                
+                // Node distribution
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    Text {
+                        text: "Node Distribution";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: #f1f5f9;
+                    }
+                    
+                    NodeDistributionBar {
+                        label: "Phase 2";
+                        count: phase2-nodes;
+                        color: #10b981;
+                        total: phase0-nodes + phase1-nodes + phase2-nodes;
+                    }
+                    
+                    NodeDistributionBar {
+                        label: "Phase 1";
+                        count: phase1-nodes;
+                        color: #0ea5e9;
+                        total: phase0-nodes + phase1-nodes + phase2-nodes;
+                    }
+                    
+                    NodeDistributionBar {
+                        label: "Phase 0";
+                        count: phase0-nodes;
+                        color: #64748b;
+                        total: phase0-nodes + phase1-nodes + phase2-nodes;
+                    }
+                }
+                
+                // Migration status
+                MigrationStatus {
+                    total-nodes: phase0-nodes + phase1-nodes + phase2-nodes;
+                    advanced-nodes: phase1-nodes + phase2-nodes;
+                }
+            }
+        }
+    }
+}
+
+// ========== SUPPORTING COMPONENTS ==========
+component PhaseTimelineItem inherits Rectangle {
+    in-out property <string> phase-name;
+    in-out property <string> description;
+    in-out property <string> technologies;
+    in-out property <string> status;
+    in-out property <bool> active;
+    in-out property <float> completion;
+    
+    width: 280px;
+    height: 60px;
+    background: active ? #6366f166 : 
+               status == "complete" ? #10b98133 : 
+               status == "pending" ? #33415533 : #1e293b33;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: active ? #6366f1 : 
+                 status == "complete" ? #10b981 : 
+                 status == "pending" ? #64748b : #475569;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+        
+        // Phase indicator
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: active ? #6366f1 : 
+                       status == "complete" ? #10b981 : 
+                       status == "pending" ? #64748b : #475569;
+            
+            Text {
+                text: phase-name.replace("Phase ", "");
+                font-size: 12px;
+                font-weight: 700;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 3px;
+            
+            Text {
+                text: phase-name + ": " + description;
+                font-size: 11px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: technologies;
+                font-size: 9px;
+                color: #94a3b8;
+            }
+            
+            if active : Rectangle {
+                width: completion * 150px;
+                height: 3px;
+                background: #6366f1;
+                border-radius: 1.5px;
+            }
+        }
+    }
+}
+
+component TimelineConnector inherits Rectangle {
+    in-out property <bool> active;
+    in-out property <float> wave-phase;
+    
+    width: 4px;
+    height: 15px;
+    x: 140px - 2px;
+    background: active ? #6366f1 : #475569;
+    
+    // Wave effect for active connectors
+    if active : Rectangle {
+        width: 8px;
+        height: 8px;
+        x: -2px;
+        y: (wave-phase * height) % height;
+        border-radius: 4px;
+        background: #a855f7;
+    }
+}
+
+component CryptoAlgorithmGrid inherits Rectangle {
+    in-out property <string> current-phase;
+    in-out property <float> rotation;
+    
+    width: 200px;
+    height: 120px;
+    
+    // Classical algorithms (Phase 0)
+    if current-phase == "Phase 0" : VerticalBox {
+        spacing: 8px;
+        alignment: center;
+        
+        AlgorithmChip { name: "Ed25519"; status: "active"; }
+        AlgorithmChip { name: "ECDH P-256"; status: "active"; }
+        AlgorithmChip { name: "AES-256-GCM"; status: "active"; }
+    }
+    
+    // Hybrid algorithms (Phase 1)
+    if current-phase == "Phase 1" : VerticalBox {
+        spacing: 8px;
+        alignment: center;
+        
+        AlgorithmChip { name: "Dilithium5"; status: "active"; }
+        AlgorithmChip { name: "Kyber1024"; status: "active"; }
+        AlgorithmChip { name: "Ed25519"; status: "legacy"; }
+    }
+    
+    // Quantum enhanced (Phase 2+)
+    if current-phase == "Phase 2" : VerticalBox {
+        spacing: 8px;
+        alignment: center;
+        
+        AlgorithmChip { name: "QRNG"; status: "active"; }
+        AlgorithmChip { name: "L-VRF"; status: "active"; }
+        AlgorithmChip { name: "Dilithium5"; status: "active"; }
+    }
+}
+
+component AlgorithmChip inherits Rectangle {
+    in-out property <string> name;
+    in-out property <string> status;
+    
+    width: 140px;
+    height: 25px;
+    background: status == "active" ? #10b98133 : 
+               status == "legacy" ? #64748b33 : #475569;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: status == "active" ? #10b981 : 
+                 status == "legacy" ? #64748b : #475569;
+    
+    Text {
+        text: name;
+        font-size: 10px;
+        font-weight: 600;
+        color: status == "active" ? #10b981 : #94a3b8;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component AlgorithmTransition inherits HorizontalBox {
+    in-out property <string> from;
+    in-out property <string> to;
+    in-out property <string> status;
+    
+    spacing: 8px;
+    alignment: center;
+    
+    Text {
+        text: from;
+        font-size: 9px;
+        color: #94a3b8;
+    }
+    
+    Text {
+        text: "→";
+        font-size: 12px;
+        color: status == "active" ? #10b981 : #475569;
+    }
+    
+    Text {
+        text: to;
+        font-size: 9px;
+        color: status == "active" ? #10b981 : #64748b;
+        font-weight: status == "active" ? 600 : 400;
+    }
+}
+
+component NetworkReadinessGauge inherits Rectangle {
+    in-out property <int> readiness;
+    
+    width: 100px;
+    height: 100px;
+    
+    // Gauge background
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 50px;
+        background: #334155;
+        border-width: 4px;
+        border-color: #1e293b;
+    }
+    
+    // Readiness indicator
+    Rectangle {
+        width: 80px;
+        height: 80px;
+        x: 10px;
+        y: 10px;
+        border-radius: 40px;
+        background: readiness > 90 ? #10b981 : 
+                   readiness > 70 ? #fbbf24 : #f43f5e;
+        
+        VerticalBox {
+            spacing: 2px;
+            alignment: center;
+            
+            Text {
+                text: readiness + "%";
+                font-size: 14px;
+                font-weight: 700;
+                color: white;
+            }
+            
+            Text {
+                text: "Ready";
+                font-size: 8px;
+                color: white;
+            }
+        }
+    }
+}
+
+component NodeDistributionBar inherits VerticalBox {
+    in-out property <string> label;
+    in-out property <int> count;
+    in-out property <brush> color;
+    in-out property <int> total;
+    
+    spacing: 4px;
+    
+    HorizontalBox {
+        spacing: 8px;
+        alignment: space-between;
+        
+        Text {
+            text: label;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: count;
+            font-size: 10px;
+            font-weight: 600;
+            color: color;
+        }
+    }
+    
+    Rectangle {
+        height: 4px;
+        background: #334155;
+        border-radius: 2px;
+        
+        Rectangle {
+            width: total > 0 ? (count as float / total as float) * parent.width : 0px;
+            height: 100%;
+            background: color;
+            border-radius: 2px;
+        }
+    }
+}
+
+component MigrationStatus inherits Rectangle {
+    in-out property <int> total-nodes;
+    in-out property <int> advanced-nodes;
+    
+    background: #1e293b33;
+    border-radius: 6px;
+    height: 50px;
+    
+    VerticalBox {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: "Migration Progress";
+            font-size: 10px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: advanced-nodes + "/" + total-nodes + " upgraded";
+            font-size: 12px;
+            font-weight: 600;
+            color: #f59e0b;
+        }
+        
+        Text {
+            text: total-nodes > 0 ? (advanced-nodes as float / total-nodes as float * 100.0).toFixed(0) + "% complete" : "0% complete";
+            font-size: 9px;
+            color: #64748b;
+        }
+    }
+}
+
+component CurrentPhaseIndicator inherits Rectangle {
+    in-out property <string> phase;
+    in-out property <float> progress;
+    in-out property <float> glow;
+    
+    width: 200px;
+    height: 60px;
+    background: #6366f166;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: #6366f1;
+    
+    // Glow effect
+    Rectangle {
+        width: 210px;
+        height: 70px;
+        x: -5px;
+        y: -5px;
+        border-radius: 13px;
+        background: radial-gradient(circle, #6366f133 0%, transparent 70%);
+        opacity: glow;
+    }
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 15px;
+        alignment: center;
+        
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: #6366f1;
+            
+            Text {
+                text: phase.replace("Phase ", "");
+                font-size: 14px;
+                font-weight: 700;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 4px;
+            
+            Text {
+                text: "Current: " + phase;
+                font-size: 12px;
+                font-weight: 600;
+                color: #f1f5f9;
+            }
+            
+            Text {
+                text: (progress * 100).toFixed(0) + "% complete";
+                font-size: 10px;
+                color: #a5b4fc;
+            }
+        }
+    }
+}
+
+// ========== PHASE DETAILS PANEL ==========
+component PhaseDetailsPanel inherits Rectangle {
+    in-out property <string> current-phase;
+    in-out property <string> next-milestone;
+    in-out property <bool> backwards-compatible;
+    in-out property <int> network-readiness;
+    
+    background: #1e293b33;
+    border-radius: 8px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "📋 Phase Evolution Details & Migration Status";
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        HorizontalBox {
+            spacing: 25px;
+            
+            PhaseDetailCard {
+                title: "Current Phase";
+                value: current-phase;
+                status: "active";
+                description: "Quantum-enhanced consensus";
+                icon: "🔄";
+            }
+            
+            PhaseDetailCard {
+                title: "Next Milestone";
+                value: next-milestone;
+                status: "upcoming";
+                description: "Quantum key distribution";
+                icon: "🎯";
+            }
+            
+            PhaseDetailCard {
+                title: "Compatibility";
+                value: backwards-compatible ? "Maintained" : "Breaking";
+                status: backwards-compatible ? "excellent" : "warning";
+                description: "Backward compatibility status";
+                icon: backwards-compatible ? "✅" : "⚠️";
+            }
+            
+            PhaseDetailCard {
+                title: "Network Health";
+                value: network-readiness + "%";
+                status: network-readiness > 90 ? "excellent" : "good";
+                description: "Node upgrade readiness";
+                icon: "🌐";
+            }
+        }
+    }
+}
+
+component PhaseDetailCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> description;
+    in-out property <string> icon;
+    
+    background: #334155;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #6366f1 :
+                  status == "upcoming" ? #0ea5e9 : #f43f5e;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 4px;
+        alignment: center;
+        
+        Text {
+            text: icon;
+            font-size: 18px;
+        }
+        
+        Text {
+            text: title;
+            font-size: 11px;
+            color: #94a3b8;
+        }
+        
+        Text {
+            text: value;
+            font-size: 13px;
+            font-weight: 600;
+            color: status == "excellent" ? #10b981 :
+                  status == "good" ? #fbbf24 : 
+                  status == "active" ? #6366f1 :
+                  status == "upcoming" ? #0ea5e9 : #f43f5e;
+        }
+        
+        Text {
+            text: description;
+            font-size: 8px;
+            color: #64748b;
+            horizontal-alignment: center;
+        }
+    }
+}
