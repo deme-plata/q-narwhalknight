@@ -1,0 +1,78 @@
+[package]
+name = "q-quantum-mixing"
+version = "1.0.0"
+edition = "2021"
+description = "Production-grade Quantum Mixing Protocol with Chaumian Mixing, Ring Signatures, and ZK Proofs"
+authors = ["Server Alpha <server-alpha@q-narwhalknight.dev>", "Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/deme-plata/q-narwhalknight"
+
+[dependencies]
+# Core Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-zk-stark = { path = "../q-zk-stark" }
+q-storage = { path = "../q-storage" }
+
+# Core Rust ecosystem
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+humantime = "2.1"
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Cryptographic libraries
+ring = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+getrandom = "0.2"
+
+# Post-quantum cryptography
+pqcrypto-dilithium = { workspace = true, optional = true }
+pqcrypto-kyber = { workspace = true, optional = true }
+
+# Zero-knowledge proofs
+risc0-zkvm = { workspace = true }
+
+# Collections and utilities
+dashmap = { workspace = true }
+num_cpus = "1.16"
+parking_lot = "0.12"
+crossbeam = { workspace = true }
+
+# Serialization
+bincode = { workspace = true }
+hex = { workspace = true }
+
+# Math libraries
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+default = ["ring-signatures", "stealth-addresses", "zk-proofs"]
+ring-signatures = []
+stealth-addresses = []
+zk-proofs = []
+quantum-resistant = ["pqcrypto-dilithium", "pqcrypto-kyber"]
+performance-optimized = []
+
+[[bench]]
+name = "mixing_benchmarks"
+harness = false

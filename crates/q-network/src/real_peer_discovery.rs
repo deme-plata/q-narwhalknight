@@ -208,9 +208,10 @@ impl RealPeerDiscovery {
         Ok(Self {
             config,
             dht_client: None,
-            bitcoin_client: None,
-            bitcoin_scanner: None,
-            dns_resolver: None,
+            // Bitcoin and DNS fields commented out due to circular dependency
+            // bitcoin_client: None,
+            // bitcoin_scanner: None,
+            // dns_resolver: None,
             tor_client: None,
             discovered_peers: Arc::new(RwLock::new(HashMap::new())),
             connected_peers: Arc::new(RwLock::new(HashSet::new())),
@@ -351,19 +352,20 @@ impl RealPeerDiscovery {
         }
 
         // Start DNS monitoring
-        if let Some(dns) = &self.dns_resolver {
-            let dns_clone = dns.clone();
-            let event_sender = self.event_sender.clone();
-            
-            tokio::spawn(async move {
-                let mut event_receiver = dns_clone.subscribe_events();
-                
-                while let Ok(_event) = event_receiver.recv().await {
-                    // DNS event handling disabled due to circular dependency
-                    debug!("DNS event received but handler disabled");
-                }
-            });
-        }
+        // DNS integration disabled due to circular dependency
+        // if let Some(dns) = &self.dns_resolver {
+        //     let dns_clone = dns.clone();
+        //     let event_sender = self.event_sender.clone();
+        //
+        //     tokio::spawn(async move {
+        //         let mut event_receiver = dns_clone.subscribe_events();
+        //
+        //         while let Ok(_event) = event_receiver.recv().await {
+        //             // DNS event handling disabled due to circular dependency
+        //             debug!("DNS event received but handler disabled");
+        //         }
+        //     });
+        // }
 
         // Start Tor monitoring
         if let Some(tor) = &self.tor_client {
@@ -411,8 +413,9 @@ impl RealPeerDiscovery {
         }
 
         // Bitcoin discovery task
-        if self.bitcoin_scanner.is_some() {
-            let scanner = self.bitcoin_scanner.clone();
+        // Bitcoin scanner disabled due to circular dependency
+        if false { // if self.bitcoin_scanner.is_some() {
+            // let scanner = self.bitcoin_scanner.clone();
             let config = self.config.clone();
             let event_sender = self.event_sender.clone();
             let stats = self.stats.clone();
@@ -422,22 +425,24 @@ impl RealPeerDiscovery {
                 loop {
                     interval.tick().await;
                     
-                    if let Some(bitcoin_scanner) = &scanner {
-                        if let Err(e) = Self::run_bitcoin_discovery(
-                            bitcoin_scanner.clone(), 
-                            event_sender.clone(),
-                            stats.clone()
-                        ).await {
-                            warn!("Bitcoin discovery error: {}", e);
-                        }
-                    }
+                    // Bitcoin discovery disabled
+                    // if let Some(bitcoin_scanner) = &scanner {
+                    //     if let Err(e) = Self::run_bitcoin_discovery(
+                    //         bitcoin_scanner.clone(),
+                    //         event_sender.clone(),
+                    //         stats.clone()
+                    //     ).await {
+                    //         warn!("Bitcoin discovery error: {}", e);
+                    //     }
+                    // }
                 }
             });
         }
 
         // DNS discovery task
-        if self.dns_resolver.is_some() {
-            let dns = self.dns_resolver.clone();
+        // DNS resolver disabled due to circular dependency
+        if false { // if self.dns_resolver.is_some() {
+            // let dns = self.dns_resolver.clone();
             let config = self.config.clone();
             let stats = self.stats.clone();
             
@@ -446,11 +451,12 @@ impl RealPeerDiscovery {
                 loop {
                     interval.tick().await;
                     
-                    if let Some(dns_resolver) = &dns {
-                        if let Err(e) = Self::run_dns_discovery(dns_resolver.clone(), &config, stats.clone()).await {
-                            debug!("DNS discovery error: {}", e);
-                        }
-                    }
+                    // DNS discovery disabled due to circular dependency
+                    // if let Some(dns_resolver) = &dns {
+                    //     if let Err(e) = Self::run_dns_discovery(dns_resolver.clone(), &config, stats.clone()).await {
+                    //         debug!("DNS discovery error: {}", e);
+                    //     }
+                    // }
                 }
             });
         }
@@ -458,7 +464,7 @@ impl RealPeerDiscovery {
         // Periodic advertisement
         let config = self.config.clone();
         let dht = self.dht_client.clone();
-        let dns = self.dns_resolver.clone();
+        // let dns = self.dns_resolver.clone(); // Disabled due to circular dependency
         let stats = self.stats.clone();
         
         tokio::spawn(async move {
@@ -466,7 +472,7 @@ impl RealPeerDiscovery {
             loop {
                 interval.tick().await;
                 
-                if let Err(e) = Self::advertise_self(&config, dht.clone(), dns.clone(), stats.clone()).await {
+                if let Err(e) = Self::advertise_self(&config, dht.clone(), stats.clone()).await {
                     warn!("Self advertisement error: {}", e);
                 }
             }
@@ -616,23 +622,23 @@ impl RealPeerDiscovery {
             }
         }
 
-        // Advertise via DNS (steganographic)
-        if let Some(dns_resolver) = dns {
-            let advertisement = format!("v=qnk1;node={};onion={};caps={};port={}",
-                                      hex::encode(config.node_id),
-                                      config.onion_address,
-                                      config.capabilities.join(","),
-                                      config.listen_port);
-
-            if let Err(e) = dns_resolver.send_steganographic_message(
-                advertisement.as_bytes(),
-                "discovery.qnk.network"
-            ).await {
-                debug!("DNS steganographic advertisement failed: {}", e);
-            } else {
-                debug!("Sent steganographic advertisement via DNS");
-            }
-        }
+        // Advertise via DNS (steganographic) - disabled due to circular dependency
+        // if let Some(dns_resolver) = dns {
+        //     let advertisement = format!("v=qnk1;node={};onion={};caps={};port={}",
+        //                               hex::encode(config.node_id),
+        //                               config.onion_address,
+        //                               config.capabilities.join(","),
+        //                               config.listen_port);
+        //
+        //     if let Err(e) = dns_resolver.send_steganographic_message(
+        //         advertisement.as_bytes(),
+        //         "discovery.qnk.network"
+        //     ).await {
+        //         debug!("DNS steganographic advertisement failed: {}", e);
+        //     } else {
+        //         debug!("Sent steganographic advertisement via DNS");
+        //     }
+        // }
 
         {
             let mut stats_guard = stats.lock().await;

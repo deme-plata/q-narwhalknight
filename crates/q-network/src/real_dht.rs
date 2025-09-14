@@ -156,9 +156,12 @@ impl RealDht {
             ping: ping::Behaviour::new(ping::Config::new()),
         };
 
-        // Create swarm
-        let swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id)
-            .connection_idle_timeout(config.connection_idle_timeout)
+        // Create swarm using new builder pattern
+        let swarm = SwarmBuilder::with_existing_identity(local_key)
+            .with_tokio()
+            .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+            .with_behaviour(|_| behaviour)?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(config.connection_idle_timeout))
             .build();
 
         // Create communication channels
@@ -395,7 +398,7 @@ impl RealDht {
 
                 // Add addresses to Kademlia
                 for addr in &info.listen_addrs {
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                 }
             }
 

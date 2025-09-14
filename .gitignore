@@ -1,1 +1,5 @@
 target/
+mistral.rs/
+logs/
+*.log
+node_data/

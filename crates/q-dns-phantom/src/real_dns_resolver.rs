@@ -3,7 +3,7 @@
 /// Makes actual DNS queries to real DNS servers for steganographic communication
 /// and peer discovery through DNS records.
 use anyhow::{anyhow, Result};
-use hickory_resolver::
+use hickory_resolver::{
     client::{Client, SyncClient},
     proto::{
         op::{DnsResponse, MessageType, OpCode, Query, ResponseCode},

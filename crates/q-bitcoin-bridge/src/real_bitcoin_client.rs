@@ -157,7 +157,7 @@ pub struct NetworkData {
 }
 
 /// Peer information
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PeerInfo {
     pub id: u32,
     pub addr: String,

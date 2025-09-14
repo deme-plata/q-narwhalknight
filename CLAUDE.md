@@ -59,6 +59,25 @@ git config user.email "server-beta@q-narwhalknight.dev"
 
 ### **🛠️ DEVELOPMENT WORKFLOW**
 
+#### **⚠️ CRITICAL DEVELOPMENT PRINCIPLES:**
+
+1. **ALWAYS FIX PROBLEMS PROPERLY** - Never use mock data or simple workarounds
+   - When encountering compilation errors, fix the actual root cause
+   - Implement real functionality instead of placeholders
+   - Use proper type definitions and complete implementations
+
+2. **NO SHORTCUTS OR MOCK SOLUTIONS**
+   - Do NOT create mock servers when the real server has issues
+   - Do NOT use placeholder data when real data should be fetched
+   - Do NOT bypass errors with temporary workarounds
+   - ALWAYS implement the proper solution even if it takes longer
+
+3. **COMPILATION ERROR RESOLUTION**
+   - Trace errors to their source and fix the underlying issue
+   - Update type definitions properly
+   - Ensure all dependencies are correctly configured
+   - Test the fix thoroughly before moving on
+
 #### **Testing Requirements:**
 ```bash
 # Before every commit:
@@ -67,10 +86,27 @@ cargo clippy -- -D warnings
 cargo fmt --check
 cargo bench --no-run
 
+# Fix any compilation errors PROPERLY:
+cargo check --workspace
+# If errors occur, fix them at the source, don't work around them
+
 # Tor-specific testing:
 cargo test --package q-tor-client
 cargo test --package q-tor-circuit  
 cargo bench tor_latency_test
+```
+
+#### **⏱️ COMPILATION TIMEOUT REQUIREMENT:**
+```bash
+# CRITICAL: Always use 10-hour timeout for compilation
+# This ensures complex quantum consensus components have sufficient build time
+timeout 36000 cargo build --release --workspace  # 10 hours = 36000 seconds
+timeout 36000 cargo run --bin q-api-server        # 10 hours for development builds
+timeout 36000 cargo test --workspace              # 10 hours for comprehensive testing
+
+# Example usage:
+timeout 36000 cargo build --release --package q-api-server
+timeout 36000 cargo build --release --package q-narwhal-core
 ```
 
 #### **Commit Standards:**
