@@ -1,0 +1,55 @@
+[package]
+name = "q-mining"
+version = "0.1.0"
+edition = "2021"
+description = "Quantum-enhanced mining for Q-NarwhalKnight blockchain"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core dependencies
+q-types = { path = "../q-types" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-network = { path = "../q-network" }
+
+# Cryptography
+sha3 = "0.10"
+blake3 = "1.5"
+dilithium = "0.2.0-alpha.3"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4"] }
+
+# Networking
+libp2p = "0.53"
+
+# Performance
+rayon = "1.8"
+
+# GPU acceleration (optional)
+opencl3 = { version = "0.9", optional = true }
+
+[features]
+default = []
+gpu-mining = ["opencl3"]
+
+[dev-dependencies]
+tempfile = "3.8"
+criterion = "0.5"
+

@@ -1,0 +1,387 @@
+import { Colors } from "colors.slint";
+// Q-NarwhalKnight Quantum Consensus Interface - Simplified Version
+
+import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
+
+// ========== COMPONENT DEFINITIONS (must come first) ==========
+
+component QuantumHeader inherits Rectangle {
+    background: @linear-gradient(90deg, #1e3a8a, #7c3aed);
+    border-radius: 15px;
+    
+    HorizontalBox {
+        padding: 20px;
+        alignment: space-between;
+        
+        HorizontalBox {
+            spacing: 15px;
+            alignment: center;
+            
+            Text {
+                text: "⚛️";
+                font-size: 32px;
+            }
+            
+            VerticalBox {
+                spacing: 2px;
+                
+                Text {
+                    text: "Q-NarwhalKnight";
+                    color: #ffffff;
+                    font-size: 22px;
+                    font-weight: 800;
+                }
+                
+                Text {
+                    text: "Quantum Consensus Interface";
+                    color: #ffffff99;
+                    font-size: 12px;
+                }
+            }
+        }
+    }
+}
+
+component MetricCard inherits Rectangle {
+    in property <string> title: "Metric";
+    in property <string> value: "0";
+    in property <string> status: "ok";
+    
+    background: #1a1a2e;
+    border-radius: 10px;
+    border-width: 2px;
+    border-color: #16213e;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 5px;
+        
+        Text {
+            text: title;
+            color: #ffffff99;
+            font-size: 12px;
+        }
+        
+        Text {
+            text: value;
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+    }
+}
+
+component StatusIndicator inherits VerticalBox {
+    in property <string> status: "Active";
+    in property <color> indicator-color: #00ff88;
+    
+    spacing: 5px;
+    alignment: center;
+    
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: indicator-color;
+    }
+    
+    Text {
+        text: status;
+        color: #ffffff;
+        font-size: 10px;
+    }
+}
+
+component PrimaryButton inherits Button {
+    in property <string> button-icon: "";
+    
+    background: @linear-gradient(90deg, #1e40af, #7c3aed);
+    border-radius: 8px;
+    
+    HorizontalBox {
+        spacing: 8px;
+        alignment: center;
+        
+        if button-icon != "": Text {
+            text: button-icon;
+            font-size: 16px;
+        }
+        
+        Text {
+            text: root.text;
+            color: #ffffff;
+            font-weight: 600;
+        }
+    }
+}
+
+component SecondaryButton inherits Button {
+    background: #374151;
+    border-radius: 8px;
+    
+    Text {
+        text: root.text;
+        color: #ffffff;
+        font-weight: 500;
+    }
+}
+
+component QuantumDashboard inherits Rectangle {
+    VerticalBox {
+        spacing: 20px;
+        padding: 20px;
+        
+        Text {
+            text: "🌌 Quantum Dashboard";
+            color: #ffffff;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            MetricCard {
+                title: "Entropy Quality";
+                value: "97.5%";
+                status: "excellent";
+            }
+            
+            MetricCard {
+                title: "Consensus Latency";
+                value: "2.3ms";
+                status: "good";
+            }
+            
+            MetricCard {
+                title: "Tor Circuits";
+                value: "4 active";
+                status: "active";
+            }
+            
+            MetricCard {
+                title: "Network Health";
+                value: "98.7%";
+                status: "excellent";
+            }
+        }
+    }
+}
+
+component EntropyVisualizer inherits Rectangle {
+    background: #1a1a2e;
+    border-radius: 10px;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        
+        Text {
+            text: "🌊 Quantum Entropy Stream";
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        Text {
+            text: "Real-time quantum randomness visualization";
+            color: #ffffff99;
+            font-size: 12px;
+        }
+    }
+}
+
+component ConsensusVisualizer inherits Rectangle {
+    background: #1a1a2e;
+    border-radius: 10px;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        
+        Text {
+            text: "🔗 DAG-Knight Consensus";
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        Text {
+            text: "Directed Acyclic Graph consensus visualization";
+            color: #ffffff99;
+            font-size: 12px;
+        }
+    }
+}
+
+component AnonymityVisualizer inherits Rectangle {
+    background: #1a1a2e;
+    border-radius: 10px;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        
+        Text {
+            text: "🧅 Tor Anonymity Network";
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        Text {
+            text: "4 dedicated circuits active\nAnonymity score: 98%";
+            color: #ffffff99;
+            font-size: 12px;
+        }
+    }
+}
+
+component QuantumWallet inherits VerticalBox {
+    spacing: 15px;
+    
+    Text {
+        text: "💎 Quantum Wallet";
+        color: #ffffff;
+        font-size: 20px;
+        font-weight: 700;
+    }
+    
+    Rectangle {
+        background: #1a1a2e;
+        border-radius: 10px;
+        height: 200px;
+        
+        VerticalBox {
+            padding: 20px;
+            spacing: 15px;
+            
+            Text {
+                text: "Wallet Balance";
+                color: #ffffff99;
+                font-size: 12px;
+            }
+            
+            Text {
+                text: "Ξ 0.000000000000000000000000000000000000 QNK";
+                color: #00ff88;
+                font-size: 24px;
+                font-weight: 700;
+            }
+            
+            HorizontalBox {
+                spacing: 10px;
+                
+                PrimaryButton {
+                    text: "Create Wallet";
+                    button-icon: "✨";
+                }
+                
+                SecondaryButton {
+                    text: "Import";
+                }
+            }
+        }
+    }
+}
+
+component SystemAnalytics inherits Rectangle {
+    background: #1a1a2e;
+    border-radius: 10px;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "📊 System Analytics";
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        ScrollView {
+            height: 150px;
+            
+            VerticalBox {
+                spacing: 5px;
+                
+                Text {
+                    text: "🌌 Quantum Consensus Interface Loading...";
+                    color: #ffffff99;
+                    font-size: 12px;
+                    font-family: "monospace";
+                }
+            }
+        }
+    }
+}
+
+// ========== MAIN WINDOW ==========
+
+export component MainWindow inherits Window {
+    title: "Q-NarwhalKnight - Quantum Consensus Interface";
+    preferred-width: 1400px;
+    preferred-height: 900px;
+    background: #0a0e17;
+    
+    // Properties
+    in-out property <string> wallet-id: "Not created";
+    in-out property <float> balance: 0.0;
+    in-out property <string> wallet-status: "";
+    in-out property <string> recipient: "";
+    in-out property <float> amount: 0.0;
+    in-out property <string> log: "🌌 Quantum Consensus Interface Loading...\n";
+    in-out property <int> active-tab: 0;
+    in-out property <float> entropy-quality: 0.97;
+    in-out property <float> consensus-latency: 2.3;
+    in-out property <int> tor-circuits: 4;
+    in-out property <float> network-health: 0.98;
+    
+    // Callbacks
+    callback create-wallet();
+    callback submit-tx(string, float);
+    callback refresh-metrics();
+    
+    VerticalBox {
+        spacing: 0;
+        
+        // Header
+        QuantumHeader { 
+            height: 80px;
+        }
+        
+        // Main content
+        TabWidget {
+            Tab {
+                title: "🌌 Dashboard";
+                QuantumDashboard { }
+            }
+            
+            Tab {
+                title: "🌊 Entropy";
+                EntropyVisualizer { }
+            }
+            
+            Tab {
+                title: "🔗 Consensus";
+                ConsensusVisualizer { }
+            }
+            
+            Tab {
+                title: "🧅 Anonymity";
+                AnonymityVisualizer { }
+            }
+            
+            Tab {
+                title: "💎 Wallet";
+                QuantumWallet { }
+            }
+            
+            Tab {
+                title: "📊 Analytics";
+                SystemAnalytics { }
+            }
+        }
+    }
+}

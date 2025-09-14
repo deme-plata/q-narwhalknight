@@ -1,0 +1,66 @@
+[package]
+name = "q-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-dag-knight = { path = "../q-dag-knight" }
+
+# Networking
+libp2p = { workspace = true }
+# libp2p-quic = { workspace = true }  # Disabled to avoid conflicts
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+uuid = { workspace = true }
+
+# Cryptography - Phase 0 (Classical)
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+
+# Cryptography - Phase 1 (Post-Quantum)
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+
+# Missing dependencies
+hex = { workspace = true }
+zeroize = { workspace = true }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Tor integration
+q-tor-client = { path = "../q-tor-client" }
+q-tor-circuit = { path = "../q-tor-circuit" }
+
+# Network discovery integrations - these are optional dependencies to avoid circular deps
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge", optional = true }
+# q-dns-phantom = { path = "../q-dns-phantom", optional = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+
+# Time and utilities
+chrono = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

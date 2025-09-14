@@ -1,0 +1,154 @@
+[package]
+name = "q-miner"
+version = "1.0.0"
+edition = "2021"
+description = "Q-NarwhalKnight High-Performance CPU/GPU Miner with CUDA Support"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/deme-plata/q-narwhalknight"
+
+[dependencies]
+# Core Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-network = { path = "../q-network" }
+q-storage = { path = "../q-storage" }
+q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Core Rust ecosystem  
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# CLI framework
+clap = { workspace = true, features = ["derive", "color"] }
+indicatif = "0.17"
+console = "0.15"
+dialoguer = "0.11"
+
+# High-performance computing
+rayon = "1.8"
+crossbeam = "0.8"
+num_cpus = "1.16"
+parking_lot = "0.12"
+
+# CUDA support (optional)
+cudarc = { version = "0.10", optional = true }
+half = { version = "2.3", optional = true }
+
+# OpenCL support (optional) 
+opencl3 = { version = "0.9", optional = true }
+
+# Vulkan compute (optional)
+vulkano = { version = "0.34", optional = true }
+vulkano-shaders = { version = "0.34", optional = true }
+
+# CPU optimizations
+target-lexicon = "0.12"
+raw-cpuid = "10.7"
+
+# Memory management
+memmap2 = "0.9"
+jemallocator = "0.5"
+
+# Networking for pool mining
+reqwest = { workspace = true }
+url = "2.5"
+rustls = { workspace = true }
+tokio-socks = "0.5"
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# JSON-RPC for Stratum protocol
+jsonrpc-core = "18.0"
+serde_with = "3.4"
+
+# Performance monitoring
+sysinfo = "0.30"
+prometheus = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+dirs = "5.0"
+
+# GUI framework (optional)
+eframe = { version = "0.24", optional = true }
+egui = { version = "0.24", optional = true }
+egui_plot = { version = "0.24", optional = true }
+
+# Math and cryptography
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+ring = { workspace = true }
+rand = { workspace = true }
+
+# VDF computation
+vdf = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["cpu-mining", "network", "cli"]
+
+# Mining backends
+cpu-mining = []
+cuda-mining = ["cudarc", "half"]
+opencl-mining = ["opencl3"]
+vulkan-mining = ["vulkano", "vulkano-shaders"]
+
+# User interfaces  
+gui = ["eframe", "egui", "egui_plot"]
+cli = []
+
+# Network features
+network = []
+pool-mining = []
+tor-support = []
+
+# Performance features
+avx2 = []
+avx512 = []
+neon = []
+
+# Development features
+benchmarks = []
+profiling = []
+
+[[bin]]
+name = "q-miner"
+path = "src/main.rs"
+
+[[bin]]
+name = "q-miner-benchmark"
+path = "src/benchmark.rs"
+required-features = ["benchmarks"]
+
+[[bin]]
+name = "q-miner-gui"
+path = "src/gui_main.rs"
+required-features = ["gui"]
+
+[build-dependencies]
+cc = "1.0"
+bindgen = "0.69"
+
+[package.metadata.docs.rs]
+features = ["cuda-mining", "opencl-mining", "gui"]

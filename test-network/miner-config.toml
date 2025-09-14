@@ -1,0 +1,38 @@
+[mining]
+algorithm = "dag-knight-vdf"
+intensity = 5
+auto_tune = true
+enable_cpu = true
+enable_gpu = false  # Start with CPU only
+max_temperature = 85.0
+
+[hardware]
+cpu_threads = 4
+gpu_devices = []
+memory_limit_gb = 4.0
+thermal_throttle = true
+
+[network]
+mode = "pool"
+tor_enabled = false
+p2p_enabled = true
+max_peers = 8
+
+[pool]
+url = "stratum+tcp://127.0.0.1:4444"
+worker_name = "test-miner-001"
+failover_enabled = false
+
+[wallet]
+address = "qnk1_1f503e55a2a06655e0d237fbd039cfacd68a17a5"
+auto_create = false
+
+[ui]
+mode = "cli"
+web_port = 8090
+theme = "dark"
+
+[logging]
+level = "info"
+file_enabled = true
+console_enabled = true

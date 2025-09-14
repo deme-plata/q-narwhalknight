@@ -1,0 +1,52 @@
+[package]
+name = "q-bitcoin-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin network bridge for anonymous Q-NarwhalKnight node discovery"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "MIT"
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Bitcoin network
+bitcoin = { workspace = true }
+bitcoin_hashes = { workspace = true }
+bitcoincore-rpc = { workspace = true }
+
+# Tor integration via SOCKS proxy
+tokio-socks = { workspace = true }
+
+# Networking
+libp2p = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+
+# Cryptography
+ring = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+lz4_flex = { workspace = true }
+bincode = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+# Q-NarwhalKnight internal
+q-types = { path = "../q-types" }
+q-tor-client = { path = "../q-tor-client" }
+q-network = { path = "../q-network" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

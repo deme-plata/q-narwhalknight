@@ -1,0 +1,68 @@
+[package]
+name = "q-dns-phantom"
+version = "0.1.0"
+edition = "2021"
+description = "DNS-Phantom Network: Steganographic communication through global DNS infrastructure"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "MIT"
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# DNS and networking
+hickory-resolver = "0.24"
+reqwest = { workspace = true }
+url = "2.5"
+
+# Cryptography and encoding
+ring = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+base64 = "0.21"
+base32 = "0.4"
+crc32fast = "1.3"
+
+# Data compression and encoding
+lz4_flex = { workspace = true }
+bincode = { workspace = true }
+
+# Random number generation
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+regex = "1.0"
+
+# Async utilities
+futures = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = "0.1"
+
+# HTTP client for DNS-over-HTTPS
+hyper = { workspace = true }
+hyper-rustls = "0.24"
+
+# Q-NarwhalKnight internal
+q-types = { path = "../q-types" }
+q-tor-client = { path = "../q-tor-client" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+
+[features]
+default = ["doh-cloudflare", "doh-google", "steganographic-encoding"]
+doh-cloudflare = []  # Use Cloudflare DNS-over-HTTPS
+doh-google = []      # Use Google DNS-over-HTTPS
+doh-quad9 = []       # Use Quad9 DNS-over-HTTPS
+steganographic-encoding = []  # Enable steganographic DNS encoding
+domain-generation = []        # Enable algorithmic domain generation
+cache-poisoning-detection = [] # Detect and avoid DNS cache poisoning

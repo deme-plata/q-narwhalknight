@@ -1,0 +1,279 @@
+// Advanced Canvas-based Quantum Visualizations
+// Interactive Canvas implementations for Server Alpha integration
+
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Colors } from "colors.slint";
+
+// ========== CANVAS-BASED DAG NETWORK ==========
+export component CanvasDAGNetwork inherits Rectangle {
+    // Data properties from Server Alpha's DAG visualization API
+    in-out property <[{x: float, y: float, id: string}]> vertices: [];
+    in-out property <[{x1: float, y1: float, x2: float, y2: float}]> edges: [];
+    in-out property <string> current-anchor: "";
+    in-out property <int> current-round: 847;
+    in-out property <float> finality-latency: 47.2;
+    
+    // Interaction properties
+    callback vertex-clicked(string);
+    callback edge-hovered(string, string);
+    
+    background: #0f1419;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    // Overlay for DAG information
+    VerticalBox {
+        x: 10px;
+        y: 10px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            height: 80px;
+            width: 200px;
+            
+            VerticalBox {
+                padding: 10px;
+                spacing: 5px;
+                
+                Text {
+                    text: "🌐 DAG Consensus";
+                    color: #f1f5f9;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+                
+                Text {
+                    text: "Round: " + current-round;
+                    color: #94a3b8;
+                    font-size: 12px;
+                }
+                
+                Text {
+                    text: "Latency: " + Math.round(finality-latency * 10) / 10 + "ms";
+                    color: #00ff88;
+                    font-size: 12px;
+                }
+            }
+        }
+    }
+}
+
+// ========== CANVAS-BASED ENTROPY STREAM ==========
+export component CanvasEntropyStream inherits Rectangle {
+    // Real-time entropy data from QRNG
+    in-out property <[{x: float, y: float, value: float}]> entropy-data: [];
+    in-out property <float> current-quality: 0.97;
+    in-out property <float> bit-rate: 2048576.0; // bits per second
+    
+    background: #0a0e17;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Information overlay
+    VerticalBox {
+        x: 10px;
+        y: 10px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            height: 60px;
+            width: 180px;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 3px;
+                
+                Text {
+                    text: "🌊 Entropy Stream";
+                    color: #f1f5f9;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                
+                Text {
+                    text: "Quality: " + Math.round(current-quality * 1000) / 10 + "%";
+                    color: current-quality > 0.95 ? #00ff88 : #fbbf24;
+                    font-size: 11px;
+                }
+                
+                Text {
+                    text: "Rate: " + Math.round(bit-rate / 1000) + " kbps";
+                    color: #94a3b8;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}
+
+// ========== CANVAS-BASED TOR ANONYMITY MAP ==========
+export component CanvasTorAnonymityMap inherits Rectangle {
+    // Server Alpha Tor circuit data (anonymized)
+    in-out property <[{x: float, y: float, active: bool}]> circuits: [];
+    in-out property <float> anonymity-score: 0.94;
+    in-out property <int> active-circuits: 4;
+    
+    background: #0a0e17;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Information overlay
+    VerticalBox {
+        x: 10px;
+        y: 10px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            height: 70px;
+            width: 160px;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 3px;
+                
+                Text {
+                    text: "🧅 Tor Circuits";
+                    color: #f1f5f9;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                
+                Text {
+                    text: "🎭 Anonymity: " + Math.round(anonymity-score * 100) + "%";
+                    color: anonymity-score > 0.95 ? #00ff88 : #fbbf24;
+                    font-size: 11px;
+                }
+                
+                Text {
+                    text: "Active: " + active-circuits;
+                    color: #94a3b8;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}
+
+// ========== CANVAS-BASED P2P NETWORK MAP ==========
+export component CanvasP2PNetworkMap inherits Rectangle {
+    // Network topology data
+    in-out property <[{x: float, y: float, id: string}]> peers: [];
+    in-out property <[{x1: float, y1: float, x2: float, y2: float}]> connections: [];
+    in-out property <int> quantum-handshakes: 1247;
+    
+    background: #0f1419;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #1e293b;
+    
+    // Information overlay
+    VerticalBox {
+        x: 10px;
+        y: 10px;
+        spacing: 5px;
+        
+        Rectangle {
+            background: #1e293b99;
+            border-radius: 6px;
+            height: 60px;
+            width: 170px;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 3px;
+                
+                Text {
+                    text: "🌐 P2P Network";
+                    color: #f1f5f9;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                
+                Text {
+                    text: "Peers: " + peers.length;
+                    color: #00d4ff;
+                    font-size: 11px;
+                }
+                
+                Text {
+                    text: "Quantum: " + quantum-handshakes;
+                    color: #8b5cf6;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}
+
+// ========== MAIN CANVAS INTEGRATION COMPONENT ==========
+export component QuantumCanvasIntegration inherits Rectangle {
+    background: Colors.background-primary;
+    
+    VerticalBox {
+        spacing: 10px;
+        padding: 10px;
+        
+        // Top row: DAG and Entropy
+        HorizontalBox {
+            spacing: 10px;
+            
+            CanvasDAGNetwork {
+                width: 50%;
+                height: 200px;
+            }
+            
+            CanvasEntropyStream {
+                width: 50%;
+                height: 200px;
+            }
+        }
+        
+        // Bottom row: Tor and P2P
+        HorizontalBox {
+            spacing: 10px;
+            
+            CanvasTorAnonymityMap {
+                width: 50%;
+                height: 180px;
+            }
+            
+            CanvasP2PNetworkMap {
+                width: 50%;
+                height: 180px;
+            }
+        }
+    }
+}
+
+// ========== DATA STRUCTURES ==========
+struct CircuitData {
+    id: string,
+    purpose: string,
+    hops: int,
+    diversity-score: float,
+}
+
+struct PeerData {
+    id: string,
+    phase: string,
+    score: float,
+    x: float,
+    y: float,
+}
+
+struct ConnectionData {
+    from: string,
+    to: string,
+    connection-type: string,
+    latency: float,
+    bandwidth: float,
+}

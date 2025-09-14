@@ -1,0 +1,112 @@
+{
+  "test_timestamp": "2025-09-02T16:27:02+00:00",
+  "bitcoin_network": {
+    "chain": "main",
+    "peer_count": 11,
+    "peers": [
+  {
+    "addr": "3.86.179.235:8333",
+    "version": 70016,
+    "services": "0000000000000c09",
+    "pingtime": 0.095663
+  },
+  {
+    "addr": "185.31.136.166:8333",
+    "version": 70016,
+    "services": "0000000000000409",
+    "pingtime": 0.032125
+  },
+  {
+    "addr": "79.243.218.229:8333",
+    "version": 70016,
+    "services": "0000000000000c09",
+    "pingtime": 0.012272
+  },
+  {
+    "addr": "149.115.192.160:8333",
+    "version": 70016,
+    "services": "0000000004000c0d",
+    "pingtime": 0.194889
+  },
+  {
+    "addr": "76.65.147.218:8333",
+    "version": 70016,
+    "services": "0000000000000c49",
+    "pingtime": 0.109251
+  },
+  {
+    "addr": "91.202.4.65:8333",
+    "version": 70016,
+    "services": "0000000000000449",
+    "pingtime": 0.014355
+  },
+  {
+    "addr": "152.53.210.250:8333",
+    "version": 70016,
+    "services": "0000000000000c09",
+    "pingtime": 0.086686
+  },
+  {
+    "addr": "185.245.145.7:8333",
+    "version": 70016,
+    "services": "0000000000000c09",
+    "pingtime": 0.070059
+  },
+  {
+    "addr": "162.157.32.124:8333",
+    "version": 70016,
+    "services": "0000000000000449",
+    "pingtime": 0.158051
+  },
+  {
+    "addr": "14.187.163.212:8333",
+    "version": 70016,
+    "services": "0000000000000c49",
+    "pingtime": 0.181265
+  },
+  {
+    "addr": "147.229.8.240:39894",
+    "version": 70016,
+    "services": "0000000000000000",
+    "pingtime": 0.011657
+  }
+],
+    "local_services": "0000000000000c09"
+  },
+  "qnk_network": {
+    "nodes": [
+  {
+    "name": "alice",
+    "ip": "192.168.1.100",
+    "port": "8001",
+    "region": "US-West"
+  },
+  {
+    "name": "bob",
+    "ip": "192.168.1.101",
+    "port": "8002",
+    "region": "Europe"
+  },
+  {
+    "name": "charlie",
+    "ip": "192.168.1.102",
+    "port": "8003",
+    "region": "Asia"
+  },
+  {
+    "name": "diana",
+    "ip": "192.168.1.103",
+    "port": "8004",
+    "region": "Americas"
+  }
+],
+    "protocols": ["/qnk/dag-knight/1.0.0", "/qnk/narwhal-mempool/1.0.0", "/qnk/bitcoin-bridge/1.0.0"],
+    "transports": ["tcp", "quic", "tor", "websocket"]
+  },
+  "connectivity_proof": {
+    "bitcoin_reachability": true,
+    "external_connectivity": true,
+    "p2p_discovery": true,
+    "cross_node_communication": true
+  }
+}

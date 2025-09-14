@@ -1,0 +1,52 @@
+[package]
+name = "q-tor-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Tor client via SOCKS proxy
+tokio-socks = { workspace = true }
+
+# Arti Tor client dependencies - using consistent 0.19.x versions
+arti-client = "0.19.0"
+arti-hyper = "0.19.0"
+tor-rtcompat = "0.19.0"
+tor-hsservice = "0.19.0"
+url = "2.5"
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Random generation
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+# JSON serialization
+serde_json = { workspace = true }
+
+# Networking
+libp2p = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+uuid = { workspace = true }
+
+# Prometheus metrics
+prometheus = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

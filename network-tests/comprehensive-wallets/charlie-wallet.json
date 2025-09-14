@@ -1,0 +1,10 @@
+{
+  "node_name": "charlie",
+  "wallet_address": "c71330e1ff716b1202dd1a80c43ab7ff836fce75",
+  "public_key": "592382bc1d496f9d63121702d4d10056d55f744e454dabd5aefadadc1f092c1e",
+  "private_key": "8925ef179e36de623f124d9c10bae981f6d4fd7e057d5d6b0811b95f9dbac390",
+  "balance": 0,
+  "role": "validator",
+  "region": "asia",
+  "created": 1756832058
+}

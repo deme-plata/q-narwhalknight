@@ -1,0 +1,65 @@
+[package]
+name = "q-zk-snark"
+version = "0.1.0"
+edition = "2021"
+authors = ["Q-NarwhalKnight ZK Team"]
+description = "Zero-Knowledge SNARK toolkit for Q-NarwhalKnight blockchain"
+license = "Apache-2.0"
+
+[dependencies]
+# Core dependencies
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+# Cryptography
+ark-ff = { workspace = true }
+ark-ec = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-bls12-381 = { workspace = true }
+ark-groth16 = { workspace = true }
+ark-marlin = { workspace = true }
+ark-poly = { workspace = true }
+ark-poly-commit = { workspace = true }
+ark-r1cs-std = { workspace = true }
+ark-relations = { workspace = true }
+ark-snark = { workspace = true }
+
+# Additional crypto
+blake3 = { workspace = true }
+sha3 = { workspace = true }  
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+# Parallel processing
+rayon = { workspace = true, optional = true }
+crossbeam = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+lazy_static = { workspace = true }
+once_cell = { workspace = true }
+num_cpus = { workspace = true }
+
+# Workspace dependencies
+q-types = { path = "../q-types" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["groth16", "plonk"]
+groth16 = []
+plonk = []
+marlin = []
+sonic = []
+gpu-acceleration = []
+parallel = ["rayon"]
+
+

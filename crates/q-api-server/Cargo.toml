@@ -1,0 +1,108 @@
+[package]
+name = "q-api-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "q-api-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "phantom-node"
+path = "src/bin/phantom-node.rs"
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-wallet = { path = "../q-wallet" }
+q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+q-dns-phantom = { path = "../q-dns-phantom" }
+q-bep44-discovery = { path = "../q-bep44-discovery" }
+# q-tor-client = { path = "../q-tor-client" } # Temporarily disabled due to arti compilation issues
+q-vm = { path = "../q-vm" }
+q-quantum-mixing = { path = "../q-quantum-mixing" }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+bincode = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+
+# Database - using RocksDB quantum storage
+q-storage = { path = "../q-storage" }
+
+# Performance optimizations for 6M+ TPS
+q-crypto-simd = { path = "../q-crypto-simd" }
+q-kernel-io = { path = "../q-kernel-io" }
+q-benchmarks = { path = "../q-benchmarks" }
+
+# Critical missing integrations for complete functionality
+# q-zk-stark = { path = "../q-zk-stark" } # Temporarily disabled due to compilation errors
+# q-zk-snark = { path = "../q-zk-snark" } # Temporarily disabled due to arkworks compatibility issues
+q-sharding = { path = "../q-sharding" }
+# q-cache = { path = "../q-cache" } # Temporarily disabled due to compilation errors
+q-dag-knight = { path = "../q-dag-knight" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-vdf = { path = "../q-vdf" }
+q-quantum-crypto = { path = "../q-quantum-crypto" }
+# q-dex = { path = "../q-dex" } # Temporarily disabled due to dependency on q-zk-snark
+# q-oracle = { path = "../q-oracle" } # Temporarily disabled due to dependency on q-zk-snark
+# q-stablecoin = { path = "../q-stablecoin" } # Temporarily disabled due to dependency on q-zk-snark
+q-tor-circuit = { path = "../q-tor-circuit" }
+# q-robot-control = { path = "../q-robot-control" } # Temporarily disabled due to compilation errors
+q-network = { path = "../q-network" }
+q-plugin-system = { path = "../q-plugin-system" }
+
+# Metrics
+prometheus = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# WebSocket and SSE support
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio-tungstenite = "0.21"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+
+# Real-time event streaming
+tokio-util = { version = "0.7", features = ["codec"] }
+pin-project-lite = "0.2"
+hex = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"
+base64 = "0.22"
+bip39 = "2.0"
+sha2 = "0.10"
+sha3 = "0.10"
+
+[dev-dependencies]
+tokio-test = "0.4"
+axum-test = "14.0"
+q-vm = { path = "../q-vm" }

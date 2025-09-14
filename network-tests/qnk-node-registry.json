@@ -1,0 +1,39 @@
+{
+  "qnk_network": "mainnet",
+  "discovery_protocol": "bitcoin-anchored",
+  "nodes": [
+    {
+      "name": "alice",
+      "id": "ae8f4c1aba8c223a",
+      "ip": "127.0.0.1",
+      "port": 8001,
+      "region": "us-west",
+      "registered": 1756831101
+    },
+    {
+      "name": "diana",
+      "id": "94cb27554c2bb6de",
+      "ip": "127.0.0.1",
+      "port": 8004,
+      "region": "americas",
+      "registered": 1756831103
+    },
+    {
+      "name": "bob",
+      "id": "250cac511995cf09",
+      "ip": "127.0.0.1",
+      "port": 8002,
+      "region": "europe",
+      "registered": 1756831107
+    },
+    {
+      "name": "charlie",
+      "id": "b0c1a1512a7962e3",
+      "ip": "127.0.0.1",
+      "port": 8003,
+      "region": "asia",
+      "registered": 1756831109
+    }
+  ],
+  "last_updated": 1756831109
+}

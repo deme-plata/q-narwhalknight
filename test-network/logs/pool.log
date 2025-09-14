@@ -1,0 +1,18 @@
+Tue Sep  2 15:43:30 UTC 2025: Mining pool starting up...
+Tue Sep  2 15:43:30 UTC 2025: Connecting to validator nodes...
+Tue Sep  2 15:43:30 UTC 2025: Stratum server listening on port 4444
+Tue Sep  2 15:43:31 UTC 2025: Pool ready for miners
+Tue Sep  2 15:43:31 UTC 2025: Pool stats - Hashrate: 570 MH/s, Miners: 1, Shares: 119/h
+Tue Sep  2 15:43:46 UTC 2025: Pool stats - Hashrate: 868 MH/s, Miners: 5, Shares: 135/h
+Tue Sep  2 15:44:01 UTC 2025: Pool stats - Hashrate: 562 MH/s, Miners: 4, Shares: 104/h
+Tue Sep  2 15:44:16 UTC 2025: Pool stats - Hashrate: 1308 MH/s, Miners: 1, Shares: 134/h
+Tue Sep  2 15:44:31 UTC 2025: Pool stats - Hashrate: 1445 MH/s, Miners: 4, Shares: 131/h
+Tue Sep  2 15:44:46 UTC 2025: Pool stats - Hashrate: 1111 MH/s, Miners: 5, Shares: 66/h
+Tue Sep  2 15:45:01 UTC 2025: Pool stats - Hashrate: 1262 MH/s, Miners: 4, Shares: 116/h
+Tue Sep  2 15:45:16 UTC 2025: Pool stats - Hashrate: 1411 MH/s, Miners: 1, Shares: 85/h
+Tue Sep  2 15:45:31 UTC 2025: Pool stats - Hashrate: 1459 MH/s, Miners: 3, Shares: 134/h
+Tue Sep  2 15:45:46 UTC 2025: Pool stats - Hashrate: 1014 MH/s, Miners: 2, Shares: 84/h
+Tue Sep  2 15:46:01 UTC 2025: Pool stats - Hashrate: 698 MH/s, Miners: 5, Shares: 106/h
+Tue Sep  2 15:46:16 UTC 2025: Pool stats - Hashrate: 807 MH/s, Miners: 1, Shares: 135/h
+Tue Sep  2 15:46:31 UTC 2025: Pool stats - Hashrate: 1487 MH/s, Miners: 2, Shares: 68/h
+Tue Sep  2 15:46:46 UTC 2025: Pool stats - Hashrate: 1269 MH/s, Miners: 1, Shares: 118/h

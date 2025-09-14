@@ -1,0 +1,337 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/q-types",
+    "crates/q-wallet", 
+    "crates/q-api-server",
+    "crates/q-visualizer",
+    "crates/q-narwhal-core",
+    "crates/q-dag-knight",
+    "crates/q-network",
+    "crates/q-quantum-rng",
+    "crates/q-lattice-vrf",
+    "crates/q-vdf",
+    "crates/q-fairqueue",
+    "crates/q-tor-client",     # Re-enabled: Fixed dependency compatibility
+    "crates/q-tor-circuit",    # Re-enabled: Fixed Tor library compatibility  
+    "crates/q-bitcoin-bridge", # New: Bitcoin network bridge for anonymous peer discovery
+    "crates/q-dandelion",
+    "crates/q-dns-phantom",
+    "crates/q-bep44-discovery", # New: BEP-44 DHT peer discovery (replaces DNS-phantom)
+    "crates/q-storage",
+    "crates/q-mining",
+    "crates/q-precision",
+    "crates/q-vm",
+    "crates/q-robot-control",
+    "crates/void-walker",
+    "crates/q-miner",        # High-performance CPU/GPU miner
+    "crates/q-sharding",
+    "crates/q-cache",        # Phase 2: Intelligent hierarchical caching system
+    "crates/q-benchmarks",   # Performance benchmarking and optimization (Server Beta)
+    "crates/q-crypto-simd",  # SIMD cryptographic acceleration (Server Beta)
+    "crates/q-kernel-io",    # Kernel I/O optimizations with io_uring and NUMA (Server Beta)
+    "crates/q-cross-shard",  # Cross-shard communication infrastructure (Server Beta)
+    "crates/q-plugin-system", # Plugin system for extensible architecture
+    "crates/q-quantum-crypto", # Quantum cryptography plugin
+    "crates/q-quantum-mixing", # Quantum transaction mixing plugin
+    "crates/q-zk-stark",      # ZK-STARK proofs with GPU acceleration
+    "crates/q-zk-snark",      # ZK-SNARK toolkit (Groth16, PLONK, Marlin)
+    "crates/q-zk-p2p",        # Zero-knowledge enhanced P2P networking
+    "crates/q-dex",           # Decentralized exchange with ZK privacy
+    "crates/q-oracle",        # Oracle network for price feeds
+    "crates/q-stablecoin",    # Algorithmic stablecoin management
+    "crates/q-narwhalknight", # High-level developer-friendly API wrapper for proven DNS-Phantom mesh networking
+    "gui"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
+homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
+repository = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
+keywords = ["quantum", "consensus", "dag-bft", "distributed-ai"]
+categories = ["science", "network-programming"]
+license = "Apache-2.0"
+rust-version = "1.86"
+authors = ["Quantum-DAG Labs Core Contributors"]
+
+# Architecture compatibility - removed core_arch patch for stable Rust compatibility
+
+# Examples are defined in individual crate Cargo.toml files
+
+[workspace.dependencies]
+# Core Rust ecosystem
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+
+# Web framework
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.0"
+
+# Networking - Enhanced for real network connectivity
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "mdns", "upnp"] }
+reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls"] }
+
+# Real network implementations
+arti-client = "0.9"
+arti-hyper = "0.9" 
+tor-rtcompat = "0.9"
+tor-hsservice = "0.9"
+hickory-dns = "0.24"
+bitcoin = { version = "0.31", features = ["serde"] }
+crc32fast = "1.3"
+# base64 = "0.21" # Removed duplicate, using 0.22.1 below
+hex = "0.4"
+
+# Cryptography (Phase 0: Classical)
+ring = "0.17"
+sha3 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Post-quantum cryptography (Phase 1+) - GLIBC compatible versions
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.7" 
+pqcrypto-falcon = "0.3"
+dilithium = "0.1"
+
+# Database - RocksDB for quantum storage (no SQLite needed)
+# sqlx removed - we use custom RocksDB implementation
+
+# Metrics and observability - compatible versions
+prometheus = "0.13.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities (updated for mistral.rs compatibility)
+futures = { version = "0.3", features = ["std"] }
+futures-util = { version = "0.3.31", features = ["std"] }
+futures-core = "0.3"
+pin-project-lite = "0.2"
+
+# WebSocket for visualizer (updated version for mistral.rs compatibility)
+tokio-tungstenite = "0.24.0"
+
+# Serialization
+bincode = "1.3"
+postcard = { version = "1.0", features = ["alloc"] }
+
+# VDF and quantum entropy
+vdf = "0.1"
+rand_core = "0.6"
+
+# Hashing
+blake3 = "1.3.3"
+
+# Zero-knowledge proofs
+risc0-zkvm = "1.0"
+
+# Configuration
+config = "0.13"
+
+# Testing
+proptest = "1.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"
+
+# Tor integration - using SOCKS proxy approach to avoid crypto conflicts
+tokio-socks = "0.5"
+# Crypto for core types - only ed25519-dalek needed in workspace
+ed25519-dalek = "2.0"
+
+# BEP-44 DHT dependencies
+dht = "0.7"
+bencode = "0.4" 
+sha1 = "0.10"
+hkdf = "0.12"
+
+# High-performance storage - unified version to avoid conflicts
+rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
+lz4 = "1.24"
+
+# Linear algebra and mathematics
+ndarray = { version = "0.15", features = ["serde"] }
+nalgebra = "0.32"
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+bulletproofs = "4.0"
+
+# Additional dependencies for testing
+zeroize = "1.5"
+pin-project = "1.1"
+rustls = "0.23"
+idna = "0.4"
+
+# Bitcoin integration for anonymous peer discovery - using workspace version
+bitcoin_hashes = "0.11"
+bitcoincore-rpc = "0.17"
+lz4_flex = "0.11"
+
+# GUI framework
+slint = "1.7"
+slint-build = "1.7"
+
+# Financial/decimal math for DeFi components
+bigdecimal = "0.4"
+rust_decimal = "1.33"
+
+# Collections and concurrency for performance
+dashmap = "6.1"
+crossbeam = "0.8"
+rayon = "1.10"
+
+# Additional crypto dependencies for ZK proofs
+ark-ff = "0.4"
+ark-ec = "0.4" 
+ark-serialize = "0.4"
+ark-std = "0.4"
+ark-bn254 = "0.4"
+ark-bls12-381 = "0.5"
+ark-groth16 = "0.4"
+ark-marlin = "0.3"
+ark-poly = "0.4"
+ark-poly-commit = "0.4"
+ark-r1cs-std = "0.4"
+ark-relations = "0.4"
+ark-snark = "0.4"
+
+# GPU acceleration for STARK proofs
+wgpu = "0.17"
+bytemuck = { version = "1.0", features = ["derive"] }
+
+# Additional utilities
+lazy_static = "1.4"
+once_cell = "1.19"
+num_cpus = "1.16"
+parking_lot = "0.12"
+clear_on_drop = "0.2"
+constant_time_eq = "0.3"
+arrayref = "0.3"
+arrayvec = "0.7"
+base-x = "0.2"
+bs58 = "0.5"
+data-encoding = "2.5"
+either = { version = "1.15.0", features = ["serde"] }
+indexmap = { version = "2.9.0", features = ["serde"] }
+pyo3 = { version = "0.25.0", features = ["full", "extension-module", "either"] }
+image = { version = "0.25.6", default-features = false, features = [
+    'bmp',
+    'dds', 
+    'exr',
+    'ff',
+    'gif',
+    'hdr',
+    'ico',
+    'jpeg',
+    'png',
+    'pnm',
+    'qoi',
+    'tga',
+    'tiff',
+    'webp',
+] }
+
+# Mistral.rs dependencies - AI model inference
+candle-core = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "5e6c385" }
+candle-nn = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "5e6c385" }
+candle-flash-attn-v3 = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "5e6c385" }
+candle-flash-attn = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "5e6c385" }
+accelerate-src = { version = "0.3.2" }
+intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"] }
+base64 = "0.22.1"
+half = "2.6.0"
+url = "2.5.4"
+walkdir = "2.5.0"
+data-url = "0.3.1"
+float8 = "0.4.0"
+regex = "1.11.1"
+metal = { version = "0.27.0", features = ["mps"] }
+toml = "0.8.22"
+itertools = "0.14.0"
+rand_distr = "0.5.0"
+cli-table = "0.5.0"
+dirs = "6.0.0"
+tqdm = "0.7.0"
+minijinja = { version = "2.10.2", features = ["builtins", "json"] }
+minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+regex-automata = { version = "0.4.9", features = ["meta"] }
+rustc-hash = "2.1.1"
+vob = "3.0.4"
+cfgrammar = "0.13.10"
+lrtable = "0.13.10"
+galil-seiferas = "0.1.5"
+radix_trie = "0.2.1"
+tokio-rayon = "2.1.0"
+rand_isaac = "0.4.0"
+indicatif = { version = "0.17.11", features = ["rayon"] }
+strum = { version = "0.27.1", features = ["derive"] }
+derive_more = { version = "2.0.1", default-features = false, features = ["from"] }
+akin = "0.4.0"
+variantly = "0.4.0"
+derive-new = "0.7.0"
+sysinfo = "0.30.13"
+csv = "1.3.1"
+bytemuck_derive = "1.9.3"
+schemars = "0.8.22"
+serde_yaml = "0.9.34"
+serde_plain = "1.0.2"
+as-any = "0.3.2"
+llguidance = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", default-features = false, features = ["lark"], rev = "c432092" }
+toktrie_hf_tokenizers = {git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", rev = "c432092" }
+objc = { version = "0.2.7" }
+serde-big-array = "0.5.1"
+interprocess = "2.2.3"
+urlencoding = "2.1.3"
+scraper = "0.23.1"
+html2text = "0.14.4"
+ordered-float = "5.0.0"
+hashbrown = "0.15.3"
+ahash = "0.8.12"
+libc = "0.2.172"
+bm25 = "2.2.1"
+symphonia = { version = "0.5.4", default-features = false, features = ["mp3", "flac", "vorbis", "wav", "isomp4", "ogg", "pcm"] }
+paste = "1.0.15"
+byteorder = "1.5.0"
+yoke = "0.7.5"
+pyo3-build-config = "0.25.0"
+ctrlc = "3.4.7"
+directories = "6.0.0"
+rustyline = { version = "15.0.0", default-features = false, features = ["with-file-history"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+axum_static = "1.7.1"
+mime_guess = "2.0.5"
+include_dir = "0.7.4"
+http = "1.3.1"
+rust-mcp-sdk = { version = "0.4.2", default-features = false, features = ["server", "hyper-server", "2025_03_26"] }
+rust-mcp-schema = { version = "0.1.11", default-features = false, features = ["schema_utils", "2024_11_05"] }
+bindgen_cuda = { git = "https://github.com/guoqingbao/bindgen_cuda.git", version = "0.1.6" }
+rubato = "0.16.2"
+rustfft = "6.3.0"
+hound = "3.5.1"
+apodize = "1.0.0"
+statrs = "0.18.0"
+
+# Mistral.rs internal dependencies
+mistralrs-core = { path = "mistral.rs/mistralrs-core" }
+mistralrs-paged-attn = { path = "mistral.rs/mistralrs-paged-attn" }
+mistralrs-quant = { path = "mistral.rs/mistralrs-quant" }
+mistralrs-vision = { path = "mistral.rs/mistralrs-vision" }
+mistralrs-server-core = { path = "mistral.rs/mistralrs-server-core" }
+mistralrs = { path = "mistral.rs/mistralrs" }
+mistralrs-audio = { path = "mistral.rs/mistralrs-audio" }
+mistralrs-mcp = { path = "mistral.rs/mistralrs-mcp" }
+
+# Note: Benchmarks are defined in individual crate Cargo.toml files
+

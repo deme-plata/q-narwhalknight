@@ -1,0 +1,135 @@
+[2m2025-09-03T07:28:13.506608Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m Starting Q-NarwhalKnight API Server on port 8087
+[2m2025-09-03T07:28:13.506715Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🆔 Generated new node ID: 20b45d227f8841646bcaf1cc7cda8a44567842c4d9c1bb2345e5619c9d0b0aed
+[2m2025-09-03T07:28:13.506727Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🚀 Initializing Q-NarwhalKnight Triple-Layer Anonymity Network
+[2m2025-09-03T07:28:13.506733Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 📡 Node ID: 20b45d227f8841646bcaf1cc7cda8a44567842c4d9c1bb2345e5619c9d0b0aed
+[2m2025-09-03T07:28:13.506737Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🧅 Starting Tor client...
+[2m2025-09-03T07:28:14.854303Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m ✅ Tor client initialized successfully
+[2m2025-09-03T07:28:14.854361Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m ₿ 🧅 Initializing Bitcoin-Tor Bridge...
+[2m2025-09-03T07:28:14.854379Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🔗 Using custom Bitcoin RPC URL from environment
+[2m2025-09-03T07:28:15.871320Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m ✅ Bitcoin-Tor Bridge initialized
+[2m2025-09-03T07:28:15.871368Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌐 Onion address: 20b45d227f8841646bcaf1cc7cda8a44.onion
+[2m2025-09-03T07:28:15.871458Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🚀 Bitcoin-Tor Bridge started successfully
+[2m2025-09-03T07:28:15.871467Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 📡 Starting peer discovery through Bitcoin network...
+[2m2025-09-03T07:28:15.871472Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌐 👻 Initializing DNS-Phantom Network...
+[2m2025-09-03T07:28:16.419986Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m ✅ DNS-Phantom Network initialized
+[2m2025-09-03T07:28:16.420304Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🔮 Steganographic communication ready
+[2m2025-09-03T07:28:16.420315Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌍 Using DNS providers: Cloudflare, Google, Quad9, OpenDNS
+[2m2025-09-03T07:28:16.421325Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🚀 DNS-Phantom Network started successfully
+[2m2025-09-03T07:28:16.421339Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 👻 Invisible internet within the internet is now active
+[2m2025-09-03T07:28:16.426244Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌟 ================================
+[2m2025-09-03T07:28:16.426342Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌟   Q-NARWHALKNIGHT ACTIVATED   
+[2m2025-09-03T07:28:16.426347Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌟 ================================
+[2m2025-09-03T07:28:16.426354Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🆔 Node ID: 20b45d227f8841646bcaf1cc7cda8a44567842c4d9c1bb2345e5619c9d0b0aed
+[2m2025-09-03T07:28:16.426360Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🧅 Tor Integration: ✅ Active
+[2m2025-09-03T07:28:16.426369Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m ₿  Bitcoin Discovery: ✅ Active
+[2m2025-09-03T07:28:16.426374Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 👻 DNS-Phantom Network: ✅ Active
+[2m2025-09-03T07:28:16.426378Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🌟 ================================
+[2m2025-09-03T07:28:16.426767Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 👻 Starting DNS-Phantom network monitoring...
+[2m2025-09-03T07:28:16.426859Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m 🔍 Starting automatic peer discovery through Bitcoin network...
+[2m2025-09-03T07:28:16.426864Z[0m [32m INFO[0m [2mq_api_server[0m[2m:[0m API server listening on 0.0.0.0:8087
+[2m2025-09-03T07:28:53.347147Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:28:53.347272Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:29:39.764072Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:29:39.764174Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:29:39.787803Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:29:39.787943Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:29:39.839742Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:29:39.839854Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:29:59.593825Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:29:59.593916Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:29:59.610474Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:29:59.610703Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:16.424697Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:30:19.065334Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:19.065412Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:19.088212Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:19.088341Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:35.830565Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:35.830649Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:35.845818Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:35.845917Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:40.697064Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:40.697197Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/health [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:30:40.715252Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:30:40.719244Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m4 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:32:00.377116Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:32:00.377238Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:32:16.424491Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:34:11.809871Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:34:11.811319Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m1 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:34:12.171043Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/wallets [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:34:12.171132Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/wallets [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mq_api_server::handlers[0m[2m:[0m Listing all wallets
+[2m2025-09-03T07:34:12.171178Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/wallets [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:34:16.423557Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:34:27.904555Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:34:27.904625Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:34:31.980559Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T07:34:31.980656Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/v1/node/status [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2025-09-03T07:36:16.423552Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:38:16.423884Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:40:16.425671Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:42:16.424302Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:44:16.424284Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:46:16.424190Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:48:16.424557Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:50:16.424284Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:52:16.423482Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:54:16.423503Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:56:16.425166Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T07:58:16.423683Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:00:16.436466Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:02:16.431938Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:04:16.424496Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:06:16.433335Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:08:16.424705Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:10:16.423902Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:12:16.423931Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:14:16.434997Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:16:16.423920Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:18:16.423257Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:20:16.425873Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:22:16.425006Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:24:03.776534Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/ [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T08:24:03.776634Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/ [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m404
+[2m2025-09-03T08:24:16.424278Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:26:16.458027Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:28:16.423897Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:30:16.424075Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:32:16.424403Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:34:16.474084Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:36:16.423948Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:38:16.423538Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:40:16.423652Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:40:16.423718Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:42:16.424069Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:42:16.424324Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:44:16.424080Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:44:16.424162Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:46:16.427185Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:46:16.427265Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:48:16.423846Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:48:16.423913Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:50:16.424198Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:50:16.424306Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:52:16.424376Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:52:16.424545Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:54:16.423562Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:54:16.423652Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:56:02.067730Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/ [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T08:56:02.067926Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/ [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m404
+[2m2025-09-03T08:56:02.681551Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/favicon.ico [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T08:56:02.681623Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/favicon.ico [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m404
+[2m2025-09-03T08:56:03.293233Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/robots.txt [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2025-09-03T08:56:03.293308Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/robots.txt [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m404
+[2m2025-09-03T08:56:16.423833Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:56:16.423914Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T08:58:16.433297Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T08:58:16.433365Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T09:00:16.429027Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T09:00:16.429118Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T09:02:16.439494Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T09:02:16.439613Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T09:04:16.424871Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T09:04:16.425193Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)
+[2m2025-09-03T09:06:16.424334Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Quad9 (risk: 0.50)
+[2m2025-09-03T09:06:16.424441Z[0m [33m WARN[0m [2mq_api_server[0m[2m:[0m 🚨 DNS Cache anomaly detected: delayed_phantom_query on Cloudflare (risk: 0.50)

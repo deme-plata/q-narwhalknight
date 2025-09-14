@@ -1,0 +1,10 @@
+{
+  "node_name": "diana",
+  "wallet_address": "4e6cc2f2b747297f6e298e5d92ae43eef5b009cf",
+  "public_key": "4b54d1bae0780d5c5d59123348c0528859b3147a4c74f25b3f269940bd4e8ee7",
+  "private_key": "05c251287fbdca103545988d014bc2c1269bae9be41122253d35b2c88afc11f9",
+  "balance": 100,
+  "role": "miner",
+  "region": "americas",
+  "created": 1756832050
+}

@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "crates/q-types",
+    "crates/q-tor-client",
+    "crates/q-tor-circuit", 
+    "crates/q-multi-chain-nexus",
+    "crates/q-bitcoin-bridge",
+    "crates/q-solana-bridge",
+    "crates/q-monero-bridge",
+    "crates/q-arbitrum-cache",
+]
+
+[workspace.package]
+version = "1.0.0-tor"
+edition = "2021"
+authors = ["Q-NarwhalKnight Team"]
+license = "Apache-2.0"
+repository = "https://github.com/deme-plata/q-narwhalknight"
+
+[workspace.dependencies]
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"

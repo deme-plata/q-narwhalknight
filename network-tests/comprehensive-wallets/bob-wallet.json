@@ -1,0 +1,10 @@
+{
+  "node_name": "bob",
+  "wallet_address": "02ed4111c71c3d746d47bf76fc3568a73abf9837",
+  "public_key": "53f93f6b35b16914d7373980b2e9bd071e3627e4cb4a249f7dffd4724f49b204",
+  "private_key": "69d52967412ec920a3073d2a0f69d2c74f43a3323709292ebd9f87ef34f6cd9c",
+  "balance": 100,
+  "role": "miner",
+  "region": "europe",
+  "created": 1756832055
+}

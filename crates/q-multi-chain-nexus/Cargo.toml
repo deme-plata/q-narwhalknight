@@ -1,0 +1,69 @@
+[package]
+name = "q-multi-chain-nexus"
+version = "1.0.0"
+edition = "2021"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+description = "🌐⚡ Ultimate Multi-Chain Tor-Nexus - Unified cross-chain infrastructure"
+license = "MIT"
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Tor integration
+tokio-socks = { workspace = true }
+
+# HTTP client with Tor support
+reqwest = { version = "0.11", features = ["json", "socks"] }
+
+# Cryptography
+ring = { workspace = true }
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+base64 = "0.22"
+
+# Database
+sled = "0.34"
+
+# Compression
+flate2 = "1.0"
+lz4 = "1.24"
+
+# Q-NarwhalKnight internal dependencies
+q-types = { path = "../q-types" }
+q-tor-client = { path = "../q-tor-client" }
+q-network = { path = "../q-network" }
+
+# Multi-chain bridge dependencies
+q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+q-solana-bridge = { path = "../q-solana-bridge" }
+q-monero-bridge = { path = "../q-monero-bridge" }
+q-arbitrum-cache = { path = "../q-arbitrum-cache" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+
+[features]
+default = [
+    "bitcoin-integration",
+    "solana-integration", 
+    "monero-integration",
+    "arbitrum-integration",
+    "unified-routing",
+    "cross-chain-sync"
+]
+bitcoin-integration = []
+solana-integration = []
+monero-integration = []
+arbitrum-integration = []
+unified-routing = []
+cross-chain-sync = []
