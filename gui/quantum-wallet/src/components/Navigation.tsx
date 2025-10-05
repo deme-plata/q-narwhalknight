@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
-import { Home, Send, Settings, Activity, Search } from 'lucide-react';
+import { Home, Send, Settings, Activity, Search, ArrowDownUp, Pickaxe, Boxes, Download } from 'lucide-react';
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'settings';
 
 interface NavigationProps {
   currentScreen: Screen;
@@ -13,7 +13,11 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
   const navItems = [
     { id: 'dashboard' as Screen, icon: Home, label: 'Dashboard' },
     { id: 'transactions' as Screen, icon: Send, label: 'Transactions' },
+    { id: 'dex' as Screen, icon: ArrowDownUp, label: 'DEX' },
     { id: 'explorer' as Screen, icon: Search, label: 'Explorer' },
+    { id: 'mining' as Screen, icon: Pickaxe, label: 'Mining' },
+    { id: 'vm' as Screen, icon: Boxes, label: 'Vittua VM' },
+    { id: 'download' as Screen, icon: Download, label: 'Downloads' },
     { id: 'settings' as Screen, icon: Settings, label: 'Settings' },
   ];
 

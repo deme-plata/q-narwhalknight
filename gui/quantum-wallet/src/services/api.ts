@@ -53,32 +53,56 @@ class QNarwhalKnightAPI {
     this.baseURL = baseURL;
   }
 
-  private async request<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T>> {
+  private async request<T>(endpoint: string, options?: RequestInit, retries = 3): Promise<ApiResponse<T>> {
     const url = `${this.baseURL}${endpoint}`;
-    
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-      });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            ...options?.headers,
+          },
+        });
+
+        // Handle rate limiting with exponential backoff
+        if (response.status === 429) {
+          if (attempt < retries) {
+            const retryAfter = response.headers.get('Retry-After');
+            const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt) * 1000;
+            console.warn(`Rate limited. Retrying after ${delay}ms (attempt ${attempt + 1}/${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          throw new Error('Rate limit exceeded. Please try again later.');
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return await response.json();
+      } catch (error) {
+        if (attempt === retries) {
+          console.error('API request failed after retries:', error);
+          return {
+            success: false,
+            data: null,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            timestamp: new Date().toISOString(),
+          };
+        }
       }
-
-      return await response.json();
-    } catch (error) {
-      console.error('API request failed:', error);
-      return {
-        success: false,
-        data: null,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      };
     }
+
+    // Should never reach here, but TypeScript needs it
+    return {
+      success: false,
+      data: null,
+      error: 'Maximum retries exceeded',
+      timestamp: new Date().toISOString(),
+    };
   }
 
   // Generate quantum-enhanced BIP39 mnemonic
@@ -414,6 +438,16 @@ class QNarwhalKnightAPI {
         timestamp: new Date().toISOString(),
       };
     }
+  }
+
+  // Get supported tokens for DEX
+  async getSupportedTokens(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/v1/dex/tokens');
+  }
+
+  // Get recent transactions
+  async getRecentTransactions(limit = 100): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>(`/v1/transactions/recent?limit=${limit}`);
   }
 }
 
