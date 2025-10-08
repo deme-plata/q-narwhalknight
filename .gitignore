@@ -6,3 +6,7 @@ node_data/
 target/
 data*/
 *.log
+windows-release/*.exe
+windows-release/*.zip
+*.exe
+*.zip

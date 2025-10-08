@@ -117,6 +117,11 @@ impl ConnectionManager {
         }
     }
 
+    /// Get number of active connections
+    pub async fn get_active_connection_count(&self) -> usize {
+        self.active_peers.read().await.len()
+    }
+
     /// Add discovered peer to connection queue
     pub async fn add_discovered_peer(&self, peer: PeerInfo) {
         info!(

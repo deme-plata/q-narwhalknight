@@ -627,10 +627,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             interval.tick().await;
 
-            // Read current state
+            // Get real connection count from ConnectionManager
+            let connected_peers = if let Some(ref conn_mgr) = app_state_updater.connection_manager {
+                conn_mgr.get_active_connection_count().await
+            } else {
+                0
+            };
+
+            // Read current state - use actual tx_pool size from DashMap
+            let current_tx = app_state_updater.tx_pool.len() as u64;
             let node_status = app_state_updater.node_status.read().await;
-            let current_tx = node_status.tx_pool_size as u64; // Use tx_pool_size as transaction count
-            let current_blocks = node_status.current_height; // Use current_height as block count
+            let current_blocks = node_status.current_height;
 
             // Calculate per-second rates
             let elapsed = start_time.elapsed().as_secs_f64().max(1.0);
@@ -642,8 +649,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.total_blocks = current_blocks;
                 stats.transactions_per_second = tx_delta as f64;
                 stats.blocks_per_second = block_delta as f64;
-                stats.connected_peers = node_status.connected_peers as usize;
-                stats.mempool_size = node_status.tx_pool_size as usize;
+                stats.connected_peers = connected_peers; // Now reading from ConnectionManager!
+                stats.mempool_size = current_tx as usize; // Use actual tx_pool size
                 stats.average_latency_ms = 45.2; // Default, can be measured
                 stats.dag_vertices = current_blocks * 4; // Approximate
                 stats.consensus_rounds = current_blocks;
