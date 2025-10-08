@@ -13,7 +13,7 @@ q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-network = { path = "../q-network" }
 q-storage = { path = "../q-storage" }
-q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
 q-quantum-rng = { path = "../q-quantum-rng" }
 
 # Core Rust ecosystem  
@@ -30,8 +30,8 @@ tracing-subscriber = { workspace = true }
 
 # CLI framework
 clap = { workspace = true, features = ["derive", "color"] }
-indicatif = "0.17"
-console = "0.15"
+indicatif = { workspace = true }
+console = { workspace = true }
 dialoguer = "0.11"
 
 # High-performance computing
@@ -77,6 +77,7 @@ prometheus = { workspace = true }
 
 # Configuration
 config = { workspace = true }
+toml = { workspace = true }
 dirs = "5.0"
 
 # GUI framework (optional)
@@ -90,6 +91,7 @@ blake3 = { workspace = true }
 sha2 = { workspace = true }
 ring = { workspace = true }
 rand = { workspace = true }
+hex = { workspace = true }
 
 # VDF computation
 vdf = { workspace = true }

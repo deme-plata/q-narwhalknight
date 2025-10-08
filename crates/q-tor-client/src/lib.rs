@@ -68,9 +68,9 @@ impl QTorClient {
             hex::encode(node_id)
         );
 
-        // Default Tor SOCKS proxy address (standard Tor port)
+        // Default Tor SOCKS proxy address (updated to 9150 to avoid conflict with P2P)
         let socks_proxy = config.socks_proxy_addr.unwrap_or_else(|| {
-            "127.0.0.1:9050"
+            "127.0.0.1:9150"
                 .parse()
                 .expect("Valid default SOCKS address")
         });

@@ -8,163 +8,10 @@ pub use tor_proxy::TorProxyManager;
 
 use crate::{WorkUnit, Solution, MiningEvent};
 use anyhow::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tracing::{info, error, debug};
+use tracing::{info, debug};
 use uuid::Uuid;
 use rand::Rng;
-
-/// Pool mining client with Tor anonymity
-pub struct PoolClient {
-    pool_url: String,
-    wallet_address: String,
-    worker_name: String,
-    tor_enabled: bool,
-    stratum_client: Option<StratumClient>,
-    tor_proxy: Option<TorProxyManager>,
-    event_tx: broadcast::Sender<MiningEvent>,
-}
-
-impl PoolClient {
-    pub async fn new(
-        pool_url: String,
-        wallet_address: String,
-        tor_enabled: bool,
-    ) -> Result<Self> {
-        let worker_name = format!("qnk-miner-{}", Uuid::new_v4().to_string()[..8]);
-        let (event_tx, _) = broadcast::channel(1000);
-        
-        let tor_proxy = if tor_enabled {
-            info!("🧅 Initializing Tor proxy for anonymous pool mining");
-            Some(TorProxyManager::new().await?)
-        } else {
-            None
-        };
-        
-        Ok(Self {
-            pool_url,
-            wallet_address,
-            worker_name,
-            tor_enabled,
-            stratum_client: None,
-            tor_proxy,
-            event_tx,
-        })
-    }
-    
-    pub async fn connect(&mut self) -> Result<()> {
-        info!("🌐 Connecting to mining pool: {}", self.pool_url);
-        
-        // Setup Tor proxy if enabled
-        let proxy_addr = if let Some(ref tor_proxy) = self.tor_proxy {
-            tor_proxy.start().await?;
-            Some(tor_proxy.get_socks_address())
-        } else {
-            None
-        };
-        
-        // Connect to pool via Stratum protocol
-        let stratum_client = StratumClient::new(
-            self.pool_url.clone(),
-            proxy_addr,
-            self.wallet_address.clone(),
-            self.worker_name.clone(),
-        ).await?;
-        
-        self.stratum_client = Some(stratum_client);
-        
-        info!("✅ Connected to mining pool successfully");
-        self.start_message_handler().await?;
-        
-        Ok(())
-    }
-    
-    pub async fn disconnect(&mut self) -> Result<()> {
-        info!("🔌 Disconnecting from mining pool");
-        
-        if let Some(mut stratum_client) = self.stratum_client.take() {
-            stratum_client.disconnect().await?;
-        }
-        
-        if let Some(mut tor_proxy) = self.tor_proxy.take() {
-            tor_proxy.stop().await?;
-        }
-        
-        Ok(())
-    }
-    
-    pub async fn submit_solution(&self, solution: Solution) -> Result<bool> {
-        if let Some(ref stratum_client) = self.stratum_client {
-            info!("💎 Submitting solution for job {}", solution.job_id);
-            
-            let accepted = stratum_client.submit_share(
-                solution.job_id,
-                solution.nonce,
-                solution.hash,
-                solution.worker_id,
-            ).await?;
-            
-            if accepted {
-                info!("✅ Solution accepted by pool!");
-                let _ = self.event_tx.send(MiningEvent::ShareAccepted {
-                    job_id: solution.job_id,
-                    difficulty: 1.0, // TODO: Get actual difficulty
-                    reward: 0.0,     // TODO: Calculate reward
-                });
-            } else {
-                error!("❌ Solution rejected by pool");
-                let _ = self.event_tx.send(MiningEvent::ShareRejected {
-                    job_id: solution.job_id,
-                    reason: "Unknown".to_string(),
-                });
-            }
-            
-            Ok(accepted)
-        } else {
-            Err(anyhow::anyhow!("Not connected to pool"))
-        }
-    }
-    
-    pub async fn update_hash_rate(&self, hash_rate: f64) -> Result<()> {
-        if let Some(ref stratum_client) = self.stratum_client {
-            stratum_client.update_hash_rate(hash_rate).await?;
-        }
-        Ok(())
-    }
-    
-    pub fn subscribe_to_events(&self) -> broadcast::Receiver<MiningEvent> {
-        self.event_tx.subscribe()
-    }
-    
-    async fn start_message_handler(&self) -> Result<()> {
-        if let Some(ref stratum_client) = self.stratum_client {
-            let mut message_rx = stratum_client.subscribe_to_messages();
-            let event_tx = self.event_tx.clone();
-            
-            tokio::spawn(async move {
-                while let Ok(message) = message_rx.recv().await {
-                    match message.method.as_str() {
-                        "mining.notify" => {
-                            if let Ok(work) = parse_mining_work(&message) {
-                                let _ = event_tx.send(MiningEvent::NewWork(work));
-                            }
-                        }
-                        "mining.set_difficulty" => {
-                            debug!("Pool set new difficulty: {:?}", message.params);
-                        }
-                        _ => {
-                            debug!("Received pool message: {}", message.method);
-                        }
-                    }
-                }
-            });
-        }
-        
-        Ok(())
-    }
-}
 
 /// Parse Stratum mining.notify message into WorkUnit
 fn parse_mining_work(message: &StratumMessage) -> Result<WorkUnit> {
@@ -292,7 +139,8 @@ impl PoolDiscovery {
         for pool in &mut self.known_pools {
             // Simulate pool stats update
             let mut rng = rand::thread_rng();
-            pool.last_block_time = Some(chrono::Utc::now() - chrono::Duration::minutes(rng.gen::<u64>() % 15));
+            let minutes_ago = (rng.gen::<u64>() % 15) as i64;
+            pool.last_block_time = Some(chrono::Utc::now() - chrono::Duration::minutes(minutes_ago));
             pool.active_miners = (pool.active_miners as i32 + (rng.gen::<i32>() % 20 - 10)).max(0) as u32;
             pool.pool_hash_rate *= 0.95 + (rng.gen::<f64>() * 0.1); // ±5% variance
         }

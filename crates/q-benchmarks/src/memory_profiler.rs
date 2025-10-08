@@ -151,13 +151,17 @@ pub async fn measure_memory_performance(config: &BenchmarkConfig) -> Result<Memo
     let mut profiler = MemoryProfiler::new();
     profiler.start_profiling()?;
 
+    // Clone config for spawned tasks to satisfy 'static lifetime requirement
+    let config_clone = config.clone();
+    let duration = config.duration_seconds;
+
     // Run memory-intensive workload simulation
-    let memory_task = tokio::spawn(async move { simulate_consensus_memory_load(config).await });
+    let memory_task = tokio::spawn(async move { simulate_consensus_memory_load(&config_clone).await });
 
     // Sample memory usage during the workload
     let sampling_task =
         tokio::spawn(
-            async move { sample_memory_usage(&mut profiler, config.duration_seconds).await },
+            async move { sample_memory_usage(&mut profiler, duration).await },
         );
 
     // Wait for both tasks

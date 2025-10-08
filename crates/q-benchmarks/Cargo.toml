@@ -23,6 +23,10 @@ q-network = { path = "../q-network" }
 
 # Performance monitoring
 sysinfo = "0.29"
+
+# Platform-specific dependencies
+# procfs is Linux-only (reads /proc filesystem)
+[target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"
 
 [[bench]]

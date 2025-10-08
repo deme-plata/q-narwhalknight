@@ -1,0 +1,8 @@
+Q-NarwhalKnight Performance Test Report
+=======================================
+Test Date: Wed 10 Sep 09:53:21 CEST 2025
+Duration: 20.333562622 seconds
+Transactions: 3250/3250
+Overall TPS: 159.83
+Overall MB/s: .312
+Performance Grade: D (Needs Improvement)

@@ -10,6 +10,7 @@ repository.workspace = true
 q-types = { path = "../q-types" }
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-dag-knight = { path = "../q-dag-knight" }
+q-resonance = { path = "../q-resonance" }
 
 # Networking
 libp2p = { workspace = true }
@@ -64,3 +65,9 @@ rand = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = { workspace = true }
+
+# Platform-specific dependencies
+# mDNS requires libudev on Linux which cannot be cross-compiled to Windows
+# Enable mDNS only on Unix-like platforms (Linux, macOS, BSD, etc.)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libp2p = { workspace = true, features = ["mdns"] }

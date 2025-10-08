@@ -235,7 +235,7 @@ impl QuantumFairQueue {
             "Enqueueing transaction {} of type {:?} from node {}",
             hex::encode(&tx_id),
             tx_type,
-            from_node
+            hex::encode(&from_node)
         );
 
         // Check for censorship attempts
@@ -247,7 +247,7 @@ impl QuantumFairQueue {
             {
                 warn!(
                     "Potential censorship detected for transaction from node {}",
-                    from_node
+                    hex::encode(&from_node)
                 );
 
                 // Apply anti-censorship measures
@@ -423,9 +423,9 @@ impl QuantumFairQueue {
             let bottom_10_percent = queue_len / 10;
             let victim_index = random_index % bottom_10_percent.max(1);
 
-            // Remove the selected victim
-            if let Some(victim) = queue.peek_by_index(victim_index) {
-                let victim_id = *victim.0;
+            // Remove the selected victim (collect to vec to index from end)
+            let items: Vec<_> = queue.iter().map(|(id, p)| (*id, *p)).collect();
+            if let Some((victim_id, _)) = items.into_iter().rev().nth(victim_index) {
                 queue.remove(&victim_id);
                 debug!("Quantum evicted transaction {}", hex::encode(&victim_id));
             }

@@ -1,14 +1,20 @@
-/// High-performance KV store abstraction with RocksDB implementation
+/// High-performance KV store abstraction with RocksDB implementation (Linux/macOS)
 /// Optimized for DagKnight/Narwhal/Bullshark access patterns
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use q_quantum_rng::{QRNGConfig, QuantumRNG, QuantumRandomness};
-use q_types::Phase;
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tracing::{debug, info, warn};
 
-use crate::{CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST, CF_NARWHAL_PAYLOADS};
+// RocksDB imports - Linux/macOS only
+#[cfg(not(target_os = "windows"))]
+use q_quantum_rng::{QRNGConfig, QuantumRNG, QuantumRandomness};
+#[cfg(not(target_os = "windows"))]
+use q_types::Phase;
+#[cfg(not(target_os = "windows"))]
+use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
+
+#[cfg(not(target_os = "windows"))]
+use crate::{CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST, CF_NARWHAL_PAYLOADS, CF_TRANSACTIONS};
 
 /// Async KV store trait for storage abstraction
 #[async_trait]
@@ -41,7 +47,8 @@ pub trait KVStore: Send + Sync {
     async fn get_db_size(&self) -> Result<u64>;
 }
 
-/// RocksDB implementation optimized for DagKnight workloads
+/// RocksDB implementation optimized for DagKnight workloads (Linux/macOS only)
+#[cfg(not(target_os = "windows"))]
 pub struct RocksDBKV {
     db: Arc<DB>,
     /// Store DB path for column family lookup instead of raw CF handles
@@ -52,6 +59,7 @@ pub struct RocksDBKV {
     phase: Phase,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl RocksDBKV {
     /// Open hot database with optimized settings for frequent access
     pub async fn open_hot_db<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -125,6 +133,7 @@ impl RocksDBKV {
             Self::create_dag_vertices_cf(),
             Self::create_bullshark_cert_cf(),
             Self::create_manifest_cf(),
+            Self::create_transactions_cf(),
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -233,6 +242,16 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(CF_MANIFEST, opts)
     }
 
+    /// Create transactions column family (tx_id -> transaction)
+    fn create_transactions_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
+        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB write buffer
+        opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
+
+        ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
+    }
+
     /// Create Narwhal payloads column family (digest -> payload)
     fn create_narwhal_payloads_cf() -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
@@ -254,6 +273,7 @@ impl RocksDBKV {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[async_trait]
 impl KVStore for RocksDBKV {
     async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
@@ -383,6 +403,7 @@ impl KVStore for RocksDBKV {
 }
 
 /// RocksDB write options optimized for Narwhal workloads
+#[cfg(not(target_os = "windows"))]
 impl RocksDBKV {
     /// Get optimized write options
     fn write_options() -> rocksdb::WriteOptions {
@@ -483,6 +504,7 @@ impl RocksDBKV {
 }
 
 /// RocksDB statistics for monitoring
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone)]
 pub struct RocksDBStats {
     pub column_families: HashMap<String, RocksDBCFStats>,
@@ -491,6 +513,7 @@ pub struct RocksDBStats {
 }
 
 /// Column family statistics
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone)]
 pub struct RocksDBCFStats {
     pub keys: u64,
@@ -499,6 +522,7 @@ pub struct RocksDBCFStats {
     pub compactions: u64,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl RocksDBStats {
     /// Get Prometheus-format metrics
     pub fn to_prometheus(&self) -> String {

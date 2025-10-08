@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  node-alpha:
+    build: .
+    container_name: qnk-node-alpha
+    ports:
+      - "8080:8080"
+      - "8333:8333"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alice
+      - Q_NODE_TYPE=validator
+      - Q_PEER_ID=node-beta:8334
+      - Q_TOR_ENABLED=true
+    volumes:
+      - ./network-deployment/configs/node-alpha.toml:/app/configs/node.toml
+      - node-alpha-data:/app/data
+    networks:
+      - qnk-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  node-beta:
+    build: .
+    container_name: qnk-node-beta
+    ports:
+      - "8081:8080"
+      - "8334:8334"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=bob
+      - Q_NODE_TYPE=validator
+      - Q_PEER_ID=node-alpha:8334
+      - Q_TOR_ENABLED=true
+    volumes:
+      - ./network-deployment/configs/node-beta.toml:/app/configs/node.toml
+      - node-beta-data:/app/data
+    networks:
+      - qnk-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - node-alpha
+
+volumes:
+  node-alpha-data:
+  node-beta-data:
+
+networks:
+  qnk-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

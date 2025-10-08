@@ -8,15 +8,115 @@ use anyhow::Result;
 use bip39::{Language, Mnemonic};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use q_bitcoin_bridge::*;
+// DEACTIVATED: use q_bitcoin_bridge::*;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// Import bridge types from q-bitcoin-bridge (only existing types)
-use q_bitcoin_bridge::{LifeProof, LifeProofData, OrganismMetadata, QnkChain, SolanaBridge};
+// DEACTIVATED: Import bridge types from q-bitcoin-bridge (only existing types)
+// DEACTIVATED: use q_bitcoin_bridge::{LifeProof, LifeProofData, OrganismMetadata, QnkChain, SolanaBridge};
+
+// Placeholder types since q-bitcoin-bridge is deactivated
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifeProof {
+    pub data: LifeProofData,
+    pub proof_hash: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifeProofData {
+    pub organism_id: String,
+    pub genetic_hash: String,
+    pub chain_activities: Vec<String>,
+    pub metabolic_rate: f64,
+    pub fitness_score: f64,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganismMetadata {
+    pub organism_id: String,
+    pub fitness_score: f64,
+    pub last_activity: DateTime<Utc>,
+    pub generation: u64,
+}
+
+pub struct QnkChain;
+impl QnkChain {
+    pub async fn new() -> Result<Self> { Ok(Self) }
+    pub fn create_quantum_address(&self, _pubkey: &ed25519_dalek::VerifyingKey) -> Result<String> {
+        Ok("qnk_stub_address".to_string())
+    }
+    pub async fn register_organism_validator(&self, _organism_id: &str, _address: &str) -> Result<String> {
+        Ok(format!("validator_stub_{}", _organism_id))
+    }
+    pub async fn check_validator_status(&self, _validator_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+    pub async fn get_consensus_participation(&self, _validator_id: &str) -> Result<f64> {
+        Ok(0.0)
+    }
+    pub async fn submit_life_proof(&self, _address: &str, _proof: &LifeProof) -> Result<String> {
+        Ok("proof_stub".to_string())
+    }
+}
+
+pub struct SolanaBridge;
+impl SolanaBridge {
+    pub async fn new() -> Result<Self> { Ok(Self) }
+    pub fn derive_solana_address(&self, _pubkey: &ed25519_dalek::VerifyingKey) -> Result<String> {
+        Ok("sol_stub_address".to_string())
+    }
+    pub async fn mint_organism_nft(&self, _organism_id: &str, _address: &str) -> Result<String> {
+        Ok(format!("nft_stub_{}", _organism_id))
+    }
+    pub async fn check_organism_nft(&self, _organism_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    pub async fn get_spl_balance(&self, _address: &str) -> Result<u64> {
+        Ok(0)
+    }
+    pub async fn update_organism_nft_metadata(&self, _nft_mint: &str, _metadata: &OrganismMetadata) -> Result<String> {
+        Ok("update_stub".to_string())
+    }
+}
+
+pub struct BitcoinBridge;
+impl BitcoinBridge {
+    pub async fn new() -> Result<Self> { Ok(Self) }
+    pub fn derive_address_from_pubkey(&self, _pubkey: &ed25519_dalek::VerifyingKey) -> Result<String> {
+        Ok("stub_bitcoin_address".to_string())
+    }
+    pub async fn create_birth_transaction(&self, _organism_id: &str, _address: &str) -> Result<String> {
+        Ok("stub_birth_tx_hash".to_string())
+    }
+    pub async fn get_address_balance(&self, _address: &str) -> Result<u64> {
+        Ok(0)
+    }
+    pub async fn get_latest_transaction(&self, _address: &str) -> Result<Option<(String, u64)>> {
+        Ok(None)
+    }
+    pub async fn send_op_return_data(&self, _data: &str, _from_address: &str) -> Result<String> {
+        Ok("stub_op_return_tx".to_string())
+    }
+}
+
+pub struct ZcashBridge;
+impl ZcashBridge {
+    pub async fn new() -> Result<Self> { Ok(Self) }
+    pub async fn create_shielded_address(&self, _seed: &[u8]) -> Result<String> {
+        Ok("stub_zcash_shielded_address".to_string())
+    }
+    pub async fn send_encrypted_memo(&self, _memo: &str, _to_address: &str) -> Result<String> {
+        Ok("stub_zcash_memo_tx".to_string())
+    }
+    pub async fn check_memo_activity(&self, _address: &str) -> Result<Vec<(String, u64, String)>> {
+        Ok(vec![])
+    }
+}
 
 /// Simple seed wrapper for BIP39
 struct Seed {
@@ -477,7 +577,10 @@ impl BlockchainLifeManager {
         );
 
         // Update organism's Bitcoin life force based on activity
-        let life_force = self.calculate_life_force_from_activity(balance, latest_tx.as_ref());
+        let life_force = self.calculate_life_force_from_activity(
+            balance as f64,
+            latest_tx.as_ref().map(|(tx_hash, _)| tx_hash)
+        );
 
         // If organism hasn't been active, send heartbeat transaction
         if life_force < 0.1 {
@@ -500,7 +603,7 @@ impl BlockchainLifeManager {
             .await?;
 
         tracing::debug!(
-            "🛡️ Zcash life sync for {}: memo_activity={}",
+            "🛡️ Zcash life sync for {}: memo_activity={:?}",
             organism_id.0,
             memo_activity
         );
@@ -530,7 +633,7 @@ impl BlockchainLifeManager {
             .await?;
 
         tracing::debug!(
-            "⚡ Solana life sync for {}: nft_active={}, spl_balance={}",
+            "⚡ Solana life sync for {}: nft_active={:?}, spl_balance={}",
             organism_id.0,
             nft_status,
             spl_balance
@@ -621,7 +724,7 @@ impl BlockchainLifeManager {
             chain_activities: organism
                 .chain_lives
                 .iter()
-                .map(|(chain, status)| (chain.clone(), status.transaction_count))
+                .map(|(chain, _status)| chain.clone())
                 .collect(),
             metabolic_rate: organism.metabolic_state.data_processing_rate,
             fitness_score: organism.genome.fitness_score,

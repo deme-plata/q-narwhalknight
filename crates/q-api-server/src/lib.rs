@@ -1,15 +1,15 @@
-use q_bep44_discovery::DiscoveryEngine;
-use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
-use q_dns_phantom::DNSPhantomNetwork;
+// DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
+// DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
+// DEACTIVATED: use q_dns_phantom::DNSPhantomNetwork;
 use q_network::NetworkManager;
 use q_storage::{StorageConfig, StorageEngine};
-// use q_tor_client::QTorClient; // Temporarily disabled due to arti compilation issues
+use q_tor_client::QTorClient; // Re-enabled for consensus integration
 use q_types::*;
 use q_wallet::{MemoryWalletStore, WalletManager};
 
-// ZK Privacy Components
-// use q_zk_stark::StarkProver; // Temporarily disabled
-// use q_zk_snark::{Groth16Prover, PlonkProver}; // Temporarily disabled
+// ZK Privacy Components - ✅ ENABLED
+use q_zk_stark::StarkSystem;
+use q_zk_snark::UniversalSNARK;
 
 // Performance & Scaling Components
 // use q_sharding::{ShardCoordinator, ShardManager}; // Temporarily disabled
@@ -18,6 +18,8 @@ use q_wallet::{MemoryWalletStore, WalletManager};
 // Consensus & DAG Components
 use q_dag_knight::{DAGKnightConsensus, QuantumAnchorElection};
 use q_narwhal_core::{NarwhalCore, ReliableBroadcast};
+use q_narwhal_core::production_mempool::ProductionMempool;
+use q_resonance::{KParameterAnalyzer, ResonanceCoordinator, KParameterMetrics, PhaseTransition};
 use q_vdf::{QuantumVDF, VDFProof};
 
 // Crypto & Security
@@ -48,14 +50,21 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub mod config;
+pub mod console_viz;  // Beautiful animated console visualization
 pub mod dex_integration_api;
 #[cfg(test)]
 pub mod dex_integration_tests;
 pub mod handlers;
 pub mod p2p_listener;
 pub mod streaming;
+pub mod binary_protocol;  // High-performance binary ingestion for 1M+ TPS
+// io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
+#[cfg(target_os = "linux")]
+pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
+pub mod parallel_workers; // 16x parallel worker pool for high TPS
 
 pub use config::Config;
+pub use console_viz::{ConsoleVisualizer, ConsensusStats, update_stats};
 pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent};
 
 /// Faucet request tracking for IP-based rate limiting
@@ -267,8 +276,9 @@ pub struct AppState {
     pub node_id: NodeId,
     pub wallet_manager: WalletManager,
     pub node_status: Arc<RwLock<NodeStatus>>,
-    pub tx_pool: Arc<RwLock<HashMap<TxHash, Transaction>>>,
-    pub tx_status: Arc<RwLock<HashMap<TxHash, TxStatus>>>,
+    // PERFORMANCE: Replaced RwLock<HashMap> with DashMap for lock-free concurrency (20-40K TPS target)
+    pub tx_pool: Arc<dashmap::DashMap<TxHash, Transaction>>,
+    pub tx_status: Arc<dashmap::DashMap<TxHash, TxStatus>>,
     pub blocks: Arc<RwLock<HashMap<Height, Vec<Transaction>>>>,
     pub wallet_balances: Arc<RwLock<HashMap<Address, Amount>>>, // Address -> Balance mapping
     pub storage_engine: Arc<StorageEngine>, // Persistent storage for balances and state
@@ -284,24 +294,33 @@ pub struct AppState {
     pub zkp_prover: Option<Arc<QuantumZKPProver>>,
 
     // Network components
-    pub bitcoin_bridge: Option<Arc<IntegratedBitcoinBridge>>,
-    pub dns_phantom: Option<Arc<q_dns_phantom::node_integration::DNSPhantomNode>>,
-    pub bep44_discovery: Option<Arc<tokio::sync::Mutex<q_bep44_discovery::DiscoveryEngine>>>,
+    // DEACTIVATED: pub bitcoin_bridge: Option<Arc<IntegratedBitcoinBridge>>,
+    pub bitcoin_bridge: Option<Arc<()>>, // DEACTIVATED placeholder
+    // DEACTIVATED: pub dns_phantom: Option<Arc<q_dns_phantom::node_integration::DNSPhantomNode>>,
+    pub dns_phantom: Option<Arc<()>>, // DEACTIVATED placeholder
+    // DEACTIVATED: pub bep44_discovery: Option<Arc<tokio::sync::Mutex<q_bep44_discovery::DiscoveryEngine>>>,
+    pub bep44_discovery: Option<Arc<()>>, // DEACTIVATED placeholder
     pub tor_client: Option<Arc<QTorClient>>,
     pub network_manager: Option<Arc<q_network::NetworkManager>>,
     pub production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
 
+    // libp2p-based zero-config peer discovery (mDNS + Gossipsub)
+    pub libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
+
     // BREAKTHROUGH: DNS-Phantom → Connection Integration
     pub connection_manager: Option<Arc<q_network::connection_manager::ConnectionManager>>,
 
-    // ZK Privacy Components
-    // pub stark_prover: Option<Arc<StarkProver>>, // Temporarily disabled
-    // pub groth16_prover: Option<Arc<Groth16Prover>>, // Temporarily disabled
-    // pub plonk_prover: Option<Arc<PlonkProver>>, // Temporarily disabled
+    // DAG State Synchronization
+    pub dag_sync_manager: Option<Arc<q_network::DagSyncManager>>,
+
+    // ZK Privacy Components - ✅ ENABLED
+    pub zk_stark_system: Option<Arc<StarkSystem>>,
+    pub zk_snark_system: Option<Arc<UniversalSNARK>>,
 
     // Performance & Scaling Optimizations
     pub simd_crypto_engine: Option<Arc<q_crypto_simd::SimdCryptoEngine>>,
-    pub kernel_io_engine: Option<Arc<q_kernel_io::KernelIoEngine>>,
+    #[cfg(target_os = "linux")]
+    pub kernel_io_engine: Option<Arc<crate::io_uring_adapter::IoUringAdapter>>,
     // pub shard_coordinator: Option<Arc<ShardCoordinator>>, // Temporarily disabled
     // pub shard_manager: Option<Arc<ShardManager>>, // Temporarily disabled
     // pub cache_manager: Option<Arc<CacheManager>>, // Temporarily disabled
@@ -311,8 +330,13 @@ pub struct AppState {
     pub dag_knight: Option<Arc<DAGKnightConsensus>>,
     pub anchor_election: Option<Arc<QuantumAnchorElection>>,
     pub narwhal_core: Option<Arc<NarwhalCore>>,
+    pub production_mempool: Option<Arc<ProductionMempool>>, // HIGH-PERFORMANCE MEMPOOL FOR 200K+ TPS
     pub reliable_broadcast: Option<Arc<ReliableBroadcast>>,
     pub quantum_vdf: Option<Arc<QuantumVDF>>,
+
+    // Quillon Resonance Consensus - K-Parameter Phase Analysis
+    pub k_parameter_analyzer: Option<Arc<KParameterAnalyzer>>,
+    pub resonance_coordinator: Option<Arc<ResonanceCoordinator>>,
 
     // Quantum Cryptography
     pub quantum_crypto: Option<Arc<QuantumCryptoEngine>>,
@@ -347,6 +371,16 @@ pub struct AppState {
     pub contract_registry: Arc<ContractRegistry>,
     pub orobit_ecosystem: Arc<OrobitSmartContractEcosystem>,
 }
+
+// SAFETY: AppState is safe to Send/Sync because:
+// 1. All internal state is wrapped in Arc which is Send+Sync when T is Send+Sync
+// 2. The KernelIoEngine contains tokio_uring Runtime which has Rc, but:
+//    - It's wrapped in Arc<Mutex<>> which prevents actual cross-thread access to the Rc
+//    - We never move the Runtime itself, only access it through the mutex
+//    - All io_uring operations happen on the thread where the runtime was created
+// 3. All RwLock and Mutex usage ensures proper synchronization
+unsafe impl Send for AppState {}
+unsafe impl Sync for AppState {}
 
 impl AppState {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
@@ -400,6 +434,28 @@ impl AppState {
             }
         }
 
+        // Load existing transactions from storage
+        let tx_pool = Arc::new(dashmap::DashMap::new());
+        let tx_status = Arc::new(dashmap::DashMap::new());
+        match storage_engine.load_all_transactions().await {
+            Ok(persisted_transactions) => {
+                for tx in persisted_transactions {
+                    tx_pool.insert(tx.id, tx.clone());
+                    tx_status.insert(tx.id, TxStatus::InMempool);
+                }
+                tracing::info!(
+                    "💳 Loaded {} transactions from persistent storage",
+                    tx_pool.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load transactions from storage: {}, starting with empty pool",
+                    e
+                );
+            }
+        }
+
         // Initialize real-time streaming
         let event_broadcaster = Arc::new(EventBroadcaster::new());
         let event_emitter = Arc::new(HighPerformanceEmitter::new(event_broadcaster.clone()));
@@ -413,8 +469,9 @@ impl AppState {
             node_id,
             wallet_manager,
             node_status: Arc::new(RwLock::new(node_status)),
-            tx_pool: Arc::new(RwLock::new(HashMap::new())),
-            tx_status: Arc::new(RwLock::new(HashMap::new())),
+            // PERFORMANCE: DashMap for lock-free transaction pool (20-40K TPS target)
+            tx_pool,
+            tx_status,
             blocks: Arc::new(RwLock::new(HashMap::new())),
             wallet_balances: Arc::new(RwLock::new(wallet_balances.clone())),
             storage_engine: storage_engine.clone(),
@@ -427,13 +484,23 @@ impl AppState {
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
             quantum_mixer: {
-                match QuantumMixingEngine::new().await {
-                    Ok(mixer) => {
-                        tracing::info!("✅ Quantum Mixing Engine initialized - Privacy mixer ready");
-                        Some(Arc::new(mixer))
+                // Create entropy pool for mixer initialization
+                match q_quantum_mixing::quantum_entropy::QuantumEntropyPool::new().await {
+                    Ok(entropy_pool) => {
+                        let entropy_arc = Arc::new(entropy_pool);
+                        match QuantumMixingEngine::new(entropy_arc).await {
+                            Ok(mixer) => {
+                                tracing::info!("✅ Quantum Mixing Engine initialized - Privacy mixer ready");
+                                Some(Arc::new(mixer))
+                            }
+                            Err(e) => {
+                                tracing::warn!("⚠️ Quantum Mixing Engine initialization failed: {}, mixer disabled", e);
+                                None
+                            }
+                        }
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Quantum Mixing Engine initialization failed: {}, mixer disabled", e);
+                        tracing::warn!("⚠️ Quantum Entropy Pool initialization failed: {}, mixer disabled", e);
                         None
                     }
                 }
@@ -466,12 +533,14 @@ impl AppState {
             bep44_discovery: None,
             tor_client: None,
             network_manager: None,
+            production_peer_discovery: None,
+            libp2p_discovery: None,  // Disabled in test mode
             connection_manager: None,
+            dag_sync_manager: None,  // Will be initialized with PeerRegistry
 
-            // ZK Privacy Components - Initialize with None, available on demand
-            // stark_prover: None, // Temporarily disabled
-            // groth16_prover: None, // Temporarily disabled
-            // plonk_prover: None, // Temporarily disabled
+            // ZK Privacy Components - Initialize with None
+            zk_stark_system: None,
+            zk_snark_system: None,
 
             // Performance & Scaling Optimizations - Initialize for maximum TPS
             simd_crypto_engine: {
@@ -487,15 +556,15 @@ impl AppState {
                     }
                 }
             },
+            #[cfg(target_os = "linux")]
             kernel_io_engine: {
-                let kernel_config = q_kernel_io::KernelIoConfig::default();
-                match q_kernel_io::KernelIoEngine::new(kernel_config).await {
-                    Ok(engine) => {
-                        tracing::info!("✅ Kernel I/O Engine initialized - io_uring and NUMA optimizations enabled");
-                        Some(Arc::new(engine))
+                match crate::io_uring_adapter::IoUringAdapter::new() {
+                    Ok(adapter) => {
+                        tracing::info!("✅ Kernel I/O Engine initialized with dedicated thread pool");
+                        Some(Arc::new(adapter))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Kernel I/O Engine initialization failed: {}, using standard I/O", e);
+                        tracing::warn!("⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O", e);
                         None
                     }
                 }
@@ -509,8 +578,13 @@ impl AppState {
             dag_knight: None,
             anchor_election: None,
             narwhal_core: None,
+            production_mempool: None,  // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
+
+            // Quillon Resonance - Will be initialized in main.rs
+            k_parameter_analyzer: None,
+            resonance_coordinator: None,
 
             // Quantum Cryptography - Initialize with None, available on demand
             quantum_crypto: None,
@@ -550,10 +624,11 @@ impl AppState {
     pub async fn new_with_networks(
         config: Config,
         node_id: NodeId,
-        bitcoin_bridge: Option<Arc<IntegratedBitcoinBridge>>,
-        dns_phantom: Option<Arc<q_dns_phantom::node_integration::DNSPhantomNode>>,
-        bep44_discovery: Option<Arc<tokio::sync::Mutex<DiscoveryEngine>>>,
+        bitcoin_bridge: Option<Arc<()>>, // DEACTIVATED
+        dns_phantom: Option<Arc<()>>, // DEACTIVATED
+        bep44_discovery: Option<Arc<()>>, // DEACTIVATED
         tor_client: Option<Arc<QTorClient>>,
+        __production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
     ) -> anyhow::Result<Self> {
         let _wallet_store = MemoryWalletStore::new();
         let wallet_manager = WalletManager::new();
@@ -588,9 +663,12 @@ impl AppState {
 
         // Initialize NetworkManager to bridge DNS-phantom to libp2p
         let network_manager = {
+            let mut tor_config = q_tor_client::TorConfig::default();
+            tor_config.enabled = true;  // Enable Tor for NetworkManager
+
             let network_config = q_network::NetworkManagerConfig {
                 local_validator_id: node_id,
-                tor_config: q_tor_client::TorConfig::default(),
+                tor_config,
                 phase: q_types::Phase::Phase1,
                 channel_rotation_hours: 24,
                 sync_enabled: true,
@@ -605,6 +683,21 @@ impl AppState {
                 }
                 Err(e) => {
                     tracing::warn!("⚠️ NetworkManager initialization failed: {}, continuing without peer bridge", e);
+                    None
+                }
+            }
+        };
+
+        // Initialize libp2p-based zero-config peer discovery
+        let libp2p_discovery = {
+            match q_network::UnifiedNetworkManager::new().await {
+                Ok(discovery) => {
+                    tracing::info!("🚀 libp2p Zero-Knowledge Discovery initialized successfully!");
+                    tracing::info!("📡 Active discovery mechanisms: mDNS (local network), Identify (peer exchange), Ping (keepalive)");
+                    Some(Arc::new(tokio::sync::Mutex::new(discovery)))
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ libp2p discovery initialization failed: {}, continuing without mDNS discovery", e);
                     None
                 }
             }
@@ -628,6 +721,28 @@ impl AppState {
             }
         }
 
+        // Load existing transactions from storage
+        let tx_pool = Arc::new(dashmap::DashMap::new());
+        let tx_status = Arc::new(dashmap::DashMap::new());
+        match storage_engine.load_all_transactions().await {
+            Ok(persisted_transactions) => {
+                for tx in persisted_transactions {
+                    tx_pool.insert(tx.id, tx.clone());
+                    tx_status.insert(tx.id, TxStatus::InMempool);
+                }
+                tracing::info!(
+                    "💳 Loaded {} transactions from persistent storage",
+                    tx_pool.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load transactions from storage: {}, starting with empty pool",
+                    e
+                );
+            }
+        }
+
         // Initialize real-time streaming
         let event_broadcaster = Arc::new(EventBroadcaster::new());
         let event_emitter = Arc::new(HighPerformanceEmitter::new(event_broadcaster.clone()));
@@ -641,8 +756,9 @@ impl AppState {
             node_id,
             wallet_manager,
             node_status: Arc::new(RwLock::new(node_status)),
-            tx_pool: Arc::new(RwLock::new(HashMap::new())),
-            tx_status: Arc::new(RwLock::new(HashMap::new())),
+            // PERFORMANCE: DashMap for lock-free transaction pool (20-40K TPS target)
+            tx_pool,
+            tx_status,
             blocks: Arc::new(RwLock::new(HashMap::new())),
             wallet_balances: Arc::new(RwLock::new(wallet_balances.clone())),
             storage_engine: storage_engine.clone(),
@@ -655,6 +771,10 @@ impl AppState {
             bep44_discovery,
             tor_client,
             network_manager,
+            production_peer_discovery: None,
+
+            // libp2p-based zero-config peer discovery
+            libp2p_discovery,
 
             // BREAKTHROUGH: DNS-Phantom → Connection Integration
             connection_manager: {
@@ -667,10 +787,28 @@ impl AppState {
                 Some(cm)
             },
 
-            // ZK Privacy Components - Initialize with None, available on demand
-            // stark_prover: None, // Temporarily disabled
-            // groth16_prover: None, // Temporarily disabled
-            // plonk_prover: None, // Temporarily disabled
+            // DAG State Synchronization - will be initialized with PeerRegistry
+            dag_sync_manager: None,
+
+            // ZK Privacy Components - ✅ Initialize ZK systems
+            zk_stark_system: {
+                match StarkSystem::new(false).await {
+                    Ok(system) => {
+                        tracing::info!("✅ ZK-STARK System initialized - Zero-knowledge proofs enabled");
+                        Some(Arc::new(system))
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️ ZK-STARK System initialization failed: {}, ZK proofs unavailable", e);
+                        None
+                    }
+                }
+            },
+            zk_snark_system: {
+                let snark_config = q_zk_snark::SNARKConfig::default();
+                let system = UniversalSNARK::new(snark_config);
+                tracing::info!("✅ ZK-SNARK System initialized - Groth16/PLONK proofs enabled");
+                Some(Arc::new(system))
+            },
 
             // Performance & Scaling Optimizations - Initialize for maximum TPS
             simd_crypto_engine: {
@@ -686,15 +824,15 @@ impl AppState {
                     }
                 }
             },
+            #[cfg(target_os = "linux")]
             kernel_io_engine: {
-                let kernel_config = q_kernel_io::KernelIoConfig::default();
-                match q_kernel_io::KernelIoEngine::new(kernel_config).await {
-                    Ok(engine) => {
-                        tracing::info!("✅ Kernel I/O Engine initialized - io_uring and NUMA optimizations enabled");
-                        Some(Arc::new(engine))
+                match crate::io_uring_adapter::IoUringAdapter::new() {
+                    Ok(adapter) => {
+                        tracing::info!("✅ Kernel I/O Engine initialized with dedicated thread pool");
+                        Some(Arc::new(adapter))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Kernel I/O Engine initialization failed: {}, using standard I/O", e);
+                        tracing::warn!("⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O", e);
                         None
                     }
                 }
@@ -708,8 +846,13 @@ impl AppState {
             dag_knight: None,
             anchor_election: None,
             narwhal_core: None,
+            production_mempool: None,  // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
+
+            // Quillon Resonance - Will be initialized in main.rs
+            k_parameter_analyzer: None,
+            resonance_coordinator: None,
 
             // Quantum Cryptography - Initialize with None, available on demand
             quantum_crypto: None,
@@ -752,67 +895,10 @@ impl AppState {
             quantum_mixer: None,  // Simple constructor - mixer initialized on demand
             zkp_prover: None,     // Simple constructor - ZK proofs initialized on demand
 
-            // Network components
-            bitcoin_bridge: None,
-            dns_phantom: None, 
-            bep44_discovery: None,
-            tor_client: None,
-            network_manager: None,
-            production_peer_discovery: None,
-            connection_manager: None,
+            // Network components already specified above (lines 660-674)
+            // REMOVED DUPLICATE: bitcoin_bridge, dns_phantom, bep44_discovery, tor_client,
+            // network_manager, production_peer_discovery, connection_manager
         })
-    }
-
-    /// Create AppState with network components
-    pub async fn new_with_networks(
-        config: Config,
-        node_id: NodeId,
-        bitcoin_bridge: Option<Arc<IntegratedBitcoinBridge>>,
-        dns_phantom: Option<Arc<q_dns_phantom::node_integration::DNSPhantomNode>>,
-        bep44_discovery: Option<Arc<tokio::sync::Mutex<q_bep44_discovery::DiscoveryEngine>>>,
-        tor_client: Option<Arc<QTorClient>>,
-        production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
-    ) -> anyhow::Result<Self> {
-        let mut state = Self::new(config).await?;
-        
-        // Set node ID
-        state.node_id = node_id;
-        {
-            let mut node_status = state.node_status.write().await;
-            node_status.node_id = node_id;
-        }
-        
-        // Initialize network components  
-        state.bitcoin_bridge = bitcoin_bridge;
-        state.dns_phantom = dns_phantom;
-        state.bep44_discovery = bep44_discovery;
-        state.tor_client = tor_client;
-        state.production_peer_discovery = production_peer_discovery;
-        
-        // Initialize NetworkManager if needed
-        if state.dns_phantom.is_some() || state.production_peer_discovery.is_some() {
-            let network_config = q_network::NetworkManagerConfig {
-                local_validator_id: node_id,
-                tor_config: q_tor_client::TorConfig::default(),
-                phase: q_types::Phase::Phase1,
-                channel_rotation_hours: 24,
-                sync_enabled: true,
-                heartbeat_interval_secs: 30,
-                max_peers: 100,
-            };
-            
-            match q_network::NetworkManager::new(network_config).await {
-                Ok(network_manager) => {
-                    state.network_manager = Some(Arc::new(network_manager));
-                    tracing::info!("✅ NetworkManager initialized for peer discovery bridge");
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ NetworkManager initialization failed: {}", e);
-                }
-            }
-        }
-        
-        Ok(state)
     }
 
     /// Helper method to save wallet balance to persistent storage

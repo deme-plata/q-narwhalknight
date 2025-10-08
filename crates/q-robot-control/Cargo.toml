@@ -39,7 +39,7 @@ serialport = "4.0"
 
 # Cross-chain integration
 q-types = { path = "../q-types" }
-q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
 
 # Real AI model processing - using mistral.rs via HTTP API
 hf-hub = "0.4"

@@ -9,7 +9,10 @@ use std::{
 use tokio::{fs, task};
 use tracing::{debug, info, warn};
 
-use crate::kv::{KVStore, RocksDBKV};
+// External crates
+extern crate serde_json;
+
+use crate::KVStore;
 
 /// Snapshot manager for creating and managing storage snapshots
 pub struct SnapshotManager {

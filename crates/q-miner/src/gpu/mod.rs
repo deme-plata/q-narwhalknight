@@ -6,7 +6,7 @@ pub use cuda::CudaMiner;
 pub use opencl::OpenClMiner;
 pub use vulkan::VulkanMiner;
 
-use crate::{MiningAlgorithm, MiningEngine, MiningStats, WorkUnit, Solution};
+use crate::{MiningAlgorithm, MiningEngine, MiningStats, WorkUnit, Solution, GlobalMiningStats};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -228,20 +228,6 @@ impl MultiGpuCoordinator {
         }
         
         Ok(all_solutions)
-    }
-}
-
-impl Default for GlobalMiningStats {
-    fn default() -> Self {
-        Self {
-            total_hash_rate: 0.0,
-            accepted_shares: 0,
-            rejected_shares: 0,
-            efficiency: 0.0,
-            uptime: chrono::Duration::zero(),
-            power_usage: 0.0,
-            devices: Vec::new(),
-        }
     }
 }
 

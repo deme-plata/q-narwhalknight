@@ -1,6 +1,6 @@
 /// Pull-based sync protocol for DagKnight DAG catch-up
 /// Efficient range-based vertex and certificate synchronization
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use libp2p::{
     request_response::{self, ProtocolSupport},
@@ -15,8 +15,11 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::RwLock;
+use tracing::{debug, info};
+
+// External crates
+extern crate hex;
 
 use crate::kv::KVStore;
 
@@ -454,59 +457,103 @@ impl request_response::Codec for DagSyncCodec {
     type Request = SyncRequest;
     type Response = SyncResponse;
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    async fn read_request<T>(&mut self, _protocol: &StreamProtocol, io: &mut T) -> io::Result<SyncRequest>
     where
         T: futures::AsyncRead + Unpin + Send,
     {
-        // Implementation would read and deserialize SyncRequest
-        // For now, return a dummy request
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Not implemented",
-        ))
+        use futures::AsyncReadExt;
+
+        // Read length prefix (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        io.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        // Read payload
+        let mut buffer = vec![0u8; len];
+        io.read_exact(&mut buffer).await?;
+
+        // Deserialize request
+        bincode::deserialize(&buffer).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })
     }
 
     async fn read_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        _protocol: &StreamProtocol,
         io: &mut T,
-    ) -> io::Result<Self::Response>
+    ) -> io::Result<SyncResponse>
     where
         T: futures::AsyncRead + Unpin + Send,
     {
-        // Implementation would read and deserialize SyncResponse
-        // For now, return a dummy response
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Not implemented",
-        ))
+        use futures::AsyncReadExt;
+
+        // Read length prefix (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        io.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        // Read payload
+        let mut buffer = vec![0u8; len];
+        io.read_exact(&mut buffer).await?;
+
+        // Deserialize response
+        bincode::deserialize(&buffer).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })
     }
 
     async fn write_request<T>(
         &mut self,
-        _: &Self::Protocol,
+        _protocol: &StreamProtocol,
         io: &mut T,
-        req: Self::Request,
+        req: SyncRequest,
     ) -> io::Result<()>
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
-        // Implementation would serialize and write SyncRequest
-        // For now, just succeed
+        use futures::AsyncWriteExt;
+
+        // Serialize request
+        let data = bincode::serialize(&req).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
+
+        // Write length prefix (4 bytes)
+        let len = data.len() as u32;
+        io.write_all(&len.to_be_bytes()).await?;
+
+        // Write payload
+        io.write_all(&data).await?;
+        io.flush().await?;
+
         Ok(())
     }
 
     async fn write_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        _protocol: &StreamProtocol,
         io: &mut T,
-        res: Self::Response,
+        res: SyncResponse,
     ) -> io::Result<()>
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
-        // Implementation would serialize and write SyncResponse
-        // For now, just succeed
+        use futures::AsyncWriteExt;
+
+        // Serialize response
+        let data = bincode::serialize(&res).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
+
+        // Write length prefix (4 bytes)
+        let len = data.len() as u32;
+        io.write_all(&len.to_be_bytes()).await?;
+
+        // Write payload
+        io.write_all(&data).await?;
+        io.flush().await?;
+
         Ok(())
     }
 }

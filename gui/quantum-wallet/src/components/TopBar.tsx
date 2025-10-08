@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield } from 'lucide-react';
+import { TICKER_SYMBOL } from '../constants/ticker';
 // import { qnkAPI } from '../services/api'; // For future real API integration
 
 interface SearchResult {
@@ -125,12 +126,6 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const getQCIColor = (qci: number) => {
-    if (qci >= 0.9) return 'from-quantum-green to-quantum-cyan';
-    if (qci >= 0.8) return 'from-quantum-yellow to-quantum-green';
-    return 'from-quantum-pink to-quantum-yellow';
-  };
-
   const getQCIStatus = (qci: number) => {
     if (qci >= 0.9) return 'Sublime';
     if (qci >= 0.8) return 'Coherent';
@@ -146,22 +141,20 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
     }
   };
 
-  const getResultColor = (type: SearchResult['type']) => {
-    switch (type) {
-      case 'transaction': return 'text-quantum-green';
-      case 'block': return 'text-quantum-cyan';
-      case 'address': return 'text-quantum-purple';
-      case 'node': return 'text-quantum-pink';
-    }
-  };
-
   return (
-    <div className="bg-quantum-indigo/30 backdrop-blur-xl border-b border-quantum-purple/20 px-6 py-4 relative z-50">
+    <div
+      className="backdrop-blur-xl border-b px-6 py-4 relative z-50"
+      style={{
+        background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.95) 0%, rgba(50, 30, 80, 0.95) 100%)',
+        borderColor: 'rgba(212, 175, 55, 0.2)',
+        boxShadow: '0 4px 20px rgba(212, 175, 55, 0.15)'
+      }}
+    >
       <div className="flex items-center justify-between">
         {/* Left: Search */}
         <div className="flex-1 max-w-md relative">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-amber-400" />
             <input
               type="text"
               value={searchQuery}
@@ -172,7 +165,7 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
               onBlur={() => setTimeout(() => setShowResults(false), 200)}
               onFocus={() => setShowResults(true)}
               placeholder="Search transactions, blocks, addresses..."
-              className="w-full pl-10 pr-4 py-2 bg-quantum-dark/50 border border-quantum-purple/30 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan transition-colors"
+              className="w-full pl-10 pr-4 py-2 bg-slate-900/70 border-2 border-amber-500/30 rounded-lg text-amber-50 placeholder-amber-300/40 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all"
             />
             {isSearching && (
               <motion.div
@@ -180,7 +173,7 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
                 transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                 className="absolute right-3 top-1/2 transform -translate-y-1/2"
               >
-                <Search className="w-4 h-4 text-quantum-cyan" />
+                <Search className="w-4 h-4 text-amber-400" />
               </motion.div>
             )}
           </div>
@@ -192,7 +185,12 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
-                className="absolute top-full mt-2 w-full bg-quantum-dark/95 backdrop-blur-xl border border-quantum-purple/30 rounded-lg shadow-2xl max-h-96 overflow-y-auto z-50"
+                className="absolute top-full mt-2 w-full backdrop-blur-xl rounded-lg shadow-2xl max-h-96 overflow-y-auto z-50"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.98) 0%, rgba(50, 30, 80, 0.98) 100%)',
+                  border: '2px solid rgba(212, 175, 55, 0.3)',
+                  boxShadow: '0 10px 40px rgba(212, 175, 55, 0.2)'
+                }}
               >
                 {searchResults.map((result, index) => (
                   <motion.div
@@ -200,22 +198,36 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: index * 0.05 }}
-                    className="flex items-center justify-between p-4 hover:bg-quantum-purple/10 border-b border-quantum-purple/10 last:border-b-0 cursor-pointer group"
+                    className="flex items-center justify-between p-4 border-b last:border-b-0 cursor-pointer group"
+                    style={{
+                      borderColor: 'rgba(212, 175, 55, 0.1)'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'linear-gradient(135deg, rgba(212, 175, 55, 0.1) 0%, rgba(255, 215, 0, 0.05) 100%)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'transparent';
+                    }}
                     onClick={() => {
-                      // Handle navigation to result
                       console.log('Navigate to:', result);
                       setShowResults(false);
                       setSearchQuery('');
                     }}
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`p-2 rounded-lg bg-quantum-purple/20 ${getResultColor(result.type)}`}>
-                        {getResultIcon(result.type)}
+                      <div
+                        className="p-2 rounded-lg"
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.2), rgba(255, 215, 0, 0.15))',
+                          border: '1px solid rgba(212, 175, 55, 0.3)'
+                        }}
+                      >
+                        <div className="text-amber-400">{getResultIcon(result.type)}</div>
                       </div>
                       <div>
-                        <div className="text-white font-medium">{result.title}</div>
+                        <div className="text-amber-100 font-semibold">{result.title}</div>
                         {result.subtitle && (
-                          <div className="text-gray-400 text-sm">{result.subtitle}</div>
+                          <div className="text-amber-300/60 text-sm">{result.subtitle}</div>
                         )}
                       </div>
                     </div>
@@ -228,16 +240,16 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
                             e.stopPropagation();
                             copyToClipboard(result.hash!, `${result.type}-${result.id}`);
                           }}
-                          className="p-1 text-gray-400 hover:text-quantum-cyan transition-colors"
+                          className="p-1 text-amber-400/60 hover:text-amber-400 transition-colors"
                         >
                           {copiedId === `${result.type}-${result.id}` ? (
-                            <Check className="w-4 h-4 text-quantum-green" />
+                            <Check className="w-4 h-4 text-green-400" />
                           ) : (
                             <Copy className="w-4 h-4" />
                           )}
                         </motion.button>
                       )}
-                      <ExternalLink className="w-4 h-4 text-gray-400" />
+                      <ExternalLink className="w-4 h-4 text-amber-400/60" />
                     </div>
                   </motion.div>
                 ))}
@@ -248,18 +260,36 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
 
         {/* Center: Network Status */}
         <div className="flex items-center gap-6">
-          <div className="text-center">
-            <div className="text-white font-bold text-lg">
-              {currentBalance.toLocaleString()} QNK
+          <div className="text-center relative">
+            <motion.div
+              className="font-bold text-lg bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent"
+              key={currentBalance}
+              initial={{ scale: 1.2, opacity: 0.5 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.3 }}
+            >
+              {currentBalance.toLocaleString()} {TICKER_SYMBOL}
+            </motion.div>
+            <div className="text-amber-300/60 text-sm font-medium flex items-center gap-2 justify-center">
+              <span>Total Balance</span>
+              <motion.div
+                className="w-1.5 h-1.5 rounded-full bg-green-400"
+                animate={{ scale: [1, 1.3, 1], opacity: [0.7, 1, 0.7] }}
+                transition={{ duration: 2, repeat: Infinity }}
+                title="Live updates enabled"
+              />
             </div>
-            <div className="text-gray-400 text-sm">Total Balance</div>
           </div>
-          
-          <div className="h-8 w-px bg-quantum-purple/30" />
-          
+
+          <div className="h-8 w-px bg-gradient-to-b from-transparent via-amber-500/30 to-transparent" />
+
           <div className="flex items-center gap-3">
-            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-quantum-green' : 'bg-red-500'}`} />
-            <div className="text-white text-sm">
+            <motion.div
+              className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-500'}`}
+              animate={isOnline ? { scale: [1, 1.2, 1], opacity: [0.7, 1, 0.7] } : {}}
+              transition={{ duration: 2, repeat: Infinity }}
+            />
+            <div className="text-amber-100 text-sm font-medium">
               Block #{blockHeight} • {peers} peers
             </div>
           </div>
@@ -267,21 +297,30 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
 
         {/* Right: Coherence Index */}
         <div className="flex items-center gap-3">
-          <Shield className="w-4 h-4 text-quantum-cyan" />
+          <Shield className="w-5 h-5 text-amber-400" />
           <div className="text-right">
             <div className="flex items-center gap-2">
-              <span className="text-white text-sm font-bold">
+              <span className="text-amber-100 text-sm font-bold">
                 {(qci * 100).toFixed(0)}%
               </span>
-              <span className={`text-xs font-medium bg-gradient-to-r ${getQCIColor(qci)} bg-clip-text text-transparent`}>
+              <span className="text-xs font-semibold bg-gradient-to-r from-amber-400 to-yellow-500 bg-clip-text text-transparent">
                 {getQCIStatus(qci)}
               </span>
             </div>
-            <div className="text-gray-400 text-xs">Quantum Coherence</div>
+            <div className="text-amber-300/60 text-xs font-medium">Quantum Coherence</div>
           </div>
-          <div className="relative w-12 h-2 bg-quantum-dark/50 rounded-full overflow-hidden">
+          <div
+            className="relative w-12 h-2 rounded-full overflow-hidden"
+            style={{
+              background: 'rgba(15, 23, 42, 0.7)',
+              border: '1px solid rgba(212, 175, 55, 0.3)'
+            }}
+          >
             <motion.div
-              className={`h-full bg-gradient-to-r ${getQCIColor(qci)}`}
+              className="h-full"
+              style={{
+                background: 'linear-gradient(90deg, #D4AF37, #FFD700, #FFA500)'
+              }}
               initial={{ width: 0 }}
               animate={{ width: `${qci * 100}%` }}
               transition={{ duration: 1 }}

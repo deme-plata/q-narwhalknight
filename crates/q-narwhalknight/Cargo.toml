@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Core quantum mesh components (proven working)
-q-dns-phantom = { path = "../q-dns-phantom" }
+# q-dns-phantom = { path = "../q-dns-phantom" } # DEACTIVATED
 q-network = { path = "../q-network" }
 q-types = { path = "../q-types" }
 

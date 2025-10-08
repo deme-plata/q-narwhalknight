@@ -275,7 +275,7 @@ impl MinerConfig {
     
     async fn calculate_optimal_intensity(&self) -> u8 {
         // Calculate optimal intensity based on hardware capabilities
-        let mut intensity = 5; // Base intensity
+        let mut intensity: u8 = 5; // Base intensity
         
         // Increase for high-end CPUs
         if self.hardware.cpu_threads >= 16 {

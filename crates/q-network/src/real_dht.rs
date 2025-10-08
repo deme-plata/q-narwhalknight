@@ -1,5 +1,5 @@
 /// Real Production DHT Implementation using libp2p Kademlia
-/// 
+///
 /// This replaces all mock implementations with actual network connectivity.
 use anyhow::{anyhow, Result};
 use futures::prelude::*;
@@ -13,7 +13,7 @@ use libp2p::{
     },
     multiaddr::Protocol,
     noise, ping,
-    swarm::SwarmEvent,
+    swarm::{SwarmEvent, NetworkBehaviour},
     SwarmBuilder,
     tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
@@ -105,10 +105,36 @@ pub enum DhtCommand {
 
 /// Combined network behavior for the DHT
 #[derive(libp2p::swarm::NetworkBehaviour)]
+#[behaviour(to_swarm = "DhtBehaviourEvent")]
 struct DhtBehaviour {
     kademlia: KademliaBehaviour<libp2p::kad::store::MemoryStore>,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
+}
+
+#[derive(Debug)]
+enum DhtBehaviourEvent {
+    Kademlia(KademliaEvent),
+    Identify(identify::Event),
+    Ping(ping::Event),
+}
+
+impl From<KademliaEvent> for DhtBehaviourEvent {
+    fn from(event: KademliaEvent) -> Self {
+        DhtBehaviourEvent::Kademlia(event)
+    }
+}
+
+impl From<identify::Event> for DhtBehaviourEvent {
+    fn from(event: identify::Event) -> Self {
+        DhtBehaviourEvent::Identify(event)
+    }
+}
+
+impl From<ping::Event> for DhtBehaviourEvent {
+    fn from(event: ping::Event) -> Self {
+        DhtBehaviourEvent::Ping(event)
+    }
 }
 
 impl RealDht {
@@ -121,7 +147,7 @@ impl RealDht {
         info!("Creating real DHT node with peer ID: {}", local_peer_id);
 
         // Create transport
-        let transport = tcp::tokio::Transport::default()
+        let transport = tcp::tokio::Transport::new(tcp::Config::default())
             .upgrade(upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key)?)
             .multiplex(yamux::Config::default())
@@ -156,13 +182,17 @@ impl RealDht {
             ping: ping::Behaviour::new(ping::Config::new()),
         };
 
-        // Create swarm using new builder pattern
-        let swarm = SwarmBuilder::with_existing_identity(local_key)
-            .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
-            .with_behaviour(|_| behaviour)?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(config.connection_idle_timeout))
-            .build();
+        // Create swarm using libp2p 0.53 API
+        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+            .upgrade(libp2p::core::upgrade::Version::V1)
+            .authenticate(noise::Config::new(&local_key)?)
+            .multiplex(yamux::Config::default())
+            .boxed();
+
+        let swarm_config = libp2p::swarm::Config::with_tokio_executor()
+            .with_idle_connection_timeout(config.connection_idle_timeout);
+
+        let swarm = Swarm::new(transport, behaviour, local_key.public().to_peer_id(), swarm_config);
 
         // Create communication channels
         let (event_sender, _) = broadcast::channel(1000);
@@ -288,15 +318,14 @@ impl RealDht {
 
             SwarmEvent::Behaviour(event) => {
                 // Handle behavior events using enum pattern matching
-                use crate::real_dht::DhtBehaviourEvent as Event;
                 match event {
-                    Event::Kademlia(kad_event) => {
+                    DhtBehaviourEvent::Kademlia(kad_event) => {
                         self.handle_kademlia_event(kad_event).await?;
                     }
-                    Event::Identify(identify_event) => {
+                    DhtBehaviourEvent::Identify(identify_event) => {
                         self.handle_identify_event(identify_event).await?;
                     }
-                    Event::Ping(ping_event) => {
+                    DhtBehaviourEvent::Ping(ping_event) => {
                         self.handle_ping_event(ping_event).await?;
                     }
                 }

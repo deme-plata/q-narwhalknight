@@ -23,7 +23,7 @@ export default function QuantumBackground() {
       color: string;
     }> = [];
 
-    const colors = ['#00d9ff', '#6b46c1', '#ff0080', '#00ff88', '#ffd700'];
+    const colors = ['#D4AF37', '#FFD700', '#FFA500', '#8B5CF6', '#A855F7']; // Gold and purple tones
 
     for (let i = 0; i < 50; i++) {
       particles.push({
@@ -37,7 +37,7 @@ export default function QuantumBackground() {
     }
 
     const animate = () => {
-      ctx.fillStyle = 'rgba(10, 11, 20, 0.05)';
+      ctx.fillStyle = 'rgba(30, 20, 60, 0.05)'; // Deep purple background
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       particles.forEach((particle, i) => {
@@ -62,7 +62,7 @@ export default function QuantumBackground() {
             ctx.beginPath();
             ctx.moveTo(particle.x, particle.y);
             ctx.lineTo(other.x, other.y);
-            ctx.strokeStyle = `rgba(0, 217, 255, ${0.2 * (1 - distance / 150)})`;
+            ctx.strokeStyle = `rgba(212, 175, 55, ${0.2 * (1 - distance / 150)})`; // Gold connections
             ctx.stroke();
           }
         });
@@ -95,12 +95,12 @@ export default function QuantumBackground() {
         {[...Array(5)].map((_, i) => (
           <motion.div
             key={i}
-            className="absolute w-0.5 h-20 bg-gradient-to-b from-transparent via-quantum-cyan to-transparent"
-            initial={{ 
+            className="absolute w-0.5 h-20 bg-gradient-to-b from-transparent via-amber-400 to-transparent"
+            initial={{
               top: -80,
               left: `${20 + i * 20}%`,
             }}
-            animate={{ 
+            animate={{
               top: '110%',
             }}
             transition={{

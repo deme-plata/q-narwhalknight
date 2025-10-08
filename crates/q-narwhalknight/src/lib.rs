@@ -33,9 +33,23 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 // Re-export core components
-pub use q_dns_phantom::{DNSPhantomConfig, DNSPhantomNetwork};
+// DEACTIVATED: pub use q_dns_phantom::{DNSPhantomConfig, DNSPhantomNetwork};
 pub use q_network::connection_manager::{ConnectionManager, PeerInfo};
 pub use q_types::*;
+
+// DEACTIVATED PLACEHOLDER TYPES
+pub struct DNSPhantomConfig;
+pub struct DNSPhantomNetwork;
+
+impl DNSPhantomConfig {
+    pub fn default() -> Self { Self }
+}
+
+impl DNSPhantomNetwork {
+    pub async fn new(_config: DNSPhantomConfig, _node_id: [u8; 32]) -> anyhow::Result<Self> {
+        Ok(Self)
+    }
+}
 
 // API module for REST endpoint integration
 #[cfg(feature = "api")]

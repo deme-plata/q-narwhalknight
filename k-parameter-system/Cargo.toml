@@ -1,0 +1,53 @@
+[package]
+name = "k-parameter-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "K-Parameter Kristensen Framework - Quantum Frontiers Research System"
+
+[[bin]]
+name = "k-parameter-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "visualization-generator"
+path = "src/visualization_generator.rs"
+
+[workspace]
+members = [
+    ".",
+    "crates/k-constants",
+    "crates/k-quantum-gravity",
+    "crates/k-dark-sector",
+    "crates/k-biological-quantum",
+    "crates/k-topological-quantum",
+    "crates/k-cosmological-inflation",
+    "crates/k-foam-topology",
+    "crates/k-graph-generator",
+]
+
+[workspace.dependencies]
+nalgebra = "0.32"
+ndarray = "0.15"
+num-complex = "0.4"
+plotters = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dependencies]
+nalgebra = { workspace = true }
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+serde = { workspace = true }
+plotters = { workspace = true }
+k-constants = { path = "crates/k-constants" }
+k-quantum-gravity = { path = "crates/k-quantum-gravity" }
+k-dark-sector = { path = "crates/k-dark-sector" }
+k-biological-quantum = { path = "crates/k-biological-quantum" }
+k-topological-quantum = { path = "crates/k-topological-quantum" }
+k-cosmological-inflation = { path = "crates/k-cosmological-inflation" }
+k-foam-topology = { path = "crates/k-foam-topology" }
+k-graph-generator = { path = "crates/k-graph-generator" }
+
+[dev-dependencies]
+approx = "0.5"

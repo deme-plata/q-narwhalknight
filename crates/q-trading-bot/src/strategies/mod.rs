@@ -1,0 +1,15 @@
+/// Trading strategies module
+use anyhow::Result;
+use async_trait::async_trait;
+use crate::types::*;
+
+#[async_trait]
+pub trait Strategy: Send + Sync {
+    fn name(&self) -> &str;
+    async fn analyze(&mut self, ticker: &Ticker, balance: &WalletBalance) -> Result<TradingSignal>;
+    async fn on_order_filled(&mut self, order: &Order) -> Result<()>;
+}
+
+pub mod grid;
+pub mod market_maker;
+pub mod dca;

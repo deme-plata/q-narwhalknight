@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Sparkles, Key, AlertCircle } from 'lucide-react';
+import { Sparkles, Key, AlertCircle } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 
 interface LoginScreenProps {
@@ -9,6 +9,7 @@ interface LoginScreenProps {
 
 export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [seedPhrase, setSeedPhrase] = useState('');
+  const [password, setPassword] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [showQuantumGenerator, setShowQuantumGenerator] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -16,16 +17,30 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
   const handleAuthenticate = async () => {
     setIsAuthenticating(true);
-    
-    // Store the seed phrase securely (in production, use proper encryption)
-    if (seedPhrase) {
-      localStorage.setItem('walletSeed', seedPhrase);
+    setGenerationError(null);
+
+    try {
+      // Call the import wallet API with mnemonic and optional password
+      const response = await qnkAPI.createWallet(seedPhrase, password || undefined);
+
+      if (response.success && response.data) {
+        // Store wallet information
+        localStorage.setItem('walletSeed', seedPhrase);
+        localStorage.setItem('walletAddress', response.data.address_formatted || '');
+        localStorage.setItem('walletId', response.data.id);
+
+        // Show success animation
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        onAuthenticate();
+      } else {
+        throw new Error(response.error || 'Failed to import wallet');
+      }
+    } catch (error) {
+      console.error('Wallet authentication failed:', error);
+      setGenerationError(error instanceof Error ? error.message : 'Authentication failed');
+      setIsAuthenticating(false);
     }
-    
-    // Simulate authentication with quantum animations
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    onAuthenticate();
   };
 
   const generateQuantumSeed = async () => {
@@ -71,37 +86,68 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       >
         {/* Logo and Title */}
         <div className="text-center mb-12">
-          <motion.div 
+          <motion.div
             className="inline-block mb-6"
-            animate={{ rotate: 360 }}
-            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.5 }}
           >
-            <div className="w-32 h-32 mx-auto relative">
-              <div className="absolute inset-0 rainbow-box rounded-full blur-2xl opacity-50" />
-              <div className="absolute inset-0 bg-gradient-to-br from-quantum-purple to-quantum-cyan rounded-full flex items-center justify-center">
-                <Shield className="w-16 h-16 text-white" />
+            <div className="w-40 h-40 mx-auto relative">
+              {/* Cosmic glow effect */}
+              <div className="absolute inset-0 bg-gradient-to-b from-amber-500/20 via-orange-500/20 to-yellow-500/20 rounded-full blur-3xl animate-pulse" />
+              {/* Gold border ring */}
+              <div className="absolute inset-0 rounded-full" style={{
+                background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                padding: '3px'
+              }}>
+                <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-4">
+                  <img
+                    src="/quillon-logo.png"
+                    alt="Quillon Graph Logo"
+                    className="w-full h-full object-contain"
+                    style={{ filter: 'invert(1)' }}
+                  />
+                </div>
               </div>
             </div>
           </motion.div>
-          
-          <h1 className="text-4xl lg:text-5xl font-bold bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
-            Q-NarwhalKnight
+
+          <h1 className="text-4xl lg:text-5xl font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent drop-shadow-[0_0_15px_rgba(251,191,36,0.5)]">
+            Quillon Graph
           </h1>
-          <p className="text-gray-400 mt-2">Quantum Consensus Wallet</p>
+          <p className="text-amber-200/70 mt-2 font-medium">Quantum Consensus Wallet</p>
         </div>
 
         {/* Login Form */}
-        <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8 quantum-glow">
+        <div className="relative rounded-3xl p-8 backdrop-blur-xl" style={{
+          background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(30, 41, 59, 0.8) 100%)',
+          border: '2px solid',
+          borderImage: 'linear-gradient(135deg, #D4AF37, #FFD700, #FFA500, #FFD700, #D4AF37) 1',
+          boxShadow: '0 0 30px rgba(212, 175, 55, 0.2), inset 0 0 20px rgba(212, 175, 55, 0.1)'
+        }}>
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-amber-200 mb-2">
                 BIP39 Quantum Seed Phrase
               </label>
               <textarea
                 value={seedPhrase}
                 onChange={(e) => setSeedPhrase(e.target.value)}
-                className="w-full h-24 px-4 py-3 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan transition-colors resize-none"
+                className="w-full h-24 px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all resize-none"
                 placeholder="Enter your 12-word seed phrase..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-amber-200 mb-2">
+                Password (Optional)
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all"
+                placeholder="Enter password for wallet encryption..."
               />
             </div>
 
@@ -109,7 +155,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             <motion.button
               onClick={generateQuantumSeed}
               disabled={isGenerating}
-              className="w-full py-4 px-6 bg-gradient-to-r from-quantum-purple/20 to-quantum-cyan/20 border border-quantum-cyan/30 rounded-xl text-white font-medium flex items-center justify-center gap-3 hover:border-quantum-cyan/60 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full py-4 px-6 bg-gradient-to-r from-amber-900/40 to-yellow-900/40 border-2 border-amber-500/40 rounded-xl text-amber-100 font-medium flex items-center justify-center gap-3 hover:border-amber-400 hover:shadow-[0_0_20px_rgba(251,191,36,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               whileHover={{ scale: isGenerating ? 1 : 1.02 }}
               whileTap={{ scale: isGenerating ? 1 : 0.98 }}
             >
@@ -119,13 +165,13 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     animate={{ rotate: 360 }}
                     transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                   >
-                    <Sparkles className="w-5 h-5" />
+                    <Sparkles className="w-5 h-5 text-amber-400" />
                   </motion.div>
                   <span>Generating BIP39 Mnemonic...</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-5 h-5" />
+                  <Sparkles className="w-5 h-5 text-amber-400" />
                   <span>Generate Quantum Entropy</span>
                 </>
               )}
@@ -145,18 +191,18 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
             {/* Quantum Generator Animation */}
             {showQuantumGenerator && (
-              <motion.div 
-                className="h-32 rounded-xl overflow-hidden relative"
+              <motion.div
+                className="h-32 rounded-xl overflow-hidden relative border-2 border-amber-500/30"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
               >
-                <div className="absolute inset-0 rainbow-box animate-rainbow-shift" />
-                <div className="absolute inset-0 bg-quantum-dark/80 flex items-center justify-center">
+                <div className="absolute inset-0 bg-gradient-to-r from-amber-500/20 via-yellow-500/20 to-orange-500/20 animate-pulse" />
+                <div className="absolute inset-0 bg-slate-900/80 flex items-center justify-center">
                   <motion.div
                     animate={{ rotate: 360 }}
                     transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                   >
-                    <Sparkles className="w-12 h-12 text-white" />
+                    <Sparkles className="w-12 h-12 text-amber-400" />
                   </motion.div>
                 </div>
               </motion.div>
@@ -166,7 +212,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             <motion.button
               onClick={handleAuthenticate}
               disabled={!seedPhrase || isAuthenticating}
-              className="w-full py-5 px-6 bg-gradient-to-r from-quantum-purple to-quantum-cyan rounded-xl text-white font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-2xl hover:shadow-quantum-cyan/25 transition-all"
+              className="w-full py-5 px-6 bg-gradient-to-r from-amber-600 to-yellow-600 rounded-xl text-slate-900 font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-[0_0_30px_rgba(251,191,36,0.5)] hover:from-amber-500 hover:to-yellow-500 transition-all"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
@@ -176,7 +222,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     animate={{ rotate: 360 }}
                     transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                   >
-                    <Shield className="w-6 h-6" />
+                    <Key className="w-6 h-6" />
                   </motion.div>
                   <span>Quantum Authenticating...</span>
                 </>
@@ -191,13 +237,13 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
           {/* Photon Waterfall Effect */}
           {isAuthenticating && (
-            <motion.div 
-              className="mt-6 h-2 rounded-full overflow-hidden"
+            <motion.div
+              className="mt-6 h-2 rounded-full overflow-hidden border border-amber-500/30"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
             >
               <motion.div
-                className="h-full bg-gradient-to-r from-quantum-green via-quantum-cyan to-quantum-purple"
+                className="h-full bg-gradient-to-r from-amber-600 via-yellow-500 to-amber-600"
                 initial={{ x: '-100%' }}
                 animate={{ x: '100%' }}
                 transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
@@ -207,7 +253,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         </div>
 
         {/* Security Note */}
-        <p className="text-center text-gray-500 text-sm mt-6">
+        <p className="text-center text-amber-300/60 text-sm mt-6 font-medium">
           🔐 Post-Quantum Cryptography • 🌊 DAG-BFT Consensus • 🧅 Tor Integration
         </p>
       </motion.div>

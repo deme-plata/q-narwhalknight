@@ -1,0 +1,10 @@
+[package]
+name = "k-cosmological-inflation"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "Cosmological inflation dynamics with Starobinsky potential"
+
+[dependencies]
+k-constants = { path = "../k-constants" }
+ndarray = { workspace = true }

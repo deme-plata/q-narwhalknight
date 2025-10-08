@@ -15,6 +15,10 @@ struct Args {
     #[arg(short, long, default_value = "benchmark")]
     mode: String,
 
+    /// Wallet address for mining rewards
+    #[arg(short, long)]
+    wallet: Option<String>,
+
     /// Number of CPU threads (0 = auto-detect)
     #[arg(short, long, default_value = "0")]
     threads: usize,
@@ -30,7 +34,7 @@ struct Args {
     /// Enable benchmarking mode
     #[arg(long)]
     benchmark: bool,
-    
+
     /// Duration in seconds for benchmark
     #[arg(long, default_value = "30")]
     duration: u64,
@@ -87,8 +91,24 @@ async fn main() -> Result<()> {
         info!("🏁 Running benchmark mode for {} seconds...", args.duration);
         run_benchmark(cpu_threads, args.intensity, args.duration).await?;
     } else {
+        // Validate wallet address for non-benchmark modes
+        let wallet = match args.wallet {
+            Some(w) => w,
+            None => {
+                error!("❌ Wallet address required for {} mode. Use --wallet <address>", args.mode);
+                std::process::exit(1);
+            }
+        };
+
+        // Validate wallet format
+        if !wallet.starts_with("qnk") || wallet.len() != 67 {
+            error!("❌ Invalid wallet address format. Must start with 'qnk' and be 67 characters long.");
+            std::process::exit(1);
+        }
+
         info!("⛏️  Starting Q-NarwhalKnight mining...");
-        run_mining(cpu_threads, args.intensity, args.gpu).await?;
+        info!("💰 Mining to wallet: {}", wallet);
+        run_mining(cpu_threads, args.intensity, args.gpu, &wallet).await?;
     }
 
     Ok(())
@@ -151,19 +171,21 @@ async fn run_benchmark(threads: usize, intensity: u8, duration: u64) -> Result<(
     Ok(())
 }
 
-async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool) -> Result<()> {
+async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &str) -> Result<()> {
     let hash_counter = Arc::new(AtomicU64::new(0));
     let is_running = Arc::new(AtomicBool::new(true));
-    
+    let wallet = wallet.to_string();
+
     info!("🔥 Starting {} CPU mining threads", threads);
-    
+
     let handles: Vec<_> = (0..threads)
         .map(|thread_id| {
             let hash_counter = hash_counter.clone();
             let is_running = is_running.clone();
-            
+            let wallet = wallet.clone();
+
             tokio::spawn(async move {
-                mining_thread(thread_id, hash_counter, is_running, intensity).await
+                mining_thread(thread_id, hash_counter, is_running, intensity, wallet).await
             })
         })
         .collect();
@@ -228,39 +250,69 @@ async fn mining_thread(
     hash_counter: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
     intensity: u8,
+    wallet: String,
 ) {
     info!("🔥 CPU mining thread {} started", thread_id);
-    
+
     let mut nonce = thread_id as u64 * 1_000_000;
     let batch_size = (intensity as u64) * 10_000;
-    
+
     // Difficulty target (for demonstration - easy target)
     let target = [0x00u8, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-    
+
+    let client = reqwest::Client::new();
+
     while is_running.load(Ordering::SeqCst) {
         // Mine a batch of nonces
         for _ in 0..batch_size {
             let hash = compute_dag_knight_hash(&[0u8; 32], nonce);
             hash_counter.fetch_add(1, Ordering::Relaxed);
-            
+
             // Check if solution meets difficulty target
             if hash < target {
-                info!("💎 Thread {} found solution! Nonce: {}, Hash: {:02x?}", 
+                info!("💎 Thread {} found solution! Nonce: {}, Hash: {:02x?}",
                      thread_id, nonce, &hash[..8]);
-                
-                // In production, this would be submitted to the network
+
+                // Submit solution to the network
+                let solution = serde_json::json!({
+                    "miner_address": wallet,
+                    "nonce": nonce,
+                    "hash": hash,
+                    "difficulty_target": target
+                });
+
+                match client.post("http://localhost:8090/api/v1/mining/submit")
+                    .json(&solution)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            if let Ok(result) = resp.json::<serde_json::Value>().await {
+                                if let Some(data) = result.get("data") {
+                                    if let Some(reward) = data.get("reward_qnk") {
+                                        info!("✅ Solution accepted! Earned {} QNK", reward);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to submit solution: {}", e);
+                    }
+                }
             }
-            
+
             nonce += 1;
         }
-        
+
         // Brief pause to prevent CPU overload
         tokio::task::yield_now().await;
     }
-    
+
     info!("🛑 CPU mining thread {} stopped", thread_id);
 }
 

@@ -11,7 +11,6 @@ clap = { version = "4.0", features = ["derive"] }
 toml = "0.5"
 # Original dependencies
 tokio = { version = "1.35.0", features = ["full", "rt-multi-thread"] }
-rocksdb = { workspace = true }
 libp2p = { version = "0.53", features = ["tcp", "tokio", "noise", "yamux", "gossipsub", "identify", "ping", "kad", "dns", "mdns", "macros", "request-response"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
@@ -73,6 +72,11 @@ blake3 = { workspace = true }
 
 # For metrics (marked as optional)
 prometheus = { version = "0.13.3", optional = true }
+
+# Platform-specific dependencies
+# RocksDB has Windows cross-compilation issues with MinGW
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.0"

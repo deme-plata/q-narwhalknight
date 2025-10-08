@@ -185,7 +185,7 @@ impl P2PServer {
 
     /// Maintain active connection
     async fn maintain_connection(
-        mut stream: TcpStream,
+        stream: TcpStream,
         peer_info: RemotePeerInfo,
         active_peers: Arc<RwLock<HashMap<String, RemotePeerInfo>>>,
     ) -> Result<()> {

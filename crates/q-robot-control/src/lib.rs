@@ -32,7 +32,7 @@ pub mod blockchain_payment;
 pub mod distributed_ai_production;
 pub mod gguf_sharing;
 
-use q_bitcoin_bridge::*;
+// DEACTIVATED: use q_bitcoin_bridge::*;
 use q_types::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

@@ -13,6 +13,20 @@ pub use sha3::{Digest, Sha3_256};
 /// Transaction hash type
 pub type TxHash = [u8; 32];
 
+/// Transaction ID type alias (same as TxHash)
+pub type TransactionId = TxHash;
+
+/// Proposal hash for consensus
+pub type ProposalHash = [u8; 32];
+
+/// Consensus vote structure
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConsensusVote {
+    pub epoch: u64,
+    pub proposal_hash: ProposalHash,
+    pub participated: bool,
+}
+
 /// Block height
 pub type Height = u64;
 
@@ -81,6 +95,8 @@ pub struct Certificate {
 pub struct WalletInfo {
     pub id: Uuid,
     pub address: Address,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address_formatted: Option<String>, // "qnk" + hex encoding
     pub public_key: Vec<u8>,
     pub balance: Amount,
     pub nonce: u64,

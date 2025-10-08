@@ -34,12 +34,19 @@ export interface NodeStatus {
   last_block_time: number;
   tps_current: number;
   tps_average: number;
-  balance: number; // Add balance to NodeStatus interface
+  balance: number;
+  performance?: {
+    max_theoretical_tps: number;
+    optimization_level: string;
+    simd_crypto_enabled: boolean;
+    kernel_io_enabled: boolean;
+  };
 }
 
 export interface WalletData {
   id: string;
   address: number[];
+  address_formatted?: string;
   public_key: number[];
   balance: number;
   nonce: number;
@@ -115,11 +122,15 @@ class QNarwhalKnightAPI {
     return this.request<NodeStatus>('/v1/node/status');
   }
 
-  // Create a new wallet
-  async createWallet(name?: string): Promise<ApiResponse<WalletData>> {
-    return this.request<WalletData>('/v1/wallets/create', {
+  // Create a new wallet (or import with mnemonic)
+  async createWallet(mnemonic?: string, password?: string): Promise<ApiResponse<WalletData>> {
+    const endpoint = mnemonic ? '/v1/wallets/import' : '/v1/wallets/create';
+    return this.request<WalletData>(endpoint, {
       method: 'POST',
-      body: JSON.stringify({ name: name || 'Q-Wallet' }),
+      body: JSON.stringify({
+        mnemonic: mnemonic || undefined,
+        password: password || undefined
+      }),
     });
   }
 
@@ -445,9 +456,14 @@ class QNarwhalKnightAPI {
     return this.request<any[]>('/v1/dex/tokens');
   }
 
-  // Get recent transactions
+  // Get recent transactions (filtered by wallet address for privacy)
   async getRecentTransactions(limit = 100): Promise<ApiResponse<any[]>> {
-    return this.request<any[]>(`/v1/transactions/recent?limit=${limit}`);
+    // Get wallet address from localStorage for privacy-filtered results
+    const walletAddress = localStorage.getItem('walletAddress') || '';
+    console.log('🔍 Fetching transactions for wallet address:', walletAddress);
+
+    // Include wallet_address query parameter for backend filtering
+    return this.request<any[]>(`/v1/transactions/recent?limit=${limit}&wallet_address=${walletAddress}`);
   }
 }
 

@@ -1,0 +1,346 @@
+use anyhow::Result;
+use std::fs;
+use std::process::Command;
+use uuid::Uuid;
+
+use crate::database::StoryDatabase;
+use crate::entities::Entity;
+use crate::story::{Story, Chapter, Scene};
+
+/// LaTeX document generator for stories
+pub struct LaTeXGenerator {
+    template_dir: String,
+}
+
+impl LaTeXGenerator {
+    pub fn new() -> Self {
+        Self {
+            template_dir: "./templates".to_string(),
+        }
+    }
+
+    /// Generate LaTeX source file
+    pub async fn generate(&self, db: &StoryDatabase, output_path: &str) -> Result<()> {
+        let stories = db.list_stories().await?;
+        if stories.is_empty() {
+            return Err(anyhow::anyhow!("No stories found"));
+        }
+
+        let story = &stories[0];
+        let entities = db.list_entities(story.id, None).await?;
+        let chapters = db.list_chapters(story.id).await?;
+
+        let mut latex_content = self.generate_document_header(story)?;
+        latex_content.push_str(&self.generate_title_page(story)?);
+        latex_content.push_str(&self.generate_entity_appendix(&entities)?);
+        latex_content.push_str(&self.generate_story_content(db, story, &chapters).await?);
+        latex_content.push_str(&self.generate_document_footer()?);
+
+        fs::write(output_path, latex_content)?;
+        Ok(())
+    }
+
+    /// Generate PDF using system pdflatex
+    pub async fn generate_pdf(&self, db: &StoryDatabase, output_path: &str) -> Result<()> {
+        let temp_tex = format!("{}.temp.tex", output_path.trim_end_matches(".pdf"));
+
+        // Generate LaTeX first
+        self.generate(db, &temp_tex).await?;
+
+        // Try to compile with pdflatex (if available)
+        match Command::new("pdflatex")
+            .arg("-interaction=nonstopmode")
+            .arg(&temp_tex)
+            .output()
+        {
+            Ok(output) => {
+                if !output.status.success() {
+                    let error = String::from_utf8_lossy(&output.stderr);
+                    println!("Warning: LaTeX compilation failed: {}", error);
+                    println!("LaTeX source available at: {}", temp_tex);
+                    return Ok(());
+                }
+                // Clean up temporary files
+                let _ = fs::remove_file(&temp_tex);
+                let base_name = temp_tex.trim_end_matches(".tex");
+                let _ = fs::remove_file(format!("{}.aux", base_name));
+                let _ = fs::remove_file(format!("{}.log", base_name));
+            }
+            Err(_) => {
+                println!("Note: pdflatex not found. LaTeX source generated at: {}", temp_tex);
+                println!("Install TeXLive to compile to PDF: sudo apt-get install texlive-full");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn generate_document_header(&self, story: &Story) -> Result<String> {
+        Ok(format!(r#"\documentclass[12pt,oneside]{{book}}
+
+% Packages for cyberpunk noir styling
+\usepackage[utf8]{{inputenc}}
+\usepackage[T1]{{fontenc}}
+\usepackage{{geometry}}
+\usepackage{{fancyhdr}}
+\usepackage{{titlesec}}
+\usepackage{{color}}
+\usepackage{{xcolor}}
+\usepackage{{graphicx}}
+\usepackage{{tcolorbox}}
+\usepackage{{enumitem}}
+\usepackage{{hyperref}}
+
+% Cyberpunk color scheme
+\definecolor{{neonblue}}{{RGB}}{{0,255,255}}
+\definecolor{{neongreen}}{{RGB}}{{57,255,20}}
+\definecolor{{darkbg}}{{RGB}}{{20,20,20}}
+\definecolor{{matrixgreen}}{{RGB}}{{0,200,0}}
+
+% Page geometry
+\geometry{{letterpaper,margin=1in}}
+
+% Headers and footers
+\pagestyle{{fancy}}
+\fancyhf{{}}
+\fancyhead[C]{{\color{{neonblue}}{}}}
+\fancyfoot[C]{{\color{{matrixgreen}}\thepage}}
+
+% Chapter styling
+\titleformat{{\chapter}}[display]
+  {{\normalfont\huge\bfseries\color{{neongreen}}}}
+  {{\chaptertitlename\ \thechapter}}
+  {{20pt}}
+  {{\Huge\color{{neonblue}}}}
+
+% Section styling
+\titleformat{{\section}}
+  {{\normalfont\Large\bfseries\color{{neongreen}}}}
+  {{\thesection}}
+  {{1em}}
+  {{}}
+
+% Hyperlink setup
+\hypersetup{{
+    colorlinks=true,
+    linkcolor=neonblue,
+    filecolor=neongreen,
+    urlcolor=neonblue,
+    pdftitle={{{}}},
+    pdfauthor={{{}}},
+    pdfsubject={{Cyberpunk Noir Novel}},
+    pdfkeywords={{cyberpunk, noir, blockchain, cryptocurrency, thriller}}
+}}
+
+\begin{{document}}
+
+"#, story.title, story.title, story.author.as_deref().unwrap_or("Unknown Author")))
+    }
+
+    fn generate_title_page(&self, story: &Story) -> Result<String> {
+        Ok(format!(r#"
+\begin{{titlepage}}
+\centering
+\vspace*{{2cm}}
+
+{{\Huge\bfseries\color{{neongreen}} {} \par}}
+\vspace{{1.5cm}}
+
+{{\Large\color{{neonblue}} {} \par}}
+\vspace{{2cm}}
+
+{{\large\color{{matrixgreen}} {} \par}}
+\vspace{{1cm}}
+
+{{\color{{darkbg}}
+\begin{{tcolorbox}}[colback=darkbg,colframe=neonblue,arc=0pt,outer arc=0pt]
+\color{{neongreen}}\textbf{{Genre:}} {}\\
+\color{{neongreen}}\textbf{{Setting:}} {}\\
+\color{{neongreen}}\textbf{{Time Period:}} {}\\
+\color{{neongreen}}\textbf{{Target Audience:}} {}
+\end{{tcolorbox}}
+}}
+
+\vfill
+{{\large\color{{matrixgreen}} Generated by ShadowChain Writer \par}}
+{{\color{{neonblue}} \today \par}}
+
+\end{{titlepage}}
+
+\newpage
+\tableofcontents
+\newpage
+
+"#,
+        story.title,
+        story.author.as_deref().unwrap_or("Anonymous"),
+        story.description,
+        story.genre.join(", "),
+        story.metadata.setting,
+        story.metadata.time_period,
+        story.metadata.target_audience
+    ))
+    }
+
+    fn generate_entity_appendix(&self, entities: &[Entity]) -> Result<String> {
+        let mut appendix = String::from(r#"
+\appendix
+\chapter{Entity Reference}
+
+This appendix contains detailed information about all entities in the story universe.
+
+"#);
+
+        // Group entities by type
+        let mut characters = Vec::new();
+        let mut technologies = Vec::new();
+        let mut locations = Vec::new();
+        let mut macguffins = Vec::new();
+        let mut organizations = Vec::new();
+
+        for entity in entities {
+            match entity.entity_type_name() {
+                "Character" => characters.push(entity),
+                "Technology" => technologies.push(entity),
+                "Location" => locations.push(entity),
+                "MacGuffin" => macguffins.push(entity),
+                "Organization" => organizations.push(entity),
+                _ => {}
+            }
+        }
+
+        // Generate sections for each entity type
+        if !characters.is_empty() {
+            appendix.push_str(r#"
+\section{Characters}
+
+\begin{description}[style=nextline]
+"#);
+            for character in characters {
+                appendix.push_str(&format!(r#"
+\item[\textcolor{{neongreen}}{{{}}}] \textcolor{{neonblue}}{{{}}}
+
+"#, self.latex_escape(character.name()), self.latex_escape(character.description())));
+            }
+            appendix.push_str("\\end{description}\n");
+        }
+
+        if !technologies.is_empty() {
+            appendix.push_str(r#"
+\section{Technologies}
+
+\begin{description}[style=nextline]
+"#);
+            for tech in technologies {
+                appendix.push_str(&format!(r#"
+\item[\textcolor{{matrixgreen}}{{{}}}] \textcolor{{neonblue}}{{{}}}
+
+"#, self.latex_escape(tech.name()), self.latex_escape(tech.description())));
+            }
+            appendix.push_str("\\end{description}\n");
+        }
+
+        if !locations.is_empty() {
+            appendix.push_str(r#"
+\section{Locations}
+
+\begin{description}[style=nextline]
+"#);
+            for location in locations {
+                appendix.push_str(&format!(r#"
+\item[\textcolor{{neonblue}}{{{}}}] \textcolor{{matrixgreen}}{{{}}}
+
+"#, self.latex_escape(location.name()), self.latex_escape(location.description())));
+            }
+            appendix.push_str("\\end{description}\n");
+        }
+
+        if !macguffins.is_empty() {
+            appendix.push_str(r#"
+\section{Key Items}
+
+\begin{description}[style=nextline]
+"#);
+            for item in macguffins {
+                appendix.push_str(&format!(r#"
+\item[\textcolor{{neongreen}}{{{}}}] \textcolor{{neonblue}}{{{}}}
+
+"#, self.latex_escape(item.name()), self.latex_escape(item.description())));
+            }
+            appendix.push_str("\\end{description}\n");
+        }
+
+        if !organizations.is_empty() {
+            appendix.push_str(r#"
+\section{Organizations}
+
+\begin{description}[style=nextline]
+"#);
+            for org in organizations {
+                appendix.push_str(&format!(r#"
+\item[\textcolor{{matrixgreen}}{{{}}}] \textcolor{{neonblue}}{{{}}}
+
+"#, self.latex_escape(org.name()), self.latex_escape(org.description())));
+            }
+            appendix.push_str("\\end{description}\n");
+        }
+
+        Ok(appendix)
+    }
+
+    async fn generate_story_content(&self, db: &StoryDatabase, story: &Story, chapters: &[Chapter]) -> Result<String> {
+        let mut content = String::new();
+
+        for chapter in chapters {
+            content.push_str(&format!(r#"
+\chapter{{{}}}
+
+"#, self.latex_escape(&chapter.title)));
+
+            if !chapter.description.is_empty() {
+                content.push_str(&format!(r#"
+\begin{{tcolorbox}}[colback=darkbg,colframe=neongreen,arc=0pt]
+\color{{neonblue}}\textit{{{}}}
+\end{{tcolorbox}}
+
+"#, self.latex_escape(&chapter.description)));
+            }
+
+            let scenes = db.list_scenes(chapter.id).await?;
+            for scene in scenes {
+                if !scene.title.is_empty() {
+                    content.push_str(&format!(r#"
+\section{{{}}}
+
+"#, self.latex_escape(&scene.title)));
+                }
+
+                if !scene.content.is_empty() {
+                    content.push_str(&format!("{}\n\n", self.latex_escape(&scene.content)));
+                }
+            }
+        }
+
+        Ok(content)
+    }
+
+    fn generate_document_footer(&self) -> Result<String> {
+        Ok(String::from(r#"
+\end{document}
+"#))
+    }
+
+    /// Escape special LaTeX characters
+    fn latex_escape(&self, text: &str) -> String {
+        text.replace("&", r"\&")
+            .replace("%", r"\%")
+            .replace("$", r"\$")
+            .replace("#", r"\#")
+            .replace("^", r"\textasciicircum{}")
+            .replace("_", r"\_")
+            .replace("{", r"\{")
+            .replace("}", r"\}")
+            .replace("~", r"\textasciitilde{}")
+            .replace("\\", r"\textbackslash{}")
+    }
+}

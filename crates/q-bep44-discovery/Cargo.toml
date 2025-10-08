@@ -31,8 +31,14 @@ hex = "0.4"
 bytes = "1.0"
 
 # Random generation
-getrandom = "0.2" 
+getrandom = "0.2"
 rand = "0.8"
+fastrand = "2.0"
+
+# Serialization
+bincode = { workspace = true }
+crc32fast = { workspace = true }
+serde_bencode = "0.2"
 
 # Async utilities
 futures = "0.3"
@@ -40,6 +46,9 @@ async-trait = "0.1"
 
 # Real network clients
 reqwest = { version = "0.12", features = ["json", "socks"] }
+
+# libp2p for DHT bootstrap - use workspace version 0.53 with all sub-crates re-exported
+libp2p = { workspace = true }
 
 # Configuration
 toml = "0.7"

@@ -1,0 +1,10 @@
+[package]
+name = "k-topological-quantum"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "Topological quantum states (anyons, golden ratio, Berry phase)"
+
+[dependencies]
+k-constants = { path = "../k-constants" }
+num-complex = { workspace = true }

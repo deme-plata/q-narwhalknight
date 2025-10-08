@@ -60,11 +60,154 @@ function App() {
   useEffect(() => {
     if (!authenticated) return;
 
-    console.log('🎬 App.tsx: useEffect running for authenticated user');
-    // No SSE or data fetching - Dashboard handles everything
+    console.log('🎬 App.tsx: Setting up SSE for real-time balance updates');
+
+    let eventSource: EventSource | null = null;
+    let mounted = true;
+
+    const fetchNodeStatus = async () => {
+      try {
+        const response = await fetch('/api/v1/node/status');
+        if (!response.ok) throw new Error('Failed to fetch node status');
+
+        const data = await response.json();
+        if (!mounted) return;
+
+        if (data.success && data.data) {
+          const currentWalletAddress = localStorage.getItem('walletAddress');
+          let walletBalance = 0;
+
+          if (currentWalletAddress) {
+            try {
+              const balanceResponse = await fetch(`/api/v1/wallets/${currentWalletAddress}/balance`);
+              const balanceData = await balanceResponse.json();
+
+              if (balanceData.success && balanceData.data) {
+                walletBalance = balanceData.data.balance_qnk || 0;
+              }
+            } catch (balanceErr) {
+              console.warn('Failed to fetch wallet balance:', balanceErr);
+            }
+          }
+
+          if (mounted) {
+            setNodeData({
+              balance: walletBalance,
+              nodeId: data.data.node_id || '',
+              blockHeight: data.data.current_height || 0,
+              peers: data.data.connected_peers || 0,
+              isOnline: data.data.network_health === 'healthy',
+              qci: 0.42
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching node status:', err);
+      }
+    };
+
+    // Initial fetch
+    fetchNodeStatus();
+
+    // Listen for custom balance update events from Dashboard
+    const handleBalanceUpdate = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      console.log('💰 App.tsx: Received custom balance-update event:', customEvent.detail);
+      if (customEvent.detail?.balance !== undefined) {
+        setNodeData(prev => ({ ...prev, balance: customEvent.detail.balance }));
+      } else {
+        // If no balance in event, refresh from API
+        fetchNodeStatus();
+      }
+    };
+
+    window.addEventListener('balance-update', handleBalanceUpdate);
+
+    // Set up SSE for real-time updates
+    const sseUrl = '/api/v1/events';
+    console.log('📡 App.tsx: Attempting SSE connection to:', sseUrl);
+
+    try {
+      eventSource = new EventSource(sseUrl);
+
+      eventSource.onopen = () => {
+        console.log('✅ App.tsx: SSE connection established');
+      };
+
+      eventSource.onmessage = (event) => {
+        console.log('📨 App.tsx: SSE message received:', event.data);
+        if (!mounted) return;
+
+        try {
+          const data = JSON.parse(event.data);
+          console.log('📦 App.tsx: SSE data parsed:', data);
+
+          // Handle balance updates from backend SSE
+          // Backend sends: { type: "balance-updated", data: { wallet_address, old_balance, new_balance, change_reason, timestamp } }
+          if (data.type === 'balance-updated' && data.data?.new_balance !== undefined) {
+            const currentWalletAddress = localStorage.getItem('walletAddress');
+            // Strip "qnk" prefix for comparison since backend sends hex without prefix
+            const currentHex = currentWalletAddress?.startsWith('qnk')
+              ? currentWalletAddress.substring(3)
+              : currentWalletAddress;
+            const eventHex = data.data.wallet_address;
+
+            console.log('💰 App.tsx: Balance update SSE event:', {
+              eventWallet: eventHex,
+              currentWallet: currentHex,
+              match: eventHex === currentHex,
+              newBalance: data.data.new_balance,
+              reason: data.data.change_reason
+            });
+
+            // Only update if this balance event is for the current wallet
+            if (!currentHex || eventHex === currentHex) {
+              console.log('✅ App.tsx: Balance update applied:', data.data.new_balance);
+              setNodeData(prev => ({ ...prev, balance: data.data.new_balance }));
+            } else {
+              console.log('❌ App.tsx: Balance update ignored (not for current wallet)');
+            }
+          }
+
+          // Handle faucet events
+          if (data.type === 'faucet-dispensed') {
+            console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
+            fetchNodeStatus();
+          }
+
+          // Handle transaction events
+          if (data.type === 'transaction-confirmed' || data.type === 'transaction-submitted') {
+            console.log('🔄 App.tsx: Transaction event - refreshing balance');
+            fetchNodeStatus();
+          }
+
+          // Handle block updates
+          if (data.type === 'block-confirmed' || data.type === 'consensus-round') {
+            console.log('⛓️ App.tsx: Block confirmed - updating status');
+            fetchNodeStatus();
+          }
+        } catch (error) {
+          console.error('❌ App.tsx: Error processing SSE event:', error);
+        }
+      };
+
+      eventSource.onerror = (error) => {
+        console.error('❌ App.tsx: SSE connection error:', error);
+        if (eventSource?.readyState === EventSource.CLOSED) {
+          console.log('🔄 App.tsx: SSE connection closed, will retry...');
+        }
+      };
+    } catch (error) {
+      console.error('❌ App.tsx: Failed to establish SSE connection:', error);
+    }
 
     return () => {
-      console.log('🎬 App.tsx: useEffect cleanup');
+      console.log('🎬 App.tsx: useEffect cleanup - closing SSE');
+      mounted = false;
+      window.removeEventListener('balance-update', handleBalanceUpdate);
+      if (eventSource) {
+        eventSource.close();
+      }
     };
   }, [authenticated]);
 
@@ -76,6 +219,7 @@ function App() {
     localStorage.removeItem('walletSeed');
     localStorage.removeItem('walletAddress');
     localStorage.removeItem('walletData');
+    localStorage.removeItem('faucetTransactions'); // Clear transaction history
     // Reset the current screen to dashboard
     setCurrentScreen('dashboard');
     // Reset node data

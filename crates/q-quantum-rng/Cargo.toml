@@ -24,11 +24,6 @@ rand_core = { workspace = true }
 sha3 = { workspace = true }
 ring = { workspace = true }
 
-# Hardware interfaces (Phase 2)
-serialport = "4.2"
-hidapi = "2.4"
-udev = "0.7"
-
 # Quantum entropy analysis
 statrs = "0.16"
 ndarray = { workspace = true }
@@ -51,8 +46,15 @@ chrono = { workspace = true }
 proptest = { workspace = true }
 tokio-test = "0.4"
 
+# Platform-specific dependencies
+# Hardware interfaces are Linux-only (require udev, hidapi for USB devices)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+serialport = "4.2"
+hidapi = "2.4"
+udev = "0.7"
+
 [features]
 default = ["simulation"]
 simulation = []          # Use simulated QRNG for Phase 0/1
-hardware = []           # Enable actual QRNG hardware support
+hardware = []           # Enable actual QRNG hardware support (Linux only)
 entropy-analysis = []   # Enable quantum entropy quality analysis

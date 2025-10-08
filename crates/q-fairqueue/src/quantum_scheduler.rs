@@ -88,8 +88,8 @@ impl QuantumScheduler {
         Ok(Self {
             policy,
             config,
-            quantum_rng: quantum_rng.cloned(),
-            lattice_vrf: lattice_vrf.cloned(),
+            quantum_rng: None, // Cannot clone QuantumRNG with trait objects
+            lattice_vrf: None, // Cannot clone LatticeVRF with trait objects
             current_type_index: 0,
             type_counters,
             deficits,

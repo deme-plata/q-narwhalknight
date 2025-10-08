@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # Core infrastructure services
+  tor-proxy:
+    image: torproject/tor:latest
+    container_name: q-tor-proxy
+    ports:
+      - "9050:9050"
+    volumes:
+      - ./docker/tor-config:/etc/tor
+    command: ["tor", "-f", "/etc/tor/torrc"]
+    networks:
+      - qnarwhal-net
+
+  dns-phantom-hub:
+    image: ubuntu:20.04
+    container_name: q-dns-phantom-hub
+    ports:
+      - "8053:53/udp"
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ROLE=dns_phantom_hub
+    networks:
+      - qnarwhal-net
+    command: ["bash", "-c", "echo 'DNS-Phantom Hub - Simulated' && sleep 3600"]
+
+  # Beta server - main coordinator
+  beta-coordinator:
+    image: ubuntu:20.04
+    container_name: q-beta-coordinator
+    ports:
+      - "8081:8081"
+      - "8082:8080"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=beta-coordinator
+      - Q_SERVER_ROLE=beta
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - dns-phantom-hub
+    command: ["bash", "-c", "echo 'Beta Coordinator - Simulating 185.182.185.227:8081 connection bridge' && nc -l -p 8081 & sleep 3600"]
+
+  # Alpha nodes (2 nodes)
+  alpha-node-01:
+    image: ubuntu:20.04
+    container_name: q-alpha-node-01
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-01
+      - Q_SERVER_ROLE=alpha
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    command: ["bash", "-c", "echo 'Alpha Node 01 - Attempting connection to beta-coordinator:8081' && sleep 10 && echo 'Hello from Alpha-01' | nc beta-coordinator 8081 && sleep 3600"]
+
+  alpha-node-02:
+    image: ubuntu:20.04
+    container_name: q-alpha-node-02
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-02
+      - Q_SERVER_ROLE=alpha
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    command: ["bash", "-c", "echo 'Alpha Node 02 - Attempting connection to beta-coordinator:8081' && sleep 15 && echo 'Hello from Alpha-02' | nc beta-coordinator 8081 && sleep 3600"]
+
+  # Validator node
+  validator-01:
+    image: ubuntu:20.04
+    container_name: q-validator-01
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=validator-01
+      - Q_SERVER_ROLE=validator
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - dns-phantom-hub
+    command: ["bash", "-c", "echo 'Validator 01 - Participating in consensus network' && sleep 3600"]
+
+networks:
+  qnarwhal-net:
+    driver: bridge

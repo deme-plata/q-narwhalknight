@@ -13,11 +13,11 @@ members = [
     "crates/q-vdf",
     "crates/q-fairqueue",
     "crates/q-tor-client",     # Re-enabled: Fixed dependency compatibility
-    "crates/q-tor-circuit",    # Re-enabled: Fixed Tor library compatibility  
-    "crates/q-bitcoin-bridge", # New: Bitcoin network bridge for anonymous peer discovery
+    "crates/q-tor-circuit",    # Re-enabled: Fixed Tor library compatibility
+    # "crates/q-bitcoin-bridge", # New: Bitcoin network bridge for anonymous peer discovery - DEACTIVATED
     "crates/q-dandelion",
-    "crates/q-dns-phantom",
-    "crates/q-bep44-discovery", # New: BEP-44 DHT peer discovery (replaces DNS-phantom)
+    # "crates/q-dns-phantom",    # DEACTIVATED
+    # "crates/q-bep44-discovery", # New: BEP-44 DHT peer discovery (replaces DNS-phantom) - DEACTIVATED
     "crates/q-storage",
     "crates/q-mining",
     "crates/q-precision",
@@ -27,7 +27,7 @@ members = [
     "crates/q-miner",        # High-performance CPU/GPU miner
     "crates/q-sharding",
     "crates/q-cache",        # Phase 2: Intelligent hierarchical caching system
-    "crates/q-benchmarks",   # Performance benchmarking and optimization (Server Beta)
+    # "crates/q-benchmarks",   # Performance benchmarking and optimization (Server Beta) - TEMPORARILY DISABLED
     "crates/q-crypto-simd",  # SIMD cryptographic acceleration (Server Beta)
     "crates/q-kernel-io",    # Kernel I/O optimizations with io_uring and NUMA (Server Beta)
     "crates/q-cross-shard",  # Cross-shard communication infrastructure (Server Beta)
@@ -41,8 +41,9 @@ members = [
     "crates/q-oracle",        # Oracle network for price feeds
     "crates/q-stablecoin",    # Algorithmic stablecoin management
     "crates/q-narwhalknight", # High-level developer-friendly API wrapper for proven DNS-Phantom mesh networking
+    "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
     "gui"
-]
+, "crates/q-resonance"]
 
 [workspace.package]
 version = "0.1.0"
@@ -75,20 +76,22 @@ async-trait = "0.1"
 # Web framework
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 hyper = "1.0"
 
 # Networking - Enhanced for real network connectivity
-libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "mdns", "upnp"] }
+# mdns removed from default features - added conditionally below for non-Windows targets
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "mdns", "tokio"] }
 reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls"] }
 
 # Real network implementations
 arti-client = "0.9"
-arti-hyper = "0.9" 
+arti-hyper = "0.9"
 tor-rtcompat = "0.9"
 tor-hsservice = "0.9"
 hickory-dns = "0.24"
-bitcoin = { version = "0.31", features = ["serde"] }
+# Use bitcoin 0.30 for compatibility with bitcoincore-rpc 0.17
+bitcoin = { version = "0.30", features = ["serde"] }
 crc32fast = "1.3"
 # base64 = "0.21" # Removed duplicate, using 0.22.1 below
 hex = "0.4"
@@ -140,6 +143,9 @@ risc0-zkvm = "1.0"
 # Configuration
 config = "0.13"
 
+# CLI/TUI utilities
+console = "0.15"
+
 # Testing
 proptest = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -158,6 +164,7 @@ hkdf = "0.12"
 
 # High-performance storage - unified version to avoid conflicts
 rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
+rusqlite = { version = "0.31", features = ["bundled"] }  # Tor dependency with bundled SQLite for cross-compilation
 lz4 = "1.24"
 
 # Linear algebra and mathematics

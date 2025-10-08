@@ -20,7 +20,8 @@ async-trait = { workspace = true }
 tokio-socks = { workspace = true }
 
 # Arti Tor client dependencies - using consistent 0.19.x versions
-arti-client = "0.19.0"
+# static-sqlite feature enables bundled SQLite for Windows cross-compilation
+arti-client = { version = "0.19.0", features = ["static-sqlite"] }
 arti-hyper = "0.19.0"
 tor-rtcompat = "0.19.0"
 tor-hsservice = "0.19.0"

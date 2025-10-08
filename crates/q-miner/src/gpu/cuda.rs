@@ -17,6 +17,7 @@ use cudarc::{
 };
 
 /// NVIDIA CUDA miner implementation
+#[cfg(feature = "cuda-mining")]
 pub struct CudaMiner {
     devices: Vec<CudaDeviceContext>,
     config: GpuMiningConfig,
@@ -399,17 +400,4 @@ pub async fn detect_cuda_devices() -> Result<Vec<GpuDeviceInfo>> {
 #[cfg(not(feature = "cuda-mining"))]
 pub async fn is_cuda_device(_device_id: u32) -> Result<bool> {
     Ok(false)
-}
-
-impl Default for MiningStats {
-    fn default() -> Self {
-        Self {
-            hash_rate: 0.0,
-            accepted_shares: 0,
-            rejected_shares: 0,
-            power_usage: 0.0,
-            temperature: 0.0,
-            uptime: chrono::Duration::zero(),
-        }
-    }
 }

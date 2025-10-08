@@ -67,7 +67,7 @@ export default function QRScannerModal({ isOpen, onClose, onScan }: QRScannerMod
       videoRef.current.srcObject = stream;
 
       // Start scanning
-      readerRef.current.decodeFromVideoDevice(null, videoRef.current, (result, error) => {
+      readerRef.current.decodeFromVideoDevice(null, videoRef.current, (result: any, error: any) => {
         if (result) {
           const text = result.getText();
           console.log('QR Code scanned:', text);

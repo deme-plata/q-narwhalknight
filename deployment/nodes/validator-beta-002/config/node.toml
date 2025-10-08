@@ -1,0 +1,30 @@
+[node]
+id = "qv-002"
+name = "Quantum Validator Validator-beta-002"
+region = "eu-west-1"
+quantum_enhanced = true
+
+[network]
+listen_address = "0.0.0.0:8080"
+consensus_address = "0.0.0.0:8081"
+api_address = "0.0.0.0:8082"
+
+[plugins]
+quantum_crypto_enabled = true
+quantum_mixing_enabled = true
+stark_proofs_enabled = true
+
+[quantum]
+qkd_protocols = ["BB84", "E91", "MDI-QKD"]
+entropy_sources = ["quantum_rng", "atmospheric_noise"]
+security_level = 128
+
+[consensus]
+stake_amount = 10000000
+committee_participation = true
+anchor_election_quantum = true
+
+[storage]
+data_dir = "./data"
+logs_dir = "./logs"
+quantum_keys_dir = "./keys"

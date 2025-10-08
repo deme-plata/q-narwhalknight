@@ -1,9 +1,8 @@
-use crate::{MiningEngine, MiningStats, WorkUnit, Solution, algorithms::DagKnightVDF};
+use crate::{MiningEngine, MiningAlgorithm, MiningStats, WorkUnit, Solution, algorithms::DagKnightVDF};
 use anyhow::Result;
 use async_trait::async_trait;
-use rayon::prelude::*;
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::RwLock;
 use tracing::{info, debug, error};
 
 /// High-performance CPU miner optimized for Q-NarwhalKnight
@@ -140,11 +139,11 @@ async fn cpu_mining_thread(
                 let nonce = nonce_base + nonce_offset;
                 
                 // Compute hash using DAG-Knight VDF algorithm
-                if let Ok(hash) = algorithm.compute_hash(&work.extra_data, nonce).await {
+                if let Ok(hash) = algorithm.as_ref().compute_hash(&work.extra_data, nonce).await {
                     hash_counter.fetch_add(1, Ordering::Relaxed);
-                    
+
                     // Check if solution meets difficulty
-                    if algorithm.verify_solution(&hash, &work.difficulty_target).await {
+                    if algorithm.as_ref().verify_solution(&hash, &work.difficulty_target).await {
                         info!("💎 CPU Thread {} found solution! Nonce: {}", thread_id, nonce);
                         
                         // In a real implementation, submit solution to pool/network
@@ -233,42 +232,36 @@ pub fn detect_cpu_capabilities() -> CpuInfo {
     // Use raw-cpuid for detailed CPU information
     #[cfg(target_arch = "x86_64")]
     {
-        if let Ok(cpuid) = raw_cpuid::CpuId::new() {
-            let vendor_info = cpuid.get_vendor_info();
-            let feature_info = cpuid.get_feature_info();
-            let extended_features = cpuid.get_extended_feature_info();
-            
-            let brand = vendor_info
-                .map(|v| v.as_str().to_string())
-                .unwrap_or_else(|| "Unknown".to_string());
-            
-            let has_avx2 = extended_features
-                .map(|ef| ef.has_avx2())
-                .unwrap_or(false);
-            
-            let has_avx512 = extended_features
-                .map(|ef| ef.has_avx512f())
-                .unwrap_or(false);
-            
-            let has_aes_ni = feature_info
-                .map(|fi| fi.has_aesni())
-                .unwrap_or(false);
-            
-            let cache_l3_size = cpuid
-                .get_cache_info()
-                .map(|ci| ci.map(|c| c.cache_size()).sum::<usize>())
-                .unwrap_or(0);
-            
-            return CpuInfo {
-                brand,
-                physical_cores,
-                logical_threads,
-                has_avx2,
-                has_avx512,
-                has_aes_ni,
-                cache_l3_size,
-            };
-        }
+        let cpuid = raw_cpuid::CpuId::new();
+        let brand = cpuid.get_vendor_info()
+            .map(|v: raw_cpuid::VendorInfo| v.as_str().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let has_avx2 = cpuid.get_extended_feature_info()
+            .map(|ef: raw_cpuid::ExtendedFeatures| ef.has_avx2())
+            .unwrap_or(false);
+
+        let has_avx512 = cpuid.get_extended_feature_info()
+            .map(|ef: raw_cpuid::ExtendedFeatures| ef.has_avx512f())
+            .unwrap_or(false);
+
+        let has_aes_ni = cpuid.get_feature_info()
+            .map(|fi: raw_cpuid::FeatureInfo| fi.has_aesni())
+            .unwrap_or(false);
+
+        // Note: raw_cpuid CacheInfo doesn't have a simple cache_size() method
+        // We'll just set a default value for now
+        let cache_l3_size = 0usize;
+
+        return CpuInfo {
+            brand,
+            physical_cores,
+            logical_threads,
+            has_avx2,
+            has_avx512,
+            has_aes_ni,
+            cache_l3_size,
+        };
     }
     
     // Fallback for non-x86_64 or if cpuid fails
@@ -368,7 +361,7 @@ pub mod benchmarks {
                     
                     while start_time.elapsed() < benchmark_duration {
                         for _ in 0..batch_size {
-                            if let Ok(_) = algorithm.compute_hash(&work.extra_data, nonce).await {
+                            if let Ok(_) = algorithm.as_ref().compute_hash(&work.extra_data, nonce).await {
                                 hash_counter.fetch_add(1, Ordering::Relaxed);
                             }
                             nonce += threads as u64;

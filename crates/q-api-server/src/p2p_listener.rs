@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
+use crate::NodeStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeMessage {
@@ -31,6 +32,7 @@ pub async fn start_p2p_listener(
     port: u16,
     local_node_id: NodeId,
     active_peers: ActivePeers,
+    node_status: Arc<RwLock<NodeStatus>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let p2p_address = format!("0.0.0.0:{}", port + 1); // Use port+1 for P2P
     let listener = TcpListener::bind(&p2p_address).await?;
@@ -43,10 +45,11 @@ pub async fn start_p2p_listener(
 
         let local_node_id_clone = local_node_id;
         let active_peers_clone = active_peers.clone();
+        let node_status_clone = node_status.clone();
 
         tokio::spawn(async move {
             if let Err(e) =
-                handle_p2p_connection(stream, addr, local_node_id_clone, active_peers_clone).await
+                handle_p2p_connection(stream, addr, local_node_id_clone, active_peers_clone, node_status_clone).await
             {
                 warn!("❌ P2P connection handling failed for {}: {}", addr, e);
             }
@@ -61,6 +64,7 @@ async fn handle_p2p_connection(
     addr: SocketAddr,
     local_node_id: NodeId,
     active_peers: ActivePeers,
+    node_status: Arc<RwLock<NodeStatus>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     debug!("🤝 Starting handshake with {}", addr);
 
@@ -123,11 +127,18 @@ async fn handle_p2p_connection(
     {
         let mut peers = active_peers.write().await;
         peers.insert(peer_handshake.node_id.clone(), peer_connection);
+        let peer_count = peers.len();
         info!(
             "👥 Added peer {} to active connections (total: {})",
             peer_handshake.node_id,
-            peers.len()
+            peer_count
         );
+
+        // Update node_status with current peer count
+        {
+            let mut status = node_status.write().await;
+            status.connected_peers = peer_count as u32;
+        }
     }
 
     // Keep connection alive and handle messages
@@ -163,11 +174,18 @@ async fn handle_p2p_connection(
     {
         let mut peers = active_peers.write().await;
         peers.remove(&peer_handshake.node_id);
+        let peer_count = peers.len();
         info!(
             "👥 Removed peer {} from active connections (remaining: {})",
             peer_handshake.node_id,
-            peers.len()
+            peer_count
         );
+
+        // Update node_status with current peer count
+        {
+            let mut status = node_status.write().await;
+            status.connected_peers = peer_count as u32;
+        }
     }
 
     Ok(())

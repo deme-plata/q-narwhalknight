@@ -14,6 +14,33 @@ pub use ui::Dashboard;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Core mining engine trait
+#[async_trait::async_trait]
+pub trait MiningEngine: Send + Sync {
+    /// Start the mining engine
+    async fn start(&mut self) -> Result<()>;
+
+    /// Stop the mining engine
+    async fn stop(&mut self) -> Result<()>;
+
+    /// Get current hash rate
+    async fn get_hash_rate(&self) -> f64;
+
+    /// Get mining statistics
+    async fn get_stats(&self) -> MiningStats;
+}
+
+/// Mining statistics for a single device
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MiningStats {
+    pub hash_rate: f64,
+    pub accepted_shares: u64,
+    pub rejected_shares: u64,
+    pub power_usage: f64,
+    pub temperature: f64,
+    pub uptime: chrono::Duration,
+}
+
 /// Core mining algorithm trait
 #[async_trait::async_trait]
 pub trait MiningAlgorithm: Send + Sync {
@@ -71,6 +98,20 @@ pub struct GlobalMiningStats {
     pub uptime: chrono::Duration,
     pub power_usage: f64,
     pub devices: Vec<DeviceStats>,
+}
+
+impl Default for GlobalMiningStats {
+    fn default() -> Self {
+        Self {
+            total_hash_rate: 0.0,
+            accepted_shares: 0,
+            rejected_shares: 0,
+            efficiency: 0.0,
+            uptime: chrono::Duration::zero(),
+            power_usage: 0.0,
+            devices: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

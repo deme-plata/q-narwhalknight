@@ -1,0 +1,13 @@
+[package]
+name = "k-graph-generator"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "Graph generation and LaTeX export for k-parameter research"
+
+[dependencies]
+k-constants = { path = "../k-constants" }
+plotters = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

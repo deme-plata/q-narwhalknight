@@ -234,7 +234,8 @@ impl MassiveScaleTestSuite {
         discovery_config.max_discovered_peers = 100 + (index % 900); // 100-1000 peers
 
         // Create discovery engine
-        let discovery_engine = DiscoveryEngine::new(discovery_config)
+        let node_id = id; // Use the generated validator ID
+        let discovery_engine = DiscoveryEngine::new(discovery_config, node_id)
             .await
             .context("Failed to create discovery engine")?;
 

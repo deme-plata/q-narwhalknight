@@ -1,0 +1,47 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "q-narwhalknight-50-nodes"
+    static_configs:
+      - targets:
+        # Infrastructure nodes
+        - "tor-proxy:9050"
+        - "dns-phantom-hub:8080"
+        - "beta-coordinator:8081"
+        # Alpha nodes
+        - "alpha-node-01:8080"
+        - "alpha-node-02:8080"
+        - "alpha-node-03:8080"
+        - "alpha-node-04:8080"
+        - "alpha-node-05:8080"
+        - "alpha-node-06:8080"
+        - "alpha-node-07:8080"
+        - "alpha-node-08:8080"
+        - "alpha-node-09:8080"
+        - "alpha-node-10:8080"
+        # Validator nodes (selected subset for metrics)
+        - "validator-01:8080"
+        - "validator-05:8080"
+        - "validator-10:8080"
+        - "validator-20:8080"
+        - "validator-30:8080"
+        - "validator-39:8080"
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  - job_name: "massive-scale-monitoring"
+    static_configs:
+      - targets: 
+        - "massive-scale-tester:8080"
+        - "network-monitor:8080"
+    scrape_interval: 10s

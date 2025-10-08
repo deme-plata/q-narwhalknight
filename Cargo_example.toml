@@ -1,0 +1,21 @@
+[package]
+name = "production_discovery_demo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "production_discovery_demo"
+path = "examples/production_discovery_demo.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+q-network = { path = "crates/q-network" }
+q-bitcoin-bridge = { path = "crates/q-bitcoin-bridge" }
+q-dns-phantom = { path = "crates/q-dns-phantom" }
+q-tor-client = { path = "crates/q-tor-client" }
+q-types = { path = "crates/q-types" }

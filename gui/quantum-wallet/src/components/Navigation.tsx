@@ -22,55 +22,94 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
   ];
 
   return (
-    <nav className={`${className} bg-quantum-indigo/30 backdrop-blur-xl border-r border-quantum-purple/20 lg:border-r-0 lg:border-t border-quantum-purple/20 fixed bottom-0 left-0 right-0 lg:static lg:h-full`}>
+    <nav
+      className={`${className} backdrop-blur-xl border-r lg:border-r-0 lg:border-t fixed bottom-0 left-0 right-0 lg:static lg:h-full`}
+      style={{
+        background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+        borderColor: 'rgba(212, 175, 55, 0.2)',
+        boxShadow: '0 0 20px rgba(212, 175, 55, 0.1)'
+      }}
+    >
       {/* Desktop Navigation */}
       <div className="hidden lg:flex flex-col h-full p-6">
         <div className="flex items-center gap-3 mb-12">
-          <div className="w-10 h-10 rainbow-box rounded-lg flex items-center justify-center">
-            <Activity className="w-6 h-6 text-white" />
+          <div
+            className="w-10 h-10 rounded-lg flex items-center justify-center relative"
+            style={{
+              background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #D4AF37 100%)',
+              boxShadow: '0 0 15px rgba(212, 175, 55, 0.4)'
+            }}
+          >
+            <Activity className="w-6 h-6 text-slate-900" />
           </div>
-          <span className="xl:block hidden text-xl font-bold bg-gradient-to-r from-quantum-cyan to-quantum-purple bg-clip-text text-transparent">
-            Q-Wallet
+          <span className="xl:block hidden text-xl font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent">
+            Quillon Graph
           </span>
         </div>
 
-        <div className="space-y-4 flex-1">
+        <div className="space-y-3 flex-1">
           {navItems.map((item) => (
             <motion.button
               key={item.id}
               onClick={() => onNavigate(item.id)}
               className={`w-full flex items-center gap-4 p-4 rounded-xl transition-all relative overflow-hidden ${
                 currentScreen === item.id
-                  ? 'bg-gradient-to-r from-quantum-purple/30 to-quantum-cyan/30 text-white border border-quantum-cyan/30'
-                  : 'text-gray-400 hover:text-white hover:bg-quantum-purple/20'
+                  ? 'text-amber-50'
+                  : 'text-amber-200/50 hover:text-amber-100'
               }`}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              style={
+                currentScreen === item.id
+                  ? {
+                      background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.2) 0%, rgba(255, 215, 0, 0.15) 100%)',
+                      border: '2px solid rgba(212, 175, 55, 0.4)',
+                      boxShadow: '0 0 20px rgba(212, 175, 55, 0.2), inset 0 0 15px rgba(212, 175, 55, 0.1)'
+                    }
+                  : {
+                      border: '2px solid transparent'
+                    }
+              }
+              whileHover={{ scale: 1.03, x: 5 }}
+              whileTap={{ scale: 0.97 }}
             >
               {currentScreen === item.id && (
                 <motion.div
-                  className="absolute inset-0 rainbow-box opacity-10"
+                  className="absolute inset-0 bg-gradient-to-r from-amber-500/10 via-yellow-500/10 to-amber-500/10"
                   initial={{ x: '-100%' }}
-                  animate={{ x: '0%' }}
-                  transition={{ type: 'spring', bounce: 0.2 }}
+                  animate={{ x: '100%' }}
+                  transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
                 />
               )}
-              <item.icon className="w-6 h-6 flex-shrink-0" />
-              <span className="xl:block hidden font-medium">{item.label}</span>
+              <item.icon className={`w-6 h-6 flex-shrink-0 ${currentScreen === item.id ? 'text-amber-400' : ''}`} />
+              <span className="xl:block hidden font-semibold">{item.label}</span>
+              {currentScreen === item.id && (
+                <motion.div
+                  className="ml-auto w-2 h-2 rounded-full bg-amber-400"
+                  animate={{ scale: [1, 1.2, 1], opacity: [0.7, 1, 0.7] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                />
+              )}
             </motion.button>
           ))}
         </div>
 
         {/* Quantum Status Indicator */}
         <div className="mt-auto">
-          <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-green/30">
+          <div
+            className="p-4 rounded-xl relative overflow-hidden"
+            style={{
+              background: 'linear-gradient(135deg, rgba(22, 163, 74, 0.15) 0%, rgba(34, 197, 94, 0.1) 100%)',
+              border: '2px solid rgba(34, 197, 94, 0.3)',
+              boxShadow: '0 0 15px rgba(34, 197, 94, 0.2)'
+            }}
+          >
             <div className="flex items-center gap-3">
               <motion.div
-                className="w-3 h-3 bg-quantum-green rounded-full"
-                animate={{ opacity: [0.5, 1, 0.5] }}
+                className="w-3 h-3 rounded-full"
+                style={{ background: 'linear-gradient(135deg, #10B981, #34D399)' }}
+                animate={{ scale: [1, 1.2, 1], opacity: [0.7, 1, 0.7] }}
                 transition={{ duration: 2, repeat: Infinity }}
               />
-              <span className="xl:block hidden text-sm text-quantum-green">Network Online</span>
+              <span className="xl:block hidden text-sm font-semibold text-green-300">Network Online</span>
             </div>
           </div>
         </div>
@@ -84,15 +123,19 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
             onClick={() => onNavigate(item.id)}
             className={`relative flex flex-col items-center p-3 rounded-xl ${
               currentScreen === item.id
-                ? 'text-quantum-cyan'
-                : 'text-gray-500'
+                ? 'text-amber-400'
+                : 'text-amber-300/40'
             }`}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.9 }}
           >
             {currentScreen === item.id && (
               <motion.div
-                className="absolute -top-1 w-12 h-1 bg-gradient-to-r from-quantum-purple to-quantum-cyan rounded-full"
+                className="absolute -top-1 w-12 h-1 rounded-full"
+                style={{
+                  background: 'linear-gradient(90deg, #D4AF37, #FFD700, #D4AF37)',
+                  boxShadow: '0 0 10px rgba(212, 175, 55, 0.5)'
+                }}
                 layoutId="mobile-indicator"
               />
             )}

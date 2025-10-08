@@ -1,0 +1,11 @@
+[package]
+name = "k-quantum-gravity"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "Quantum gravity corrections and K-Parameter gravitational enhancements"
+
+[dependencies]
+k-constants = { path = "../k-constants" }
+nalgebra = { workspace = true }
+ndarray = { workspace = true }

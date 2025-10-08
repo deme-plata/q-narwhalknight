@@ -161,6 +161,12 @@ pub enum StreamEvent {
         mixing_duration_seconds: u32,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// Custom event for mining rewards and other custom types
+    Custom {
+        event_type: String,
+        data: serde_json::Value,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -420,28 +426,29 @@ async fn handle_client_message(message: &str, _state: &Arc<AppState>) -> anyhow:
 }
 
 /// Get event type name for SSE event naming
-fn event_type_name(event: &StreamEvent) -> &'static str {
+fn event_type_name(event: &StreamEvent) -> String {
     match event {
-        StreamEvent::TransactionSubmitted { .. } => "transaction-submitted",
-        StreamEvent::TransactionStatusUpdate { .. } => "transaction-status",
-        StreamEvent::VertexCreated { .. } => "vertex-created",
-        StreamEvent::CertificateGenerated { .. } => "certificate-generated",
-        StreamEvent::BlockFinalized { .. } => "block-finalized",
-        StreamEvent::NodeStatusUpdate { .. } => "node-status",
-        StreamEvent::PeerEvent { .. } => "peer-event",
-        StreamEvent::MetricsUpdate { .. } => "metrics-update",
-        StreamEvent::PeerDiscovered { .. } => "peer-discovered",
-        StreamEvent::PeerConnected { .. } => "peer-connected",
-        StreamEvent::PeerDisconnected { .. } => "peer-disconnected",
-        StreamEvent::PhantomPeerDiscovered { .. } => "phantom-peer-discovered",
-        StreamEvent::PhantomMessageReceived { .. } => "phantom-message-received",
-        StreamEvent::SecurityAlert { .. } => "security-alert",
-        StreamEvent::NetworkTopologyChanged { .. } => "network-topology-changed",
-        StreamEvent::TorCircuitEvent { .. } => "tor-circuit-event",
-        StreamEvent::FaucetDispensed { .. } => "faucet-dispensed",
-        StreamEvent::BalanceUpdated { .. } => "balance-updated",
-        StreamEvent::PrivacyMixingStarted { .. } => "privacy-mixing-started",
-        StreamEvent::PrivacyMixingCompleted { .. } => "privacy-mixing-completed",
+        StreamEvent::TransactionSubmitted { .. } => "transaction-submitted".to_string(),
+        StreamEvent::TransactionStatusUpdate { .. } => "transaction-status".to_string(),
+        StreamEvent::VertexCreated { .. } => "vertex-created".to_string(),
+        StreamEvent::CertificateGenerated { .. } => "certificate-generated".to_string(),
+        StreamEvent::BlockFinalized { .. } => "block-finalized".to_string(),
+        StreamEvent::NodeStatusUpdate { .. } => "node-status".to_string(),
+        StreamEvent::PeerEvent { .. } => "peer-event".to_string(),
+        StreamEvent::MetricsUpdate { .. } => "metrics-update".to_string(),
+        StreamEvent::PeerDiscovered { .. } => "peer-discovered".to_string(),
+        StreamEvent::PeerConnected { .. } => "peer-connected".to_string(),
+        StreamEvent::PeerDisconnected { .. } => "peer-disconnected".to_string(),
+        StreamEvent::PhantomPeerDiscovered { .. } => "phantom-peer-discovered".to_string(),
+        StreamEvent::PhantomMessageReceived { .. } => "phantom-message-received".to_string(),
+        StreamEvent::SecurityAlert { .. } => "security-alert".to_string(),
+        StreamEvent::NetworkTopologyChanged { .. } => "network-topology-changed".to_string(),
+        StreamEvent::TorCircuitEvent { .. } => "tor-circuit-event".to_string(),
+        StreamEvent::FaucetDispensed { .. } => "faucet-dispensed".to_string(),
+        StreamEvent::BalanceUpdated { .. } => "balance-updated".to_string(),
+        StreamEvent::PrivacyMixingStarted { .. } => "privacy-mixing-started".to_string(),
+        StreamEvent::PrivacyMixingCompleted { .. } => "privacy-mixing-completed".to_string(),
+        StreamEvent::Custom { event_type, .. } => event_type.clone(),
     }
 }
 

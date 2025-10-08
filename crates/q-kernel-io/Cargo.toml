@@ -28,7 +28,8 @@ mio = "0.8"                # Cross-platform I/O
 
 # System information
 sysinfo = "0.30"           # System topology detection
-nix = "0.27"               # Unix system calls
+num_cpus = { workspace = true }  # CPU count detection
+nix = { version = "0.27", features = ["mman", "socket", "zerocopy", "sched", "process", "net"] }  # Unix system calls with needed features
 
 # Error handling
 anyhow = { workspace = true }
@@ -40,6 +41,9 @@ bincode = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# Temporary files (for testing and examples)
+tempfile = { workspace = true }
 
 # Benchmarking
 criterion = { workspace = true }

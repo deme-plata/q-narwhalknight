@@ -37,7 +37,7 @@ impl MerkleTree {
         // Compute root hash (simplified - real implementation would build full tree)
         let mut hasher = blake3::Hasher::new();
         for validator in validators {
-            hasher.update(validator.as_bytes());
+            hasher.update(validator);
         }
         let root = hasher.finalize().into();
 
@@ -61,7 +61,7 @@ impl MerkleTree {
         }
 
         Ok(MerkleProof {
-            leaf_hash: blake3::hash(validator_id.as_bytes()).into(),
+            leaf_hash: blake3::hash(validator_id).into(),
             index,
             siblings,
         })
@@ -143,7 +143,7 @@ impl NetworkMembershipProof {
         let member_var = builder.create_variable("member_id".to_string(), false);
         let position_var = builder.create_variable("position".to_string(), false);
 
-        builder.assign_variable(&member_var, field_from_bytes(validator_id.as_bytes()))?;
+        builder.assign_variable(&member_var, field_from_bytes(validator_id))?;
         builder.assign_variable(&position_var, Fr::from(member_index as u64))?;
 
         // Build merkle proof verification constraints

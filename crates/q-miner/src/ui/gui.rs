@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 use anyhow::Result;
 use eframe::egui;
 use egui::{Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
@@ -56,12 +58,16 @@ impl GuiApplication {
     
     fn load_icon() -> egui::IconData {
         // Create a simple quantum-themed icon
-        let icon_data = include_bytes!("../../../assets/icon.png");
+        let icon_data = include_bytes!("../../../../assets/icon.png");
         egui::IconData::try_from_png_bytes(icon_data)
             .unwrap_or_else(|_| {
-                // Fallback: create a simple programmatic icon
+                // Fallback: create a simple programmatic icon with correct RGBA format
+                let mut rgba = Vec::with_capacity(32 * 32 * 4);
+                for _ in 0..(32 * 32) {
+                    rgba.extend_from_slice(&[0, 255, 255, 255]); // Cyan pixel with full alpha
+                }
                 egui::IconData {
-                    rgba: vec![0, 255, 255, 255; 32 * 32], // Cyan square
+                    rgba,
                     width: 32,
                     height: 32,
                 }

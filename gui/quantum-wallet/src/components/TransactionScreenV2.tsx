@@ -257,18 +257,26 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
       }
 
       console.log('📥 Transaction result:', result);
-      
+      console.log('📥 Result details - success:', result.success, 'data:', result.data, 'error:', result.error);
+
       if (result.success && result.data) {
+        console.log('✅ Transaction successful! Hash:', result.data.transaction_hash);
+        console.log('✅ Full transaction data:', JSON.stringify(result.data, null, 2));
+
         setTransaction(prev => ({
           ...prev,
-          success: !enablePrivacyMixer, // Only show success immediately for non-mixer transactions
-          txHash: result.data.transaction_hash || result.data.mixing_session_id || 'unknown',
+          success: true, // Always show success for completed transactions
+          txHash: result.data.transaction_hash || result.data.mixing_session_id || result.data.tx_hash || 'pending',
           starkProof: result.data.stark_proof
         }));
 
-        // Balance will update automatically via SSE
+        // Dispatch custom event to update balance
+        window.dispatchEvent(new CustomEvent('balance-update', {
+          detail: { refresh: true }
+        }));
       } else {
-        throw new Error(result.error || 'Transaction failed');
+        console.error('❌ Transaction failed:', result.error);
+        throw new Error(result.error || 'Transaction failed - no error message provided');
       }
     } catch (error) {
       console.error('❌ Transaction error:', error);
@@ -304,7 +312,12 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
 
       {/* Current Balance Display */}
       <motion.div
-        className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-6 quantum-glow"
+        className="backdrop-blur-xl rounded-3xl p-6"
+        style={{
+          background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+          border: '2px solid rgba(212, 175, 55, 0.3)',
+          boxShadow: '0 0 30px rgba(212, 175, 55, 0.2)'
+        }}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
       >
@@ -344,7 +357,12 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
       {/* Transaction Form */}
       {currentBalance >= 0 && (
         <motion.div
-          className="bg-quantum-purple/20 backdrop-blur-xl rounded-3xl p-8 border border-quantum-purple/30"
+          className="backdrop-blur-xl rounded-3xl p-8"
+          style={{
+            background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+            border: '2px solid rgba(212, 175, 55, 0.2)',
+            boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)'
+          }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
@@ -406,7 +424,12 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
             </div>
 
             {/* Quantum Privacy Mixer Toggle */}
-            <div className="bg-quantum-pink/10 border border-quantum-pink/20 rounded-xl p-6">
+            <div className="rounded-xl p-6"
+              style={{
+                background: 'linear-gradient(135deg, rgba(236, 72, 153, 0.1) 0%, rgba(219, 39, 119, 0.05) 100%)',
+                border: '2px solid rgba(236, 72, 153, 0.2)'
+              }}
+            >
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <Shield className="w-6 h-6 text-quantum-pink" />
@@ -552,7 +575,13 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
         <motion.button
           onClick={handleSendTransaction}
           disabled={transaction.isProcessing || !validateTransaction().valid}
-          className="w-full py-6 px-8 bg-gradient-to-r from-quantum-purple to-quantum-cyan rounded-xl text-white font-bold text-xl flex items-center justify-center gap-4 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-2xl hover:shadow-quantum-cyan/25 transition-all"
+          className="w-full py-6 px-8 rounded-xl text-white font-bold text-xl flex items-center justify-center gap-4 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+          style={{
+            background: transaction.isProcessing || !validateTransaction().valid
+              ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.5) 0%, rgba(139, 92, 246, 0.5) 100%)'
+              : 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #FFA500 100%)',
+            boxShadow: '0 0 30px rgba(212, 175, 55, 0.3)'
+          }}
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
         >

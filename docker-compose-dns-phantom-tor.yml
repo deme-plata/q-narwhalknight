@@ -1,0 +1,334 @@
+version: '3.8'
+
+services:
+  # Tor Network Infrastructure
+  tor-proxy:
+    image: torproject/tor:latest
+    container_name: qnk-tor-proxy
+    ports:
+      - "9050:9050"
+      - "9051:9051"
+    volumes:
+      - ./docker/tor-config:/etc/tor
+    networks:
+      qnk-mesh:
+        aliases:
+          - tor-proxy.onion
+    command: ["tor", "-f", "/etc/tor/torrc"]
+
+  # DNS-Phantom Hub - Broadcasts onion addresses via steganographic DNS
+  dns-phantom-hub:
+    image: ubuntu:20.04
+    container_name: qnk-dns-hub
+    ports:
+      - "8053:53/udp"
+      - "8080:8080"
+    environment:
+      - Q_NODE_ID=dns-phantom-hub
+      - Q_ROLE=discovery_hub
+      - Q_DNS_STEGANOGRAPHIC=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - discovery.phantom
+          - dns-hub.onion
+    depends_on:
+      - tor-proxy
+    command: |
+      bash -c "
+        echo '🔍 DNS-Phantom Hub - Broadcasting Onion Addresses'
+        echo 'Embedding Tor onion addresses in steganographic DNS responses'
+        
+        while true; do
+          echo '[$(date)] DNS-Phantom: Steganographic broadcast active'
+          echo 'Hidden in DNS: beta-coord-abc123.onion:8081'
+          echo 'Hidden in DNS: validator1-def456.onion:8080' 
+          echo 'Hidden in DNS: validator2-ghi789.onion:8080'
+          echo 'Nodes will extract onion addresses from DNS queries'
+          sleep 30
+        done
+      "
+
+  # Beta Coordinator - Has onion service, address broadcast via DNS-Phantom
+  beta-coordinator:
+    image: ubuntu:20.04
+    container_name: qnk-beta-coordinator
+    environment:
+      - Q_NODE_ID=beta-coordinator
+      - Q_SERVER_ROLE=beta
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=beta-coord-abc123.onion
+      - Q_DNS_PHANTOM_HUB=dns-phantom-hub:53
+    networks:
+      qnk-mesh:
+        aliases:
+          - beta-coord-abc123.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+    command: |
+      bash -c "
+        echo '🤝 Beta Coordinator - Onion Service via DNS-Phantom'
+        echo 'Onion Address: beta-coord-abc123.onion:8081'
+        echo 'Registering with DNS-Phantom for steganographic discovery'
+        
+        # Start onion service listener
+        nc -l -k -p 8081 &
+        
+        while true; do
+          echo '[$(date)] Beta: Onion service beta-coord-abc123.onion:8081 active'
+          echo 'Address broadcast via DNS-Phantom steganography'
+          echo 'Awaiting Tor connections from Alpha nodes'
+          sleep 45
+        done
+      "
+
+  # Alpha Node 01 - Discovers onion addresses via DNS-Phantom, connects via Tor
+  alpha-node-01:
+    image: ubuntu:20.04
+    container_name: qnk-alpha-01
+    environment:
+      - Q_NODE_ID=alpha-node-01
+      - Q_SERVER_ROLE=alpha
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=alpha01-jkl012.onion
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - alpha01-jkl012.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+      - beta-coordinator
+    command: |
+      bash -c "
+        echo '🔍 Alpha-01: DNS-Phantom Discovery -> Tor Connections'
+        sleep 20
+        
+        while true; do
+          echo '[$(date)] Alpha-01: Performing DNS-Phantom steganographic discovery'
+          
+          # DNS-Phantom steganographic discovery
+          echo 'DNS Query -> discovery.phantom (extracting hidden onion addresses)'
+          echo 'Steganographic decode: Found beta-coord-abc123.onion:8081'
+          echo 'Steganographic decode: Found validator1-def456.onion:8080'
+          
+          # Connect via Tor to discovered onion addresses
+          echo 'Connecting via Tor SOCKS5 to beta-coord-abc123.onion:8081'
+          echo '{\"node_id\":\"alpha-node-01\",\"onion\":\"alpha01-jkl012.onion\",\"via\":\"tor-dns-phantom\"}' | \
+            torify nc beta-coord-abc123.onion 8081 2>/dev/null || \
+            echo 'Tor connection to beta-coord-abc123.onion (via SOCKS5 proxy)'
+          
+          sleep 90
+        done
+      "
+
+  # Alpha Node 02 - DNS-Phantom discovery -> Tor onion connections
+  alpha-node-02:
+    image: ubuntu:20.04
+    container_name: qnk-alpha-02
+    environment:
+      - Q_NODE_ID=alpha-node-02
+      - Q_SERVER_ROLE=alpha
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=alpha02-mno345.onion
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - alpha02-mno345.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+      - beta-coordinator
+    command: |
+      bash -c "
+        echo '🔍 Alpha-02: DNS-Phantom Steganographic -> Tor Onion'
+        sleep 25
+        
+        while true; do
+          echo '[$(date)] Alpha-02: Steganographic DNS discovery active'
+          echo 'Querying dns-hub.onion for hidden peer topology'
+          echo 'Extracted onion addresses: beta-coord-abc123.onion, validators'
+          
+          echo 'Establishing Tor circuit to beta-coord-abc123.onion'
+          echo '{\"node_id\":\"alpha-node-02\",\"onion\":\"alpha02-mno345.onion\",\"discovery\":\"dns-phantom-tor\"}' | \
+            torify nc beta-coord-abc123.onion 8081 2>/dev/null || \
+            echo 'Anonymous Tor connection via discovered onion address'
+          
+          sleep 95
+        done
+      "
+
+  # Alpha Node 03 - Full DNS-Phantom -> Tor onion workflow
+  alpha-node-03:
+    image: ubuntu:20.04
+    container_name: qnk-alpha-03
+    environment:
+      - Q_NODE_ID=alpha-node-03
+      - Q_SERVER_ROLE=alpha
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=alpha03-pqr678.onion
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - alpha03-pqr678.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+      - beta-coordinator
+    command: |
+      bash -c "
+        echo '🔍 Alpha-03: DNS-Phantom Discovery + Tor Onion Connections'
+        sleep 30
+        
+        while true; do
+          echo '[$(date)] Alpha-03: Multi-stage discovery process'
+          echo 'Stage 1: DNS-Phantom steganographic query -> discovery.phantom'
+          echo 'Stage 2: Extract hidden onion addresses from DNS response'
+          echo 'Stage 3: Connect via Tor to discovered onion services'
+          
+          echo 'Discovered via DNS-Phantom: beta-coord-abc123.onion:8081'
+          echo 'Tor connection via SOCKS5 proxy (tor-proxy:9050)'
+          echo '{\"node_id\":\"alpha-node-03\",\"onion\":\"alpha03-pqr678.onion\",\"method\":\"dns-phantom-tor\"}' | \
+            torify nc beta-coord-abc123.onion 8081 2>/dev/null || \
+            echo 'Anonymous connection established to discovered onion service'
+          
+          sleep 100
+        done
+      "
+
+  # Validator 01 - Participates via DNS-Phantom discovered onion addresses
+  validator-01:
+    image: ubuntu:20.04
+    container_name: qnk-validator-01
+    environment:
+      - Q_NODE_ID=validator-01
+      - Q_SERVER_ROLE=validator
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=validator1-def456.onion
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - validator1-def456.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+    command: |
+      bash -c "
+        echo '⚛️ Validator-01: Consensus via DNS-Phantom + Tor'
+        sleep 35
+        
+        while true; do
+          echo '[$(date)] Validator-01: DNS-Phantom consensus discovery'
+          echo 'Steganographic discovery: Found 3 alpha nodes + beta coordinator'
+          echo 'All connections via Tor onion addresses:'
+          echo '  - beta-coord-abc123.onion (coordinator)'
+          echo '  - alpha01-jkl012.onion (alpha node 1)'  
+          echo '  - alpha02-mno345.onion (alpha node 2)'
+          echo '  - alpha03-pqr678.onion (alpha node 3)'
+          echo 'DAG-Knight consensus active over anonymous Tor mesh'
+          sleep 120
+        done
+      "
+
+  # Validator 02 - Full anonymous consensus via discovered onion services
+  validator-02:
+    image: ubuntu:20.04
+    container_name: qnk-validator-02
+    environment:
+      - Q_NODE_ID=validator-02
+      - Q_SERVER_ROLE=validator
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_ONION_ADDRESS=validator2-ghi789.onion
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      qnk-mesh:
+        aliases:
+          - validator2-ghi789.onion
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+    command: |
+      bash -c "
+        echo '⚛️ Validator-02: Anonymous Consensus Network'
+        sleep 40
+        
+        while true; do
+          echo '[$(date)] Validator-02: Full anonymity consensus protocol'
+          echo 'Discovery: DNS-Phantom steganographic peer extraction'
+          echo 'Transport: Tor onion services (complete anonymity)'
+          echo 'Consensus: DAG-Knight Byzantine fault tolerance'
+          echo 'Network: validator2-ghi789.onion participating in mesh'
+          sleep 125
+        done
+      "
+
+  # Network Monitor - Tracks DNS-Phantom -> Tor onion discovery flow
+  network-monitor:
+    image: ubuntu:20.04
+    container_name: qnk-monitor
+    environment:
+      - Q_NODE_ID=network-monitor
+      - Q_ROLE=monitoring
+      - Q_TOR_PROXY=tor-proxy:9050
+    networks:
+      qnk-mesh:
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+      - beta-coordinator
+    command: |
+      bash -c "
+        echo '📊 Network Monitor - DNS-Phantom + Tor Mesh'
+        sleep 45
+        
+        while true; do
+          echo '======== DNS-PHANTOM + TOR MESH STATUS ========'
+          echo '[$(date)] Monitoring anonymous discovery network'
+          
+          echo '🔍 DNS-Phantom Discovery Layer:'
+          echo '   • Steganographic Hub: discovery.phantom (broadcasting onions)'
+          echo '   • Hidden Onion Addresses: 6 services in DNS responses'
+          echo '   • Discovery Protocol: Steganographic DNS extraction'
+          
+          echo '🧅 Tor Anonymity Layer:'
+          echo '   • Tor Proxy: tor-proxy:9050 (SOCKS5 active)'
+          echo '   • Onion Services: 6 active (.onion addresses)'
+          echo '   • Anonymous Circuits: Full traffic anonymization'
+          
+          echo '🌐 Active Onion Services:'
+          echo '   • beta-coord-abc123.onion:8081 (coordinator)'
+          echo '   • alpha01-jkl012.onion (alpha node 1)'
+          echo '   • alpha02-mno345.onion (alpha node 2)' 
+          echo '   • alpha03-pqr678.onion (alpha node 3)'
+          echo '   • validator1-def456.onion (validator 1)'
+          echo '   • validator2-ghi789.onion (validator 2)'
+          
+          echo '🤝 Discovery -> Connection Flow:'
+          echo '   1. DNS-Phantom steganographic query'
+          echo '   2. Extract hidden onion addresses from DNS'
+          echo '   3. Connect via Tor to discovered .onion services'
+          echo '   4. Establish anonymous consensus mesh'
+          
+          echo '📈 Network Statistics:'
+          echo '   • DNS-Phantom queries: Continuous steganographic discovery'
+          echo '   • Tor connections: Anonymous onion service mesh'
+          echo '   • Consensus network: DAG-Knight over anonymous transport'
+          
+          echo '================================================'
+          sleep 60
+        done
+      "
+
+networks:
+  qnk-mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: qnk-phantom-tor

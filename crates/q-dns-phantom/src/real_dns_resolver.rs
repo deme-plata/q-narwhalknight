@@ -32,6 +32,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 use url::Url;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// DNS resolver configuration
 #[derive(Debug, Clone)]
@@ -207,7 +208,7 @@ impl RealDnsResolver {
                             hickory_resolver::config::Protocol::Udp
                         },
                         tls_dns_name: None,
-                        trust_nx_responses: true,
+                        trust_negative_responses: true,
                         bind_addr: None,
                     }
                 );
@@ -464,7 +465,7 @@ impl RealDnsResolver {
                 name: domain.to_string(),
                 record_type: format!("{:?}", record_type),
                 class: "IN".to_string(),
-                ttl: record.ttl(),
+                ttl: 300, // Default TTL since hickory-dns RData doesn't expose ttl() method
                 data: record.to_string(),
             })
             .collect();
@@ -554,7 +555,7 @@ impl RealDnsResolver {
                         "total" => total_fragments = value.parse().unwrap_or(0),
                         "ts" => timestamp = value.parse().unwrap_or(0),
                         "data" => {
-                            payload = base64::decode(value).unwrap_or_default();
+                            payload = STANDARD.decode(value).unwrap_or_default();
                         }
                         _ => {}
                     }

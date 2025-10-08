@@ -1,0 +1,9 @@
+[package]
+name = "k-biological-quantum"
+version = "0.1.0"
+edition = "2021"
+authors = ["OroBit Research Consortium"]
+description = "Biological quantum coherence (photosynthesis, magnetoreception)"
+
+[dependencies]
+k-constants = { path = "../k-constants" }

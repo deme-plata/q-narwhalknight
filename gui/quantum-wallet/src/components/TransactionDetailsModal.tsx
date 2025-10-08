@@ -85,45 +85,47 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.9, y: 20 }}
             transition={{ type: "spring", duration: 0.3 }}
-            className="bg-gradient-to-br from-quantum-indigo/90 to-quantum-purple/80 backdrop-blur-xl rounded-3xl p-8 max-w-lg w-full quantum-glow border border-quantum-cyan/30"
+            className="backdrop-blur-xl rounded-3xl p-8 max-w-2xl w-full border-2"
+            style={{
+              background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.98) 0%, rgba(50, 30, 80, 0.98) 100%)',
+              borderColor: 'rgba(212, 175, 55, 0.3)',
+              boxShadow: '0 0 40px rgba(212, 175, 55, 0.3), inset 0 0 20px rgba(212, 175, 55, 0.1)'
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
-                <div className={`p-3 rounded-xl ${
-                  isMining ? 'bg-quantum-yellow/20' :
-                  isContract ? 'bg-quantum-purple/20' :
-                  isToken ? 'bg-quantum-cyan/20' :
-                  isStaking ? 'bg-emerald-500/20' :
-                  isReflection ? 'bg-lime-500/20' :
-                  isReceive ? 'bg-quantum-green/20' : 'bg-quantum-pink/20'
-                }`}>
+                <div className="p-3 rounded-xl"
+                  style={{
+                    background: isReceive
+                      ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))'
+                      : 'linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(220, 38, 38, 0.15))',
+                    border: isReceive
+                      ? '2px solid rgba(34, 197, 94, 0.3)'
+                      : '2px solid rgba(239, 68, 68, 0.3)'
+                  }}
+                >
                   {isMining ? (
-                    <Coins className="w-6 h-6 text-quantum-yellow" />
+                    <Coins className="w-6 h-6 text-amber-400" />
                   ) : isContract ? (
-                    <Code className="w-6 h-6 text-quantum-purple" />
+                    <Code className="w-6 h-6 text-amber-400" />
                   ) : isToken ? (
-                    <Coins className="w-6 h-6 text-quantum-cyan" />
+                    <Coins className="w-6 h-6 text-amber-400" />
                   ) : isStaking ? (
                     <Coins className="w-6 h-6 text-emerald-400" />
                   ) : isReflection ? (
                     <Coins className="w-6 h-6 text-lime-400" />
                   ) : isReceive ? (
-                    <ArrowDownLeft className="w-6 h-6 text-quantum-green" />
+                    <ArrowDownLeft className="w-6 h-6 text-green-400" />
                   ) : (
-                    <ArrowUpRight className="w-6 h-6 text-quantum-pink" />
+                    <ArrowUpRight className="w-6 h-6 text-red-400" />
                   )}
                 </div>
                 <div>
-                  <h2 className="text-xl font-bold text-white">Transaction Details</h2>
+                  <h2 className="text-xl font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent">Transaction Details</h2>
                   <p className={`text-sm ${
-                    isMining ? 'text-quantum-yellow' :
-                    isContract ? 'text-quantum-purple' :
-                    isToken ? 'text-quantum-cyan' :
-                    isStaking ? 'text-emerald-400' :
-                    isReflection ? 'text-lime-400' :
-                    isReceive ? 'text-quantum-green' : 'text-quantum-pink'
+                    isReceive ? 'text-green-400' : 'text-red-400'
                   }`}>
                     {isMining ? '⛏️ Mining Reward' :
                      isContract ? '📜 Contract Deployment' :
@@ -135,36 +137,42 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 </div>
               </div>
               <motion.button
-                whileHover={{ scale: 1.1 }}
+                whileHover={{ scale: 1.1, rotate: 90 }}
                 whileTap={{ scale: 0.9 }}
                 onClick={onClose}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 transition-colors"
+                className="p-2 rounded-xl hover:bg-amber-500/10 transition-colors"
               >
-                <X className="w-5 h-5 text-white" />
+                <X className="w-5 h-5 text-amber-400" />
               </motion.button>
             </div>
 
             {/* Amount */}
-            <div className="bg-white/5 rounded-2xl p-6 mb-6">
+            <div className="rounded-2xl p-6 mb-6"
+              style={{
+                background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.15), rgba(255, 215, 0, 0.1))',
+                border: '2px solid rgba(212, 175, 55, 0.3)',
+                boxShadow: '0 0 20px rgba(212, 175, 55, 0.2)'
+              }}
+            >
               <div className="text-center">
-                <p className="text-sm text-gray-300 mb-2">Amount</p>
+                <p className="text-sm text-amber-300/60 mb-2">Amount</p>
                 {(transaction as any).isPrivate ? (
                   <div>
-                    <p className="text-3xl font-bold text-quantum-purple">🔒 PRIVATE</p>
-                    <p className="text-sm text-gray-400 mt-1">
+                    <p className="text-3xl font-bold text-amber-400">🔒 PRIVATE</p>
+                    <p className="text-sm text-amber-300/60 mt-1">
                       🛡️ ZK-SNARK Protected
                     </p>
-                    <p className="text-xs text-gray-500 mt-2">
+                    <p className="text-xs text-amber-300/40 mt-2">
                       Amount hidden for quantum privacy
                     </p>
                   </div>
                 ) : (
                   <div>
-                    <p className={`text-3xl font-bold ${isReceive ? 'text-quantum-green' : 'text-quantum-pink'}`}>
-                      {isReceive ? '+' : '-'}{transaction.amount?.toFixed(8) || '0'} {TICKER_SYMBOL}
+                    <p className={`text-3xl font-bold ${isReceive ? 'text-green-400' : 'text-red-400'}`}>
+                      {isReceive ? '+' : '-'}{(transaction.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {TICKER_SYMBOL}
                     </p>
-                    <p className="text-sm text-gray-400 mt-1">
-                      ≈ ${((transaction.amount || 0) * 0.01).toFixed(2)} USD
+                    <p className="text-sm text-amber-300/60 mt-1">
+                      ≈ ${((transaction.amount || 0) * 0.01).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
                     </p>
                   </div>
                 )}
@@ -174,87 +182,109 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
             {/* Transaction Details */}
             <div className="space-y-4">
               {/* Transaction Hash */}
-              <div className="bg-white/5 rounded-xl p-4">
+              <div className="rounded-xl p-4"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))',
+                  border: '1px solid rgba(212, 175, 55, 0.2)'
+                }}
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Hash className="w-4 h-4 text-quantum-cyan" />
-                    <span className="text-sm text-gray-300">Transaction Hash</span>
+                    <Hash className="w-4 h-4 text-amber-400" />
+                    <span className="text-sm text-amber-200">Transaction Hash</span>
                   </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => copyToClipboard(transaction.txHash, 'hash')}
-                    className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+                    className="p-1 rounded-lg hover:bg-amber-500/10 transition-colors"
                   >
                     {copiedField === 'hash' ? (
-                      <Check className="w-4 h-4 text-quantum-green" />
+                      <Check className="w-4 h-4 text-green-400" />
                     ) : (
-                      <Copy className="w-4 h-4 text-gray-400" />
+                      <Copy className="w-4 h-4 text-amber-400" />
                     )}
                   </motion.button>
                 </div>
-                <p className="font-mono text-sm text-white mt-2 break-all">
-                  {transaction.txHash}
-                </p>
+                <div className="mt-2">
+                  <p className="font-mono text-xs text-amber-100 break-all">
+                    {transaction.txHash}
+                  </p>
+                </div>
               </div>
 
               {/* From Address */}
-              <div className="bg-white/5 rounded-xl p-4">
+              <div className="rounded-xl p-4"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))',
+                  border: '1px solid rgba(212, 175, 55, 0.2)'
+                }}
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Wallet className="w-4 h-4 text-quantum-purple" />
-                    <span className="text-sm text-gray-300">From</span>
+                    <Wallet className="w-4 h-4 text-amber-400" />
+                    <span className="text-sm text-amber-200">From</span>
                   </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => copyToClipboard(transaction.from || '', 'from')}
-                    className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+                    className="p-1 rounded-lg hover:bg-amber-500/10 transition-colors"
                   >
                     {copiedField === 'from' ? (
-                      <Check className="w-4 h-4 text-quantum-green" />
+                      <Check className="w-4 h-4 text-green-400" />
                     ) : (
-                      <Copy className="w-4 h-4 text-gray-400" />
+                      <Copy className="w-4 h-4 text-amber-400" />
                     )}
                   </motion.button>
                 </div>
-                <p className="font-mono text-sm text-white mt-2 break-all">
+                <p className="font-mono text-xs text-amber-100 mt-2 break-all">
                   {(transaction as any).isPrivate ? '🔒 Protected by ZK-SNARK' : (transaction.from || 'Unknown')}
                 </p>
               </div>
 
               {/* To Address */}
-              <div className="bg-white/5 rounded-xl p-4">
+              <div className="rounded-xl p-4"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))',
+                  border: '1px solid rgba(212, 175, 55, 0.2)'
+                }}
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Wallet className="w-4 h-4 text-quantum-cyan" />
-                    <span className="text-sm text-gray-300">To</span>
+                    <Wallet className="w-4 h-4 text-amber-400" />
+                    <span className="text-sm text-amber-200">To</span>
                   </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => copyToClipboard(transaction.to || '', 'to')}
-                    className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+                    className="p-1 rounded-lg hover:bg-amber-500/10 transition-colors"
                   >
                     {copiedField === 'to' ? (
-                      <Check className="w-4 h-4 text-quantum-green" />
+                      <Check className="w-4 h-4 text-green-400" />
                     ) : (
-                      <Copy className="w-4 h-4 text-gray-400" />
+                      <Copy className="w-4 h-4 text-amber-400" />
                     )}
                   </motion.button>
                 </div>
-                <p className="font-mono text-sm text-white mt-2 break-all">
+                <p className="font-mono text-xs text-amber-100 mt-2 break-all">
                   {(transaction as any).isPrivate ? '🔒 Protected by ZK-SNARK' : (transaction.to || 'Unknown')}
                 </p>
               </div>
 
               {/* Token Address for token/reward transactions */}
               {(isToken || isStaking || isReflection) && transaction.tokenAddress && (
-                <div className="bg-white/5 rounded-xl p-4">
+                <div className="rounded-xl p-4"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))',
+                    border: '1px solid rgba(212, 175, 55, 0.2)'
+                  }}
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <Code className="w-4 h-4 text-quantum-cyan" />
-                      <span className="text-sm text-gray-300">
+                      <Code className="w-4 h-4 text-amber-400" />
+                      <span className="text-sm text-amber-200">
                         {isToken ? 'Token Contract' : 'Reward Contract'}
                       </span>
                     </div>
@@ -262,20 +292,20 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
                       onClick={() => copyToClipboard(transaction.tokenAddress || '', 'token')}
-                      className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+                      className="p-1 rounded-lg hover:bg-amber-500/10 transition-colors"
                     >
                       {copiedField === 'token' ? (
-                        <Check className="w-4 h-4 text-quantum-green" />
+                        <Check className="w-4 h-4 text-green-400" />
                       ) : (
-                        <Copy className="w-4 h-4 text-gray-400" />
+                        <Copy className="w-4 h-4 text-amber-400" />
                       )}
                     </motion.button>
                   </div>
-                  <p className="font-mono text-sm text-white mt-2 break-all">
+                  <p className="font-mono text-xs text-amber-100 mt-2 break-all">
                     {transaction.tokenAddress}
                   </p>
                   {transaction.tokenName && (
-                    <p className="text-xs text-gray-400 mt-1">
+                    <p className="text-xs text-amber-300/60 mt-1">
                       {transaction.tokenName} ({transaction.tokenSymbol})
                     </p>
                   )}
@@ -283,14 +313,19 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
               )}
 
               {/* Timestamp */}
-              <div className="bg-white/5 rounded-xl p-4">
+              <div className="rounded-xl p-4"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))',
+                  border: '1px solid rgba(212, 175, 55, 0.2)'
+                }}
+              >
                 <div className="flex items-center gap-2 mb-2">
-                  <Clock className="w-4 h-4 text-quantum-yellow" />
-                  <span className="text-sm text-gray-300">Timestamp</span>
+                  <Clock className="w-4 h-4 text-amber-400" />
+                  <span className="text-sm text-amber-200">Timestamp</span>
                 </div>
-                <div className="text-white">
+                <div className="text-amber-100">
                   <p className="text-sm">{dateTime.date}</p>
-                  <p className="text-sm text-gray-400">{dateTime.time}</p>
+                  <p className="text-sm text-amber-300/60">{dateTime.time}</p>
                 </div>
               </div>
             </div>
@@ -301,7 +336,11 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => copyToClipboard(transaction.txHash, 'hash')}
-                className="flex-1 flex items-center justify-center gap-2 bg-quantum-purple/30 hover:bg-quantum-purple/40 text-white py-3 px-4 rounded-xl transition-colors"
+                className="flex-1 flex items-center justify-center gap-2 text-amber-100 py-3 px-4 rounded-xl transition-colors"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.2), rgba(255, 215, 0, 0.15))',
+                  border: '2px solid rgba(212, 175, 55, 0.3)'
+                }}
               >
                 <Copy className="w-4 h-4" />
                 Copy Hash
@@ -315,7 +354,11 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                   const explorerUrl = `${window.location.origin}/explorer/tx/${transaction.txHash}`;
                   window.open(explorerUrl, '_blank');
                 }}
-                className="flex-1 flex items-center justify-center gap-2 bg-quantum-cyan/30 hover:bg-quantum-cyan/40 text-white py-3 px-4 rounded-xl transition-colors"
+                className="flex-1 flex items-center justify-center gap-2 text-amber-100 py-3 px-4 rounded-xl transition-colors"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.2), rgba(255, 215, 0, 0.15))',
+                  border: '2px solid rgba(212, 175, 55, 0.3)'
+                }}
               >
                 <ExternalLink className="w-4 h-4" />
                 Explorer
@@ -324,8 +367,13 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
 
             {/* Status Badge */}
             <div className="mt-4 text-center">
-              <span className="inline-flex items-center gap-2 bg-quantum-green/20 text-quantum-green text-sm py-2 px-4 rounded-full border border-quantum-green/30">
-                <div className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></div>
+              <span className="inline-flex items-center gap-2 text-green-400 text-sm py-2 px-4 rounded-full"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(22, 163, 74, 0.1))',
+                  border: '2px solid rgba(34, 197, 94, 0.3)'
+                }}
+              >
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                 Confirmed
               </span>
             </div>

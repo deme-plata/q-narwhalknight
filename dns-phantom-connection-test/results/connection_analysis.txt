@@ -1,0 +1,27 @@
+DNS-PHANTOM ACTUAL CONNECTION TEST RESULTS
+==========================================
+
+Test Duration: 120 seconds
+Test Checks: 1 monitoring intervals
+
+Node A Results:
+- DNS Steganographic Queries: 1
+- Peer Discoveries: 0
+0  
+- Actual Connections: 0
+0
+
+Node B Results:
+- DNS Steganographic Queries: 0
+0
+- Peer Discoveries: 0
+0
+- Actual Connections: 0
+0
+
+Combined Results:
+- Total DNS Steganographic Queries: 
+- Total Peer Discoveries: 
+- Total Actual Connections: 
+
+Final Result: FAILED

@@ -54,7 +54,8 @@ pub async fn run_simple_bep44_test() -> Result<SimpleTestMetrics> {
         getrandom::getrandom(&mut keypair[1..]).unwrap();
         config.validator_keypair = keypair;
 
-        let mut engine = DiscoveryEngine::new(config).await?;
+        let node_id = keypair;
+        let mut engine = DiscoveryEngine::new(config, node_id).await?;
         engine.initialize().await?;
         engine.start().await?;
 
@@ -144,7 +145,8 @@ pub async fn validate_bep44_integration() -> Result<bool> {
     info!("🔍 Validating BEP-44 integration");
 
     let config = Bep44DiscoveryConfig::default();
-    let mut engine = DiscoveryEngine::new(config).await?;
+    let node_id = config.validator_keypair;
+    let mut engine = DiscoveryEngine::new(config, node_id).await?;
 
     // Test basic operations
     engine.initialize().await?;

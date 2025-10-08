@@ -2,7 +2,6 @@
 /// Optimized for Narwhal mempool and Bullshark finality with hot/cold storage split
 /// Battle-tested design using RocksDB with specialized column families
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use q_dag_knight::BullsharkCert;
 use q_dag_knight::NarwhalPayload;
 use q_narwhal_core::Certificate;
@@ -17,13 +16,28 @@ use std::{
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+// External crates
+extern crate hex;
+extern crate blake3;
+
 pub mod kv;
 pub mod manifest;
 pub mod metrics;
 pub mod snapshot;
 pub mod sync;
 
+// Windows uses sled implementation
+#[cfg(target_os = "windows")]
+pub mod kv_sled;
+
+// Export platform-specific KVStore implementation
+#[cfg(not(target_os = "windows"))]
 pub use kv::{KVStore, RocksDBKV};
+
+#[cfg(target_os = "windows")]
+pub use kv::KVStore;
+#[cfg(target_os = "windows")]
+pub use kv_sled::RocksDBKV;
 pub use manifest::StorageManifest;
 pub use metrics::StorageMetrics;
 pub use snapshot::SnapshotManager;
@@ -35,6 +49,7 @@ pub const CF_DAG_VERTICES: &str = "dag_vertices";
 pub const CF_BULLSHARK_CERT: &str = "bullshark_cert";
 pub const CF_MANIFEST: &str = "manifest";
 pub const CF_NARWHAL_PAYLOADS: &str = "narwhal_payloads";
+pub const CF_TRANSACTIONS: &str = "transactions";
 
 /// Storage configuration
 #[derive(Debug, Clone)]
@@ -655,6 +670,79 @@ impl QStorage {
             "💰 Saved {} wallet balances to persistent storage",
             balances.len()
         );
+        Ok(())
+    }
+
+    /// Save transaction to persistent storage
+    pub async fn save_transaction(&self, tx: &q_types::Transaction) -> Result<()> {
+        let tx_data = bincode::serialize(tx)?;
+        self.hot_db.put(CF_TRANSACTIONS, &tx.id, &tx_data).await?;
+        debug!(
+            "💳 Saved transaction: {} ({} -> {})",
+            hex::encode(&tx.id),
+            hex::encode(&tx.from),
+            hex::encode(&tx.to)
+        );
+        Ok(())
+    }
+
+    /// Load transaction from persistent storage
+    pub async fn load_transaction(&self, tx_id: &[u8; 32]) -> Result<Option<q_types::Transaction>> {
+        match self.hot_db.get(CF_TRANSACTIONS, tx_id).await? {
+            Some(tx_data) => {
+                let tx: q_types::Transaction = bincode::deserialize(&tx_data)?;
+                debug!("💳 Loaded transaction: {}", hex::encode(tx_id));
+                Ok(Some(tx))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load all transactions from persistent storage
+    pub async fn load_all_transactions(&self) -> Result<Vec<q_types::Transaction>> {
+        let mut transactions = Vec::new();
+
+        match self.hot_db.scan_all(CF_TRANSACTIONS).await {
+            Ok(entries) => {
+                for (_key, tx_data) in entries {
+                    if let Ok(tx) = bincode::deserialize::<q_types::Transaction>(&tx_data) {
+                        transactions.push(tx);
+                    }
+                }
+                info!(
+                    "💳 Loaded {} transactions from persistent storage",
+                    transactions.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan transactions: {}", e);
+            }
+        }
+
+        Ok(transactions)
+    }
+
+    /// Save multiple transactions atomically
+    pub async fn save_transactions(&self, transactions: &[q_types::Transaction]) -> Result<()> {
+        let mut batch_ops = Vec::new();
+
+        for tx in transactions {
+            let tx_data = bincode::serialize(tx)?;
+            batch_ops.push((CF_TRANSACTIONS, tx.id.to_vec(), tx_data));
+        }
+
+        self.hot_db.write_batch(batch_ops).await?;
+        info!(
+            "💳 Saved {} transactions to persistent storage",
+            transactions.len()
+        );
+        Ok(())
+    }
+
+    /// Delete transaction from persistent storage
+    pub async fn delete_transaction(&self, tx_id: &[u8; 32]) -> Result<()> {
+        self.hot_db.delete(CF_TRANSACTIONS, tx_id).await?;
+        debug!("🗑️ Deleted transaction: {}", hex::encode(tx_id));
         Ok(())
     }
 }

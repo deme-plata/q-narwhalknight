@@ -4,9 +4,9 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/ui/',
+  base: '/',
   build: {
-    outDir: '../../web-ui/dist-final',
+    outDir: './dist-final',
     emptyOutDir: true,
   },
   server: {

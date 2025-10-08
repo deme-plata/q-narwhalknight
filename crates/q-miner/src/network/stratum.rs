@@ -25,7 +25,6 @@ pub struct StratumClient {
 }
 
 struct StratumConnection {
-    stream: TcpStream,
     reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
     writer: tokio::io::WriteHalf<TcpStream>,
 }
@@ -97,11 +96,10 @@ impl StratumClient {
             TcpStream::connect((host, port)).await?
         };
         
-        let (reader, writer) = tokio::io::split(stream.clone());
+        let (reader, writer) = tokio::io::split(stream);
         let reader = BufReader::new(reader);
-        
+
         self.connection = Some(StratumConnection {
-            stream,
             reader,
             writer,
         });
@@ -188,12 +186,12 @@ impl StratumClient {
                     method: "mining.notify".to_string(),
                     params: serde_json::json!([
                         format!("job_{}", chrono::Utc::now().timestamp()),
-                        "0x" + &hex::encode([1u8; 32]),  // Previous hash
-                        "0x" + &hex::encode([2u8; 32]),  // Merkle root
-                        "0x" + &hex::encode([3u8; 4]),   // Version
-                        "1e0ffff0",                      // nBits
-                        chrono::Utc::now().timestamp(),  // Timestamp
-                        true                             // Clean jobs
+                        format!("0x{}", hex::encode([1u8; 32])),  // Previous hash
+                        format!("0x{}", hex::encode([2u8; 32])),  // Merkle root
+                        format!("0x{}", hex::encode([3u8; 4])),   // Version
+                        "1e0ffff0",                               // nBits
+                        chrono::Utc::now().timestamp(),           // Timestamp
+                        true                                      // Clean jobs
                     ]),
                     result: None,
                     error: None,
@@ -244,7 +242,8 @@ impl StratumClient {
     
     pub async fn disconnect(&mut self) -> Result<()> {
         if let Some(mut connection) = self.connection.take() {
-            let _ = connection.stream.shutdown().await;
+            // Shutdown the writer (reader will be dropped)
+            let _ = connection.writer.shutdown().await;
         }
         Ok(())
     }

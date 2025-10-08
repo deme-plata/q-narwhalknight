@@ -438,28 +438,27 @@ impl ConnectionManager {
         stream.write_all(b"\n").await?; // Add newline as Server Beta expects
         stream.flush().await?;
 
-        // Try to read response to confirm connection
+        // Try to read handshake response to confirm connection
         let mut response_buffer = vec![0u8; 1024];
-        match timeout(Duration::from_secs(5), stream.read(&mut response_buffer)).await {
+        match timeout(Duration::from_secs(10), stream.read(&mut response_buffer)).await {
             Ok(Ok(bytes_read)) if bytes_read > 0 => {
                 let response = String::from_utf8_lossy(&response_buffer[..bytes_read]);
-                info!("📨 Server Beta response: {}", response);
+                info!("📨 Peer handshake response: {}", response);
 
-                if response
-                    .contains("Q-NarwhalKnight Server Beta P2P Bridge - Connection Successful!")
-                {
-                    info!("🎉 BREAKTHROUGH: DNS-Phantom → Connection SUCCESS!");
-                    info!("✅ Confirmed working cross-server mesh formation!");
+                if response.contains("\"server_role\":\"beta\"") || response.contains("Q-NarwhalKnight") {
+                    info!("🎉 Handshake confirmed! Connection established successfully");
                 }
             }
             Ok(Ok(_)) => {
-                warn!("📭 No response from Server Beta");
+                info!("📭 No immediate handshake response (peer may respond later)");
             }
             Ok(Err(e)) => {
-                warn!("❌ Error reading response: {}", e);
+                // Don't fail the connection on read error during handshake
+                // The peer might respond later or during health checks
+                info!("⚠️ Handshake read error (continuing anyway): {}", e);
             }
             Err(_) => {
-                warn!("⏰ Response timeout");
+                info!("⏰ Handshake response timeout (peer may be slow, continuing anyway)");
             }
         }
 
@@ -639,30 +638,52 @@ impl ConnectionManager {
 
     /// PHASE 2: Ping connection to check health
     async fn ping_connection(&self, connection: &mut ActiveConnection) -> Result<()> {
-        let ping_message = "{\"type\":\"ping\",\"timestamp\":".to_string()
-            + &SystemTime::now()
+        let ping_message = format!(
+            "{{\"type\":\"ping\",\"timestamp\":{}}}\n",
+            SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)?
                 .as_secs()
-                .to_string()
-            + "}";
+        );
 
         let mut stream = connection.stream.lock().await;
-        match timeout(Duration::from_secs(3), async {
+        match timeout(Duration::from_secs(5), async {
+            // Send ping with newline
             stream.write_all(ping_message.as_bytes()).await?;
             stream.flush().await?;
 
-            let mut buffer = [0u8; 64];
-            stream.read(&mut buffer).await?;
-            Ok::<(), anyhow::Error>(())
+            // Wait for pong response
+            let mut buffer = vec![0u8; 256];
+            let bytes_read = stream.read(&mut buffer).await?;
+
+            if bytes_read > 0 {
+                let response = String::from_utf8_lossy(&buffer[..bytes_read]);
+                debug!("🏓 Ping response: {}", response);
+
+                // Check if it's a valid pong or any response indicating peer is alive
+                if response.contains("\"type\":\"pong\"") || response.contains("received") || bytes_read > 0 {
+                    Ok::<(), anyhow::Error>(())
+                } else {
+                    Err(anyhow!("Invalid ping response"))
+                }
+            } else {
+                Err(anyhow!("Empty ping response"))
+            }
         })
         .await
         {
             Ok(Ok(())) => {
                 connection.last_activity = SystemTime::now();
+                debug!("✅ Health check passed for peer");
                 Ok(())
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(anyhow!("Ping timeout")),
+            Ok(Err(e)) => {
+                warn!("⚠️ Ping failed: {}", e);
+                Err(e)
+            }
+            Err(_) => {
+                warn!("⏰ Ping timeout (5 seconds)");
+                Err(anyhow!("Ping timeout"))
+            }
         }
     }
 

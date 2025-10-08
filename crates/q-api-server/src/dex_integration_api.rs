@@ -424,7 +424,7 @@ pub async fn get_all_pools(
 }
 
 pub async fn get_pool_info(
-    Path(address): Path<String>,
+    Path(_address): Path<String>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<PoolInfo>>, StatusCode> {
     // TODO: Implement actual pool lookup
@@ -455,7 +455,7 @@ pub struct SwapQuote {
 }
 
 pub async fn get_swap_quote(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Json(request): Json<SwapQuoteRequest>,
 ) -> Result<Json<DexApiResponse<SwapQuote>>, StatusCode> {
     // Input validation
@@ -562,7 +562,7 @@ pub async fn execute_swap(
         _ => return Ok(Json(DexApiResponse::error("invalid amount_in".to_string()))),
     };
     
-    let minimum_out: u64 = match request.minimum_amount_out.parse() {
+    let _minimum_out: u64 = match request.minimum_amount_out.parse() {
         Ok(amount) if amount > 0 => amount,
         _ => return Ok(Json(DexApiResponse::error("invalid minimum_amount_out".to_string()))),
     };
@@ -586,16 +586,14 @@ pub async fn execute_swap(
     };
     
     // Update transaction pool with pending transaction
+    // DashMap doesn't need .write() - it's concurrent by default
     {
-        let mut tx_pool = state.tx_pool.write().await;
-        let mut tx_status = state.tx_status.write().await;
-        
         // Convert hex string to bytes for the transaction hash
         if let Ok(hash_bytes) = hex::decode(&tx_hash[2..]) {
             if hash_bytes.len() == 32 {
                 let mut hash_array = [0u8; 32];
                 hash_array.copy_from_slice(&hash_bytes);
-                
+
                 // Create a mock transaction
                 let transaction = Transaction {
                     id: hash_array,
@@ -608,9 +606,9 @@ pub async fn execute_swap(
                     timestamp: chrono::Utc::now(),
                     data: format!("swap:{}:{}", request.token_in, request.token_out).into_bytes(),
                 };
-                
-                tx_pool.insert(hash_array, transaction);
-                tx_status.insert(hash_array, TxStatus::Pending);
+
+                state.tx_pool.insert(hash_array, transaction);
+                state.tx_status.insert(hash_array, TxStatus::Pending);
             }
         }
     }
@@ -658,7 +656,7 @@ pub struct ContractAudit {
 }
 
 pub async fn get_contract_audit(
-    Path(contract): Path<String>,
+    Path(_contract): Path<String>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<ContractAudit>>, StatusCode> {
     // TODO: Implement actual audit lookup
@@ -833,24 +831,24 @@ pub async fn get_swap_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<SwapResult>>, StatusCode> {
     // Check transaction status from the tx pool
-    let tx_status = state.tx_status.read().await;
-    
+    // DashMap doesn't need .read() - it's concurrent by default
     if let Some(hash_bytes) = hex::decode(&tx_hash).ok() {
         if hash_bytes.len() == 32 {
             let mut hash_array = [0u8; 32];
             hash_array.copy_from_slice(&hash_bytes);
-            
-            if let Some(status) = tx_status.get(&hash_array) {
+
+            if let Some(status) = state.tx_status.get(&hash_array) {
                 let swap_result = SwapResult {
                     transaction_hash: tx_hash,
-                    status: match status {
+                    status: match *status {
                         TxStatus::Pending => "pending".to_string(),
                         TxStatus::InMempool => "in_mempool".to_string(),
                         TxStatus::Confirmed { .. } => "confirmed".to_string(),
                         TxStatus::Failed { .. } => "failed".to_string(),
+                        TxStatus::Mixing => "mixing".to_string(), // Quantum mixing in progress
                     },
                     amount_in: "0".to_string(),  // TODO: Extract from transaction
-                    amount_out: "0".to_string(), // TODO: Extract from transaction  
+                    amount_out: "0".to_string(), // TODO: Extract from transaction
                     gas_used: 21000, // TODO: Get actual gas used
                 };
                 return Ok(Json(DexApiResponse::success(swap_result)));

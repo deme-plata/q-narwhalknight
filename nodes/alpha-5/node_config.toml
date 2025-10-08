@@ -1,0 +1,37 @@
+[node]
+id = "alpha-5"
+port = 8010
+api_port = 9010
+phase = "Phase4"
+
+[optimization]
+enable_simd = true
+enable_kernel_io = true
+simd_mode = "avx512"
+enable_io_uring = true
+enable_numa = true
+enable_zero_copy = true
+
+[cache]
+total_size = "2GB"
+l1_size = "1MB"
+l2_size = "100MB"
+l3_size = "1GB"
+enable_ml_prefetch = true
+
+[network]
+bootstrap_peers = ["bootstrap.q-narwhalknight.network"]
+enable_bitcoin_discovery = true
+enable_tor = true
+max_peers = 50
+
+[consensus]
+timeout_ms = 5000
+batch_size = 1000
+enable_sharding = true
+shard_count = 8
+
+[logging]
+level = "info"
+enable_metrics = true
+metrics_port = 9110

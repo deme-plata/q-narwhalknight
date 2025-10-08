@@ -380,7 +380,7 @@ impl BitcoinBridge {
             .push_slice(&push_bytes)
             .into_script();
         let output = TxOut {
-            value: 0,
+            value: bitcoin::Amount::from_sat(0),
             script_pubkey: script,
         };
 
@@ -406,7 +406,9 @@ impl BitcoinBridge {
 
         // Scan transactions in recent blocks
         for tx in block.txdata {
-            if let Ok(advertisements) = self.extract_advertisements(&tx).await {
+            // Convert bitcoincore_rpc Transaction to bitcoin Transaction
+            let bitcoin_tx: bitcoin::Transaction = tx;
+            if let Ok(advertisements) = self.extract_advertisements(&bitcoin_tx).await {
                 for advertisement in advertisements {
                     self.process_discovered_peer(advertisement).await;
                 }

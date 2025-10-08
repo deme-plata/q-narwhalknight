@@ -158,7 +158,7 @@ impl ZkP2pManager {
     pub fn new(config: ZkP2pConfig) -> Self {
         info!(
             "🚀 Initializing ZK-enhanced P2P manager for validator: {}",
-            config.validator_id
+            hex::encode(&config.validator_id)
         );
 
         Self {
@@ -221,8 +221,10 @@ impl ZkP2pManager {
         {
             let mut connections = self.connections.write().await;
             for connection in &established_connections {
+                // Hash onion address to get ValidatorId ([u8; 32])
+                let validator_id = blake3::hash(connection.peer_info.onion_address.as_bytes()).into();
                 connections.insert(
-                    ValidatorId::from(connection.peer_info.onion_address.clone()),
+                    validator_id,
                     connection.clone(),
                 );
             }
@@ -369,6 +371,9 @@ impl ZkP2pManager {
             .establish_tor_connection_with_circuits(&peer.onion_address)
             .await?;
 
+        // Get performance tier before moving quality_proof
+        let performance_tier = quality_proof.get_performance_tier();
+
         let verified_connection = VerifiedP2pConnection {
             peer_info: peer.clone(),
             tor_connection,
@@ -389,7 +394,7 @@ impl ZkP2pManager {
         info!(
             "✅ Verified connection established with {} (tier: {:?})",
             peer.onion_address,
-            quality_proof.get_performance_tier()
+            performance_tier
         );
 
         Ok(verified_connection)

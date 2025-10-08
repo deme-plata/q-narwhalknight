@@ -1,0 +1,394 @@
+version: '3.8'
+
+services:
+  # Core infrastructure services
+  tor-proxy:
+    image: torproject/tor:latest
+    container_name: q-tor-proxy
+    ports:
+      - "9050:9050"
+      - "9051:9051"
+    volumes:
+      - ./docker/tor-config:/etc/tor
+    command: ["tor", "-f", "/etc/tor/torrc"]
+    networks:
+      - qnarwhal-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9050"]
+      interval: 5s
+      retries: 5
+
+  dns-phantom-hub:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-dns-phantom-hub
+    ports:
+      - "8053:53/udp"
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ROLE=dns_phantom_hub
+      - Q_DNS_STEGANOGRAPHIC=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - tor-proxy
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--dns-phantom-hub", "--port", "8080"]
+
+  # Beta server - main coordinator
+  beta-coordinator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-beta-coordinator
+    ports:
+      - "8081:8081"
+      - "8082:8080"
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=beta-coordinator
+      - Q_SERVER_ROLE=beta
+      - Q_P2P_PORT=8081
+      - Q_API_PORT=8080
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - tor-proxy
+      - dns-phantom-hub
+    volumes:
+      - ./target/release:/app/bin
+      - ./docker/logs:/app/logs
+    command: ["/app/bin/q-api-server", "--node-id", "beta-coordinator", "--p2p-port", "8081", "--api-port", "8080"]
+
+  # Alpha nodes (10 nodes)
+  alpha-node-01:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-01
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-01
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+      - dns-phantom-hub
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-01", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-02:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-02
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-02
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-02", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-03:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-03
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-03
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-03", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-04:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-04
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-04
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-04", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-05:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-05
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-05
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-05", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-06:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-06
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-06
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-06", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-07:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-07
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-07
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-07", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-08:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-08
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-08
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-08", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-09:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-09
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-09
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-09", "--target-beta", "beta-coordinator:8081"]
+
+  alpha-node-10:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-alpha-node-10
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=alpha-node-10
+      - Q_SERVER_ROLE=alpha
+      - Q_BETA_TARGET=beta-coordinator:8081
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-10", "--target-beta", "beta-coordinator:8081"]
+
+  # Consensus validator nodes (40 nodes)
+  validator-01:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-validator-01
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=validator-01
+      - Q_SERVER_ROLE=validator
+      - Q_CONSENSUS_MODE=dag_knight
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - dns-phantom-hub
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "validator-01", "--consensus-validator"]
+
+  # Generate remaining validators using a template
+  # Validators 02-40 would follow similar pattern but with different node IDs
+  # For brevity, showing first few examples:
+
+  validator-02:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-validator-02
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=validator-02
+      - Q_SERVER_ROLE=validator
+      - Q_CONSENSUS_MODE=dag_knight
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - dns-phantom-hub
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "validator-02", "--consensus-validator"]
+
+  validator-03:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-validator-03
+    environment:
+      - RUST_LOG=info
+      - Q_NODE_ID=validator-03
+      - Q_SERVER_ROLE=validator
+      - Q_CONSENSUS_MODE=dag_knight
+      - Q_TOR_PROXY=tor-proxy:9050
+      - Q_DNS_PHANTOM_DISCOVERY=true
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - dns-phantom-hub
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/q-api-server", "--node-id", "validator-03", "--consensus-validator"]
+
+  # Monitoring and metrics service
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: q-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - qnarwhal-net
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: q-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./docker/grafana-dashboards:/var/lib/grafana/dashboards
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - prometheus
+
+  # Load testing service
+  load-tester:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qnarwhal
+    container_name: q-load-tester
+    environment:
+      - RUST_LOG=info
+      - Q_LOAD_TEST_MODE=massive_scale
+      - Q_TARGET_TPS=50000
+      - Q_TEST_DURATION=600
+    networks:
+      - qnarwhal-net
+    depends_on:
+      - beta-coordinator
+      - alpha-node-01
+    volumes:
+      - ./target/release:/app/bin
+    command: ["/app/bin/massive_scale_test", "--validators", "50", "--duration", "600", "--real-dht"]
+
+networks:
+  qnarwhal-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  prometheus-data:
+  grafana-data:

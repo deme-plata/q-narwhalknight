@@ -18,9 +18,27 @@ pub mod persistent_channels;
 pub mod real_dht;
 pub mod real_peer_discovery;
 
+// libp2p-based peer discovery (zero-config mDNS + gossipsub)
+pub mod unified_network_manager;
+pub mod libp2p_bridge;
+
+// Resonance consensus protocol (Phase 3: String-theoretic consensus)
+pub mod resonance_protocol;
+
 pub use crypto_agile::{AgileHandshake, CryptoProvider, CryptoScheme, Kyber1024KeyExchange};
 pub use network_manager::{NetworkManager, NetworkManagerConfig};
 pub use peer_registry::{PeerCapability, PeerInfo, PeerRegistry};
+pub use persistent_channels::PersistentChannelManager;
+pub use dag_sync::{DagSyncManager, DagSyncRequest, DagSyncResponse, SyncType, DagStateSummary};
+
+// Export libp2p discovery components
+pub use unified_network_manager::UnifiedNetworkManager;
+pub use libp2p_bridge::{Libp2pBridge, BridgeEvent, DhtEvent};
+
+// Export resonance consensus protocol components
+pub use resonance_protocol::{
+    resonance_topic, ResonanceGossipManager, ResonanceProtocolHandler,
+};
 
 // Simplified network structure for compilation
 pub struct QuantumNetwork {

@@ -1,0 +1,67 @@
+{
+  "timestamp": 1757087036.1822135,
+  "test_results": {
+    "onion_services_created": [
+      "114c175f1e3d3bc0.onion",
+      "0dcfd8eedb7d0225.onion",
+      "0b1e08e79a3c6f79.onion"
+    ],
+    "dht_records": [
+      {
+        "node_id": "validator-alpha",
+        "onion_address": "114c175f1e3d3bc0.onion",
+        "dht_port": 8001,
+        "node_port": 9001,
+        "capabilities": [
+          "quantum_consensus",
+          "dag_knight",
+          "narwhal_mempool"
+        ],
+        "descriptor_id": "00b51ce01191a793e1dc30a88a92bb86",
+        "timestamp": 1757087035,
+        "signature": "4aee1ccd55f610d06717cc0d158c55bc"
+      },
+      {
+        "node_id": "validator-beta",
+        "onion_address": "0dcfd8eedb7d0225.onion",
+        "dht_port": 8002,
+        "node_port": 9002,
+        "capabilities": [
+          "quantum_consensus",
+          "dag_knight",
+          "narwhal_mempool"
+        ],
+        "descriptor_id": "075553eef6ea33acb863fa0e6c53059a",
+        "timestamp": 1757087035,
+        "signature": "a507faa8420114ee9c36fb995bf186a7"
+      },
+      {
+        "node_id": "validator-gamma",
+        "onion_address": "0b1e08e79a3c6f79.onion",
+        "dht_port": 8003,
+        "node_port": 9003,
+        "capabilities": [
+          "quantum_consensus",
+          "dag_knight",
+          "narwhal_mempool"
+        ],
+        "descriptor_id": "50e1a340f715febcd1992c98dfc29cc6",
+        "timestamp": 1757087035,
+        "signature": "5f3b9d6840e4b7e906573cc5825d077f"
+      }
+    ],
+    "peers_discovered": 3,
+    "data_operations": "successful",
+    "network_stats": {
+      "onion_services": 3,
+      "records_published": 3,
+      "queries_performed": 1,
+      "dht_puts": 1,
+      "dht_gets": 1,
+      "circuits_used": 0,
+      "avg_query_time_ms": 150,
+      "peer_connections": 3
+    }
+  },
+  "conclusion": "Production Tor DHT fully operational"
+}

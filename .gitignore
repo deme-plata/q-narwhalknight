@@ -3,3 +3,6 @@ mistral.rs/
 logs/
 *.log
 node_data/
+target/
+data*/
+*.log

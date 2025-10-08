@@ -1,0 +1,50 @@
+{
+    "test_metadata": {
+        "test_start": "2025-09-03T21:49:10+02:00",
+        "test_end": "2025-09-03T21:49:11+02:00",
+        "test_duration_seconds": 1,
+        "alpha_directory": "/tmp/q-alpha-test-alpha_20250903_213734",
+        "beta_directory": "/tmp/q-beta-test-beta_20250903_214505",
+        "validation_duration_seconds": 180
+    },
+    "overall_result": {
+        "success": false,
+        "status": "FAILED"
+    },
+    "phase_results": {
+        "phase1_alpha_broadcasting": {
+            "success": false,
+            "alpha_nodes_total": 2,
+            "alpha_nodes_active": 0,
+            "bitcoin_broadcasts": 2
+        },
+        "phase2_beta_discovery": {
+            "success": false,
+            "beta_nodes_total": 8,
+            "beta_nodes_active": 0,
+            "total_discoveries": 25,
+            "unique_alpha_peers_found": 1
+        },
+        "phase3_tor_connectivity": {
+            "success": true,
+            "successful_connections": 71,
+            "failed_connections": 21,
+            "connection_success_rate_percent": 77
+        },
+        "phase4_performance": {
+            "success": true,
+            "discovery_latency_seconds": 0,
+            "average_connection_latency_ms": 352
+        }
+    },
+    "detailed_metrics": {
+        "cross_server_discovery_proof": false,
+        "bitcoin_network_integration_proof": true,
+        "tor_anonymity_proof": true,
+        "multi_ip_connectivity_proof": false
+    },
+    "recommendations": [
+        "Increase Alpha node broadcast frequency",
+        "Improve Bitcoin network scanning reliability"
+    ]
+}

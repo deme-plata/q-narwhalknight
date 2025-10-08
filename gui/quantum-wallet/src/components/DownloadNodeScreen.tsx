@@ -92,7 +92,7 @@ export default function DownloadNodeScreen() {
               Download for Linux (Latest)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: ~450 MB | Version: 0.1.0-alpha
+              Size: ~42 MB | Version: 0.1.0-alpha
             </p>
           </div>
 
@@ -101,11 +101,10 @@ export default function DownloadNodeScreen() {
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
 {`chmod +x q-api-server-linux-x86_64
-DISABLE_GPU_STARK=1 Q_NARWHAL_BOOTSTRAP_NODE=185.182.185.227:7081 \\
-  ./q-api-server-linux-x86_64 --port 8080`}
+./q-api-server-linux-x86_64 --port 8080`}
             </pre>
-            <p className="text-xs text-yellow-400 mt-2">
-              ⚠️ Set DISABLE_GPU_STARK=1 to avoid GPU crashes on some systems
+            <p className="text-xs text-quantum-green mt-2">
+              ✅ Linux binary includes logging fix - bootstrap peer discovery now visible
             </p>
           </div>
         </motion.div>
@@ -160,7 +159,7 @@ DISABLE_GPU_STARK=1 Q_NARWHAL_BOOTSTRAP_NODE=185.182.185.227:7081 \\
               Download for Windows (Latest)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: ~480 MB | Version: 0.1.0-alpha
+              Size: ~73 MB | Version: 0.1.0-alpha
             </p>
           </div>
 
@@ -168,12 +167,10 @@ DISABLE_GPU_STARK=1 Q_NARWHAL_BOOTSTRAP_NODE=185.182.185.227:7081 \\
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
-{`set DISABLE_GPU_STARK=1
-set Q_NARWHAL_BOOTSTRAP_NODE=185.182.185.227:7081
-q-api-server-windows-x64.exe --port 8080`}
+{`q-api-server-windows-x64.exe --port 8080`}
             </pre>
-            <p className="text-xs text-yellow-400 mt-2">
-              ⚠️ Windows binary coming soon (cross-compilation in progress)
+            <p className="text-xs text-quantum-green mt-2">
+              ✅ Windows binary includes logging fix - bootstrap peer discovery now visible
             </p>
           </div>
         </motion.div>

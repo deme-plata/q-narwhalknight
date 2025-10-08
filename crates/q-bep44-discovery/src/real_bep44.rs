@@ -95,7 +95,7 @@ impl RealBep44Client {
     }
 
     /// Bootstrap to the BitTorrent DHT network
-    pub async fn bootstrap(&mut self) -> Result<()> {
+    pub async fn bootstrap(&self) -> Result<()> {
         info!("🚀 Bootstrapping to BitTorrent DHT network...");
 
         let bootstrap_nodes = self.bootstrap_nodes.clone();
@@ -121,7 +121,7 @@ impl RealBep44Client {
     }
 
     /// Connect to a specific DHT node
-    async fn connect_to_node(&mut self, addr: SocketAddr) -> Result<()> {
+    async fn connect_to_node(&self, addr: SocketAddr) -> Result<()> {
         debug!("🔗 Connecting to DHT node: {}", addr);
 
         // In a real implementation, this would:
@@ -144,7 +144,7 @@ impl RealBep44Client {
     }
 
     /// Populate routing table by querying bootstrap nodes
-    async fn populate_routing_table(&mut self) -> Result<()> {
+    async fn populate_routing_table(&self) -> Result<()> {
         info!("📋 Populating DHT routing table...");
 
         // In a real implementation, this would:
@@ -161,7 +161,7 @@ impl RealBep44Client {
     }
 
     /// Store a BEP-44 mutable data record in the DHT
-    pub async fn put_mutable(&mut self, data: &[u8], salt: Option<&[u8]>) -> Result<[u8; 20]> {
+    pub async fn put_mutable(&self, data: &[u8], salt: Option<&[u8]>) -> Result<[u8; 20]> {
         let sequence = chrono::Utc::now().timestamp();
 
         // Calculate target key: SHA1(public_key + salt)
@@ -226,7 +226,7 @@ impl RealBep44Client {
     }
 
     /// Distribute a record to the DHT network
-    async fn distribute_record(&mut self, record: &MutableRecord) -> Result<()> {
+    async fn distribute_record(&self, record: &MutableRecord) -> Result<()> {
         info!("📡 Distributing record to DHT network...");
 
         // In a real implementation, this would:
@@ -247,7 +247,7 @@ impl RealBep44Client {
     }
 
     /// Get a BEP-44 mutable data record from the DHT
-    pub async fn get_mutable(&mut self, target: &[u8; 20]) -> Result<Option<MutableRecord>> {
+    pub async fn get_mutable(&self, target: &[u8; 20]) -> Result<Option<MutableRecord>> {
         info!("🔍 Retrieving BEP-44 record from DHT");
         info!("   • Target: {}", hex::encode(target));
 
@@ -287,7 +287,7 @@ impl RealBep44Client {
 
     /// Announce Q-NarwhalKnight validator presence
     pub async fn announce_presence(
-        &mut self,
+        &self,
         onion_address: &str,
         capabilities: Vec<String>,
     ) -> Result<[u8; 20]> {
@@ -313,7 +313,7 @@ impl RealBep44Client {
     }
 
     /// Discover Q-NarwhalKnight peers for a specific date
-    pub async fn discover_peers(&mut self, date: &str) -> Result<Vec<PeerPresenceRecord>> {
+    pub async fn discover_peers(&self, date: &str) -> Result<Vec<PeerPresenceRecord>> {
         info!("🔍 Discovering Q-NarwhalKnight peers for date: {}", date);
 
         let mut discovered = Vec::new();

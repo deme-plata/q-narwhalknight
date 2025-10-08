@@ -1,4 +1,6 @@
 use anyhow::{Result, anyhow};
+
+#[cfg(feature = "opencl-mining")]
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE},
     context::Context,
@@ -8,6 +10,7 @@ use opencl3::{
     platform::get_platforms,
     program::Program,
 };
+
 use std::ptr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -17,6 +20,7 @@ use crate::{DeviceType, DeviceStats, MiningStats, MiningEngine, WorkUnit, Soluti
 use async_trait::async_trait;
 
 /// OpenCL GPU mining implementation for cross-platform support
+#[cfg(feature = "opencl-mining")]
 pub struct OpenClMiner {
     devices: Vec<OpenCLDevice>,
     context: Context,
@@ -27,6 +31,7 @@ pub struct OpenClMiner {
     is_running: Arc<RwLock<bool>>,
 }
 
+#[cfg(feature = "opencl-mining")]
 pub struct OpenCLDevice {
     pub device_id: String,
     pub device: Device,
@@ -39,6 +44,7 @@ pub struct OpenCLDevice {
     pub local_memory_size: u64,
 }
 
+#[cfg(feature = "opencl-mining")]
 impl OpenClMiner {
     pub async fn new(device_ids: Vec<u32>, intensity: u8) -> Result<Self> {
         info!("🔍 Initializing OpenCL GPU mining...");
@@ -334,6 +340,7 @@ impl OpenClMiner {
     }
 }
 
+#[cfg(feature = "opencl-mining")]
 #[async_trait]
 impl MiningEngine for OpenClMiner {
     async fn start(&mut self) -> Result<()> {
@@ -358,28 +365,30 @@ impl MiningEngine for OpenClMiner {
 }
 
 /// OpenCL device detection and capabilities
-pub async fn detect_opencl_devices() -> Result<Vec<OpenCLDevice>> {
+#[cfg(feature = "opencl-mining")]
+pub async fn detect_opencl_devices() -> Result<Vec<GpuDeviceInfo>> {
     let platforms = get_platforms().map_err(|e| anyhow!("Failed to get OpenCL platforms: {}", e))?;
     let mut devices = Vec::new();
-    
+
     for platform in platforms {
         match get_all_devices(platform.id(), CL_DEVICE_TYPE_GPU) {
             Ok(platform_devices) => {
                 for (i, device) in platform_devices.iter().enumerate() {
                     match OpenCLDevice::from_device(device.clone(), format!("OpenCL-{}-{}", platform.name().unwrap_or("Unknown".to_string()), i)) {
-                        Ok(device_info) => devices.push(device_info),
+                        Ok(device_info) => devices.push(device_info.to_gpu_device_info()),
                         Err(e) => warn!("Failed to get device info: {}", e),
                     }
                 }
             }
-            Err(e) => debug!("No GPU devices found on platform {}: {}", 
+            Err(e) => debug!("No GPU devices found on platform {}: {}",
                 platform.name().unwrap_or("Unknown".to_string()), e),
         }
     }
-    
+
     Ok(devices)
 }
 
+#[cfg(feature = "opencl-mining")]
 impl OpenCLDevice {
     fn from_device(device: Device, device_id: String) -> Result<Self> {
         Ok(Self {
@@ -393,6 +402,20 @@ impl OpenCLDevice {
             local_memory_size: device.local_mem_size()?,
             device,
         })
+    }
+
+    pub fn to_gpu_device_info(&self) -> GpuDeviceInfo {
+        GpuDeviceInfo {
+            device_id: self.device_id.parse().unwrap_or(0),
+            name: self.name.clone(),
+            vendor: self.vendor.clone(),
+            compute_capability: None,
+            memory_total: self.memory,
+            memory_free: self.memory, // Approximate
+            core_count: self.compute_units,
+            max_threads_per_block: self.max_work_group_size as u32,
+            max_shared_memory: self.local_memory_size as u32,
+        }
     }
     
     pub fn get_device_info(&self) -> String {
@@ -414,15 +437,16 @@ impl OpenCLDevice {
 }
 
 /// Advanced OpenCL features
+#[cfg(feature = "opencl-mining")]
 pub mod advanced {
     use super::*;
-    
+
     /// Multi-device OpenCL coordinator
     pub struct MultiDeviceCoordinator {
         devices: Vec<OpenCLDevice>,
         workload_distribution: Vec<f64>, // Percentage per device
     }
-    
+
     impl MultiDeviceCoordinator {
         pub fn new(devices: Vec<OpenCLDevice>) -> Self {
             // Calculate optimal workload distribution based on device capabilities
@@ -479,7 +503,8 @@ pub mod advanced {
         pub fn allocate_buffer(&mut self, context: &Context, size: usize) -> Result<Buffer<u8>> {
             // Try to reuse existing buffer
             if let Some(buffer) = self.free_buffers.pop() {
-                self.allocated_buffers.push(buffer.clone());
+                // Note: Buffer doesn't implement Clone, so we just return it
+                // In real usage, we'd need to track buffers differently
                 return Ok(buffer);
             }
             
@@ -490,9 +515,8 @@ pub mod advanced {
             
             // Allocate new buffer
             let buffer = Buffer::<u8>::create(context, CL_MEM_READ_WRITE, size, ptr::null_mut())?;
-            self.allocated_buffers.push(buffer.clone());
             self.total_allocated += size;
-            
+
             Ok(buffer)
         }
         
@@ -506,5 +530,42 @@ pub mod advanced {
         pub fn get_memory_usage(&self) -> (usize, usize) {
             (self.total_allocated, self.max_allocation)
         }
+    }
+}
+
+// ============================================================================
+// OpenCL Mining Stub (when opencl-mining feature is not enabled)
+// ============================================================================
+
+#[cfg(not(feature = "opencl-mining"))]
+pub struct OpenClMinerStub;
+
+#[cfg(not(feature = "opencl-mining"))]
+impl OpenClMinerStub {
+    pub async fn new(_device_ids: Vec<u32>, _intensity: u8) -> Result<Self> {
+        Err(anyhow!("OpenCL mining support not compiled. Rebuild with --features opencl-mining"))
+    }
+}
+
+#[cfg(not(feature = "opencl-mining"))]
+pub type OpenClMiner = OpenClMinerStub;
+
+#[cfg(not(feature = "opencl-mining"))]
+#[async_trait]
+impl MiningEngine for OpenClMiner {
+    async fn start(&mut self) -> Result<()> {
+        Err(anyhow!("OpenCL not available"))
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_hash_rate(&self) -> f64 {
+        0.0
+    }
+
+    async fn get_stats(&self) -> MiningStats {
+        MiningStats::default()
     }
 }

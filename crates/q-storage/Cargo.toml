@@ -17,7 +17,6 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 
 # Storage engines
-rocksdb = { workspace = true }
 bincode = { workspace = true }
 lz4 = { workspace = true }
 
@@ -38,6 +37,15 @@ libp2p = { workspace = true, features = ["request-response", "cbor"] }
 
 # Metrics
 prometheus = { workspace = true }
+
+# Platform-specific storage backends
+# RocksDB has Windows cross-compilation issues with MinGW
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+
+# Sled works on all platforms including Windows
+[target.'cfg(target_os = "windows")'.dependencies]
+sled = "0.34"
 
 [dev-dependencies]
 tempfile = "3.8"

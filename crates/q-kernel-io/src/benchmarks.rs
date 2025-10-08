@@ -2,9 +2,8 @@
 // Comprehensive benchmarking of kernel-level optimizations
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use q_kernel_io::*;
+use crate::*;  // Use crate:: instead of q_kernel_io:: since this is within the same crate
 use std::net::SocketAddr;
-use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 
 fn criterion_benchmark(c: &mut Criterion) {

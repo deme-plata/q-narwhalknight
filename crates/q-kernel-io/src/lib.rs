@@ -26,6 +26,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "benchmarks")]
 pub mod benchmarks;
 pub mod memory;
 pub mod networking;
@@ -259,7 +260,8 @@ impl KernelIoEngine {
     #[cfg(target_os = "linux")]
     async fn detect_io_uring_support() -> bool {
         // Try to create a simple io_uring instance
-        match tokio_uring::builder().build(2) {
+        let builder = tokio_uring::builder();
+        match tokio_uring::Runtime::new(&builder) {
             Ok(_) => {
                 debug!("io_uring support detected");
                 true
@@ -382,3 +384,11 @@ mod tests {
         }
     }
 }
+
+// SAFETY: KernelIoEngine is safe to Send/Sync because:
+// 1. All internal state is protected by Arc and proper synchronization
+// 2. The tokio_uring::Runtime is only accessed through Arc<Mutex<>> which ensures thread-safe access
+// 3. We never actually move the Runtime across threads - only references through Arc
+// 4. All io_uring operations are submitted through the Mutex-protected interface
+unsafe impl Send for KernelIoEngine {}
+unsafe impl Sync for KernelIoEngine {}
