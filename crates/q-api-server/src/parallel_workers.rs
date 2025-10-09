@@ -41,7 +41,7 @@ impl Default for WorkerPoolConfig {
         Self {
             num_workers: 16,           // 16 parallel workers for 16x improvement
             batch_interval_ms: 100,    // Process every 100ms
-            min_batch_size: 10,        // Wait for at least 10 tx
+            min_batch_size: 1,         // Process even single transactions for immediate finality
             max_batch_size: 5000,      // Up to 5000 tx per worker per batch
             enable_numa_pinning: false, // Requires elevated privileges
         }

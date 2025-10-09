@@ -1,22 +1,14 @@
 [build]
-default-target = "x86_64-pc-windows-gnu"
+target = "x86_64-pc-windows-gnu"
 
 [build.env]
 passthrough = [
     "OPENSSL_STATIC",
     "OPENSSL_VENDORED",
-    "OPENSSL_DIR",
-    "OPENBLAS_TARGET",
 ]
 
 [target.x86_64-pc-windows-gnu]
 pre-build = [
-    "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install -y libssl-dev:$CROSS_DEB_ARCH pkg-config gfortran mingw-w64",
-]
-
-[target.x86_64-pc-windows-gnu.env]
-volumes = ["CARGO_HOME"]
-passthrough = [
-    "OPENBLAS_TARGET=NEHALEM",
+    "dpkg --add-architecture amd64",
+    "apt-get update && apt-get install -y libssl-dev:amd64 pkg-config mingw-w64 gfortran-mingw-w64-x86-64",
 ]

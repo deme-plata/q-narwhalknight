@@ -4,6 +4,7 @@ use axum::{
 };
 use clap::{Arg, ArgAction, Command};
 use q_api_server::{handlers, streaming, AppState, Config, ConsoleVisualizer, update_stats};
+use q_types::TxStatus;
 mod contracts_api;
 mod dex_integration_api;
 use contracts_api::create_contracts_router;
@@ -634,8 +635,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0
             };
 
-            // Read current state - use actual tx_pool size from DashMap
-            let current_tx = app_state_updater.tx_pool.len() as u64;
+            // Read current state - count CONFIRMED transactions (not just mempool)
+            let current_tx = app_state_updater.tx_status.iter()
+                .filter(|entry| matches!(entry.value(), TxStatus::Confirmed { .. }))
+                .count() as u64;
+            let mempool_size = app_state_updater.tx_pool.len() as u64;
             let node_status = app_state_updater.node_status.read().await;
             let current_blocks = node_status.current_height;
 
@@ -645,12 +649,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let block_delta = current_blocks.saturating_sub(last_block_count);
 
             update_stats(stats_handle_updater.clone(), |stats| {
-                stats.total_transactions = current_tx;
+                stats.total_transactions = current_tx; // Count of CONFIRMED transactions
                 stats.total_blocks = current_blocks;
                 stats.transactions_per_second = tx_delta as f64;
                 stats.blocks_per_second = block_delta as f64;
-                stats.connected_peers = connected_peers; // Now reading from ConnectionManager!
-                stats.mempool_size = current_tx as usize; // Use actual tx_pool size
+                stats.connected_peers = connected_peers; // Reading from ConnectionManager
+                stats.mempool_size = mempool_size as usize; // Pending transactions in mempool
                 stats.average_latency_ms = 45.2; // Default, can be measured
                 stats.dag_vertices = current_blocks * 4; // Approximate
                 stats.consensus_rounds = current_blocks;
@@ -1467,8 +1471,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   Full consensus pipeline: SIMD → Narwhal → DAG-Knight → Bullshark");
 
     // Initialize parallel worker pool
-    let _worker_pool = q_api_server::parallel_workers::init_parallel_workers(app_state.clone());
+    // NOTE: Even though worker_pool is unused, it must be kept alive so spawned tasks persist
+    let worker_pool = q_api_server::parallel_workers::init_parallel_workers(app_state.clone());
     info!("✅ Parallel worker pool initialized successfully");
+    info!("   Workers will process transactions continuously in background");
 
     // Start libp2p-based zero-config peer discovery (mDNS + Gossipsub)
     if let Some(libp2p_discovery) = &app_state.libp2p_discovery {
