@@ -43,7 +43,7 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
         if (balanceResponse.success && balanceResponse.data) {
           const newBalance = balanceResponse.data.balance_qnk || 0;
           setActualBalance(newBalance);
-          console.log('✅ Balance refreshed:', newBalance, 'QNK');
+          console.log('✅ Balance refreshed:', newBalance, 'QUG');
         } else {
           console.warn('⚠️ Balance refresh failed:', balanceResponse.error);
         }
@@ -98,7 +98,7 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
       setError('⚠️ Testing with zero balance - transaction will proceed but may fail at API level');
       // Don't return - allow transaction to proceed for testing
     } else if (totalRequired > effectiveBalance) {
-      setError(`❌ Insufficient balance. Required: ${totalRequired.toFixed(8)} QNK (${amountNumber} + ${fee} fee), Available: ${effectiveBalance.toFixed(8)} QNK`);
+      setError(`❌ Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amountNumber} + ${fee} fee), Available: ${effectiveBalance.toFixed(8)} QUG`);
       return;
     }
     
@@ -271,7 +271,7 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
           {/* Amount */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Amount (QNK)
+              Amount (QUG)
             </label>
             <input
               type="number"
@@ -283,7 +283,7 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
             />
             <div className="flex justify-between items-center text-sm mt-1">
               <div className="flex items-center gap-2">
-                <span className="text-gray-400">Available: <span className="text-quantum-green font-semibold">{Math.max(actualBalance, currentBalance).toFixed(8)} QNK</span></span>
+                <span className="text-gray-400">Available: <span className="text-quantum-green font-semibold">{Math.max(actualBalance, currentBalance).toFixed(8)} QUG</span></span>
                 <button
                   onClick={refreshBalance}
                   disabled={isRefreshing}
@@ -442,7 +442,7 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-400">Privacy Mixer Fee:</span>
                       <span className="text-quantum-yellow font-semibold">
-                        {amount ? (parseFloat(amount) * 0.001).toFixed(6) : '0.000000'} QNK (0.1%)
+                        {amount ? (parseFloat(amount) * 0.001).toFixed(6) : '0.000000'} QUG (0.1%)
                       </span>
                     </div>
                   </div>
@@ -456,10 +456,10 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
             <div className="bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-xl p-4">
               <div className="flex items-center gap-3 mb-3">
                 <AlertTriangle className="w-5 h-5 text-quantum-yellow" />
-                <span className="text-quantum-yellow font-medium">No QNK Balance</span>
+                <span className="text-quantum-yellow font-medium">No QUG Balance</span>
               </div>
               <p className="text-sm text-gray-300 mb-4">
-                You need QNK tokens to send transactions. Request test tokens from the faucet.
+                You need QUG tokens to send transactions. Request test tokens from the faucet.
               </p>
               <button
                 onClick={async () => {
@@ -524,11 +524,11 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
                 </div>
                 <div>
                   <div className="text-sm text-gray-400">Amount:</div>
-                  <div className="text-2xl font-bold text-white">{amount} QNK</div>
+                  <div className="text-2xl font-bold text-white">{amount} QUG</div>
                 </div>
                 <div>
                   <div className="text-sm text-gray-400">Network Fee:</div>
-                  <div className="text-quantum-green">0.00001 QNK</div>
+                  <div className="text-quantum-green">0.00001 QUG</div>
                 </div>
               </div>
 
@@ -804,12 +804,12 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
               
               <div className="flex justify-between text-sm">
                 <span className="text-gray-400">Amount Sent:</span>
-                <span className="text-white font-semibold">{amount} QNK</span>
+                <span className="text-white font-semibold">{amount} QUG</span>
               </div>
               
               <div className="flex justify-between text-sm">
                 <span className="text-gray-400">Network Fee:</span>
-                <span className="text-quantum-green">0.00001 QNK</span>
+                <span className="text-quantum-green">0.00001 QUG</span>
               </div>
               
               {starkProof && (

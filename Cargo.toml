@@ -23,6 +23,9 @@ members = [
     "crates/q-precision",
     "crates/q-vm",
     "crates/q-robot-control",
+    "crates/q-higgs-hydro",  # Higgs field manipulation for water-based quantum computation
+    "crates/q-higgs-simulator",  # 3D Higgs field simulation with attosecond laser control
+    "crates/q-robot-cli",    # Quantum water robot control CLI
     "crates/void-walker",
     "crates/q-miner",        # High-performance CPU/GPU miner
     "crates/q-sharding",
@@ -169,7 +172,7 @@ lz4 = "1.24"
 
 # Linear algebra and mathematics
 ndarray = { version = "0.15", features = ["serde"] }
-nalgebra = "0.32"
+nalgebra = { version = "0.32", features = ["serde-serialize"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"

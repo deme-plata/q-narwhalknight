@@ -113,13 +113,13 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
       return { valid: false, error: 'Please enter a valid amount' };
     }
     
-    const fee = 0.00001; // QNK
+    const fee = 0.00001; // QUG
     const totalRequired = amount + fee;
     
     if (currentBalance < totalRequired) {
       return { 
         valid: false, 
-        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} QNK (${amount} + ${fee} fee), Available: ${currentBalance.toFixed(8)} QNK` 
+        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amount} + ${fee} fee), Available: ${currentBalance.toFixed(8)} QUG` 
       };
     }
     
@@ -251,7 +251,7 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
         result = await qnkAPI.sendTransaction(
           walletAddress,
           toAddress,
-          parseFloat(amount), // Keep as QNK, no unit conversion
+          parseFloat(amount), // Keep as QUG, no unit conversion
           memo || undefined
         );
       }
@@ -328,7 +328,7 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
           </div>
           <div className="text-right">
             <div className="text-2xl font-bold text-quantum-green">
-              {currentBalance.toFixed(8)} QNK
+              {currentBalance.toFixed(8)} QUG
             </div>
             {currentBalance <= 0 && (
               <button
@@ -389,7 +389,7 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
             {/* Amount */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                Amount (QNK)
+                Amount (QUG)
               </label>
               <input
                 type="number"
@@ -402,10 +402,10 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
               />
               <div className="flex justify-between items-center text-sm mt-1">
                 <span className="text-gray-400">
-                  Available: <span className="text-quantum-green font-semibold">{currentBalance.toFixed(8)} QNK</span>
+                  Available: <span className="text-quantum-green font-semibold">{currentBalance.toFixed(8)} QUG</span>
                 </span>
                 <span className="text-gray-400">
-                  Fee: <span className="text-quantum-yellow">0.00001 QNK</span>
+                  Fee: <span className="text-quantum-yellow">0.00001 QUG</span>
                 </span>
               </div>
             </div>

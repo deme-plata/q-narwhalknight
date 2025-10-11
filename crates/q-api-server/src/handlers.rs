@@ -383,11 +383,16 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
     let mut batch = Vec::with_capacity(batch_size);
     let mut tx_hashes = Vec::with_capacity(batch_size);
 
-    // Lock-free iteration over DashMap
-    for entry in state.tx_pool.iter().take(batch_size) {
-        let tx = entry.value().clone();
-        tx_hashes.push(tx.hash());
-        batch.push(tx);
+    // CRITICAL FIX: Atomically extract and remove transactions from pool
+    // This prevents multiple workers from processing the same transaction
+    // We must remove BEFORE processing to avoid race conditions
+    let pool_keys: Vec<_> = state.tx_pool.iter().take(batch_size).map(|e| *e.key()).collect();
+
+    for tx_hash in pool_keys {
+        if let Some((_, tx)) = state.tx_pool.remove(&tx_hash) {
+            tx_hashes.push(tx_hash);
+            batch.push(tx);
+        }
     }
 
     tracing::info!("🚀 Processing transaction batch: {} transactions", batch.len());
@@ -441,11 +446,99 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
             Ok(_committed_vertices) => {
                 // Update transaction status to confirmed
                 let current_round = *dag_knight.current_round.read().await;
-                for tx_hash in &tx_hashes {
+                for (tx, tx_hash) in batch.iter().zip(tx_hashes.iter()) {
                     state.tx_status.insert(*tx_hash, TxStatus::Confirmed {
                         block_height: current_round,
                         round: current_round,
                     });
+
+                    // CRITICAL: Update balances ONLY after consensus confirmation
+                    // This ensures atomic state transitions and prevents double-spending
+                    let mut balances = state.wallet_balances.write().await;
+
+                    // Deduct from sender
+                    let sender_balance = balances.get(&tx.from).copied().unwrap_or(0);
+                    let total_cost = tx.amount + tx.fee;
+
+                    if sender_balance >= total_cost {
+                        let old_sender_balance = sender_balance;
+                        let new_sender_balance = sender_balance - total_cost;
+                        balances.insert(tx.from, new_sender_balance);
+
+                        // Add to recipient
+                        let old_recipient_balance = balances.get(&tx.to).copied().unwrap_or(0);
+                        let new_recipient_balance = old_recipient_balance + tx.amount;
+                        balances.insert(tx.to, new_recipient_balance);
+
+                        tracing::debug!(
+                            "💰 Consensus confirmed tx {}: {} → {} ({} QNK)",
+                            hex::encode(tx_hash),
+                            hex::encode(tx.from)[..8].to_string(),
+                            hex::encode(tx.to)[..8].to_string(),
+                            tx.amount as f64 / 100_000_000.0
+                        );
+
+                        // Release the balance lock before emitting events
+                        drop(balances);
+
+                        // Emit balance update events for real-time frontend updates
+                        // Sender balance update
+                        let sender_event = crate::streaming::StreamEvent::BalanceUpdated {
+                            wallet_address: hex::encode(tx.from),
+                            old_balance: old_sender_balance as f64 / 100_000_000.0,
+                            new_balance: new_sender_balance as f64 / 100_000_000.0,
+                            change_reason: "transaction_sent".to_string(),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        if let Err(e) = state.event_emitter.emit_immediate(sender_event).await {
+                            warn!("Failed to emit sender balance update: {}", e);
+                        }
+
+                        // Recipient balance update
+                        let recipient_event = crate::streaming::StreamEvent::BalanceUpdated {
+                            wallet_address: hex::encode(tx.to),
+                            old_balance: old_recipient_balance as f64 / 100_000_000.0,
+                            new_balance: new_recipient_balance as f64 / 100_000_000.0,
+                            change_reason: "transaction_received".to_string(),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
+                            warn!("Failed to emit recipient balance update: {}", e);
+                        }
+
+                        // Store confirmed transaction to persistent storage for recent activity
+                        if let Err(e) = state.storage_engine.save_transaction(&tx).await {
+                            warn!("Failed to save transaction to persistent storage: {}", e);
+                        }
+                    }
+
+                    // NOTE: Transaction already removed from pool during extraction (line 392)
+                    // No need to remove here - prevents double-processing by parallel workers
+                }
+
+                // SHADOW MODE: Feed batch to Quillon Resonance for analysis
+                // This collects K-parameter metrics without affecting consensus
+                if let Some(resonance) = &state.resonance_coordinator {
+                    if let Some(k_analyzer) = &state.k_parameter_analyzer {
+                        // Calculate system metrics for K-parameter
+                        let batch_size = batch.len();
+                        let total_value: u64 = batch.iter().map(|tx| tx.amount).sum();
+
+                        // Feed to K-parameter analyzer (shadow mode - observe only)
+                        // TODO: Re-enable when record_batch_metrics is implemented
+                        // k_analyzer.record_batch_metrics(
+                        //     batch_size,
+                        //     total_value,
+                        //     current_round,
+                        // ).await;
+
+                        tracing::debug!(
+                            "🌊 Resonance shadow analysis: {} tx, {} QNK, round {}",
+                            batch_size,
+                            total_value as f64 / 100_000_000.0,
+                            current_round
+                        );
+                    }
                 }
             }
             Err(_e) => {
@@ -553,10 +646,10 @@ pub async fn send_transaction(
             _ => return Ok(Json(ApiResponse::error("Invalid sender address format".to_string()))),
         }
     } else {
-        // Handle ENS-style addresses - hash the string
+        // Handle short addresses - hash the FULL address string (with qnk prefix)
         use q_types::{Sha3_256, Digest};
         let mut hasher = Sha3_256::new();
-        hasher.update(from_hex.as_bytes());
+        hasher.update(request.from.as_bytes());
         hasher.finalize().into()
     };
 
@@ -577,10 +670,10 @@ pub async fn send_transaction(
             _ => return Ok(Json(ApiResponse::error("Invalid recipient address format".to_string()))),
         }
     } else {
-        // Handle ENS-style addresses (e.g., alice.qnk) - for now just hash the string
+        // Handle short addresses - hash the FULL address string (with qnk prefix)
         use q_types::{Sha3_256, Digest};
         let mut hasher = Sha3_256::new();
-        hasher.update(to_hex.as_bytes());
+        hasher.update(request.to.as_bytes());
         hasher.finalize().into()
     };
 
@@ -609,11 +702,10 @@ pub async fn send_transaction(
     // Mock signature for now (in real implementation, this would use the wallet's private key)
     signed_transaction.signature = vec![0u8; 64]; // Mock signature
     
-    // Update wallet balances
+    // Check sender has sufficient balance (but don't update balances yet)
+    // Balances will be updated ONLY after consensus confirmation
     {
-        let mut balances = state.wallet_balances.write().await;
-
-        // Deduct from sender (use actual from address)
+        let balances = state.wallet_balances.read().await;
         let sender_address = signed_transaction.from;
         let sender_balance = balances.get(&sender_address).copied().unwrap_or(0);
         let total_cost = signed_transaction.amount + signed_transaction.fee;
@@ -626,64 +718,7 @@ pub async fn send_transaction(
             total_cost as f64 / 100_000_000.0
         );
 
-        if sender_balance >= total_cost {
-            let new_sender_balance = sender_balance - total_cost;
-            balances.insert(sender_address, new_sender_balance);
-            info!("Deducted {} from sender, new balance: {} QNK",
-                total_cost as f64 / 100_000_000.0,
-                new_sender_balance as f64 / 100_000_000.0
-            );
-
-            // Add to recipient
-            let recipient_balance = balances.get(&signed_transaction.to).copied().unwrap_or(0);
-            let new_recipient_balance = recipient_balance + signed_transaction.amount;
-            balances.insert(signed_transaction.to, new_recipient_balance);
-            info!("Added {} to recipient, new balance: {} QNK",
-                signed_transaction.amount as f64 / 100_000_000.0,
-                new_recipient_balance as f64 / 100_000_000.0
-            );
-
-            // Drop the lock before async operations
-            drop(balances);
-
-            // Persist both balances to storage
-            if let Err(e) = state.save_wallet_balance(&sender_address, new_sender_balance).await {
-                warn!("Failed to persist sender balance to storage: {}", e);
-            }
-            if let Err(e) = state.save_wallet_balance(&signed_transaction.to, new_recipient_balance).await {
-                warn!("Failed to persist recipient balance to storage: {}", e);
-            }
-
-            // Emit real-time balance update events for BOTH sender and recipient
-            let sender_event = crate::streaming::StreamEvent::BalanceUpdated {
-                wallet_address: hex::encode(sender_address),
-                old_balance: sender_balance as f64 / 100_000_000.0,
-                new_balance: new_sender_balance as f64 / 100_000_000.0,
-                change_reason: "transaction_sent".to_string(),
-                timestamp: chrono::Utc::now(),
-            };
-
-            let recipient_event = crate::streaming::StreamEvent::BalanceUpdated {
-                wallet_address: hex::encode(signed_transaction.to),
-                old_balance: recipient_balance as f64 / 100_000_000.0,
-                new_balance: new_recipient_balance as f64 / 100_000_000.0,
-                change_reason: "transaction_received".to_string(),
-                timestamp: chrono::Utc::now(),
-            };
-
-            // Broadcast balance updates via SSE
-            if let Err(e) = state.event_emitter.emit_immediate(sender_event).await {
-                warn!("Failed to broadcast sender balance update: {}", e);
-            }
-            if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
-                warn!("Failed to broadcast recipient balance update: {}", e);
-            }
-
-            info!("💰 Broadcasted balance updates - Sender: {} QNK, Recipient: {} QNK",
-                new_sender_balance as f64 / 100_000_000.0,
-                new_recipient_balance as f64 / 100_000_000.0
-            );
-        } else {
+        if sender_balance < total_cost {
             warn!("Insufficient balance! Sender has {} but needs {}",
                 sender_balance as f64 / 100_000_000.0,
                 total_cost as f64 / 100_000_000.0
@@ -694,6 +729,8 @@ pub async fn send_transaction(
                 total_cost as f64 / 100_000_000.0
             ))));
         }
+
+        info!("✅ Balance check passed - transaction will be submitted to consensus");
     }
 
     // Add to transaction pool (PHASE 1: Simple HashMap - 4K TPS)
@@ -752,7 +789,9 @@ pub async fn send_transaction(
         "from": hex::encode(signed_transaction.from),
         "to": hex::encode(signed_transaction.to),
         "amount": signed_transaction.amount,
+        "amount_qnk": signed_transaction.amount as f64 / 100_000_000.0,
         "fee": signed_transaction.fee,
+        "fee_qnk": signed_transaction.fee as f64 / 100_000_000.0,
         "nonce": signed_transaction.nonce,
         "timestamp": signed_transaction.timestamp,
         "stark_proof": stark_proof,
@@ -795,22 +834,20 @@ pub async fn get_recent_transactions(
         None
     };
 
-    // DashMap lock-free iteration - FILTER by wallet address if provided
-    let mut recent_txs: Vec<Transaction> = state.tx_pool
-        .iter()
-        .filter(|entry| {
-            // If wallet address provided, only show transactions where wallet is sender OR recipient
+    // Load confirmed transactions from persistent storage
+    let mut recent_txs: Vec<Transaction> = match state.storage_engine.load_all_transactions().await {
+        Ok(mut txs) => {
+            // Filter by wallet address if provided
             if let Some(wallet_bytes) = wallet_address_bytes {
-                let tx = entry.value();
-                tx.from == wallet_bytes || tx.to == wallet_bytes
-            } else {
-                // No wallet address provided - show ALL recent transactions
-                true
+                txs.retain(|tx| tx.from == wallet_bytes || tx.to == wallet_bytes);
             }
-        })
-        .take(200) // Increased limit for pagination support
-        .map(|entry| entry.value().clone())
-        .collect();
+            txs
+        }
+        Err(e) => {
+            warn!("Failed to load transactions from storage: {}", e);
+            Vec::new()
+        }
+    };
 
     // Sort by timestamp (newest first)
     recent_txs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -1843,28 +1880,34 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
 
 /// Get wallet balance by address
 pub async fn get_wallet_balance(
-    State(state): State<Arc<AppState>>, 
+    State(state): State<Arc<AppState>>,
     axum::extract::Path(wallet_address): axum::extract::Path<String>
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting balance for wallet address: {}", wallet_address);
 
-    // Parse wallet address (handle 'qnk' prefix)
+    // Use same address parsing logic as faucet for consistency
     let hex_part = if wallet_address.starts_with("qnk") {
-        &wallet_address[3..]
+        &wallet_address[3..] // Remove 'qnk' prefix
     } else {
         &wallet_address
     };
-    
-    let address_bytes = match hex::decode(hex_part) {
-        Ok(bytes) => {
-            let mut addr = [0u8; 32];
-            let copy_len = std::cmp::min(bytes.len(), 32);
-            addr[..copy_len].copy_from_slice(&bytes[..copy_len]);
-            addr
+
+    let address_bytes = if hex_part.len() == 64 {
+        // Full 32-byte hex address
+        match hex::decode(hex_part) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&bytes);
+                addr
+            }
+            _ => return Ok(Json(ApiResponse::error("Invalid wallet address format".to_string()))),
         }
-        Err(_) => {
-            return Ok(Json(ApiResponse::error("Invalid wallet address format".to_string())));
-        }
+    } else {
+        // Handle short addresses - hash the string like faucet does
+        use q_types::{Sha3_256, Digest};
+        let mut hasher = Sha3_256::new();
+        hasher.update(wallet_address.as_bytes());
+        hasher.finalize().into()
     };
 
     // Get balance from wallet balances
