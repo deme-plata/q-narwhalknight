@@ -2,7 +2,11 @@ pub mod cuda;
 pub mod opencl;
 pub mod vulkan;
 
+#[cfg(feature = "cuda-mining")]
 pub use cuda::CudaMiner;
+#[cfg(not(feature = "cuda-mining"))]
+pub use cuda::CudaMinerStub as CudaMiner;
+
 pub use opencl::OpenClMiner;
 pub use vulkan::VulkanMiner;
 
