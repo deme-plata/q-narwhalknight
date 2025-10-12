@@ -13,7 +13,3 @@ pre-build = [
     "dpkg --add-architecture amd64",
     "apt-get update && apt-get install -y libssl-dev:amd64 pkg-config mingw-w64 gfortran-mingw-w64-x86-64",
 ]
-
-[target.x86_64-pc-windows-gnu.env]
-# Static linking for Fortran libraries to avoid DLL dependencies
-RUSTFLAGS = "-C link-args=-static-libgfortran -C link-args=-static-libgcc -C link-args=-static -C target-feature=+crt-static"
