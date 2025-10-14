@@ -10,3 +10,8 @@ windows-release/*.exe
 windows-release/*.zip
 *.exe
 *.zip
+
+# Proprietary Quillon Bank CLI
+crates/q-quillon-bank/
+**/quillon-bank
+**/quillon_bank
