@@ -161,6 +161,47 @@ pub enum StreamEvent {
         mixing_duration_seconds: u32,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// Nitro boost applied to a token
+    NitroBoost {
+        token_id: String,
+        points: u64,
+        total_points: u64,
+        boosted_by: String, // wallet address
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// Bulk update of all nitro boost points
+    NitroBoostsUpdate {
+        boosts: std::collections::HashMap<String, u64>, // token_id -> total_points
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// Token price update from swap or oracle
+    TokenPriceUpdate {
+        token_symbol: String,
+        price: f64,
+        change_24h: f64,
+        volume_24h: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// Liquidity pool update
+    LiquidityPoolUpdate {
+        pool_id: String,
+        token0: String,
+        token1: String,
+        reserve0: u64,
+        reserve1: u64,
+        total_liquidity: u64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// Swap executed event
+    SwapExecuted {
+        from_token: String,
+        to_token: String,
+        amount_in: u64,
+        amount_out: u64,
+        wallet_address: String,
+        price_impact: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
     /// Custom event for mining rewards and other custom types
     Custom {
         event_type: String,
@@ -448,6 +489,11 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::BalanceUpdated { .. } => "balance-updated".to_string(),
         StreamEvent::PrivacyMixingStarted { .. } => "privacy-mixing-started".to_string(),
         StreamEvent::PrivacyMixingCompleted { .. } => "privacy-mixing-completed".to_string(),
+        StreamEvent::NitroBoost { .. } => "nitro_boost".to_string(),
+        StreamEvent::NitroBoostsUpdate { .. } => "nitro_boosts_update".to_string(),
+        StreamEvent::TokenPriceUpdate { .. } => "token_price_update".to_string(),
+        StreamEvent::LiquidityPoolUpdate { .. } => "liquidity_pool_update".to_string(),
+        StreamEvent::SwapExecuted { .. } => "swap_executed".to_string(),
         StreamEvent::Custom { event_type, .. } => event_type.clone(),
     }
 }
@@ -666,6 +712,98 @@ impl HighPerformanceEmitter {
             circuit_id,
             event_type,
             details,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit nitro boost event for a token
+    pub async fn emit_nitro_boost(
+        &self,
+        token_id: String,
+        points: u64,
+        total_points: u64,
+        boosted_by: String,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::NitroBoost {
+            token_id,
+            points,
+            total_points,
+            boosted_by,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit bulk nitro boosts update
+    pub async fn emit_nitro_boosts_update(
+        &self,
+        boosts: std::collections::HashMap<String, u64>,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::NitroBoostsUpdate {
+            boosts,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit token price update
+    pub async fn emit_token_price_update(
+        &self,
+        token_symbol: String,
+        price: f64,
+        change_24h: f64,
+        volume_24h: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::TokenPriceUpdate {
+            token_symbol,
+            price,
+            change_24h,
+            volume_24h,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit liquidity pool update
+    pub async fn emit_liquidity_pool_update(
+        &self,
+        pool_id: String,
+        token0: String,
+        token1: String,
+        reserve0: u64,
+        reserve1: u64,
+        total_liquidity: u64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::LiquidityPoolUpdate {
+            pool_id,
+            token0,
+            token1,
+            reserve0,
+            reserve1,
+            total_liquidity,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit swap executed event
+    pub async fn emit_swap_executed(
+        &self,
+        from_token: String,
+        to_token: String,
+        amount_in: u64,
+        amount_out: u64,
+        wallet_address: String,
+        price_impact: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::SwapExecuted {
+            from_token,
+            to_token,
+            amount_in,
+            amount_out,
+            wallet_address,
+            price_impact,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await
