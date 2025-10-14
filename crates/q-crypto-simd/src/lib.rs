@@ -68,6 +68,7 @@ pub mod vectorized_hashing;
 pub mod cache_aligned;
 pub mod avx512;
 pub mod benchmarks;
+pub mod parallel_ed25519;
 
 // Re-export key types
 pub use batch_verification::{BatchSignatureVerifier, BatchVerificationResult};
@@ -93,10 +94,10 @@ pub struct SimdCryptoConfig {
 impl Default for SimdCryptoConfig {
     fn default() -> Self {
         Self {
-            max_signature_batch: 64,    // Process 64 signatures at once
-            max_hash_batch: 32,         // Process 32 hashes at once
+            max_signature_batch: 256,   // Process 256 signatures at once (4x increase)
+            max_hash_batch: 128,        // Process 128 hashes at once (4x increase)
             enable_avx512: true,        // Use AVX-512 if available
-            enable_avx2: true,          // Use AVX2 if available  
+            enable_avx2: true,          // Use AVX2 if available
             cache_alignment: 64,        // 64-byte cache line alignment
         }
     }
