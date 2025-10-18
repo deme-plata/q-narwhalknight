@@ -58,10 +58,11 @@ export const SessionTimeoutProvider: React.FC<{ children: React.ReactNode }> = (
 
       // Restore session
       const keyPair = await keypairFromMnemonic(mnemonic);
-      walletSession.setSession(keyPair.privateKey, keyPair.address);
+      // Pass mnemonic to session for "Never expire" convenience (stored only if timeout is "never")
+      walletSession.setSession(keyPair.privateKey, keyPair.address, mnemonic);
 
-      // SECURITY: Do NOT store plaintext mnemonic - keep it encrypted only
-      console.log('✅ Session restored - mnemonic recovered from encrypted storage (not stored in plaintext)');
+      // SECURITY: Mnemonic is only stored in sessionStorage if "Never expire" is enabled
+      console.log('✅ Session restored with mnemonic for "Never expire" convenience');
 
       // Resolve promise with the mnemonic
       if (resolver) {

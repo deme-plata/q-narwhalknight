@@ -16,7 +16,7 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
     { id: 'dex' as Screen, icon: ArrowDownUp, label: 'DEX' },
     { id: 'explorer' as Screen, icon: Search, label: 'Explorer' },
     { id: 'mining' as Screen, icon: Pickaxe, label: 'Mining' },
-    { id: 'vm' as Screen, icon: Boxes, label: 'Vittua VM' },
+    { id: 'vm' as Screen, icon: Boxes, label: 'QVM' },
     { id: 'download' as Screen, icon: Download, label: 'Downloads' },
     { id: 'settings' as Screen, icon: Settings, label: 'Settings' },
   ];

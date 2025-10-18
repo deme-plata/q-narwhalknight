@@ -65,6 +65,7 @@ q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-robot-control = { path = "../q-robot-control" }
+q-storage = { path = "../q-storage" }
 uuid = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 bip39 = "2.0"

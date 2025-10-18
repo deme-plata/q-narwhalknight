@@ -16,7 +16,8 @@ use tracing::{debug, error, info};
 
 use crate::AppState;
 use q_quillon_bank::{QuillonBankSystem, AssetType};
-use q_types::ApiResponse;
+use q_types::{ApiResponse, Transaction};
+use chrono::Utc;
 
 /// Create Quillon Bank API router
 pub fn create_quillon_bank_router() -> Router<Arc<AppState>> {
@@ -206,6 +207,8 @@ struct MintRequest {
     collateral_type: String,
     collateral_amount: f64,
     reason: Option<String>,
+    /// Optional wallet address (if not authenticated via X-Wallet-Auth header)
+    wallet_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -221,57 +224,172 @@ async fn mint_qnkusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MintRequest>,
 ) -> Result<Json<ApiResponse<MintResponse>>, StatusCode> {
-    info!("💰 Minting {} QNKUSD with {} {} collateral",
-        request.amount, request.collateral_amount, request.collateral_type);
-
-    let mut bank_system = state.quillon_bank.write().await;
+    info!("💰 Minting {} QUGUSD with {} {} collateral",
+        request.amount as f64 / 1e8, request.collateral_amount, request.collateral_type);
 
     // Parse collateral type
     let collateral_type = match request.collateral_type.to_uppercase().as_str() {
+        "QUG" | "ORB" => AssetType::ORB, // Q-NarwhalKnight native token
         "BTC" => AssetType::BTC,
         "ETH" => AssetType::ETH,
         "USDC" => AssetType::USDC,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        _ => {
+            error!("❌ Invalid collateral type: {}", request.collateral_type);
+            return Err(StatusCode::BAD_REQUEST);
+        }
     };
 
     // Execute mint operation on blockchain
     let start = std::time::Instant::now();
 
-    // For CLI integration, we need to create a borrower address
-    // In production, this should come from authenticated user
-    let borrower = q_quillon_bank::Address::new();
+    // ✅ CRITICAL FIX: Get wallet address from request body (frontend provides it)
+    let borrower_bytes = if let Some(wallet_addr) = &request.wallet_address {
+        // Parse wallet address from frontend
+        let hex_part = if wallet_addr.starts_with("qnk") {
+            &wallet_addr[3..]
+        } else if wallet_addr.starts_with("0x") {
+            &wallet_addr[2..]
+        } else {
+            wallet_addr.as_str()
+        };
+
+        match hex::decode(hex_part) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                info!("👤 Minting for wallet: qnk{}", hex::encode(&arr[..8]));
+                arr
+            }
+            _ => {
+                error!("❌ Invalid wallet address format: {}", wallet_addr);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+    } else {
+        // Fallback: Create a new random address (should not happen in production)
+        error!("⚠️  No wallet address provided - using random address (THIS IS A BUG)");
+        let borrower = q_quillon_bank::Address::new();
+        borrower.0
+    };
+
+    // NOTE: Frontend sends `amount` in base units (e.g., 2656000000 for 26.56 QUGUSD)
+    // We need to convert back to human-readable for collateral ratio calculation
+    let amount_usd = (request.amount as f64) / 100_000_000.0; // Convert base units to USD
 
     // Calculate actual collateral ratio before the mint call
     let collateral_value_usd = match &collateral_type {
+        AssetType::ORB => request.collateral_amount * 42.50, // QUG price ~$42.50
         AssetType::BTC => request.collateral_amount * 70_000.0,
         AssetType::ETH => request.collateral_amount * 3_500.0,
         AssetType::USDC => request.collateral_amount,
         _ => 0.0,
     };
 
-    let collateral_ratio = (collateral_value_usd / request.amount as f64) * 100.0;
+    let collateral_ratio = (collateral_value_usd / amount_usd) * 100.0;
 
-    let tx_id = bank_system.mint_qnkusd(
-        &borrower,
-        (request.collateral_amount * 1_000_000_000_000.0) as u128, // Convert to base units
-        collateral_type,
-        (request.amount * 1_000_000_000_000) as u128, // Convert QNKUSD to base units
-    ).await.map_err(|e| {
-        error!("Failed to mint QNKUSD: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Convert frontend base units (100M) to Quillon Bank base units (1T)
+    // Frontend: 1 QUGUSD = 100,000,000 base units
+    // Backend: 1 QUGUSD = 1,000,000,000,000 base units
+    // Multiplier: 10,000 (1T / 100M)
+    let amount_backend_units = (request.amount as u128) * 10_000;
+
+    let tx_id = {
+        let mut bank_system = state.quillon_bank.write().await;
+        let borrower = q_quillon_bank::Address(borrower_bytes);
+        bank_system.mint_qnkusd(
+            &borrower,
+            (request.collateral_amount * 1_000_000_000_000.0) as u128, // Convert to base units
+            collateral_type,
+            amount_backend_units, // Already converted from frontend base units
+        ).await.map_err(|e| {
+            error!("Failed to mint QNKUSD: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    }; // Drop the lock here
 
     let finalized_in_seconds = start.elapsed().as_secs_f64();
 
+    // Create a blockchain Transaction object for Recent Activity
+    let zero_address = [0u8; 32]; // System address for minting
+    let transaction = Transaction {
+        id: tx_id.0,  // Use the transaction ID from Quillon Bank
+        from: zero_address,  // System/CDP mint (from zero address)
+        to: borrower_bytes,  // User receiving QUGUSD
+        amount: request.amount,  // QUGUSD amount already in frontend base units
+        fee: 0,  // No fee for CDP minting
+        nonce: 0,  // CDP operations don't use nonces
+        signature: vec![],  // System operation, no signature needed
+        timestamp: Utc::now(),
+        data: format!("CDP_MINT:{}:{}", request.collateral_type, request.collateral_amount).into_bytes(),
+        token_type: q_types::TokenType::QUGUSD,
+        fee_token_type: q_types::TokenType::QUGUSD,
+    };
+
+    // Store transaction for Recent Activity display
+    if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
+        error!("Failed to save CDP mint transaction to storage: {}", e);
+    } else {
+        info!("💳 CDP mint transaction saved to Recent Activity: {}", hex::encode(&tx_id.0));
+    }
+
+    // ✅ CRITICAL FIX: Update user's QUGUSD balance in token_balances map
+    {
+        let mut token_balances = state.token_balances.write().await;
+        let balance_key = (borrower_bytes, q_types::QUGUSD_TOKEN_ADDRESS);
+        let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+        let new_balance = current_balance + request.amount;
+        token_balances.insert(balance_key, new_balance);
+
+        info!("💰 Updated QUGUSD balance for {}: {} → {} (minted: {})",
+            hex::encode(&borrower_bytes[..8]),
+            current_balance as f64 / 1e8,
+            new_balance as f64 / 1e8,
+            request.amount as f64 / 1e8
+        );
+
+        // Persist the balance update to storage
+        if let Err(e) = state.storage_engine.save_token_balance(&borrower_bytes, &q_types::QUGUSD_TOKEN_ADDRESS, new_balance).await {
+            error!("Failed to persist QUGUSD balance after minting: {}", e);
+        }
+    }
+
+    // ✅ CRITICAL FIX: Lock QUG collateral by deducting from wallet balance
+    {
+        let mut wallet_balances = state.wallet_balances.write().await;
+        let current_qug = wallet_balances.get(&borrower_bytes).copied().unwrap_or(0);
+        let collateral_base_units = (request.collateral_amount * 1e8) as u64;
+
+        if current_qug >= collateral_base_units {
+            let new_qug_balance = current_qug - collateral_base_units;
+            wallet_balances.insert(borrower_bytes, new_qug_balance);
+
+            info!("🔒 Locked {} QUG as collateral: {} → {}",
+                request.collateral_amount,
+                current_qug as f64 / 1e8,
+                new_qug_balance as f64 / 1e8
+            );
+
+            // Persist the QUG balance update
+            if let Err(e) = state.storage_engine.save_wallet_balance(&borrower_bytes, new_qug_balance).await {
+                error!("Failed to persist QUG balance after locking collateral: {}", e);
+            }
+        } else {
+            error!("⚠️  Insufficient QUG balance for collateral lock: {} QUG required, {} available",
+                request.collateral_amount,
+                current_qug as f64 / 1e8
+            );
+        }
+    }
+
     let response = MintResponse {
-        transaction_id: format!("{:?}", tx_id),
+        transaction_id: format!("0x{}", hex::encode(&tx_id.0)),
         amount_minted: request.amount,
         collateral_locked: request.collateral_amount,
         collateral_ratio,
         finalized_in_seconds,
     };
 
-    info!("✅ Minted {} QNKUSD in {:.2}s", request.amount, finalized_in_seconds);
+    info!("✅ Minted {} QUGUSD in {:.2}s", request.amount, finalized_in_seconds);
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -293,6 +411,7 @@ async fn burn_qnkusd(
 
     // Parse collateral type
     let collateral_type = match request.collateral_type.to_uppercase().as_str() {
+        "QUG" | "ORB" => AssetType::ORB, // Q-NarwhalKnight native token
         "BTC" => AssetType::BTC,
         "ETH" => AssetType::ETH,
         "USDC" => AssetType::USDC,
@@ -393,6 +512,7 @@ async fn add_collateral(
     let mut bank_system = state.quillon_bank.write().await;
 
     let collateral_type = match request.collateral_type.to_uppercase().as_str() {
+        "QUG" | "ORB" => AssetType::ORB, // Q-NarwhalKnight native token
         "BTC" => AssetType::BTC,
         "ETH" => AssetType::ETH,
         "USDC" => AssetType::USDC,

@@ -36,8 +36,8 @@ impl AIAssistant {
         println!();
 
         println!("{}", "Suggested Traits:".bright_white().bold());
-        for trait in &character_suggestions.traits {
-            println!("   • {}", trait.bright_green());
+        for character_trait in &character_suggestions.traits {
+            println!("   • {}", character_trait.bright_green());
         }
         println!();
 
@@ -458,7 +458,7 @@ impl PlotGenerator {
                 "Build romantic tension amid the chaos".to_string(),
                 "Test loyalty through difficult circumstances".to_string(),
             ],
-            underutilized_entities,
+            underutilized_entities: underutilized,
         }
     }
 

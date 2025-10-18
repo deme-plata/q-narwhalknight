@@ -10,25 +10,33 @@
 //! - 10x-100x GPU acceleration for cryptographic operations
 
 pub mod air;
+pub mod batch_prover;
 pub mod gpu;
 pub mod performance;
 pub mod polynomials;
 pub mod stark_prover;
 pub mod stark_verifier;
+pub mod wallet_privacy_stark;
 
 // Re-export main types for convenience
 pub use air::{AirConstraints, ExecutionTrace};
+pub use batch_prover::{BatchConfig, BatchProvingStats, BatchStarkProof, BatchStarkProver};
 pub use gpu::{FriProofGpu, GpuProvingMetrics, GpuStarkProver, StarkProofGpu};
 pub use performance::{PerformanceTargets, StarkPerformanceBenchmark};
 pub use stark_prover::{StarkProof, StarkProver};
 pub use stark_verifier::{StarkVerifier, VerificationResult};
+pub use wallet_privacy_stark::{
+    StarkBalanceRangeProof, StarkTransactionPrivacyProof, StarkWalletOwnershipProof,
+    WalletPrivacyStarkProver,
+};
 
 use anyhow::Result;
 
-/// Phase 3 STARK system with GPU acceleration
+/// Phase 3 STARK system with GPU acceleration and CPU batching
 pub struct StarkSystem {
     gpu_prover: Option<GpuStarkProver>,
     cpu_prover: StarkProver,
+    batch_prover: BatchStarkProver,
     verifier: StarkVerifier,
     performance_monitor: gpu::performance_monitor::PerformanceMonitor,
 }
@@ -36,7 +44,13 @@ pub struct StarkSystem {
 impl StarkSystem {
     /// Create new STARK system with optional GPU acceleration
     pub async fn new(enable_gpu: bool) -> Result<Self> {
+        Self::new_with_batch_config(enable_gpu, BatchConfig::default()).await
+    }
+
+    /// Create new STARK system with custom batch configuration
+    pub async fn new_with_batch_config(enable_gpu: bool, batch_config: BatchConfig) -> Result<Self> {
         let cpu_prover = StarkProver::new();
+        let batch_prover = BatchStarkProver::with_config(batch_config);
         let verifier = StarkVerifier::new();
 
         let gpu_prover = if enable_gpu {
@@ -48,9 +62,20 @@ impl StarkSystem {
         Ok(Self {
             gpu_prover,
             cpu_prover,
+            batch_prover,
             verifier,
             performance_monitor: gpu::performance_monitor::PerformanceMonitor::new(),
         })
+    }
+
+    /// Get mutable reference to batch prover for direct access
+    pub fn batch_prover_mut(&mut self) -> &mut BatchStarkProver {
+        &mut self.batch_prover
+    }
+
+    /// Get batch proving statistics
+    pub fn batch_stats(&self) -> &BatchProvingStats {
+        self.batch_prover.stats()
     }
 
     /// Generate STARK proof using best available method (GPU if available, CPU fallback)

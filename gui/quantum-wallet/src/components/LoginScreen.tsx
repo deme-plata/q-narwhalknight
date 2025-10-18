@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Sparkles, Key, AlertCircle } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import { storeWallet, walletSession } from '../services/walletAuth';
 
 interface LoginScreenProps {
   onAuthenticate: () => void;
@@ -20,14 +21,81 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     setGenerationError(null);
 
     try {
-      // Call the import wallet API with mnemonic and optional password
-      const response = await qnkAPI.createWallet(seedPhrase, password || undefined);
+      // Password is REQUIRED
+      if (!password) {
+        throw new Error('Password is required for wallet encryption');
+      }
+
+      // CRITICAL SECURITY: Check if wallet already exists
+      // MUST verify password if user is trying to use the SAME mnemonic
+      const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
+
+      if (encryptedMnemonic) {
+        console.log('🔐 Existing wallet found - verifying password...');
+
+        // FIRST: Check if this is the same mnemonic by comparing addresses
+        const { keypairFromMnemonic } = await import('../services/walletAuth');
+        const providedWalletAddress = (await keypairFromMnemonic(seedPhrase)).address;
+        const storedAddress = localStorage.getItem('walletAddress');
+
+        if (storedAddress && providedWalletAddress === storedAddress) {
+          // SAME MNEMONIC - password verification is REQUIRED
+          console.log('🔐 Same wallet detected - verifying password is mandatory...');
+
+          try {
+            const { recoverMnemonic } = await import('../services/walletAuth');
+            const storedMnemonic = await recoverMnemonic(password);
+
+            if (storedMnemonic.trim() === seedPhrase.trim()) {
+              console.log('✅ Password verified successfully!');
+            } else {
+              // This should never happen since addresses matched
+              console.error('❌ CRITICAL: Address matched but mnemonic different!');
+              throw new Error('Wallet data corruption detected. Please contact support.');
+            }
+          } catch (decryptError) {
+            // Decryption failed with same mnemonic = WRONG PASSWORD
+            console.error('❌ WRONG PASSWORD - Authentication failed');
+            setIsAuthenticating(false);
+            setGenerationError('Incorrect password. Please enter the correct password for your existing wallet.');
+            return; // CRITICAL: Stop execution here - do not continue to createWallet
+          }
+        } else {
+          // DIFFERENT MNEMONIC - clear old data and allow new wallet
+          console.warn('⚠️ Different wallet detected (address mismatch) - allowing new wallet creation');
+          console.log('🗑️ Clearing old wallet data');
+          localStorage.removeItem('walletEncryptedMnemonic');
+          localStorage.removeItem('walletEncryptedKey');
+          localStorage.removeItem('walletAddress');
+          localStorage.removeItem('walletPublicKey');
+        }
+      }
+
+      // Call the import wallet API with mnemonic and password
+      const response = await qnkAPI.createWallet(seedPhrase, password);
 
       if (response.success && response.data) {
-        // Store wallet information
-        localStorage.setItem('walletSeed', seedPhrase);
+        // Store wallet address and ID
         localStorage.setItem('walletAddress', response.data.address_formatted || '');
         localStorage.setItem('walletId', response.data.id);
+
+        // CRITICAL: Clear cached balance from previous wallet
+        localStorage.removeItem('cachedBalance');
+        console.log('🗑️ Cleared cached balance from previous wallet');
+
+        try {
+          // IMPORTANT: Enable AEGIS-QL post-quantum keys by default
+          const wallet = await storeWallet(seedPhrase, password, true);
+          // Automatically start session so user doesn't need to enter password again
+          // Pass mnemonic to session for "Never expire" convenience (stored only if timeout is "never")
+          walletSession.setSession(wallet.privateKey, wallet.address, seedPhrase);
+          console.log('✅ Wallet encrypted with password-protected AES-256-GCM');
+          console.log('✅ AEGIS-QL post-quantum keys generated and encrypted');
+          console.log('✅ Session started with mnemonic for "Never expire" convenience');
+        } catch (error) {
+          console.error('Failed to encrypt wallet:', error);
+          throw new Error(`Wallet encryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
 
         // Show success animation
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -140,7 +208,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
             <div>
               <label className="block text-sm font-medium text-amber-200 mb-2">
-                Password (Optional)
+                Password (Required for wallet encryption)
               </label>
               <input
                 type="password"
@@ -148,6 +216,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all"
                 placeholder="Enter password for wallet encryption..."
+                required
               />
             </div>
 
@@ -211,7 +280,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             {/* Authenticate Button */}
             <motion.button
               onClick={handleAuthenticate}
-              disabled={!seedPhrase || isAuthenticating}
+              disabled={!seedPhrase || !password || isAuthenticating}
               className="w-full py-5 px-6 bg-gradient-to-r from-amber-600 to-yellow-600 rounded-xl text-slate-900 font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-[0_0_30px_rgba(251,191,36,0.5)] hover:from-amber-500 hover:to-yellow-500 transition-all"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}

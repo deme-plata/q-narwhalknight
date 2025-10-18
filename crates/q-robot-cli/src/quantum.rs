@@ -19,6 +19,7 @@ pub struct QuantumState {
     /// Coherence time in seconds
     coherence_time: f64,
     /// Last measurement time
+    #[serde(skip)]
     last_measurement: Option<Instant>,
     /// Entanglement information
     entangled_systems: Vec<String>,
@@ -245,6 +246,7 @@ pub struct QuantumStateMonitor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeasurementRecord {
+    #[serde(skip)]
     pub timestamp: Instant,
     pub observable: String,
     pub result: f64,

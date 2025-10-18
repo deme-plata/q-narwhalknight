@@ -12,7 +12,7 @@
 /// where it matters most.
 
 use anyhow::{anyhow, Result};
-use pqcrypto_sphincsplus::sphincssha2256fsimple;
+use pqcrypto_sphincsplus::sphincssha256256fsimple;
 use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SecretKey as PQSecretKey, SignedMessage};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -65,15 +65,15 @@ impl OperationType {
 
 /// SPHINCS+ keypair (256-bit security level)
 pub struct SphincsPlusKeyPair {
-    pub public_key: sphincssha2256fsimple::PublicKey,
-    pub secret_key: sphincssha2256fsimple::SecretKey,
+    pub public_key: sphincssha256256fsimple::PublicKey,
+    pub secret_key: sphincssha256256fsimple::SecretKey,
 }
 
 impl SphincsPlusKeyPair {
     /// Generate a new SPHINCS+-256f keypair
     /// 256f = 256-bit security, "fast" variant (faster signing, larger signatures)
     pub fn generate() -> Self {
-        let (public_key, secret_key) = sphincssha2256fsimple::keypair();
+        let (public_key, secret_key) = sphincssha256256fsimple::keypair();
         Self {
             public_key,
             secret_key,
@@ -82,20 +82,20 @@ impl SphincsPlusKeyPair {
 
     /// Sign a message with SPHINCS+ (hash-based post-quantum signatures)
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        sphincssha2256fsimple::sign(message, &self.secret_key)
+        sphincssha256256fsimple::sign(message, &self.secret_key)
             .as_bytes()
             .to_vec()
     }
 
     /// Verify a SPHINCS+ signature
     pub fn verify(_message: &[u8], signed_message: &[u8], public_key: &[u8]) -> Result<bool> {
-        let pk = sphincssha2256fsimple::PublicKey::from_bytes(public_key)
+        let pk = sphincssha256256fsimple::PublicKey::from_bytes(public_key)
             .map_err(|_| anyhow!("Invalid SPHINCS+ public key"))?;
 
         let signed_msg = SignedMessage::from_bytes(signed_message)
             .map_err(|_| anyhow!("Invalid SPHINCS+ signed message"))?;
 
-        match sphincssha2256fsimple::open(&signed_msg, &pk) {
+        match sphincssha256256fsimple::open(&signed_msg, &pk) {
             Ok(_recovered_message) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -183,11 +183,11 @@ mod tests {
         // SPHINCS+-256f key sizes
         assert_eq!(
             keypair.public_key.as_bytes().len(),
-            sphincssha2256fsimple::public_key_bytes()
+            sphincssha256256fsimple::public_key_bytes()
         );
         assert_eq!(
             keypair.secret_key.as_bytes().len(),
-            sphincssha2256fsimple::secret_key_bytes()
+            sphincssha256256fsimple::secret_key_bytes()
         );
     }
 
@@ -235,7 +235,7 @@ mod tests {
         let signature = keypair.sign(message);
 
         // SPHINCS+-256f signatures are approximately 50 KB
-        let expected_size = sphincssha2256fsimple::signature_bytes();
+        let expected_size = sphincssha256256fsimple::signature_bytes();
 
         // The signed message includes the message itself
         assert!(

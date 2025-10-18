@@ -3,12 +3,21 @@ use axum::{
     Router,
 };
 use clap::{Arg, ArgAction, Command};
-use q_api_server::{handlers, streaming, AppState, Config, ConsoleVisualizer, update_stats};
+use q_api_server::{handlers, streaming, payment_api, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats};
 use q_types::TxStatus;
 mod contracts_api;
 mod dex_integration_api;
+mod liquidity_api;
+mod cdp_simple;
+// ✅ ENABLED - Full Quillon Bank CDP system
+mod quillon_bank_api;
+// ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System
+mod stablecoin_api;
 use contracts_api::create_contracts_router;
 use dex_integration_api::create_dex_integration_router;
+use liquidity_api::create_liquidity_router;
+use cdp_simple::create_cdp_router;
+use quillon_bank_api::create_quillon_bank_router;
 // DEACTIVATED: use q_bep44_discovery::{Bep44DiscoveryConfig, DiscoveryEngine};
 // DEACTIVATED: use q_bitcoin_bridge::{
 //     bridge::{IntegratedBitcoinBridge, PeerNetworkEvent},
@@ -124,25 +133,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize Tor client first
     info!("🧅 Starting Tor client...");
-    // let tor_config = q_tor_client::TorConfig::default();
-    // let tor_client = match QTorClient::new(tor_config, node_id, q_types::Phase::Phase1).await {
-    //     Ok(client) => {
-    //         info!("✅ Tor client initialized successfully");
-    //         Arc::new(client)
-    //     }
-    //     Err(e) => {
-    //         warn!(
-    //             "⚠️  Tor client initialization failed: {}, continuing without Tor",
-    //             e
-    //         );
-    //         // Create a mock Tor client for development
-    //         Arc::new(QTorClient::mock())
-    //     }
-    // };
-
-    // Temporarily skip Tor client initialization
-    info!("⚠️  Skipping Tor client initialization due to arti compilation issues");
-    let tor_client: Option<Arc<q_tor_client::QTorClient>> = None;
+    let tor_config = q_tor_client::TorConfig::default();
+    let tor_client = match q_tor_client::QTorClient::new(tor_config, node_id, q_types::Phase::Phase1).await {
+        Ok(client) => {
+            info!("✅ Tor client initialized successfully");
+            Some(Arc::new(client))
+        }
+        Err(e) => {
+            warn!(
+                "⚠️  Tor client initialization failed: {}, continuing without Tor",
+                e
+            );
+            info!("   Error details: {}", e);
+            info!("   Make sure Tor is running on 127.0.0.1:9150");
+            // Continue without Tor rather than using mock
+            None
+        }
+    };
 
     // Initialize Bitcoin-Tor Bridge - DEACTIVATED
     let bitcoin_bridge: Option<Arc<()>> = {
@@ -478,9 +485,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   Future: 500,000+ TPS (Phase 3 - SIMD Crypto)");
     info!("   Future: 1,000,000+ TPS (Phase 4 - io_uring Kernel I/O)");
 
-    // Determine number of parallel workers (use CPU cores)
-    let num_workers = 16; // Start with 16 workers, will scale to 32 in Phase 2
-    info!("   Parallel Workers: {}", num_workers);
+    // Determine number of parallel workers (4x CPU cores for I/O bound workload)
+    let cpu_cores = num_cpus::get();
+    let num_workers = (cpu_cores * 4).max(64); // Minimum 64 workers, optimal for 1M TPS target
+    info!("   Parallel Workers: {} ({}x CPU cores)", num_workers, num_workers / cpu_cores);
 
     // Initialize Production Mempool for high-throughput transaction batching
     let mempool_config = q_narwhal_core::production_mempool::MempoolConfig {
@@ -542,14 +550,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     state.k_parameter_analyzer = Some(Arc::new(k_analyzer));
 
-    // ResonanceCoordinator will be initialized when DAG-Knight is active
-    if let Some(ref _dag_knight_ref) = dag_knight {
+    // ========================================
+    // SHADOW MODE: DAG-Knight (Primary) + Q-Resonance (Shadow)
+    // ========================================
+    // Initialize Shadow Mode Coordinator if DAG-Knight is active
+    if let Some(ref dag_knight_ref) = dag_knight {
+        info!("🎭 Initializing Shadow Mode Coordinator...");
+
+        // Create ResonanceCoordinator for shadow mode
         let resonance = q_resonance::ResonanceCoordinator::new(node_id.to_vec());
-        info!("✅ Quillon Resonance Coordinator initialized");
-        info!("   String-theoretic consensus: ACTIVE");
-        info!("   Energy minimization: ENABLED");
-        info!("   Spectral BFT: ACTIVE");
-        state.resonance_coordinator = Some(Arc::new(resonance));
+        let resonance_arc = Arc::new(resonance);
+
+        // Configure shadow mode
+        let shadow_config = q_resonance::ShadowModeConfig {
+            enabled: true,
+            agreement_threshold: 0.85,       // 85% agreement required
+            observation_rounds: 100,          // Observe 100 rounds
+            hybrid_mode: false,               // Pure shadow initially
+            resonance_weight: 0.0,            // Start at 0% resonance
+            auto_adjust_weight: true,         // Auto-adjust on performance
+            log_interval_rounds: 10,          // Log every 10 rounds
+        };
+
+        // Create ShadowModeCoordinator
+        match q_resonance::ShadowModeCoordinator::new(
+            dag_knight_ref.clone(),
+            resonance_arc.clone(),
+            shadow_config,
+        ).await {
+            Ok(shadow_coordinator) => {
+                info!("✅ Shadow Mode Coordinator initialized");
+                info!("   🎯 Primary: DAG-Knight Consensus");
+                info!("   🌊 Shadow: Quillon Resonance Consensus");
+                info!("   📊 Agreement Threshold: 85.0%");
+                info!("   🔄 Observation Rounds: 100");
+                info!("   ⚖️  Auto-weight adjustment: ENABLED");
+                info!("   String-theoretic consensus: SHADOW MODE");
+                info!("   Energy minimization: MONITORING");
+                info!("   Spectral BFT: COMPARISON");
+
+                // Store both coordinators in app state
+                state.resonance_coordinator = Some(resonance_arc);
+                state.shadow_coordinator = Some(Arc::new(tokio::sync::Mutex::new(shadow_coordinator)));
+            }
+            Err(e) => {
+                warn!("⚠️  Shadow Mode Coordinator initialization failed: {}", e);
+                warn!("   Continuing with ResonanceCoordinator only (no shadow mode)");
+                // Still store resonance coordinator without shadow mode
+                state.resonance_coordinator = Some(resonance_arc);
+            }
+        };
     }
 
     // ========================================
@@ -595,6 +645,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let app_state = Arc::new(state);
+
+    // ========================================
+    // IPFS-ROCKSDB DECENTRALIZED STORAGE INITIALIZATION
+    // ========================================
+    info!("💾 Initializing IPFS-RocksDB decentralized storage system...");
+    let ipfs_storage = match q_api_server::storage_api::initialize_storage().await {
+        Ok(storage) => {
+            info!("✅ IPFS-RocksDB storage system initialized successfully");
+            info!("   Distributed database backups enabled");
+            info!("   Content-addressed storage via IPFS");
+            info!("   libp2p network integration active");
+            Some(storage)
+        }
+        Err(e) => {
+            warn!("⚠️  IPFS storage initialization failed: {}, backup functionality disabled", e);
+            None
+        }
+    };
+    let ipfs_storage_state = Arc::new(tokio::sync::RwLock::new(ipfs_storage));
+
+    // ========================================
+    // DATABASE REPLICATION VIA GOSSIPSUB
+    // ========================================
+    info!("🔄 Initializing database replication system...");
+
+    // Initialize replication only if IPFS storage is available
+    let replication_system = if ipfs_storage_state.read().await.is_some() {
+        use q_ipfs_storage::{DatabaseReplicationManager, ReplicationConfig};
+        use q_api_server::database_replication_bridge::DatabaseReplicationBridge;
+
+        // Create replication configuration
+        let replication_config = ReplicationConfig {
+            enabled: true,
+            snapshot_interval: 300,  // 5 minutes
+            max_incremental_updates: 100,
+            verify_updates: true,
+            parallel_downloads: 10,
+        };
+
+        // Initialize replication manager
+        let (replication_manager, update_rx) = DatabaseReplicationManager::new(
+            node_id.to_vec(),
+            ipfs_storage_state.clone(),
+            replication_config,
+        );
+        let replication_manager = Arc::new(replication_manager);
+
+        // Start replication manager background tasks
+        info!("🚀 Starting database replication manager...");
+        replication_manager.clone().start().await;
+
+        // Create channel for gossipsub publishing
+        let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+
+        // Create replication bridge
+        let bridge = DatabaseReplicationBridge::new(
+            replication_manager.clone(),
+            update_rx,
+        );
+
+        // Start bridge (spawns background tasks for bidirectional forwarding)
+        info!("🌉 Starting database replication bridge...");
+        let incoming_tx = match bridge.start(gossipsub_tx).await {
+            Ok(tx) => {
+                info!("✅ Database replication bridge started successfully");
+                tx
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to start replication bridge: {}, replication disabled", e);
+                tokio::sync::mpsc::unbounded_channel().0
+            }
+        };
+
+        // Integrate with libp2p UnifiedNetworkManager if available
+        if let Some(libp2p_discovery) = &app_state.libp2p_discovery {
+            let discovery_clone = libp2p_discovery.clone();
+
+            // Subscribe to database updates topic
+            {
+                let mut manager = discovery_clone.lock().await;
+                if let Err(e) = manager.subscribe_topic(q_ipfs_storage::DATABASE_UPDATES_TOPIC) {
+                    warn!("⚠️  Failed to subscribe to database updates topic: {}", e);
+                } else {
+                    info!("📢 Subscribed to database updates topic: {}", q_ipfs_storage::DATABASE_UPDATES_TOPIC);
+                }
+            }
+
+            // Spawn task to forward outgoing updates to gossipsub
+            let outgoing_discovery = discovery_clone.clone();
+            tokio::spawn(async move {
+                info!("📤 Starting outgoing database update forwarder...");
+                while let Some((topic, data)) = gossipsub_rx.recv().await {
+                    let mut manager = outgoing_discovery.lock().await;
+                    if let Err(e) = manager.publish_topic(&topic, data) {
+                        tracing::error!("❌ Failed to publish database update to gossipsub: {}", e);
+                    } else {
+                        tracing::debug!("✅ Published database update to gossipsub: {}", topic);
+                    }
+                }
+                tracing::warn!("📤 Outgoing database update forwarder stopped");
+            });
+
+            info!("✅ Database replication integrated with gossipsub");
+            info!("   Automatic synchronization: ENABLED");
+            info!("   Snapshot interval: 5 minutes");
+            info!("   Topic: /qnk/database-updates/1.0.0");
+
+            Some((replication_manager, incoming_tx))
+        } else {
+            warn!("⚠️  libp2p discovery not available, replication will not work");
+            None
+        }
+    } else {
+        warn!("⚠️  IPFS storage not initialized, database replication disabled");
+        None
+    };
 
     // ========================================
     // 🎨 START ANIMATED CONSOLE VISUALIZATION
@@ -1192,6 +1358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) // Get wallet balance by address
         .route("/api/v1/mnemonic", get(handlers::generate_mnemonic))
         .route("/api/v1/faucet", post(handlers::faucet)) // Test token faucet
+        .route("/api/v1/mining/challenge", get(handlers::get_mining_challenge)) // Get current mining challenge
         .route("/api/v1/mining/submit", post(handlers::submit_mining_solution))
         // Chain endpoints
         .route("/api/v1/status", get(handlers::node_status))
@@ -1315,6 +1482,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Real-time streaming endpoints
         .route("/api/v1/events", get(streaming::sse_events))
         .route("/api/v1/ws", get(streaming::websocket_handler))
+        // WebSocket transaction streaming for 1M+ TPS (zero HTTP overhead)
+        .route("/api/v1/ws/transactions", get(q_api_server::websocket_stream::ws_transaction_stream))
         // ===========================================
         // NEW INTEGRATED CRATES API ROUTES
         // ===========================================
@@ -1347,6 +1516,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Quillon Resonance Consensus
         .route("/api/v1/consensus/resonance/status", get(handlers::resonance_status))
         .route("/api/v1/consensus/resonance/k-parameter", get(handlers::k_parameter_metrics))
+        // Shadow Mode - Performance Monitoring
+        .route("/api/v1/consensus/shadow-metrics", get(handlers::shadow_mode_metrics))
+        .route("/api/v1/consensus/migration-report", get(handlers::shadow_mode_migration_report))
+        .route("/api/v1/consensus/migrate-to-resonance", post(handlers::migrate_to_resonance))
         // Quantum Cryptography
         .route(
             "/api/v1/quantum/crypto/status",
@@ -1356,10 +1529,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // DeFi Components
         .route("/api/v1/defi/dex/status", get(handlers::dex_status))
         .route("/api/v1/defi/oracle/status", get(handlers::oracle_status))
+        .route("/api/v1/defi/oracle/price/:feed_id", get(handlers::get_oracle_price))
+        .route("/api/v1/defi/oracle/feeds", get(handlers::get_oracle_feeds))
         .route(
             "/api/v1/defi/stablecoin/status",
             get(handlers::stablecoin_status),
         )
+        // Nitro Points / Token Boosting System
+        .route("/api/v1/nitro/boosts", get(handlers::get_nitro_boosts))
+        .route("/api/v1/nitro/boost", post(handlers::add_nitro_boost))
+        // DEX Swap Functionality
+        .route("/api/v1/dex/swap", post(handlers::execute_swap))
+        // Blockchain Benchmark (rate limited to once per 24 hours)
+        .route("/api/v1/benchmark", post(handlers::run_blockchain_benchmark))
+        // Stripe Payment Integration for USD Wallet - ENABLED
+        .route("/api/v1/payment/create-intent", post(payment_api::create_payment_intent))
+        .route("/api/v1/payment/confirm", post(payment_api::confirm_payment))
+        .route("/api/v1/payment/balance", post(payment_api::get_usd_balance))
+        .route("/api/v1/payment/withdraw", post(payment_api::withdraw_usd))
+        .route("/api/v1/payment/convert-to-qugusd", post(payment_api::convert_usd_to_qugusd))
+        .route("/api/v1/payment/transfer", post(payment_api::transfer_usd))
         // Network & Infrastructure
         .route(
             "/api/v1/tor/circuits/status",
@@ -1407,6 +1596,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/api/v1/contracts", create_contracts_router())
         // DEX Integration API - Secure external DEX/swap integration
         .nest("/api/v1/dex", create_dex_integration_router())
+        // Liquidity Provision API
+        .nest("/api/v1/liquidity", create_liquidity_router())
+        // ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System (AUTHENTICATED)
+        .route("/api/v1/wallet/tokens", get(stablecoin_api::get_multi_token_balance))
+        .route("/api/v1/stablecoin/mint", post(stablecoin_api::mint_qugusd))
+        .route("/api/v1/stablecoin/redeem", post(stablecoin_api::redeem_qug))
+        .route("/api/v1/stablecoin/position/:address", get(stablecoin_api::get_position_health))
+        .route("/api/v1/stablecoin/vault/stats", get(stablecoin_api::get_vault_stats))
+        .route("/api/v1/stats/fees", get(stablecoin_api::get_fee_stats))
+        .route("/api/v1/stablecoin/liquidatable", get(stablecoin_api::get_liquidatable_positions))
+        .route("/api/v1/stablecoin/liquidate", post(stablecoin_api::liquidate_position))
+        // Simple CDP API - QUGUSD minting with QUG collateral (fallback) - DISABLED (conflicts with full Quillon Bank)
+        // .nest("/api/v1/quillon-bank/stablecoin", create_cdp_router())
+        // ✅ ENABLED - Full Quillon Bank CDP system with real balance changes
+        .nest("/api/v1/quillon-bank", create_quillon_bank_router())
         // Health and metrics
         .route("/health", get(handlers::health_check))
         .route("/api/v1/health", get(handlers::health_check))
@@ -1436,6 +1640,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
         .with_state(app_state.clone());
+
+    // Create separate router for IPFS storage endpoints with their own state
+    let storage_router = Router::new()
+        .route("/api/v1/storage/backup", post(q_api_server::storage_api::backup_database))
+        .route("/api/v1/storage/restore", post(q_api_server::storage_api::restore_database))
+        .route("/api/v1/storage/status", get(q_api_server::storage_api::storage_status))
+        .with_state(ipfs_storage_state);
+
+    // Merge the routers
+    let app = app.merge(storage_router);
 
     // Create shared peer list for P2P connections
     let active_peers = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -1500,6 +1714,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // Set up gossipsub message forwarding channel for database replication
+        if let Some((_, incoming_tx)) = &replication_system {
+            let (gossipsub_msg_tx, mut gossipsub_msg_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Set gossipsub channel in UnifiedNetworkManager
+            {
+                let mut discovery = libp2p_discovery.lock().await;
+                discovery.set_gossipsub_channel(gossipsub_msg_tx);
+            }
+
+            // Spawn receiver task to forward gossipsub messages to replication bridge
+            let incoming_replication_tx = incoming_tx.clone();
+            tokio::spawn(async move {
+                info!("📥 Starting gossipsub → replication bridge receiver...");
+                while let Some((topic, data)) = gossipsub_msg_rx.recv().await {
+                    // Only forward database update messages to replication bridge
+                    if topic == q_ipfs_storage::DATABASE_UPDATES_TOPIC {
+                        tracing::debug!("📥 Forwarding database update message to replication bridge");
+                        if let Err(e) = incoming_replication_tx.send(data) {
+                            tracing::error!("❌ Failed to forward message to replication bridge: {}", e);
+                        }
+                    }
+                }
+                tracing::warn!("📥 Gossipsub → replication bridge channel closed");
+            });
+        }
+
         // Spawn libp2p discovery event loop
         let discovery_clone = libp2p_discovery.clone();
         tokio::spawn(async move {
@@ -1511,18 +1752,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start the HTTP API server
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.port)).await?;
-    info!("API server listening on {}", listener.local_addr()?);
+    // Start the HIGH-PERFORMANCE HTTP API server
+    info!("🚀 Initializing High-Performance HTTP Server for 1M+ TPS");
+    info!("   TCP optimizations: NODELAY, REUSEPORT, 4MB buffers");
+    info!("   HTTP/2 support: Automatic via client negotiation");
     info!(
         "P2P connections will be accepted on port {}",
         config.port + 1
     );
 
-    axum::serve(
-        listener, 
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>()
-    ).await?;
+    // Use our optimized HTTP server with TCP socket configuration
+    use q_api_server::high_performance_server::HighPerformanceServer;
+
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
+    let high_perf_server = HighPerformanceServer::new(app, addr)
+        .with_tcp_buffers(4 * 1024 * 1024, 4 * 1024 * 1024)  // 4MB buffers
+        .with_backlog(1024);  // 1024 pending connections
+
+    high_perf_server.run().await?;
 
     Ok(())
 }

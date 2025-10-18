@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import './PasswordModal.css';
 
 interface PasswordModalProps {
@@ -51,7 +52,7 @@ const PasswordModal: React.FC<PasswordModalProps> = ({
 
   if (!isOpen) return null;
 
-  return (
+  return createPortal(
     <div className="password-modal-overlay" onClick={onCancel}>
       <div
         className="password-modal-content"
@@ -155,7 +156,8 @@ const PasswordModal: React.FC<PasswordModalProps> = ({
           </p>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 

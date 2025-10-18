@@ -1,4 +1,4 @@
-# Q-NarwhalKnight v0.0.1-alpha
+# Q-NarwhalKnight v0.0.3-beta
 
 🌟 **Quantum-Enhanced DAG-BFT Consensus with Post-Quantum Cryptography**
 
@@ -184,11 +184,49 @@ GET    /metrics              # Prometheus metrics
 Q-NarwhalKnight includes advanced quantum state visualization:
 
 - **Rainbow-box quantum states**: Multi-dimensional qubit representation
-- **DAG entanglement patterns**: Moiré interference visualization  
+- **DAG entanglement patterns**: Moiré interference visualization
 - **QKD photon waterfalls**: Real-time quantum key distribution
 - **STARK proof fractals**: Zero-knowledge proof visualization
 
 Access visualizations at `/quantum/visualization` or via WebSocket streams.
+
+## 💼 Dual Wallet Implementations
+
+Q-NarwhalKnight offers two complementary wallet implementations:
+
+### 🦀 Slint Native Wallet (`/gui`)
+- **Technology**: Rust + Slint UI Framework
+- **Platform**: Native desktop application (Linux, Windows, macOS)
+- **Performance**: Zero-overhead native performance
+- **Features**:
+  - DAG consensus visualization with real-time updates
+  - Network topology monitoring
+  - Tor anonymity integration
+  - Quantum entropy visualization
+  - Narwhal mempool explorer
+  - Phase transition monitoring
+  - LVRF randomness visualization
+  - VDF progress tracking
+  - Canvas-based quantum visualizations
+
+### ⚛️ React TypeScript Wallet (`/gui/quantum-wallet`)
+- **Technology**: Vite + React + TypeScript
+- **Platform**: Web-based PWA (Progressive Web App)
+- **Performance**: Optimized with code splitting and lazy loading
+- **Features**:
+  - Modern responsive UI with dark mode
+  - Wallet authentication with post-quantum signatures
+  - Real-time transaction monitoring via SSE
+  - DEX trading interface with liquidity pools
+  - Mining dashboard with GPU/CPU support
+  - CDP vault management for stablecoins
+  - QR code scanner for mobile transactions
+  - Session timeout with encrypted key storage
+  - Token management and custom token support
+  - Stripe payment integration
+  - Download node packages directly from UI
+
+Both wallets share the same backend API and provide complementary user experiences - native performance for power users and web accessibility for general users.
 
 ## 🤝 Contributing
 
@@ -238,7 +276,32 @@ See `CLAUDE.md` for instructions on:
 
 ## 🏷️ Version History
 
-- **v0.0.1-alpha** (Current): Initial implementation with Phase 0 consensus and Phase 1 crypto-agility
+- **v0.0.3-beta** (Current): Production Beta Release
+  - Dual wallet implementations: Slint (native Rust) + React TypeScript (web)
+  - Full wallet authentication with post-quantum signatures (SHA-512 + noble-ed25519)
+  - DEX integration with liquidity pools and real-time swap functionality
+  - Session management with auto-timeout and encrypted key storage
+  - Mining dashboard with SSE real-time updates
+  - Transaction tunneling for privacy-preserving transfers
+  - Database replication for high availability
+  - AEGIS-QL quantum entanglement coordination language
+  - Higgs-Hydro quantum vacuum simulation
+  - Reticular chemistry robots for material synthesis
+  - ZK-STARK batch prover integration
+  - Comprehensive API documentation and testing suite
+  - IPFS + RocksDB distributed storage layer
+  - QUG/QUGUSD stablecoin with CDP vaults
+  - Nitro Points loyalty system
+  - Payment gateway integration (Stripe)
+
+- **v0.0.2-beta**: Enhanced Features Release
+  - Post-quantum wallet authentication
+  - Real-time DEX with liquidity management
+  - Privacy enhancements and transaction tunneling
+  - Database replication architecture
+
+- **v0.0.1-alpha**: Initial implementation with Phase 0 consensus and Phase 1 crypto-agility
+
 - **v0.1.0** (Planned): Production-ready Phase 0 with performance optimizations
 - **v0.2.0** (Planned): Complete Phase 1 post-quantum transition
 

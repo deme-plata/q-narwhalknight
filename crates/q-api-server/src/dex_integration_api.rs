@@ -361,17 +361,27 @@ pub struct TokenInfo {
 pub async fn get_supported_tokens(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<Vec<TokenInfo>>>, StatusCode> {
-    // TODO: Implement actual token registry lookup
+    // Return both QUG and QUGUSD tokens
     let tokens = vec![
         TokenInfo {
-            address: "0x0000000000000000000000000000000000000000".to_string(),
-            name: "Q-NarwhalKnight Token".to_string(),
-            symbol: "QNK".to_string(),
-            decimals: 18,
-            total_supply: "1000000000000000000000000000".to_string(), // 1B tokens
+            address: hex::encode(q_types::QUG_TOKEN_ADDRESS),
+            name: "Quillon".to_string(),
+            symbol: "QUG".to_string(),
+            decimals: q_types::QUG_DECIMALS,
+            total_supply: q_types::QUG_MAX_SUPPLY.to_string(),
             contract_type: "Native".to_string(),
             verified: true,
-            audit_report: Some("https://audits.q-narwhalknight.dev/qnk".to_string()),
+            audit_report: Some("https://audits.q-narwhalknight.dev/qug".to_string()),
+        },
+        TokenInfo {
+            address: hex::encode(q_types::QUGUSD_TOKEN_ADDRESS),
+            name: "Quillon USD".to_string(),
+            symbol: "QUGUSD".to_string(),
+            decimals: q_types::QUGUSD_DECIMALS,
+            total_supply: "unlimited".to_string(), // Unlimited if properly collateralized
+            contract_type: "Stablecoin".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/qugusd".to_string()),
         },
     ];
 
@@ -382,21 +392,38 @@ pub async fn get_token_info(
     Path(address): Path<String>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<TokenInfo>>, StatusCode> {
-    // TODO: Implement actual token lookup
-    if address == "0x0000000000000000000000000000000000000000" {
+    // Support both address lookups and symbol lookups
+    let qug_address = hex::encode(q_types::QUG_TOKEN_ADDRESS);
+    let qugusd_address = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS);
+
+    let address_upper = address.to_uppercase();
+
+    if address == qug_address || address_upper == "QUG" {
         let token = TokenInfo {
-            address,
-            name: "Q-NarwhalKnight Token".to_string(),
-            symbol: "QNK".to_string(),
-            decimals: 18,
-            total_supply: "1000000000000000000000000000".to_string(),
+            address: qug_address,
+            name: "Quillon".to_string(),
+            symbol: "QUG".to_string(),
+            decimals: q_types::QUG_DECIMALS,
+            total_supply: q_types::QUG_MAX_SUPPLY.to_string(),
             contract_type: "Native".to_string(),
             verified: true,
-            audit_report: Some("https://audits.q-narwhalknight.dev/qnk".to_string()),
+            audit_report: Some("https://audits.q-narwhalknight.dev/qug".to_string()),
+        };
+        Ok(Json(DexApiResponse::success(token)))
+    } else if address == qugusd_address || address_upper == "QUGUSD" {
+        let token = TokenInfo {
+            address: qugusd_address,
+            name: "Quillon USD".to_string(),
+            symbol: "QUGUSD".to_string(),
+            decimals: q_types::QUGUSD_DECIMALS,
+            total_supply: "unlimited".to_string(),
+            contract_type: "Stablecoin".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/qugusd".to_string()),
         };
         Ok(Json(DexApiResponse::success(token)))
     } else {
-        Ok(Json(DexApiResponse::error("Token not found".to_string())))
+        Ok(Json(DexApiResponse::error(format!("Token '{}' not found", address))))
     }
 }
 
@@ -605,6 +632,8 @@ pub async fn execute_swap(
                     signature: vec![],
                     timestamp: chrono::Utc::now(),
                     data: format!("swap:{}:{}", request.token_in, request.token_out).into_bytes(),
+                    token_type: q_types::TokenType::QUG,
+                    fee_token_type: q_types::TokenType::QUGUSD,
                 };
 
                 state.tx_pool.insert(hash_array, transaction);
@@ -726,8 +755,8 @@ pub async fn get_rate_limits(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<RateLimits>>, StatusCode> {
     let limits = RateLimits {
-        requests_per_hour: 5000,
-        requests_per_minute: 100,
+        requests_per_hour: 1_000_000,  // 1 million requests per hour
+        requests_per_minute: 10_000,    // 10k requests per minute
         current_usage: 42, // TODO: Implement actual tracking
         reset_time: chrono::Utc::now().timestamp() as u64 + 3600,
     };
@@ -817,8 +846,8 @@ pub async fn create_liquidity_pool(
         contract_metadata,
         options
     ).await {
-        Ok(contract_address) => {
-            Ok(Json(DexApiResponse::success(contract_address)))
+        Ok((contract_id, _address)) => {
+            Ok(Json(DexApiResponse::success(contract_id)))
         }
         Err(e) => {
             Ok(Json(DexApiResponse::error(format!("Failed to create pool: {}", e))))
@@ -861,19 +890,35 @@ pub async fn get_swap_status(
 
 pub async fn get_token_price(
     Path(token): Path<String>,
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<TokenPrice>>, StatusCode> {
-    // For now, return mock price data. In production, this would query price oracles
-    let price = match token.as_str() {
-        "QNK" | "0x0000000000000000000000000000000000000000" => TokenPrice {
-            token: "QNK".to_string(),
-            price_usd: 1.0, // $1 per QNK for demo
-            price_qnk: 1.0,
-            change_24h: 2.5, // +2.5%
-            volume_24h: "1000000".to_string(),
+    let qug_address = hex::encode(q_types::QUG_TOKEN_ADDRESS);
+    let qugusd_address = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS);
+    let token_upper = token.to_uppercase();
+
+    // Get current QUG price from CollateralVault
+    let qug_price_usd = state.collateral_vault.read().await.qug_price_usd;
+
+    let price = if token == qug_address || token_upper == "QUG" {
+        TokenPrice {
+            token: "QUG".to_string(),
+            price_usd: qug_price_usd,
+            price_qnk: 1.0, // QUG is the base token
+            change_24h: 0.0, // TODO: Calculate from historical data
+            volume_24h: "0".to_string(), // TODO: Calculate from DEX activity
             last_updated: current_timestamp(),
-        },
-        _ => TokenPrice {
+        }
+    } else if token == qugusd_address || token_upper == "QUGUSD" {
+        TokenPrice {
+            token: "QUGUSD".to_string(),
+            price_usd: 1.0, // Always $1.00 (stablecoin peg)
+            price_qnk: 1.0 / qug_price_usd, // QUGUSD price in QUG terms
+            change_24h: 0.0, // Stablecoin should have minimal change
+            volume_24h: "0".to_string(), // TODO: Calculate from DEX activity
+            last_updated: current_timestamp(),
+        }
+    } else {
+        TokenPrice {
             token: token.clone(),
             price_usd: 0.0,
             price_qnk: 0.0,
@@ -882,7 +927,7 @@ pub async fn get_token_price(
             last_updated: current_timestamp(),
         }
     };
-    
+
     Ok(Json(DexApiResponse::success(price)))
 }
 

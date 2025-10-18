@@ -13,9 +13,9 @@ q-quantum-crypto = { path = "../q-quantum-crypto" }
 q-tor-client = { path = "../q-tor-client" }
 q-zk-snark = { path = "../q-zk-snark" }
 q-zk-stark = { path = "../q-zk-stark" }
-q-oracle = { path = "../q-oracle" }
+# q-oracle = { path = "../q-oracle" } # Disabled - has BigDecimal serde issues, not used in code
 q-plugin-system = { path = "../q-plugin-system" }
-q-stablecoin = { path = "../q-stablecoin" }
+# q-stablecoin = { path = "../q-stablecoin" } # Disabled - has BigDecimal serde issues, not used in code
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
 
 # Core dependencies

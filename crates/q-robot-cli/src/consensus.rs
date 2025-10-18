@@ -33,17 +33,6 @@ pub struct ConsensusState {
     pub pending_transactions: u32,
 }
 
-pub enum ConsensusEvent {
-    BlockFinalized { round: u64, block_hash: Vec<u8> },
-    MessageAccepted { message_hash: Vec<u8> },
-    RobotDataConfirmed { robot_id: String, data_hash: Vec<u8> },
-    SwarmCoordinationUpdate { swarm_id: String, status: String },
-    EnvironmentalAlert { alert_type: String, location: (f64, f64, f64) },
-    ConsensusStateUpdate { round: u64, state: String },
-    PeerDiscovered { peer_id: String, endpoint: String },
-    PeerLost { peer_id: String },
-}
-
 impl ConsensusNode {
     pub async fn new(endpoint: String) -> Result<Self> {
         Ok(Self { endpoint })

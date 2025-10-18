@@ -12,6 +12,11 @@ BUILD INFORMATION:
 
 INCLUDED FILES:
 - q-api-server.exe (81MB) - Main consensus server executable
+- libgfortran-5.dll (3.3MB) - GNU Fortran Runtime (required by OpenBLAS)
+- libgcc_s_seh-1.dll (149KB) - GCC Runtime (exception handling)
+- libquadmath-0.dll (374KB) - GCC Quad-Precision Math
+- libwinpthread-1.dll (607KB) - MinGW-w64 POSIX Threads
+- LICENSE-MINGW.txt - Runtime library licensing information
 
 SYSTEM REQUIREMENTS:
 - Windows 10/11 (x86_64)
@@ -22,6 +27,7 @@ SYSTEM REQUIREMENTS:
 QUICK START:
 
 1. Extract all files to a directory (e.g., C:\Q-NarwhalKnight\)
+   IMPORTANT: Keep all DLL files in the same directory as q-api-server.exe
 
 2. Open Command Prompt or PowerShell in that directory
 

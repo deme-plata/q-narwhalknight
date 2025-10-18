@@ -59,7 +59,8 @@ impl StoryDatabase {
         let mut stories = Vec::new();
         let iter = self.db.iterator(IteratorMode::From(b"story:", rocksdb::Direction::Forward));
 
-        for (key, value) in iter {
+        for item in iter {
+            let (key, value) = item?;
             let key_str = String::from_utf8_lossy(&key);
             if key_str.starts_with("story:") && !key_str.ends_with(":index") {
                 let story: Story = serde_json::from_slice(&value)?;
@@ -121,7 +122,8 @@ impl StoryDatabase {
         let prefix = format!("entity:{}:", story_id);
         let iter = self.db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
 
-        for (key, value) in iter {
+        for item in iter {
+            let (key, value) = item?;
             let key_str = String::from_utf8_lossy(&key);
             if !key_str.starts_with(&prefix) {
                 break;
@@ -198,7 +200,8 @@ impl StoryDatabase {
         let prefix = format!("chapter:{}:", story_id);
         let iter = self.db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
 
-        for (key, value) in iter {
+        for item in iter {
+            let (key, value) = item?;
             let key_str = String::from_utf8_lossy(&key);
             if !key_str.starts_with(&prefix) {
                 break;
@@ -235,7 +238,8 @@ impl StoryDatabase {
         let prefix = format!("scene:{}:", chapter_id);
         let iter = self.db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
 
-        for (key, value) in iter {
+        for item in iter {
+            let (key, value) = item?;
             let key_str = String::from_utf8_lossy(&key);
             if !key_str.starts_with(&prefix) {
                 break;

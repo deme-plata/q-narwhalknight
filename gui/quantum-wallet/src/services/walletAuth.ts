@@ -1,28 +1,40 @@
 /**
  * Wallet Authentication Service
  *
- * Provides Ed25519 signature-based authentication for Q-NarwhalKnight wallet APIs.
+ * Provides Ed25519 and AEGIS-QL signature-based authentication for Q-NarwhalKnight wallet APIs.
  * Implements the authentication protocol defined in WALLET_AUTHENTICATION.md
  */
 
 import * as ed25519 from '@noble/ed25519';
 import { sha3_256 } from '@noble/hashes/sha3';
+import {
+  AegisQL,
+  type AegisPublicKey,
+  type AegisSecretKey,
+  exportSignatureToJSON,
+  exportPublicKeyToJSON,
+} from './aegisQL';
 
 export interface AuthHeader {
   address: string;
   timestamp: number;
-  scheme: 'Ed25519' | 'Dilithium5' | 'Hybrid' | 'UltraSecure';
+  scheme: 'Ed25519' | 'Dilithium5' | 'Hybrid' | 'UltraSecure' | 'AegisQL' | 'AegisQLHybrid';
   signature?: string;
   dilithium5_signature?: string;
   dilithium5_public_key?: string;
   sphincs_signature?: string;
   sphincs_public_key?: string;
+  aegis_signature?: string;
+  aegis_public_key?: string;
 }
 
 export interface WalletKeyPair {
   publicKey: Uint8Array;
   privateKey: Uint8Array;
   address: string; // qnk-prefixed hex address
+  // AEGIS-QL post-quantum keys (optional)
+  aegisPublicKey?: AegisPublicKey;
+  aegisPrivateKey?: AegisSecretKey;
 }
 
 /**
@@ -74,20 +86,39 @@ export async function signChallenge(
 export async function generateAuthHeader(
   privateKey: Uint8Array,
   address: string,
-  requestPath: string
+  requestPath: string,
+  scheme: 'Ed25519' | 'AegisQL' | 'AegisQLHybrid' = 'Ed25519',
+  aegisKeys?: { publicKey: AegisPublicKey; secretKey: AegisSecretKey }
 ): Promise<string> {
   const timestamp = Math.floor(Date.now() / 1000);
 
-  // Generate and sign challenge
+  // Generate authentication challenge
   const challenge = generateChallenge(address, timestamp, requestPath);
-  const signature = await signChallenge(challenge, privateKey);
 
   const authHeader: AuthHeader = {
     address,
     timestamp,
-    scheme: 'Ed25519',
-    signature: bytesToHex(signature),
+    scheme,
   };
+
+  // Add Ed25519 signature if required
+  if (scheme === 'Ed25519' || scheme === 'AegisQLHybrid') {
+    const ed25519Signature = await signChallenge(challenge, privateKey);
+    authHeader.signature = bytesToHex(ed25519Signature);
+  }
+
+  // Add AEGIS-QL signature if required
+  if (scheme === 'AegisQL' || scheme === 'AegisQLHybrid') {
+    if (!aegisKeys) {
+      throw new Error('AEGIS-QL keys required for AegisQL/AegisQLHybrid scheme');
+    }
+
+    const aegis = new AegisQL();
+    const aegisSignature = await aegis.sign(challenge, aegisKeys.secretKey);
+
+    authHeader.aegis_signature = exportSignatureToJSON(aegisSignature);
+    authHeader.aegis_public_key = exportPublicKeyToJSON(aegisKeys.publicKey);
+  }
 
   return JSON.stringify(authHeader);
 }
@@ -114,6 +145,17 @@ export async function generateKeyPair(): Promise<WalletKeyPair> {
     privateKey,
     address,
   };
+}
+
+/**
+ * Generate AEGIS-QL post-quantum keypair
+ */
+export async function generateAegisKeyPair(): Promise<{
+  publicKey: AegisPublicKey;
+  secretKey: AegisSecretKey;
+}> {
+  const aegis = new AegisQL();
+  return await aegis.generateKeypair();
 }
 
 /**
@@ -241,10 +283,12 @@ export async function decryptPrivateKey(
 /**
  * Store encrypted wallet in localStorage
  * Now also encrypts and stores the mnemonic for password-based recovery
+ * Optionally generates and stores AEGIS-QL post-quantum keys
  */
 export async function storeWallet(
   mnemonic: string,
-  password: string
+  password: string,
+  includeAegisQL: boolean = false
 ): Promise<WalletKeyPair> {
   const keyPair = await keypairFromMnemonic(mnemonic);
   const encryptedPrivateKey = await encryptPrivateKey(keyPair.privateKey, password);
@@ -252,6 +296,28 @@ export async function storeWallet(
   // Also encrypt the mnemonic using the same password
   const mnemonicBytes = new TextEncoder().encode(mnemonic);
   const encryptedMnemonic = await encryptPrivateKey(mnemonicBytes, password);
+
+  // Optionally generate and store AEGIS-QL keys
+  if (includeAegisQL) {
+    const aegisKeys = await generateAegisKeyPair();
+
+    // Serialize AEGIS-QL secret key to JSON
+    const aegisSecretKeyJson = JSON.stringify(aegisKeys.secretKey);
+    const aegisSecretKeyBytes = new TextEncoder().encode(aegisSecretKeyJson);
+
+    // Encrypt AEGIS-QL secret key
+    const encryptedAegisKey = await encryptPrivateKey(aegisSecretKeyBytes, password);
+
+    // Store encrypted AEGIS-QL key and public key
+    localStorage.setItem('walletEncryptedAegisKey', encryptedAegisKey);
+    localStorage.setItem('walletAegisPublicKey', JSON.stringify(aegisKeys.publicKey));
+
+    // Add to returned keypair
+    keyPair.aegisPublicKey = aegisKeys.publicKey;
+    keyPair.aegisPrivateKey = aegisKeys.secretKey;
+
+    console.log('✅ AEGIS-QL post-quantum keys generated and stored');
+  }
 
   // Store encrypted private key, mnemonic, and public address
   localStorage.setItem('walletAddress', keyPair.address);
@@ -268,6 +334,7 @@ export async function storeWallet(
 
 /**
  * Load and decrypt wallet from localStorage
+ * Also loads AEGIS-QL keys if available
  */
 export async function loadWallet(password: string): Promise<WalletKeyPair> {
   const address = localStorage.getItem('walletAddress');
@@ -281,11 +348,34 @@ export async function loadWallet(password: string): Promise<WalletKeyPair> {
   const privateKey = await decryptPrivateKey(encryptedKey, password);
   const publicKey = hexToBytes(publicKeyHex);
 
-  return {
+  const keyPair: WalletKeyPair = {
     publicKey,
     privateKey,
     address,
   };
+
+  // Load AEGIS-QL keys if available
+  const encryptedAegisKey = localStorage.getItem('walletEncryptedAegisKey');
+  const aegisPublicKeyJson = localStorage.getItem('walletAegisPublicKey');
+
+  if (encryptedAegisKey && aegisPublicKeyJson) {
+    try {
+      const aegisSecretKeyBytes = await decryptPrivateKey(encryptedAegisKey, password);
+      const aegisSecretKeyJson = new TextDecoder().decode(aegisSecretKeyBytes);
+      const aegisSecretKey = JSON.parse(aegisSecretKeyJson);
+      const aegisPublicKey = JSON.parse(aegisPublicKeyJson);
+
+      keyPair.aegisPublicKey = aegisPublicKey;
+      keyPair.aegisPrivateKey = aegisSecretKey;
+
+      console.log('✅ AEGIS-QL post-quantum keys loaded');
+    } catch (error) {
+      console.warn('⚠️ Failed to load AEGIS-QL keys:', error);
+      // Continue without AEGIS-QL keys (fall back to Ed25519 only)
+    }
+  }
+
+  return keyPair;
 }
 
 /**
@@ -344,6 +434,7 @@ function bytesToHex(bytes: Uint8Array): string {
 class WalletSession {
   private privateKey: Uint8Array | null = null;
   private address: string | null = null;
+  private mnemonic: string | null = null; // Store mnemonic for "Never expire" convenience
   private expiresAt: number = 0;
   private sessionCheckInterval: number | null = null;
 
@@ -365,6 +456,7 @@ class WalletSession {
         // Convert arrays back to Uint8Array
         this.privateKey = new Uint8Array(data.privateKey);
         this.address = data.address;
+        this.mnemonic = data.mnemonic || null;
         this.expiresAt = data.expiresAt;
 
         // Check if expired
@@ -384,11 +476,19 @@ class WalletSession {
   private persistSession() {
     try {
       if (this.privateKey && this.address) {
-        const data = {
+        const data: any = {
           privateKey: Array.from(this.privateKey),
           address: this.address,
           expiresAt: this.expiresAt,
         };
+
+        // Only store mnemonic if "Never expire" is enabled (for convenience)
+        // This is safe because sessionStorage is cleared when browser closes
+        const timeoutSetting = localStorage.getItem('walletSessionTimeout') || 'never';
+        if (timeoutSetting === 'never' && this.mnemonic) {
+          data.mnemonic = this.mnemonic;
+        }
+
         sessionStorage.setItem('walletSession', JSON.stringify(data));
       }
     } catch (error) {
@@ -412,12 +512,21 @@ class WalletSession {
   /**
    * Set wallet session with configurable timeout
    * Timeout is read from localStorage (walletSessionTimeout setting)
+   * Optionally accepts mnemonic to store for "Never expire" convenience
    */
-  setSession(privateKey: Uint8Array, address: string) {
+  setSession(privateKey: Uint8Array, address: string, mnemonic?: string) {
     this.privateKey = privateKey;
     this.address = address;
 
+    // Store mnemonic if provided (only for "Never expire" sessions)
     const timeoutMinutes = this.getTimeoutMinutes();
+    if (timeoutMinutes === null && mnemonic) {
+      this.mnemonic = mnemonic;
+      console.log('✅ Mnemonic stored in session for "Never expire" convenience');
+    } else {
+      this.mnemonic = null; // Don't store mnemonic for timed sessions
+    }
+
     if (timeoutMinutes === null) {
       // Never expire - set to far future (100 years)
       this.expiresAt = Date.now() + 100 * 365 * 24 * 60 * 60 * 1000;
@@ -432,13 +541,18 @@ class WalletSession {
 
   /**
    * Get wallet session if valid
+   * Returns privateKey, address, and mnemonic (if "Never expire" is enabled)
    */
-  getSession(): { privateKey: Uint8Array; address: string } | null {
+  getSession(): { privateKey: Uint8Array; address: string; mnemonic?: string } | null {
     if (!this.privateKey || !this.address || Date.now() > this.expiresAt) {
       this.clearSession();
       return null;
     }
-    return { privateKey: this.privateKey, address: this.address };
+    return {
+      privateKey: this.privateKey,
+      address: this.address,
+      mnemonic: this.mnemonic || undefined,
+    };
   }
 
   /**
@@ -447,6 +561,7 @@ class WalletSession {
   clearSession() {
     this.privateKey = null;
     this.address = null;
+    this.mnemonic = null;
     this.expiresAt = 0;
 
     // Clear from sessionStorage

@@ -14,6 +14,58 @@ use crate::quantum::QuantumState;
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobotId(pub String);
 
+/// Reticular chemistry specialization for different robot types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReticulateSpec {
+    /// MOF construction specialist
+    MOFBuilder {
+        preferred_metals: Vec<&'static str>,
+        topology_expertise: Vec<&'static str>,
+    },
+    /// COF construction specialist
+    COFBuilder {
+        linkage_types: Vec<&'static str>,
+        dimension: &'static str,
+    },
+    /// ZIF construction specialist
+    ZIFBuilder {
+        imidazolate_variants: Vec<&'static str>,
+        zeolite_analogs: Vec<&'static str>,
+    },
+    /// Hybrid framework builder
+    HybridBuilder {
+        framework_types: Vec<&'static str>,
+        advanced_topologies: bool,
+    },
+    /// Molecular-level precision builder
+    MolecularBuilder {
+        specialization: &'static str,
+        precision_level: &'static str,
+    },
+    /// Swarm-coordinated framework construction
+    SwarmBuilder {
+        coordination_type: &'static str,
+        framework_scale: &'static str,
+    },
+    /// Master builder (all types)
+    MasterBuilder {
+        all_framework_types: bool,
+        optimization_expert: bool,
+    },
+}
+
+/// Reticular framework construction result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameworkBuildResult {
+    pub framework_id: String,
+    pub framework_type: String,
+    pub completion_time: Duration,
+    pub surface_area: f64,    // m²/g
+    pub pore_volume: f64,      // cm³/g
+    pub stability: f64,        // 0.0-1.0
+    pub applications: Vec<String>,
+}
+
 impl RobotId {
     pub fn new(id: &str) -> Self {
         Self(id.to_string())
@@ -77,14 +129,92 @@ impl RobotType {
     
     pub fn quantum_abilities(&self) -> Vec<&'static str> {
         match self {
-            Self::QuantumJellyfish => vec!["bioluminescence", "superposition_glow"],
-            Self::EntangledDolphin => vec!["quantum_echolocation", "entanglement_comm"],
-            Self::TunnelingOctopus => vec!["quantum_tunneling", "phase_camouflage"],
-            Self::WaveParticleWhale => vec!["wave_particle_song", "quantum_sonar"],
-            Self::SuperpositionSeahorse => vec!["position_superposition", "quantum_grasp"],
-            Self::NanoQuantumonas => vec!["cellular_tunneling", "molecular_sensing"],
-            Self::SchoolingRobotichthys => vec!["collective_coherence", "swarm_entanglement"],
-            Self::CyberCetus => vec!["quantum_consciousness", "ecosystem_monitoring"],
+            Self::QuantumJellyfish => vec![
+                "bioluminescence",
+                "superposition_glow",
+                "build_mof",
+                "construct_zeolite"
+            ],
+            Self::EntangledDolphin => vec![
+                "quantum_echolocation",
+                "entanglement_comm",
+                "build_cof",
+                "molecular_assembly"
+            ],
+            Self::TunnelingOctopus => vec![
+                "quantum_tunneling",
+                "phase_camouflage",
+                "build_zif",
+                "framework_manipulation"
+            ],
+            Self::WaveParticleWhale => vec![
+                "wave_particle_song",
+                "quantum_sonar",
+                "construct_mof_5",
+                "reticular_design"
+            ],
+            Self::SuperpositionSeahorse => vec![
+                "position_superposition",
+                "quantum_grasp",
+                "build_uio66",
+                "framework_healing"
+            ],
+            Self::NanoQuantumonas => vec![
+                "cellular_tunneling",
+                "molecular_sensing",
+                "nanoscale_assembly",
+                "sbu_placement"
+            ],
+            Self::SchoolingRobotichthys => vec![
+                "collective_coherence",
+                "swarm_entanglement",
+                "coordinated_framework_build",
+                "distributed_mof_synthesis"
+            ],
+            Self::CyberCetus => vec![
+                "quantum_consciousness",
+                "ecosystem_monitoring",
+                "large_scale_framework_construction",
+                "reticular_optimization"
+            ],
+        }
+    }
+
+    /// Get reticular chemistry specialization for robot type
+    pub fn reticular_specialization(&self) -> ReticulateSpec {
+        match self {
+            Self::QuantumJellyfish => ReticulateSpec::MOFBuilder {
+                preferred_metals: vec!["Zn", "Cu"],
+                topology_expertise: vec!["fcu", "pcu"],
+            },
+            Self::EntangledDolphin => ReticulateSpec::COFBuilder {
+                linkage_types: vec!["imine", "boronate_ester"],
+                dimension: "2D",
+            },
+            Self::TunnelingOctopus => ReticulateSpec::ZIFBuilder {
+                imidazolate_variants: vec!["MeIm", "EtIm"],
+                zeolite_analogs: vec!["SOD", "RHO"],
+            },
+            Self::WaveParticleWhale => ReticulateSpec::MOFBuilder {
+                preferred_metals: vec!["Zr", "Cr"],
+                topology_expertise: vec!["fcu", "ftl"],
+            },
+            Self::SuperpositionSeahorse => ReticulateSpec::HybridBuilder {
+                framework_types: vec!["MOF", "COF", "ZIF"],
+                advanced_topologies: true,
+            },
+            Self::NanoQuantumonas => ReticulateSpec::MolecularBuilder {
+                specialization: "SBU_placement",
+                precision_level: "atomic",
+            },
+            Self::SchoolingRobotichthys => ReticulateSpec::SwarmBuilder {
+                coordination_type: "distributed",
+                framework_scale: "large",
+            },
+            Self::CyberCetus => ReticulateSpec::MasterBuilder {
+                all_framework_types: true,
+                optimization_expert: true,
+            },
         }
     }
 }
@@ -116,6 +246,7 @@ pub struct RobotStatus {
     pub active_abilities: Vec<String>,
     pub sensor_data: SensorData,
     pub connection_quality: f64,   // 0.0-1.0
+    #[serde(skip)]
     pub last_heartbeat: Instant,
 }
 

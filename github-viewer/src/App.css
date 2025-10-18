@@ -1,0 +1,164 @@
+/* Cyberpunk theme - Global styles */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Courier New', 'Consolas', 'Monaco', monospace, 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+  background: #0a0e27;
+  color: #ffffff;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #00ffff;
+  border-radius: 6px;
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #ff00ff;
+  box-shadow: 0 0 15px rgba(255, 0, 255, 0.7);
+}
+
+/* Code syntax highlighting overrides */
+pre[class*="language-"] {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  overflow: visible;
+}
+
+code[class*="language-"] {
+  font-family: 'Fira Code', 'Cascadia Code', 'Courier New', monospace, 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+  font-size: 14px;
+  line-height: 1.6;
+  background: transparent;
+  text-shadow: none;
+}
+
+/* Token colors - Cyberpunk theme */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #495670;
+}
+
+.token.punctuation {
+  color: #8892b0;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #ff00ff; /* Magenta */
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #00ff88; /* Green */
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #00ffff; /* Cyan */
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #00ffff; /* Cyan */
+}
+
+.token.function,
+.token.class-name {
+  color: #ffff00; /* Yellow */
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #ff0066; /* Red */
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes glow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(0, 255, 255, 0.6);
+  }
+}
+
+/* Selection */
+::selection {
+  background: rgba(0, 255, 255, 0.3);
+  color: #ffffff;
+}
+
+::-moz-selection {
+  background: rgba(0, 255, 255, 0.3);
+  color: #ffffff;
+}
+
+/* Emoji support - ensure proper rendering */
+.token {
+  font-family: 'Fira Code', 'Cascadia Code', 'Courier New', monospace, 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+}
+
+pre, code {
+  font-variant-ligatures: none;
+  font-feature-settings: normal;
+}
+
+/* Preserve whitespace and emojis in code blocks */
+pre code {
+  white-space: pre;
+  word-break: normal;
+  word-wrap: normal;
+}

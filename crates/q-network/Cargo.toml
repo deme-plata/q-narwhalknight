@@ -12,8 +12,9 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-resonance = { path = "../q-resonance" }
 
-# Networking
-libp2p = { workspace = true }
+# Networking - gossipsub included from workspace
+# NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio"] }
 # libp2p-quic = { workspace = true }  # Disabled to avoid conflicts
 
 # Async runtime
@@ -25,6 +26,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 postcard = { workspace = true }
 uuid = { workspace = true }
+blake3 = { workspace = true }
 
 # Cryptography - Phase 0 (Classical)
 ed25519-dalek = { workspace = true }
@@ -61,6 +63,7 @@ async-trait = { workspace = true }
 # Time and utilities
 chrono = { workspace = true }
 rand = { workspace = true }
+crossbeam = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

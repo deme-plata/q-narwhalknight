@@ -16,13 +16,17 @@ export default function DownloadNodeScreen() {
         <p className="text-xl text-gray-300 max-w-3xl mx-auto">
           Join the quantum consensus network. Run your own validator node with Phase 1 post-quantum cryptography.
         </p>
+        <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
+          <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
+          <span className="text-sm font-bold text-quantum-green">v0.0.2-beta Released - Now with Transaction Tunneling!</span>
+        </div>
       </motion.div>
 
       {/* Feature Cards */}
       <div className="grid md:grid-cols-4 gap-4">
         {[
           { icon: Shield, title: 'Post-Quantum', desc: 'Dilithium5 + Kyber1024' },
-          { icon: Zap, title: '48K+ TPS', desc: 'DAG-Knight consensus' },
+          { icon: Zap, title: '1.2M+ TPS', desc: 'Sub-50ms finality' },
           { icon: Server, title: 'Validator Ready', desc: 'Full node support' },
           { icon: Terminal, title: 'CLI + API', desc: 'REST & WebSocket' },
         ].map((feature, i) => (
@@ -63,36 +67,36 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Production Binary</p>
-                <p className="text-sm text-gray-400">Optimized release build with full features</p>
+                <p className="text-white font-medium">Complete Linux Package</p>
+                <p className="text-sm text-gray-400">Tarball with binary + comprehensive documentation</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">All Network Integrations</p>
-                <p className="text-sm text-gray-400">Tor, Bitcoin Bridge, DNS-Phantom</p>
+                <p className="text-white font-medium">Production Ready</p>
+                <p className="text-sm text-gray-400">Optimized release build with systemd service template</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">ZK-SNARK & ZK-STARK</p>
-                <p className="text-sm text-gray-400">Privacy with GPU acceleration</p>
+                <p className="text-white font-medium">No Dependencies</p>
+                <p className="text-sm text-gray-400">Static linking - only requires standard Linux libs</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-linux-x86_64"
+              href="/downloads/q-narwhalknight-linux-v0.0.2-beta.tar.gz"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download for Linux (Latest)
+              Download Linux Package (Latest)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: ~42 MB | Version: 0.1.0-alpha
+              Size: 15 MB (tar.gz) | Version: 0.0.2-beta
             </p>
           </div>
 
@@ -100,11 +104,13 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`chmod +x q-api-server-linux-x86_64
-./q-api-server-linux-x86_64 --port 8080`}
+{`tar -xzf q-narwhalknight-linux-v0.0.2-beta.tar.gz
+cd q-narwhalknight-linux-v0.0.2-beta
+chmod +x q-api-server
+./q-api-server --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              ✅ Linux binary includes logging fix - bootstrap peer discovery now visible
+              ✅ Includes: q-api-server binary (41MB) + comprehensive README with systemd setup
             </p>
           </div>
         </motion.div>
@@ -130,8 +136,8 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Windows Native Binary</p>
-                <p className="text-sm text-gray-400">No WSL required, runs natively</p>
+                <p className="text-white font-medium">Complete Windows Package</p>
+                <p className="text-sm text-gray-400">Includes all required DLL dependencies</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -144,22 +150,22 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">GPU Mining Ready</p>
-                <p className="text-sm text-gray-400">CUDA & OpenCL support included</p>
+                <p className="text-white font-medium">No Installation Required</p>
+                <p className="text-sm text-gray-400">Extract and run - all dependencies bundled</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-windows-x64.exe"
+              href="/downloads/q-narwhalknight-windows-v0.0.2-beta.zip"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download for Windows (Latest)
+              Download Windows Package (Latest)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: ~73 MB | Version: 0.1.0-alpha
+              Size: 29 MB (zip) | Version: 0.0.2-beta | Includes all DLLs
             </p>
           </div>
 
@@ -167,10 +173,13 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
-{`q-api-server-windows-x64.exe --port 8080`}
+{`# 1. Extract the zip file
+# 2. Keep all DLL files with the .exe
+# 3. Run:
+q-api-server.exe --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              ✅ Windows binary includes logging fix - bootstrap peer discovery now visible
+              ✅ Includes: q-api-server.exe + 4 runtime DLLs + README + LICENSE
             </p>
           </div>
         </motion.div>
@@ -253,7 +262,7 @@ export default function DownloadNodeScreen() {
 
         <div className="grid md:grid-cols-3 gap-4">
           <a
-            href="https://github.com/deme-plata/q-narwhalknight"
+            href="https://code.quillon.xyz/"
             target="_blank"
             rel="noopener noreferrer"
             className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-cyan/20 hover:border-quantum-cyan/50 transition-all"
@@ -263,11 +272,16 @@ export default function DownloadNodeScreen() {
             <p className="text-sm text-gray-400">View source code & contribute</p>
           </a>
 
-          <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
+          <a
+            href="https://api.quillon.xyz"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20 hover:border-quantum-purple/50 transition-all"
+          >
             <Terminal className="w-6 h-6 text-quantum-purple mb-2" />
             <h3 className="font-bold text-white mb-1">API Documentation</h3>
             <p className="text-sm text-gray-400">REST & WebSocket endpoints</p>
-          </div>
+          </a>
 
           <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-green/20">
             <Shield className="w-6 h-6 text-quantum-green mb-2" />

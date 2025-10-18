@@ -22,7 +22,7 @@ rocksdb = "0.24"
 comrak = "0.30"  # Markdown to HTML/LaTeX
 textwrap = "0.16"
 regex = "1.11"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Interactive CLI
 dialoguer = "0.11"

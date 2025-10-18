@@ -28,16 +28,6 @@ pub enum CryptoPhase {
     Q2,
 }
 
-impl From<q_types::CryptoPhase> for CryptoPhase {
-    fn from(phase: q_types::CryptoPhase) -> Self {
-        match phase {
-            q_types::CryptoPhase::Q0 => CryptoPhase::Q0,
-            q_types::CryptoPhase::Q1 => CryptoPhase::Q1,
-            q_types::CryptoPhase::Q2 => CryptoPhase::Q2,
-        }
-    }
-}
-
 /// Hybrid wallet supporting multiple cryptographic phases
 pub struct HybridWallet {
     pub id: Uuid,

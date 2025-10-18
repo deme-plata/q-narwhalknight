@@ -19,6 +19,7 @@ pub struct OrobitSmartContractEcosystem {
     pub form_definitions: Arc<RwLock<HashMap<ContractType, FormDefinition>>>,
     pub wasm_runtime: Arc<OrobitWasmRuntime>,
     pub security_suite: Arc<SecuritySuite>,
+    pub storage_engine: Option<Arc<q_storage::StorageEngine>>,
 }
 
 /// All contract types from VirtualMachine.tsx
@@ -413,6 +414,16 @@ pub struct ParameterValidator;
 impl OrobitSmartContractEcosystem {
     /// Initialize the complete Orobit smart contract ecosystem
     pub async fn new() -> Result<Self> {
+        Self::new_with_storage(None).await
+    }
+
+    pub async fn new_with_storage(storage_engine: Option<Arc<q_storage::StorageEngine>>) -> Result<Self> {
+        // EXTREMELY VISIBLE LOG - If this doesn't appear, the function isn't being called
+        eprintln!("🚀🚀🚀 SMARTCONTRACT ECOSYSTEM INITIALIZATION STARTED 🚀🚀🚀");
+        tracing::info!("🚀 Initializing SmartContractEcosystem with storage: {}",
+            if storage_engine.is_some() { "enabled" } else { "disabled" });
+        eprintln!("Storage engine present: {}", storage_engine.is_some());
+
         let ecosystem = Self {
             contract_templates: Arc::new(RwLock::new(HashMap::new())),
             deployed_contracts: Arc::new(RwLock::new(HashMap::new())),
@@ -420,11 +431,43 @@ impl OrobitSmartContractEcosystem {
             form_definitions: Arc::new(RwLock::new(HashMap::new())),
             wasm_runtime: Arc::new(OrobitWasmRuntime::new()?),
             security_suite: Arc::new(SecuritySuite::new()),
+            storage_engine: storage_engine.clone(),
         };
 
+        eprintln!("📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚");
+        tracing::info!("📚 Loading contract templates...");
         // Load all contract templates from Orobit Chimera
-        ecosystem.load_all_contract_templates().await?;
+        match ecosystem.load_all_contract_templates().await {
+            Ok(_) => {
+                eprintln!("✅✅✅ CONTRACT TEMPLATES LOADED SUCCESSFULLY ✅✅✅");
+                tracing::info!("✅ Contract templates loaded successfully");
+            }
+            Err(e) => {
+                eprintln!("❌❌❌ TEMPLATE LOADING FAILED: {} ❌❌❌", e);
+                return Err(e);
+            }
+        }
 
+        // Load deployed contracts from persistent storage if available
+        if let Some(ref storage) = ecosystem.storage_engine {
+            eprintln!("💾💾💾 STORAGE ENGINE IS AVAILABLE - LOADING CONTRACTS 💾💾💾");
+            tracing::info!("💾 Storage engine is available, loading persisted contracts...");
+            match ecosystem.load_contracts_from_storage(storage).await {
+                Ok(_) => {
+                    eprintln!("✅✅✅ CONTRACT LOADING COMPLETED SUCCESSFULLY ✅✅✅");
+                    tracing::info!("✅ Contract loading completed");
+                }
+                Err(e) => {
+                    eprintln!("❌❌❌ FAILED TO LOAD CONTRACTS: {} ❌❌❌", e);
+                    tracing::error!("❌ Failed to load contracts from storage: {}", e);
+                }
+            }
+        } else {
+            eprintln!("⚠️⚠️⚠️ NO STORAGE ENGINE - CONTRACTS WON'T PERSIST ⚠️⚠️⚠️");
+            tracing::warn!("⚠️ No storage engine provided - contracts will not persist across restarts");
+        }
+
+        eprintln!("🎉🎉🎉 SMARTCONTRACT ECOSYSTEM FULLY INITIALIZED 🎉🎉🎉");
         Ok(ecosystem)
     }
 
@@ -953,16 +996,16 @@ impl OrobitSmartContractEcosystem {
         deployer: [u8; 32],
         parameters: HashMap<String, serde_json::Value>,
         options: DeploymentOptions,
-    ) -> Result<String> {
+    ) -> Result<(String, ContractAddress)> {
         // Submit deployment request
         let request_id = uuid::Uuid::new_v4().to_string();
 
         let deployment_request = DeploymentRequest {
             request_id: request_id.clone(),
-            contract_type,
+            contract_type: contract_type.clone(),
             deployer,
-            parameters,
-            deployment_options: options,
+            parameters: parameters.clone(),
+            deployment_options: options.clone(),
             submitted_at: current_timestamp(),
         };
 
@@ -970,7 +1013,112 @@ impl OrobitSmartContractEcosystem {
         let mut pending = self.deployment_engine.pending_deployments.write().await;
         pending.push(deployment_request);
 
-        Ok(request_id)
+        // IMMEDIATE DEPLOYMENT: Create the contract right away instead of just queuing
+        // This fixes the bug where contracts have all-zero addresses
+        let contract_address = self.process_deployment(contract_type, deployer, parameters, options, request_id.clone()).await?;
+
+        Ok((request_id, contract_address))
+    }
+
+    /// Process a contract deployment and create the actual contract instance
+    async fn process_deployment(
+        &self,
+        contract_type: ContractType,
+        deployer: [u8; 32],
+        parameters: HashMap<String, serde_json::Value>,
+        _options: DeploymentOptions,
+        request_id: String,
+    ) -> Result<ContractAddress> {
+        // Get the template
+        let template = self.get_template(&contract_type).await?;
+
+        // Generate a proper contract address based on deployer + nonce + contract type
+        let contract_address = self.derive_contract_address(&deployer, &contract_type, &template.wasm_bytecode);
+
+        // Extract contract metadata from parameters
+        let name = parameters.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unnamed Contract")
+            .to_string();
+
+        let symbol = parameters.get("symbol")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Create contract features map
+        let mut features = HashMap::new();
+        for (key, value) in &parameters {
+            if value.is_boolean() {
+                features.insert(key.clone(), value.as_bool().unwrap_or(false));
+            }
+        }
+
+        // Create the deployed contract
+        let deployed_contract = DeployedSmartContract {
+            address: contract_address.clone(),
+            contract_type,
+            deployer,
+            deployment_params: parameters,
+            deployed_at: current_timestamp(),
+            deployment_tx: format!("0x{}", hex::encode(&request_id)),
+            verified: false,
+            contract_state: ContractState {
+                active: true,
+                paused: false,
+                total_calls: 0,
+                last_interaction: current_timestamp(),
+                storage_root: [0u8; 32],
+            },
+            metadata: ContractMetadata {
+                name,
+                symbol,
+                description: format!("{:?} contract deployed via Q-NarwhalKnight VM", template.contract_type),
+                features,
+                governance_enabled: false,
+                upgrade_history: vec![],
+            },
+        };
+
+        // Store the deployed contract
+        let mut deployed = self.deployed_contracts.write().await;
+        deployed.insert(contract_address.clone(), deployed_contract.clone());
+        drop(deployed); // Release the write lock before saving to storage
+
+        // Save to persistent storage
+        self.save_contract_to_storage(&deployed_contract).await?;
+
+        Ok(contract_address)
+    }
+
+    /// Derive a deterministic contract address from deployer + contract type + bytecode
+    /// This ensures each deployment gets a unique, non-zero address
+    fn derive_contract_address(&self, deployer: &[u8; 32], contract_type: &ContractType, bytecode: &[u8]) -> ContractAddress {
+        use sha2::{Sha256, Digest};
+
+        let mut hasher = Sha256::new();
+
+        // Hash the deployer address
+        hasher.update(deployer);
+
+        // Hash the contract type as a discriminator
+        hasher.update(format!("{:?}", contract_type).as_bytes());
+
+        // Hash a portion of the bytecode (or a placeholder if empty)
+        if !bytecode.is_empty() {
+            hasher.update(&bytecode[..bytecode.len().min(256)]);
+        } else {
+            // Use a random component if no bytecode (for testing)
+            hasher.update(&uuid::Uuid::new_v4().as_bytes()[..]);
+        }
+
+        // Add timestamp for uniqueness
+        hasher.update(&current_timestamp().to_le_bytes());
+
+        let hash = hasher.finalize();
+        let mut address = [0u8; 32];
+        address.copy_from_slice(&hash[..32]);
+
+        ContractAddress(address)
     }
 
     /// Get available contract types
@@ -1013,6 +1161,63 @@ impl OrobitSmartContractEcosystem {
             .filter(|contract| contract.deployer == deployer)
             .cloned()
             .collect()
+    }
+
+    /// Get a specific contract by address
+    pub async fn get_contract_by_address(&self, address: ContractAddress) -> Option<DeployedSmartContract> {
+        let deployed = self.deployed_contracts.read().await;
+        deployed.get(&address).cloned()
+    }
+
+    /// Save a deployed contract to persistent storage
+    async fn save_contract_to_storage(&self, contract: &DeployedSmartContract) -> Result<()> {
+        if let Some(ref storage) = self.storage_engine {
+            let contract_data = serde_json::to_vec(contract)
+                .map_err(|e| anyhow!("Failed to serialize contract: {}", e))?;
+            storage.save_contract(&contract.address.0, &contract_data).await
+                .map_err(|e| anyhow!("Failed to save contract to storage: {}", e))?;
+            tracing::info!("💾 Saved contract {} to persistent storage", hex::encode(contract.address.0));
+        } else {
+            tracing::warn!("⚠️ No storage engine available - contract will not persist across restarts");
+        }
+        Ok(())
+    }
+
+    /// Load all contracts from persistent storage
+    async fn load_contracts_from_storage(&self, storage: &Arc<q_storage::StorageEngine>) -> Result<()> {
+        tracing::info!("📂 Loading contracts from persistent storage...");
+
+        let contract_entries = storage.load_all_contracts().await
+            .map_err(|e| anyhow!("Failed to load contracts from storage: {}", e))?;
+
+        let mut deployed = self.deployed_contracts.write().await;
+        let mut loaded_count = 0;
+
+        for (address_bytes, contract_data) in contract_entries {
+            match serde_json::from_slice::<DeployedSmartContract>(&contract_data) {
+                Ok(contract) => {
+                    let mut address = [0u8; 32];
+                    address.copy_from_slice(&address_bytes);
+                    tracing::debug!("📄 Loaded contract: {} ({})",
+                        contract.metadata.name,
+                        hex::encode(&address));
+                    deployed.insert(ContractAddress(address), contract);
+                    loaded_count += 1;
+                }
+                Err(e) => {
+                    tracing::error!("⚠️ Failed to deserialize contract at {}: {}",
+                        hex::encode(&address_bytes), e);
+                }
+            }
+        }
+
+        if loaded_count > 0 {
+            tracing::info!("✅ Loaded {} contracts from persistent storage", loaded_count);
+        } else {
+            tracing::info!("📭 No contracts found in storage (starting fresh)");
+        }
+
+        Ok(())
     }
 
     // Helper methods for loading bytecode and source

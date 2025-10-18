@@ -370,11 +370,8 @@ impl CudaMinerStub {
 }
 
 #[cfg(not(feature = "cuda-mining"))]
-pub type CudaMiner = CudaMinerStub;
-
-#[cfg(not(feature = "cuda-mining"))]
 #[async_trait]
-impl MiningEngine for CudaMiner {
+impl MiningEngine for CudaMinerStub {
     async fn start(&mut self) -> Result<()> {
         Err(anyhow!("CUDA not available"))
     }

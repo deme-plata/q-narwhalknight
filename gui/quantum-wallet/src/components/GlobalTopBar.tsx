@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Loader } from 'lucide-react';
-import { qnkAPI } from '../services/api';
+import { Search, Loader, Zap } from 'lucide-react';
+import { qnkAPI, type MiningRewardEvent } from '../services/api';
 
 interface GlobalTopBarProps {
   authenticated?: boolean;
@@ -24,6 +24,35 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [miningHashRate, setMiningHashRate] = useState(0);
+  const [isMining, setIsMining] = useState(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const walletAddress = localStorage.getItem('walletAddress') || '';
+
+  // SSE for mining hash rate updates
+  useEffect(() => {
+    if (!walletAddress || !authenticated) return;
+
+    const eventSource = qnkAPI.subscribeToMiningRewards(
+      walletAddress,
+      (reward: MiningRewardEvent) => {
+        // Update hash rate from mining reward events
+        if (reward.hash_rate > 0) {
+          setMiningHashRate(reward.hash_rate);
+          setIsMining(true);
+        }
+      },
+      () => {} // Balance updates handled by MiningDashboard
+    );
+
+    eventSourceRef.current = eventSource;
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, [walletAddress, authenticated]);
 
   // Debounced search effect
   useEffect(() => {
@@ -156,6 +185,13 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
     return amount.toFixed(4);
   };
 
+  const formatHashRate = (hashRate: number) => {
+    if (hashRate >= 1e9) return `${(hashRate / 1e9).toFixed(2)} GH/s`;
+    if (hashRate >= 1e6) return `${(hashRate / 1e6).toFixed(2)} MH/s`;
+    if (hashRate >= 1e3) return `${(hashRate / 1e3).toFixed(2)} KH/s`;
+    return `${hashRate.toFixed(2)} H/s`;
+  };
+
   const handleResultClick = (result: SearchResult) => {
     setShowResults(false);
     setSearchQuery('');
@@ -183,16 +219,25 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                 className="flex items-center gap-3"
                 whileHover={{ scale: 1.05 }}
               >
-                <div className="relative">
-                  <div className="absolute inset-0 bg-gradient-to-br from-quantum-cyan/20 to-quantum-purple/20 rounded-lg" />
-                  <img
-                    src="/quillon-logo.png"
-                    alt="Quillon Graph Logo"
-                    className="relative w-12 h-12 object-contain p-1 z-10"
-                    style={{ filter: 'invert(1) brightness(1.2)' }}
-                  />
+                <div className="relative w-10 h-10">
+                  {/* Cosmic glow effect */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-amber-500/20 via-orange-500/20 to-yellow-500/20 rounded-full blur-lg animate-pulse" />
+                  {/* Gold border ring */}
+                  <div className="absolute inset-0 rounded-full" style={{
+                    background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                    padding: '2px'
+                  }}>
+                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
+                      <img
+                        src="/quillon-logo.png"
+                        alt="Quillon Graph Logo"
+                        className="w-full h-full object-contain"
+                        style={{ filter: 'invert(1)' }}
+                      />
+                    </div>
+                  </div>
                 </div>
-                <span className="text-lg font-bold text-white">Quillon Graph</span>
+                <span className="text-lg font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent">Quillon Graph</span>
               </motion.div>
             </div>
 
@@ -281,8 +326,24 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
               )}
             </div>
 
-            {/* Status Indicator */}
+            {/* Mining Hash Rate Indicator & Status */}
             <div className="flex items-center gap-4">
+              {/* Mining Hash Rate (SSE Real-Time) */}
+              {authenticated && isMining && miningHashRate > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex items-center gap-2 bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-lg px-3 py-1.5"
+                >
+                  <Zap className="w-4 h-4 text-quantum-yellow animate-pulse" />
+                  <span className="text-quantum-yellow text-sm font-bold">
+                    {formatHashRate(miningHashRate)}
+                  </span>
+                  <span className="text-gray-400 text-xs">Mining</span>
+                </motion.div>
+              )}
+
+              {/* Connection Status Indicator */}
               {authenticated ? (
                 <div className="flex items-center gap-2 text-quantum-green text-sm">
                   <div className="w-2 h-2 bg-quantum-green rounded-full animate-pulse" />

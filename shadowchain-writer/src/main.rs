@@ -12,6 +12,7 @@ mod analysis;
 
 use cli::*;
 use database::StoryDatabase;
+use story::StoryCommands;
 
 #[derive(Parser)]
 #[command(name = "shadowchain")]

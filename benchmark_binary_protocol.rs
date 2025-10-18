@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
 
     // Generate real transactions with actual signatures
     println!("📝 Generating real transactions with Ed25519 signatures...");
-    let batch_size = 1000;
+    let batch_size = 10000; // Test with 10K transactions for real TPS measurement
     let mut transactions = Vec::with_capacity(batch_size);
 
     let start_gen = std::time::Instant::now();
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
         });
 
         let response = client
-            .post("http://localhost:9010/api/v1/transactions")
+            .post("http://localhost:8200/api/v1/transactions")
             .json(&request_body)
             .send()
             .await;
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
         let packed = rmp_serde::to_vec(&tx)?;
 
         let response = client
-            .post("http://localhost:9010/api/v1/binary/transaction")
+            .post("http://localhost:8200/api/v1/binary/transaction")
             .header("Content-Type", "application/msgpack")
             .body(packed)
             .send()
@@ -185,14 +185,14 @@ async fn main() -> Result<()> {
     println!("  Latency: {:.2}ms per tx", binary_latency);
     println!();
 
-    // Test 3: Binary Batch Protocol (100 tx per batch)
-    println!("🔬 Test 3: Binary Batch Protocol (100 tx per batch)");
+    // Test 3: Binary Batch Protocol (LARGE batches for maximum TPS)
+    println!("🔬 Test 3: Binary Batch Protocol (1000 tx per batch - HIGH PERFORMANCE)");
     println!("-" .repeat(80));
 
     successful = 0;
     let batch_start = std::time::Instant::now();
 
-    for chunk in transactions.chunks(100) {
+    for chunk in transactions.chunks(1000) {
         #[derive(serde::Serialize)]
         struct BinaryTransactionBatch {
             transactions: Vec<Transaction>,
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
         let packed = rmp_serde::to_vec(&batch)?;
 
         let response = client
-            .post("http://localhost:9010/api/v1/binary/batch")
+            .post("http://localhost:8200/api/v1/binary/batch")
             .header("Content-Type", "application/msgpack")
             .body(packed)
             .send()

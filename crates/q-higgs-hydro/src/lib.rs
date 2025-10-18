@@ -26,23 +26,23 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use q_quantum_rng::QuantumRNG;
-use q_robot_control::RoboticsInterface;
+// Removed unused import: q_robot_control::RoboticsInterface is not exported
 use q_types::{Hash256, NodeId};
 
 pub mod field_dynamics;
 pub mod higgs_memory;
-pub mod lloyd_protocols;
-pub mod quantum_droplets;
-pub mod vacuum_computing;
+pub mod reticular_builder;
+pub mod attosecond_laser;
+pub mod vacuum_manipulation;
 
 pub use field_dynamics::*;
 pub use higgs_memory::*;
-pub use lloyd_protocols::*;
-pub use quantum_droplets::*;
-pub use vacuum_computing::*;
+pub use reticular_builder::*;
+pub use attosecond_laser::*;
+pub use vacuum_manipulation::*;
 
 /// Fundamental constants of our universe
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhysicalConstants {
     /// Higgs vacuum expectation value (246 GeV)²
     pub vacuum_expectation_value_sq: f64,
@@ -72,7 +72,7 @@ impl Default for PhysicalConstants {
 }
 
 /// A single memory cell built on local Higgs condensate manipulation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct HiggsBit {
     /// Local vacuum expectation value squared
     pub local_v_e_sq: f64,
@@ -170,7 +170,7 @@ impl HiggsBit {
 }
 
 /// A quantum water droplet operating as a field-programmable reality gate
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct QuantumDroplet {
     /// Unique droplet identifier
     pub id: Hash256,
@@ -188,8 +188,8 @@ pub struct QuantumDroplet {
     pub entanglement_network: HashMap<Hash256, f64>,
     /// Lloyd computation state
     pub lloyd_state: LloydComputationState,
-    /// Robot control interface
-    pub robot_interface: Option<Arc<dyn RoboticsInterface>>,
+    /// Robot control interface (temporarily disabled pending interface refactor)
+    // pub robot_interface: Option<Arc<dyn RoboticsInterface>>,
     /// Physical constants reference
     pub constants: PhysicalConstants,
 }
@@ -254,7 +254,7 @@ impl QuantumDroplet {
             mass_attograms: 1e-15, // ~1000 molecules
             entanglement_network: HashMap::new(),
             lloyd_state: LloydComputationState::default(),
-            robot_interface: None,
+            // robot_interface: None,
             constants,
         })
     }

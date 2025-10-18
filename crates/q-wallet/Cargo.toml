@@ -28,5 +28,14 @@ bip39 = "2.0"
 pbkdf2 = "0.12"
 hmac = "0.12"
 
+# Post-quantum cryptography
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.8"
+pqcrypto-sphincsplus = "0.6"
+pqcrypto-traits = "0.3"
+
+# Encryption
+aes-gcm = "0.10"
+
 [dev-dependencies]
 proptest = { workspace = true }

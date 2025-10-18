@@ -99,3 +99,335 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(180deg, #8b66e1, #20f9ff);
 }
+
+/* 🚀 NITRO BOOST DESIGN ELEMENTS */
+
+/* Nitro Energy Pulse */
+@keyframes nitro-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(255, 0, 128, 0.4),
+                0 0 40px rgba(0, 217, 255, 0.3),
+                0 0 60px rgba(255, 215, 0, 0.2),
+                inset 0 0 20px rgba(255, 0, 128, 0.2);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(255, 0, 128, 0.6),
+                0 0 80px rgba(0, 217, 255, 0.5),
+                0 0 120px rgba(255, 215, 0, 0.4),
+                inset 0 0 40px rgba(255, 0, 128, 0.3);
+    transform: scale(1.02);
+  }
+}
+
+/* Electric Arc Animation */
+@keyframes electric-arc {
+  0% {
+    opacity: 0.3;
+    transform: translateX(-100%) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(0%) rotate(180deg);
+  }
+  100% {
+    opacity: 0.3;
+    transform: translateX(100%) rotate(360deg);
+  }
+}
+
+/* Nitro Flame Trail */
+@keyframes flame-trail {
+  0% {
+    background-position: 0% 50%;
+    filter: brightness(1) hue-rotate(0deg);
+  }
+  50% {
+    background-position: 100% 50%;
+    filter: brightness(1.5) hue-rotate(180deg);
+  }
+  100% {
+    background-position: 0% 50%;
+    filter: brightness(1) hue-rotate(360deg);
+  }
+}
+
+/* Hyperdrive Streak */
+@keyframes hyperdrive {
+  0% {
+    transform: translateX(-200%) scaleX(0.5);
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(0%) scaleX(1);
+  }
+  100% {
+    transform: translateX(200%) scaleX(0.5);
+    opacity: 0;
+  }
+}
+
+/* Energy Shield Rotation */
+@keyframes shield-rotate {
+  0% {
+    transform: rotate(0deg);
+    border-color: rgba(0, 217, 255, 0.5);
+  }
+  33% {
+    border-color: rgba(255, 0, 128, 0.5);
+  }
+  66% {
+    border-color: rgba(255, 215, 0, 0.5);
+  }
+  100% {
+    transform: rotate(360deg);
+    border-color: rgba(0, 217, 255, 0.5);
+  }
+}
+
+/* Plasma Wave */
+@keyframes plasma-wave {
+  0% {
+    background-position: 0% 0%;
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    background-position: 100% 100%;
+    opacity: 0.5;
+  }
+}
+
+/* Turbo Charge Effect */
+@keyframes turbo-charge {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    filter: brightness(2) saturate(2);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    filter: brightness(1) saturate(1);
+  }
+}
+
+/* Lightning Strike */
+@keyframes lightning-strike {
+  0%, 90%, 100% {
+    opacity: 0;
+    transform: translateY(-100%) scaleY(0);
+  }
+  92% {
+    opacity: 1;
+    transform: translateY(0%) scaleY(1);
+  }
+  94% {
+    opacity: 0;
+  }
+  96% {
+    opacity: 1;
+  }
+}
+
+/* Nitro Boost Utility Classes */
+.nitro-boost-active {
+  animation: nitro-pulse 1.5s ease-in-out infinite;
+  background: linear-gradient(135deg,
+    rgba(255, 0, 128, 0.3),
+    rgba(0, 217, 255, 0.3),
+    rgba(255, 215, 0, 0.3));
+  background-size: 200% 200%;
+  position: relative;
+  overflow: hidden;
+}
+
+.nitro-boost-active::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(255, 0, 128, 0.8),
+    rgba(0, 217, 255, 0.8),
+    rgba(255, 215, 0, 0.8),
+    transparent);
+  background-size: 200% 100%;
+  animation: electric-arc 2s linear infinite;
+  z-index: -1;
+  border-radius: inherit;
+}
+
+.nitro-boost-active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(45deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.3) 50%,
+    transparent 70%);
+  background-size: 200% 200%;
+  animation: hyperdrive 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Energy Trail Effect */
+.energy-trail {
+  position: relative;
+  overflow: hidden;
+}
+
+.energy-trail::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(0, 217, 255, 0.6),
+    transparent);
+  animation: hyperdrive 1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Flame Border Effect */
+.flame-border {
+  background: linear-gradient(45deg,
+    #ff0080, #ff4500, #ffd700, #00d9ff, #6b46c1);
+  background-size: 400% 400%;
+  animation: flame-trail 3s ease infinite;
+  padding: 3px;
+  border-radius: inherit;
+}
+
+/* Shield Glow */
+.shield-glow {
+  position: relative;
+  border: 3px solid transparent;
+  animation: shield-rotate 4s linear infinite;
+  box-shadow: 0 0 30px rgba(0, 217, 255, 0.5),
+              inset 0 0 30px rgba(255, 0, 128, 0.3);
+}
+
+/* Plasma Background */
+.plasma-bg {
+  background: linear-gradient(45deg,
+    rgba(255, 0, 128, 0.2),
+    rgba(0, 217, 255, 0.2),
+    rgba(255, 215, 0, 0.2),
+    rgba(107, 70, 193, 0.2));
+  background-size: 400% 400%;
+  animation: plasma-wave 5s ease infinite;
+}
+
+/* Turbo Button */
+.turbo-button {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #ff0080, #00d9ff);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.turbo-button::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #ffd700, #ff4500);
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.turbo-button:hover::before {
+  animation: turbo-charge 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Lightning Container */
+.lightning-container {
+  position: relative;
+}
+
+.lightning-container::before {
+  content: '';
+  position: absolute;
+  top: -100%;
+  left: 50%;
+  width: 4px;
+  height: 100%;
+  background: linear-gradient(180deg,
+    transparent,
+    #00d9ff,
+    #fff,
+    #00d9ff,
+    transparent);
+  transform: translateX(-50%);
+  animation: lightning-strike 4s ease-in-out infinite;
+  filter: drop-shadow(0 0 10px #00d9ff);
+}
+
+/* Hyperspeed Lines */
+.hyperspeed-lines {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hyperspeed-lines::before,
+.hyperspeed-lines::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: -100%;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(0, 217, 255, 0.8),
+    transparent);
+  transform: translateY(-50%);
+  animation: hyperdrive 1s ease-in-out infinite;
+}
+
+.hyperspeed-lines::after {
+  top: 70%;
+  animation-delay: 0.3s;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(255, 0, 128, 0.8),
+    transparent);
+}
+
+/* Quantum Particle Burst */
+@keyframes particle-burst {
+  0% {
+    transform: scale(0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+.particle-burst {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  background: radial-gradient(circle, #00d9ff, transparent);
+  border-radius: 50%;
+  animation: particle-burst 1s ease-out infinite;
+  pointer-events: none;
+}
+
+/* Neon Glow Text */
+.neon-glow-text {
+  text-shadow:
+    0 0 5px rgba(0, 217, 255, 0.8),
+    0 0 10px rgba(0, 217, 255, 0.6),
+    0 0 15px rgba(0, 217, 255, 0.4),
+    0 0 20px rgba(0, 217, 255, 0.2);
+  animation: nitro-pulse 2s ease-in-out infinite;
+}

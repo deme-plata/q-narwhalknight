@@ -753,6 +753,3 @@ struct SwarmMetrics {
     energy_efficiency: f64,         // Energy usage optimization
     quantum_fidelity: f64,         // Quantum entanglement maintenance
 }
-
-// Re-export the Robot type for use in this module
-use crate::robot::Robot;

@@ -1,0 +1,38 @@
+===============================================
+Higgs Field Simulator - Execution Report
+===============================================
+Generated: Sat 11 Oct 13:04:51 CEST 2025
+
+SIMULATION PARAMETERS:
+- Resolution: 64³ grid points (262,144 total)
+- Box size: 100 nm
+- Grid spacing: 1.562 nm
+- Time step: 1 attosecond
+- Duration: 1000 attoseconds (1 femtosecond)
+
+LASER CONFIGURATION:
+- Photon energy: 50 eV
+- Wavelength: 24.8 nm (XUV)
+- Pulse duration: 100 attoseconds (FWHM)
+- Peak intensity: 10^13 W/cm²
+
+OUTPUT FILES:
+- higgs_field_final.vtk
+- higgs_slice_xy.vtk
+- line_profile.txt
+- metrics.txt
+- simulation_report.txt
+
+SIMULATION METRICS:
+500 1.109290e9 2.512200e2 2.462200e2
+600 1.109290e9 2.512200e2 2.462200e2
+700 1.109290e9 2.512200e2 2.462200e2
+800 1.109290e9 2.512200e2 2.462200e2
+900 1.109290e9 2.512200e2 2.462200e2
+
+PERFORMANCE:
+- [0;32m[2025-10-11 13:04:50][0m Extracted:    Performance: 2525165.7 grid-updates/second
+- [0;32m[2025-10-11 13:04:51][0m Extracted:    ✅ Simulation complete in 103.81 seconds
+
+STATUS: ✅ SUCCESS
+===============================================

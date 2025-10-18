@@ -18,10 +18,11 @@ use crate::{
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
+use q_aegis_ql::{AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
 
 /// 🎻 Transaction type compatible with Narwhal
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -189,6 +190,12 @@ pub struct ResonanceCoordinator {
 
     /// 🎻 Gossip message receiver (from network)
     gossip_rx: Option<mpsc::UnboundedReceiver<ResonanceMessage>>,
+
+    /// 🔐 AEGIS-QL validator authentication
+    aegis: AegisQL,
+
+    /// 🔐 Validator public keys for signature verification
+    validator_public_keys: Arc<RwLock<HashMap<[u8; 32], AegisPublicKey>>>,
 }
 
 /// 🎻 Performance metrics for resonance consensus
@@ -224,6 +231,37 @@ impl ResonanceCoordinator {
             state_tracker,
             gossip_tx: None,
             gossip_rx: None,
+            aegis: AegisQL::new(),
+            validator_public_keys: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// 🎻 Create a new resonance coordinator with AEGIS-QL validator authentication
+    pub fn new_with_aegis(
+        node_id: Vec<u8>,
+        validator_keys: HashMap<[u8; 32], AegisPublicKey>,
+    ) -> Self {
+        tracing::info!("🔐 Initializing Resonance Coordinator with AEGIS-QL authentication for node {:?}", node_id);
+
+        let state_tracker = Arc::new(ResonanceStateTracker::new(node_id.clone()));
+
+        Self {
+            node_id,
+            ordering: Arc::new(RwLock::new(ResonanceOrdering::new(
+                100.0,  // energy_threshold
+                1.0,    // variance_threshold
+                0.5,    // byzantine_threshold
+            ))),
+            spectral_bft: Arc::new(RwLock::new(SpectralBFT::new(0.5, 5))),
+            energy_functional: Arc::new(RwLock::new(None)),
+            vertices_by_round: Arc::new(DashMap::new()),
+            latest_consensus_round: Arc::new(RwLock::new(0)),
+            metrics: Arc::new(RwLock::new(ResonanceMetrics::default())),
+            state_tracker,
+            gossip_tx: None,
+            gossip_rx: None,
+            aegis: AegisQL::new(),
+            validator_public_keys: Arc::new(RwLock::new(validator_keys)),
         }
     }
 
@@ -254,6 +292,43 @@ impl ResonanceCoordinator {
             state_tracker,
             gossip_tx: Some(tx_to_network),
             gossip_rx: Some(rx_to_coordinator),
+            aegis: AegisQL::new(),
+            validator_public_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        (coordinator, tx_from_network, rx_from_coordinator)
+    }
+
+    /// 🎻 Create a new resonance coordinator with gossip and AEGIS-QL authentication
+    pub fn new_with_gossip_and_aegis(
+        node_id: Vec<u8>,
+        validator_keys: HashMap<[u8; 32], AegisPublicKey>,
+    ) -> (Self, mpsc::UnboundedSender<ResonanceMessage>, mpsc::UnboundedReceiver<ResonanceMessage>) {
+        tracing::info!("🔐 Initializing Resonance Coordinator with Gossip and AEGIS-QL for node {:?}", node_id);
+
+        let state_tracker = Arc::new(ResonanceStateTracker::new(node_id.clone()));
+
+        // Create gossip channels
+        let (tx_to_network, rx_from_coordinator) = mpsc::unbounded_channel();
+        let (tx_from_network, rx_to_coordinator) = mpsc::unbounded_channel();
+
+        let coordinator = Self {
+            node_id,
+            ordering: Arc::new(RwLock::new(ResonanceOrdering::new(
+                100.0,  // energy_threshold
+                1.0,    // variance_threshold
+                0.5,    // byzantine_threshold
+            ))),
+            spectral_bft: Arc::new(RwLock::new(SpectralBFT::new(0.5, 5))),
+            energy_functional: Arc::new(RwLock::new(None)),
+            vertices_by_round: Arc::new(DashMap::new()),
+            latest_consensus_round: Arc::new(RwLock::new(0)),
+            metrics: Arc::new(RwLock::new(ResonanceMetrics::default())),
+            state_tracker,
+            gossip_tx: Some(tx_to_network),
+            gossip_rx: Some(rx_to_coordinator),
+            aegis: AegisQL::new(),
+            validator_public_keys: Arc::new(RwLock::new(validator_keys)),
         };
 
         (coordinator, tx_from_network, rx_from_coordinator)
@@ -771,6 +846,87 @@ impl ResonanceCoordinator {
     /// 🎻 Get state tracker for external access
     pub fn get_state_tracker(&self) -> Arc<ResonanceStateTracker> {
         Arc::clone(&self.state_tracker)
+    }
+
+    /// 🔐 Verify validator signature with AEGIS-QL
+    ///
+    /// Philosophy: Like checking a musician's credentials before they join the symphony,
+    /// we verify validator authenticity through post-quantum cryptography.
+    pub fn verify_validator(
+        &self,
+        validator_address: &[u8; 32],
+        message: &[u8],
+        signature: &AegisSignature,
+    ) -> Result<bool> {
+        let keys = self.validator_public_keys.read();
+        let pub_key = keys.get(validator_address)
+            .ok_or_else(|| ResonanceError::InvalidState("Unknown validator".to_string()))?;
+
+        self.aegis.verify(message, signature, pub_key)
+            .map_err(|e| ResonanceError::InvalidState(format!("Signature verification failed: {}", e)))
+    }
+
+    /// 🔐 Add validator public key to authorization list
+    ///
+    /// Philosophy: Admit a new musician to the orchestra with their unique signature.
+    pub fn add_validator(&self, validator_address: [u8; 32], public_key: AegisPublicKey) {
+        let mut keys = self.validator_public_keys.write();
+        keys.insert(validator_address, public_key);
+
+        tracing::info!("🔐 Added validator {:?} to AEGIS-QL authorization", hex::encode(&validator_address[..8]));
+    }
+
+    /// 🔐 Remove validator from authorization list
+    ///
+    /// Philosophy: Remove a musician from the orchestra roster.
+    pub fn remove_validator(&self, validator_address: &[u8; 32]) {
+        let mut keys = self.validator_public_keys.write();
+        keys.remove(validator_address);
+
+        tracing::info!("🔐 Removed validator {:?} from AEGIS-QL authorization", hex::encode(&validator_address[..8]));
+    }
+
+    /// 🔐 Check if validator is authorized
+    pub fn is_validator_authorized(&self, validator_address: &[u8; 32]) -> bool {
+        let keys = self.validator_public_keys.read();
+        keys.contains_key(validator_address)
+    }
+
+    /// 🔐 Get number of authorized validators
+    pub fn validator_count(&self) -> usize {
+        let keys = self.validator_public_keys.read();
+        keys.len()
+    }
+
+    /// 🔐 Process Narwhal batch with AEGIS-QL validator authentication
+    ///
+    /// Philosophy: Enhanced processing that verifies validator identity before accepting
+    /// their contribution to the symphony.
+    pub async fn process_with_aegis_auth(
+        &self,
+        round: u64,
+        transactions: Vec<NarwhalTransaction>,
+        validator_address: &[u8; 32],
+        signature: &AegisSignature,
+        stake: f64,
+        network_position: Vec<f64>,
+    ) -> Result<Vec<[u8; 32]>> {
+        // 🔐 Verify validator signature
+        let message = format!("CONSENSUS:{}:{}", round, transactions.len());
+
+        if !self.verify_validator(validator_address, message.as_bytes(), signature)? {
+            return Err(ResonanceError::InvalidState("Invalid validator signature".to_string()));
+        }
+
+        tracing::info!("🔐 Validator {:?} authenticated for round {}", hex::encode(&validator_address[..8]), round);
+
+        // Process with verified validator
+        self.process_narwhal_batch_with_gossip(
+            round,
+            transactions,
+            stake,
+            network_position,
+        ).await
     }
 }
 

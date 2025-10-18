@@ -34,6 +34,14 @@ pub use integration::{
     ResonanceMetrics,
     NarwhalTransaction,
 };
+
+// Re-export AEGIS-QL types for convenience
+pub use q_aegis_ql::{
+    AegisQL,
+    PublicKey as AegisPublicKey,
+    SecretKey as AegisSecretKey,
+    Signature as AegisSignature,
+};
 pub use gossip::{
     ResonanceMessage,
     ResonanceStateTracker,

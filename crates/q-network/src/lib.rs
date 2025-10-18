@@ -25,6 +25,9 @@ pub mod libp2p_bridge;
 // Resonance consensus protocol (Phase 3: String-theoretic consensus)
 pub mod resonance_protocol;
 
+// Transaction Tunneling - Ultra-low-latency fast path
+pub mod transaction_tunneling;
+
 pub use crypto_agile::{AgileHandshake, CryptoProvider, CryptoScheme, Kyber1024KeyExchange};
 pub use network_manager::{NetworkManager, NetworkManagerConfig};
 pub use peer_registry::{PeerCapability, PeerInfo, PeerRegistry};
@@ -38,6 +41,31 @@ pub use libp2p_bridge::{Libp2pBridge, BridgeEvent, DhtEvent};
 // Export resonance consensus protocol components
 pub use resonance_protocol::{
     resonance_topic, ResonanceGossipManager, ResonanceProtocolHandler,
+};
+
+// Export transaction tunneling components
+pub use transaction_tunneling::{
+    TunnelingEngine, TunnelingConfig, TunnelingProfile, TunnelingResult,
+    TunnelingStats, CircuitBreakerState, ConsensusMessageType,
+};
+
+// Distributed VM and DEX modules
+pub mod distributed_vm;
+pub mod distributed_dex;
+pub mod distributed_protocol;
+
+// Export distributed components
+pub use distributed_vm::{
+    DistributedVMCoordinator, ContractStateMessage, ExecutionRequest,
+    ExecutionResponse, StateUpdate, MerkleProof, VMNetworkStats,
+};
+pub use distributed_dex::{
+    DistributedDEXCoordinator, OrderBookMessage, TradeMessage,
+    LiquidityPoolMessage, TradingPair, Order, OrderType, OrderSide,
+    DEXStats, ArbitrageOpportunity,
+};
+pub use distributed_protocol::{
+    DistributedProtocolManager, DistributedNetworkStats,
 };
 
 // Simplified network structure for compilation

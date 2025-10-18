@@ -12,13 +12,23 @@ use crate::analysis::StoryAnalyzer;
 
 #[derive(Subcommand)]
 pub enum EntityCommands {
-    /// Create a new entity
+    /// Create a new entity (interactive)
     Create {
         /// Entity type (character, tech, location, macguffin, org)
         #[arg(short, long)]
         entity_type: String,
         /// Entity name
         name: String,
+    },
+    /// Create entity from JSON file (non-interactive)
+    CreateFrom {
+        /// Path to JSON file with entity data
+        json_file: String,
+    },
+    /// Batch create entities from JSON array file
+    BatchCreate {
+        /// Path to JSON file with array of entities
+        json_file: String,
     },
     /// List entities with optional filtering
     List {
@@ -114,6 +124,12 @@ pub async fn handle_entity_command(db: &mut StoryDatabase, command: EntityComman
     match command {
         EntityCommands::Create { entity_type, name } => {
             create_entity_interactive(db, &entity_type, &name).await?;
+        }
+        EntityCommands::CreateFrom { json_file } => {
+            create_entity_from_json(db, &json_file).await?;
+        }
+        EntityCommands::BatchCreate { json_file } => {
+            batch_create_entities(db, &json_file).await?;
         }
         EntityCommands::List { entity_type, tag } => {
             list_entities(db, entity_type, tag).await?;
@@ -256,9 +272,10 @@ async fn create_entity_interactive(db: &mut StoryDatabase, entity_type: &str, na
                 .with_prompt("Character description")
                 .interact_text()?;
 
-            let traits: Vec<String> = Input::with_theme(&ColorfulTheme::default())
+            let traits_input: String = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("Character traits (comma-separated)")
-                .interact_text()?
+                .interact_text()?;
+            let traits: Vec<String> = traits_input
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -276,9 +293,10 @@ async fn create_entity_interactive(db: &mut StoryDatabase, entity_type: &str, na
                 .with_prompt("Technology description")
                 .interact_text()?;
 
-            let technical_details: Vec<String> = Input::with_theme(&ColorfulTheme::default())
+            let technical_input: String = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("Technical details (comma-separated)")
-                .interact_text()?
+                .interact_text()?;
+            let technical_details: Vec<String> = technical_input
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -556,5 +574,48 @@ async fn export_entities_json(db: &mut StoryDatabase, output: &str) -> Result<()
     std::fs::write(output, json)?;
 
     println!("{}", format!("✅ Entities exported to: {}", output).green());
+    Ok(())
+}
+
+// Non-interactive entity creation functions
+
+async fn create_entity_from_json(db: &mut StoryDatabase, json_file: &str) -> Result<()> {
+    let stories = db.list_stories().await?;
+    if stories.is_empty() {
+        println!("{}", "No stories found. Create one first.".red());
+        return Ok(());
+    }
+
+    let story = &stories[0];
+
+    let json_data = std::fs::read_to_string(json_file)?;
+    let entity_type: EntityType = serde_json::from_str(&json_data)?;
+
+    let entity_id = db.create_entity(story.id, entity_type.clone()).await?;
+    println!("{}", format!("✅ Created entity from JSON: {} ({})", entity_type.name(), entity_id).green());
+
+    Ok(())
+}
+
+async fn batch_create_entities(db: &mut StoryDatabase, json_file: &str) -> Result<()> {
+    let stories = db.list_stories().await?;
+    if stories.is_empty() {
+        println!("{}", "No stories found. Create one first.".red());
+        return Ok(());
+    }
+
+    let story = &stories[0];
+
+    let json_data = std::fs::read_to_string(json_file)?;
+    let entities: Vec<EntityType> = serde_json::from_str(&json_data)?;
+
+    println!("{}", format!("📦 Creating {} entities...", entities.len()).bright_cyan());
+
+    for entity in entities {
+        let entity_id = db.create_entity(story.id, entity.clone()).await?;
+        println!("   ✓ {} ({})", entity.name().bright_white(), entity_id);
+    }
+
+    println!("{}", "✅ Batch creation complete!".bright_green());
     Ok(())
 }

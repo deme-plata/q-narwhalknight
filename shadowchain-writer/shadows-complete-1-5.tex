@@ -1,0 +1,116 @@
+\documentclass[12pt,letterpaper]{book}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{graphicx}
+
+% Cyberpunk noir color scheme
+\definecolor{neonblue}{RGB}{0,255,255}
+\definecolor{neongreen}{RGB}{57,255,20}
+\definecolor{neonpink}{RGB}{255,16,240}
+\definecolor{darkbg}{RGB}{10,10,15}
+
+% Hyperref setup
+\hypersetup{
+    colorlinks=true,
+    linkcolor=neonblue,
+    filecolor=neongreen,
+    urlcolor=neonpink,
+    pdftitle={Shadows in the Chain: A Quantum Cryptography Thriller},
+    pdfauthor={Claude \& shadowchain-writer},
+    pdfsubject={Cyberpunk Noir Thriller},
+    pdfkeywords={quantum computing, cryptography, post-quantum, thriller, cyberpunk}
+}
+
+% Custom title formatting
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{neonblue}}{\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{neongreen}}{\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{neonpink}}{\thesubsection}{1em}{}
+
+% Custom tcolorbox for technical notes
+\newtcolorbox{technote}{
+  colback=darkbg,
+  colframe=neonblue,
+  coltext=white,
+  boxrule=1pt,
+  arc=2mm,
+  left=5pt,
+  right=5pt,
+  top=5pt,
+  bottom=5pt
+}
+
+% Header/footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\textcolor{neonblue}{\thepage}}
+\fancyhead[RE]{\textcolor{neongreen}{\textit{Shadows in the Chain}}}
+\fancyhead[LO]{\textcolor{neonpink}{\textit{\leftmark}}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Document begins
+\begin{document}
+
+% Title page
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+
+{\Huge\bfseries\color{neonblue}SHADOWS IN THE CHAIN\par}
+\vspace{1cm}
+{\LARGE\color{neongreen}A Quantum Cryptography Thriller\par}
+\vspace{2cm}
+
+{\Large\color{neonpink}Chapters 1-5: Complete Manuscript\par}
+\vspace{1cm}
+
+{\large\textit{When quantum computing threatens to break global encryption,\\
+one woman must choose between order and chaos.}\par}
+
+\vspace{3cm}
+
+{\large\color{neonblue}Generated: \today\par}
+
+\vfill
+
+{\small\textit{A cyberpunk noir thriller exploring post-quantum cryptography,\\
+algorithmic governance, and the price of freedom in a quantum age.}\par}
+
+\end{titlepage}
+
+% Table of contents
+\tableofcontents
+\newpage
+
+% Chapter 1
+\chapter{The Zürich Handoff}
+\input{chapter1_content_new.tex}
+
+% Chapter 2
+\chapter{The Singapore Protocol}
+\input{chapter2_content_new.tex}
+
+% Chapter 3
+\chapter{Phoenix Rising}
+\input{chapter3_content_new.tex}
+
+% Chapter 4
+\chapter{The Singapore Endgame}
+\input{chapter4_content_new.tex}
+
+% Chapter 5
+\chapter{The Moscow Gambit}
+\input{chapter5_content_new.tex}
+
+\end{document}

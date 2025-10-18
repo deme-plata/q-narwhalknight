@@ -45,6 +45,8 @@ members = [
     "crates/q-stablecoin",    # Algorithmic stablecoin management
     "crates/q-narwhalknight", # High-level developer-friendly API wrapper for proven DNS-Phantom mesh networking
     "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
+    "crates/q-ipfs-storage",   # IPFS-RocksDB decentralized storage
+    "crates/q-aegis-ql",       # AEGIS-QL post-quantum access control
     "gui"
 , "crates/q-resonance"]
 
@@ -194,7 +196,7 @@ slint = "1.7"
 slint-build = "1.7"
 
 # Financial/decimal math for DeFi components
-bigdecimal = "0.4"
+bigdecimal = { version = "0.4", features = ["serde"] }
 rust_decimal = "1.33"
 
 # Collections and concurrency for performance

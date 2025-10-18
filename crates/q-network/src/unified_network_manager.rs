@@ -103,6 +103,8 @@ pub struct UnifiedNetworkManager {
     local_peer_id: PeerId,
     /// Channel to send discovered peers to ConnectionManager (Phase 2 bridge)
     peer_tx: Option<mpsc::UnboundedSender<PeerInfo>>,
+    /// Channel to forward gossipsub messages (for database replication, etc.)
+    gossipsub_message_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
 }
 
 impl UnifiedNetworkManager {
@@ -245,6 +247,7 @@ impl UnifiedNetworkManager {
             peer_addresses: Arc::new(RwLock::new(HashMap::new())),
             local_peer_id,
             peer_tx: None, // Set via set_peer_channel() after construction
+            gossipsub_message_tx: None, // Set via set_gossipsub_channel() after construction
         })
     }
 
@@ -252,6 +255,12 @@ impl UnifiedNetworkManager {
     pub fn set_peer_channel(&mut self, tx: mpsc::UnboundedSender<PeerInfo>) {
         self.peer_tx = Some(tx);
         info!("🌉 libp2p → ConnectionManager bridge channel established");
+    }
+
+    /// Set channel for forwarding gossipsub messages to subscribers
+    pub fn set_gossipsub_channel(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
+        self.gossipsub_message_tx = Some(tx);
+        info!("🌉 Gossipsub message forwarding channel established");
     }
 
     /// Main event loop - processes all discovery events
@@ -415,8 +424,20 @@ impl UnifiedNetworkManager {
                     message_id,
                     message.data.len()
                 );
-                // TODO: Forward to consensus layer for processing
-                // For now, just log receipt
+
+                // Forward to gossipsub message channel if available
+                if let Some(ref tx) = self.gossipsub_message_tx {
+                    let topic = message.topic.to_string();
+                    let data = message.data.clone();
+
+                    if let Err(e) = tx.send((topic.clone(), data)) {
+                        warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic, e);
+                    } else {
+                        debug!("✅ Forwarded gossipsub message on topic: {}", topic);
+                    }
+                }
+
+                // Also log receipt for debugging
                 debug!("📨 Message data: {:?}", message.data);
             }
             QNarwhalEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic }) => {
@@ -494,6 +515,26 @@ impl UnifiedNetworkManager {
     /// Announce ourselves as Q-NarwhalKnight node (simplified for mDNS-only)
     pub fn announce_self(&mut self) -> anyhow::Result<()> {
         info!("📢 Announced self to network via mDNS");
+        Ok(())
+    }
+
+    /// Subscribe to a custom gossipsub topic
+    pub fn subscribe_topic(&mut self, topic: &str) -> anyhow::Result<()> {
+        let ident_topic = IdentTopic::new(topic);
+        self.swarm.behaviour_mut().gossipsub
+            .subscribe(&ident_topic)
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to topic {}: {}", topic, e))?;
+        info!("📢 Subscribed to gossipsub topic: {}", topic);
+        Ok(())
+    }
+
+    /// Publish a message to a gossipsub topic
+    pub fn publish_topic(&mut self, topic: &str, data: Vec<u8>) -> anyhow::Result<()> {
+        let ident_topic = IdentTopic::new(topic);
+        self.swarm.behaviour_mut().gossipsub
+            .publish(ident_topic, data)
+            .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
+        debug!("📤 Published message to gossipsub topic: {}", topic);
         Ok(())
     }
 }

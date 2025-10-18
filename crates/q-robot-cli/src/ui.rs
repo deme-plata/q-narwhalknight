@@ -310,12 +310,12 @@ impl TerminalUI {
         self.update_data().await
     }
     
-    fn draw_ui<B: Backend>(&mut self, frame: &mut Frame<B>) {
+    fn draw_ui(&mut self, frame: &mut Frame) {
         if self.app_state.show_help {
             self.draw_help_screen(frame);
             return;
         }
-        
+
         let size = frame.size();
         
         // Create main layout
@@ -345,7 +345,7 @@ impl TerminalUI {
         self.draw_status_bar(frame, chunks[2]);
     }
     
-    fn draw_header<B: Backend>(&self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let title = "🌊🤖 Quantum Water Robot Control System 🤖🌊";
         let tabs = vec![
             "🤖 Robots", "🐟 Swarms", "⚛️  Quantum", "📊 Sensors", "🌊 Environment", "📝 Logs"
@@ -381,7 +381,7 @@ impl TerminalUI {
         }
     }
     
-    fn draw_robots_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_robots_tab(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -426,7 +426,7 @@ impl TerminalUI {
         frame.render_widget(details_paragraph, chunks[1]);
     }
     
-    fn draw_swarms_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_swarms_tab(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -476,7 +476,7 @@ impl TerminalUI {
         frame.render_widget(formation_content, formation_area);
     }
     
-    fn draw_quantum_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_quantum_tab(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -553,7 +553,7 @@ impl TerminalUI {
         frame.render_widget(measurements_block, chunks[1]);
     }
     
-    fn draw_sensors_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_sensors_tab(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
@@ -606,7 +606,7 @@ impl TerminalUI {
         frame.render_widget(sensor_table, chunks[1]);
     }
     
-    fn draw_environment_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_environment_tab(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -658,7 +658,7 @@ impl TerminalUI {
         frame.render_widget(quality_table, chunks[1]);
     }
     
-    fn draw_logs_tab<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_logs_tab(&mut self, frame: &mut Frame, area: Rect) {
         let log_items: Vec<ListItem> = self.app_state.log_messages
             .iter()
             .rev() // Show newest first
@@ -694,7 +694,7 @@ impl TerminalUI {
         frame.render_widget(logs_list, area);
     }
     
-    fn draw_status_bar<B: Backend>(&self, frame: &mut Frame<B>, area: Rect) {
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
         let status_text = format!(
             " Connected Robots: {} | Active Swarms: {} | Last Update: {:.1}s ago | Press 'h' for help, 'q' to quit",
             5, // Would be dynamic
@@ -709,7 +709,7 @@ impl TerminalUI {
         frame.render_widget(status_paragraph, area);
     }
     
-    fn draw_help_screen<B: Backend>(&self, frame: &mut Frame<B>) {
+    fn draw_help_screen(&self, frame: &mut Frame) {
         let help_text = vec![
             Line::from("🌊🤖 Quantum Water Robot Control System - Help 🤖🌊"),
             Line::from(""),

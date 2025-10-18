@@ -28,13 +28,16 @@ use q_quantum_mixing::{QuantumMixingEngine, QuantumZKPProver};
 
 // DeFi Components
 // use q_dex::{DEXEngine, LiquidityPool}; // Temporarily disabled
-// use q_oracle::{OracleNetwork, PriceOracle}; // Temporarily disabled
+// Quantum Oracle - AI-Enhanced Price Aggregation
+// use q_oracle; // Temporarily disabled
 // use q_stablecoin::{StablecoinManager, CollateralManager}; // Temporarily disabled
+use q_quillon_bank::QuillonBankSystem; // ✅ ENABLED - Full quantum banking system
 
 // Network & Infrastructure
 use q_tor_circuit::{CircuitPool, DedicatedCircuitManager};
 // use q_robot_control::{RobotFleet, SwarmIntelligence}; // Temporarily disabled
 use q_network::{CryptoProvider, QuantumNetwork};
+use libp2p::PeerId;
 
 // Plugin System
 use q_plugin_system::{PluginManager, PluginSystem, PluginSystemConfig};
@@ -54,10 +57,19 @@ pub mod console_viz;  // Beautiful animated console visualization
 pub mod dex_integration_api;
 #[cfg(test)]
 pub mod dex_integration_tests;
+pub mod liquidity_api;  // Liquidity provision API
+pub mod quillon_bank_api;  // ✅ ENABLED - Full Quillon Bank CDP system
+pub mod cdp_simple;  // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod handlers;
 pub mod p2p_listener;
 pub mod streaming;
 pub mod binary_protocol;  // High-performance binary ingestion for 1M+ TPS
+pub mod high_performance_server;  // HTTP/2 server optimized for 1M+ TPS
+pub mod websocket_stream;  // WebSocket streaming for 1M+ TPS (zero HTTP overhead)
+pub mod wallet_auth;  // Signature-based wallet authentication for privacy
+pub mod storage_api;  // IPFS-RocksDB decentralized storage for database backups
+pub mod database_replication_bridge;  // Bridge between IPFS replication and gossipsub
+pub mod payment_api;  // ✅ ENABLED - Stripe payment processing with async-stripe
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
@@ -111,6 +123,18 @@ pub struct PendingMixingRequest {
     pub output_addresses: Vec<String>,
     pub privacy_level: q_types::PrivacyLevel,
     pub decoy_count: u32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Liquidity pool structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LiquidityPool {
+    pub pool_id: String,
+    pub token0: String,  // Native QUG or token contract address
+    pub token1: String,  // Token contract address
+    pub reserve0: u64,
+    pub reserve1: u64,
+    pub provider: [u8; 32],  // Wallet address that provided liquidity
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -281,6 +305,14 @@ pub struct AppState {
     pub tx_status: Arc<dashmap::DashMap<TxHash, TxStatus>>,
     pub blocks: Arc<RwLock<HashMap<Height, Vec<Transaction>>>>,
     pub wallet_balances: Arc<RwLock<HashMap<Address, Amount>>>, // Address -> Balance mapping
+    // Password hashes: wallet_address -> bcrypt_hash (for secure login)
+    pub wallet_password_hashes: Arc<RwLock<HashMap<Address, String>>>,
+    // Token balances: (wallet_address, token_contract_address) -> token_amount
+    pub token_balances: Arc<RwLock<HashMap<([u8; 32], [u8; 32]), u64>>>,
+    // Liquidity pools: pool_id -> (token0, token1, reserve0, reserve1, provider)
+    pub liquidity_pools: Arc<RwLock<HashMap<String, LiquidityPool>>>,
+    // Nitro boosts: token_id -> total_boost_points (aggregated from all wallets)
+    pub nitro_boosts: Arc<RwLock<HashMap<String, u64>>>,
     pub storage_engine: Arc<StorageEngine>, // Persistent storage for balances and state
     pub event_broadcaster: Arc<EventBroadcaster>,
     pub event_emitter: Arc<HighPerformanceEmitter>,
@@ -314,7 +346,7 @@ pub struct AppState {
     pub dag_sync_manager: Option<Arc<q_network::DagSyncManager>>,
 
     // ZK Privacy Components - ✅ ENABLED
-    pub zk_stark_system: Option<Arc<StarkSystem>>,
+    pub zk_stark_system: Option<Arc<tokio::sync::Mutex<StarkSystem>>>,
     pub zk_snark_system: Option<Arc<UniversalSNARK>>,
 
     // Performance & Scaling Optimizations
@@ -337,6 +369,7 @@ pub struct AppState {
     // Quillon Resonance Consensus - K-Parameter Phase Analysis
     pub k_parameter_analyzer: Option<Arc<KParameterAnalyzer>>,
     pub resonance_coordinator: Option<Arc<ResonanceCoordinator>>,
+    pub shadow_coordinator: Option<Arc<tokio::sync::Mutex<q_resonance::ShadowModeCoordinator>>>,
 
     // Quantum Cryptography
     pub quantum_crypto: Option<Arc<QuantumCryptoEngine>>,
@@ -350,6 +383,15 @@ pub struct AppState {
     // pub price_oracle: Option<Arc<PriceOracle>>, // Temporarily disabled
     // pub stablecoin_manager: Option<Arc<StablecoinManager>>, // Temporarily disabled
     // pub collateral_manager: Option<Arc<CollateralManager>>, // Temporarily disabled
+
+    // Quantum Oracle - AI-Enhanced Price Aggregation (927k+ TPS)
+    // pub quantum_oracle: Option<Arc<q_oracle::QuantumOracle>>, // Temporarily disabled
+
+    // Quillon Bank - Full Quantum Banking System with CDP
+    pub quillon_bank: Arc<RwLock<QuillonBankSystem>>, // ✅ ENABLED - Real banking system
+
+    // QUG/QUGUSD Stablecoin System - CollateralVault for over-collateralized minting
+    pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
 
     // Advanced Infrastructure
     pub tor_circuit_manager: Option<Arc<DedicatedCircuitManager>>,
@@ -370,6 +412,9 @@ pub struct AppState {
     // VM and Smart Contracts - Orobit Integration
     pub contract_registry: Arc<ContractRegistry>,
     pub orobit_ecosystem: Arc<OrobitSmartContractEcosystem>,
+
+    // Distributed VM and DEX (Horizontal Scaling)
+    pub distributed_protocol: Option<Arc<q_network::DistributedProtocolManager>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -434,6 +479,74 @@ impl AppState {
             }
         }
 
+        // Load existing token balances from persistent storage
+        let mut token_balances = HashMap::new();
+        match storage_engine.load_token_balances().await {
+            Ok(persisted_token_balances) => {
+                token_balances = persisted_token_balances;
+                tracing::info!(
+                    "🪙 Loaded {} token balances from persistent storage",
+                    token_balances.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load token balances from storage: {}, starting with empty token balances",
+                    e
+                );
+            }
+        }
+
+        // Load existing password hashes from persistent storage
+        let mut wallet_password_hashes = HashMap::new();
+        match storage_engine.load_password_hashes().await {
+            Ok(persisted_hashes) => {
+                wallet_password_hashes = persisted_hashes;
+                tracing::info!(
+                    "🔐 Loaded {} password hashes from persistent storage",
+                    wallet_password_hashes.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load password hashes from storage: {}, starting with empty hashes",
+                    e
+                );
+            }
+        }
+
+        // Load existing liquidity pools from persistent storage
+        let mut liquidity_pools_map = HashMap::new();
+        match storage_engine.load_liquidity_pools().await {
+            Ok(persisted_pools) => {
+                // Deserialize each pool from bytes
+                for (pool_id, pool_bytes) in persisted_pools {
+                    match serde_json::from_slice::<LiquidityPool>(&pool_bytes) {
+                        Ok(pool) => {
+                            liquidity_pools_map.insert(pool_id.clone(), pool);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize liquidity pool {}: {}, skipping",
+                                pool_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    "💧 Loaded {} liquidity pools from persistent storage",
+                    liquidity_pools_map.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load liquidity pools from storage: {}, starting with empty pools",
+                    e
+                );
+            }
+        }
+
         // Load existing transactions from storage
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
@@ -461,8 +574,29 @@ impl AppState {
         let event_emitter = Arc::new(HighPerformanceEmitter::new(event_broadcaster.clone()));
 
         // Initialize VM and Smart Contract system with Orobit integration
-        let contract_registry = Arc::new(ContractRegistry::new().await?);
-        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new().await?);
+        // IMPORTANT: Create ecosystem FIRST with storage, then pass to registry
+        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?);
+        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(orobit_ecosystem.clone()));
+
+        // NOTE: Token balances are now loaded from persistent storage above
+        // No need to restore from deployed contracts - persistence handles it
+
+        // Initialize Quillon Bank - Full Quantum Banking System with CDP
+        let plugin_manager = Arc::new(PluginManager::new());
+        let quillon_bank_system = QuillonBankSystem::new(
+            node_id,
+            q_types::Phase::Phase1,
+            plugin_manager.clone(),
+        ).await?;
+        quillon_bank_system.initialize().await?;
+        let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
+        tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
+
+        // Initialize CollateralVault for QUG/QUGUSD stablecoin system
+        let collateral_vault = Arc::new(RwLock::new(
+            q_vm::contracts::CollateralVault::new()
+        ));
+        tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         Ok(Self {
             config,
@@ -474,6 +608,10 @@ impl AppState {
             tx_status,
             blocks: Arc::new(RwLock::new(HashMap::new())),
             wallet_balances: Arc::new(RwLock::new(wallet_balances.clone())),
+            wallet_password_hashes: Arc::new(RwLock::new(wallet_password_hashes)),
+            token_balances: Arc::new(RwLock::new(token_balances)),
+            liquidity_pools: Arc::new(RwLock::new(liquidity_pools_map)),
+            nitro_boosts: Arc::new(RwLock::new(HashMap::new())),
             storage_engine: storage_engine.clone(),
             event_broadcaster,
             event_emitter,
@@ -585,6 +723,7 @@ impl AppState {
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,
             resonance_coordinator: None,
+            shadow_coordinator: None,
 
             // Quantum Cryptography - Initialize with None, available on demand
             quantum_crypto: None,
@@ -598,6 +737,9 @@ impl AppState {
             // price_oracle: None, // Temporarily disabled
             // stablecoin_manager: None, // Temporarily disabled
             // collateral_manager: None, // Temporarily disabled
+
+            // Quantum Oracle - AI-Enhanced Price Aggregation
+            // quantum_oracle: None,  // Temporarily disabled
 
             // Advanced Infrastructure - Initialize with None, available on demand
             tor_circuit_manager: None,
@@ -618,6 +760,15 @@ impl AppState {
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
             orobit_ecosystem,
+
+            // Quillon Bank - Full Quantum Banking System with CDP
+            quillon_bank,
+
+            // QUG/QUGUSD Stablecoin System - CollateralVault
+            collateral_vault,
+
+            // Distributed VM and DEX - Initialize in production mode
+            distributed_protocol: None, // Initialized separately
         })
     }
 
@@ -721,6 +872,74 @@ impl AppState {
             }
         }
 
+        // Load existing token balances from persistent storage
+        let mut token_balances = HashMap::new();
+        match storage_engine.load_token_balances().await {
+            Ok(persisted_token_balances) => {
+                token_balances = persisted_token_balances;
+                tracing::info!(
+                    "🪙 Loaded {} token balances from persistent storage",
+                    token_balances.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load token balances from storage: {}, starting with empty token balances",
+                    e
+                );
+            }
+        }
+
+        // Load existing password hashes from persistent storage
+        let mut wallet_password_hashes = HashMap::new();
+        match storage_engine.load_password_hashes().await {
+            Ok(persisted_hashes) => {
+                wallet_password_hashes = persisted_hashes;
+                tracing::info!(
+                    "🔐 Loaded {} password hashes from persistent storage",
+                    wallet_password_hashes.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load password hashes from storage: {}, starting with empty hashes",
+                    e
+                );
+            }
+        }
+
+        // Load existing liquidity pools from persistent storage
+        let mut liquidity_pools_map = HashMap::new();
+        match storage_engine.load_liquidity_pools().await {
+            Ok(persisted_pools) => {
+                // Deserialize each pool from bytes
+                for (pool_id, pool_bytes) in persisted_pools {
+                    match serde_json::from_slice::<LiquidityPool>(&pool_bytes) {
+                        Ok(pool) => {
+                            liquidity_pools_map.insert(pool_id.clone(), pool);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize liquidity pool {}: {}, skipping",
+                                pool_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    "💧 Loaded {} liquidity pools from persistent storage",
+                    liquidity_pools_map.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load liquidity pools from storage: {}, starting with empty pools",
+                    e
+                );
+            }
+        }
+
         // Load existing transactions from storage
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
@@ -748,8 +967,29 @@ impl AppState {
         let event_emitter = Arc::new(HighPerformanceEmitter::new(event_broadcaster.clone()));
 
         // Initialize VM and Smart Contract system with Orobit integration
-        let contract_registry = Arc::new(ContractRegistry::new().await?);
-        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new().await?);
+        // IMPORTANT: Create ecosystem FIRST with storage, then pass to registry
+        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?);
+        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(orobit_ecosystem.clone()));
+
+        // NOTE: Token balances are now loaded from persistent storage above
+        // No need to restore from deployed contracts - persistence handles it
+
+        // Initialize Quillon Bank - Full Quantum Banking System with CDP
+        let plugin_manager = Arc::new(PluginManager::new());
+        let quillon_bank_system = QuillonBankSystem::new(
+            node_id,
+            q_types::Phase::Phase1,
+            plugin_manager.clone(),
+        ).await?;
+        quillon_bank_system.initialize().await?;
+        let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
+        tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
+
+        // Initialize CollateralVault for QUG/QUGUSD stablecoin system
+        let collateral_vault = Arc::new(RwLock::new(
+            q_vm::contracts::CollateralVault::new()
+        ));
+        tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         Ok(Self {
             config,
@@ -761,6 +1001,10 @@ impl AppState {
             tx_status,
             blocks: Arc::new(RwLock::new(HashMap::new())),
             wallet_balances: Arc::new(RwLock::new(wallet_balances.clone())),
+            wallet_password_hashes: Arc::new(RwLock::new(wallet_password_hashes)),
+            token_balances: Arc::new(RwLock::new(token_balances)),
+            liquidity_pools: Arc::new(RwLock::new(liquidity_pools_map)),
+            nitro_boosts: Arc::new(RwLock::new(HashMap::new())),
             storage_engine: storage_engine.clone(),
             event_broadcaster,
             event_emitter,
@@ -795,7 +1039,7 @@ impl AppState {
                 match StarkSystem::new(false).await {
                     Ok(system) => {
                         tracing::info!("✅ ZK-STARK System initialized - Zero-knowledge proofs enabled");
-                        Some(Arc::new(system))
+                        Some(Arc::new(tokio::sync::Mutex::new(system)))
                     }
                     Err(e) => {
                         tracing::warn!("⚠️ ZK-STARK System initialization failed: {}, ZK proofs unavailable", e);
@@ -853,6 +1097,7 @@ impl AppState {
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,
             resonance_coordinator: None,
+            shadow_coordinator: None,
 
             // Quantum Cryptography - Initialize with None, available on demand
             quantum_crypto: None,
@@ -866,6 +1111,9 @@ impl AppState {
             // price_oracle: None, // Temporarily disabled
             // stablecoin_manager: None, // Temporarily disabled
             // collateral_manager: None, // Temporarily disabled
+
+            // Quantum Oracle - AI-Enhanced Price Aggregation
+            // quantum_oracle: None,  // Temporarily disabled
 
             // Advanced Infrastructure - Initialize with None, available on demand
             tor_circuit_manager: None,
@@ -895,9 +1143,14 @@ impl AppState {
             quantum_mixer: None,  // Simple constructor - mixer initialized on demand
             zkp_prover: None,     // Simple constructor - ZK proofs initialized on demand
 
-            // Network components already specified above (lines 660-674)
-            // REMOVED DUPLICATE: bitcoin_bridge, dns_phantom, bep44_discovery, tor_client,
-            // network_manager, production_peer_discovery, connection_manager
+            // Quillon Bank - Full Quantum Banking System with CDP
+            quillon_bank,
+
+            // QUG/QUGUSD Stablecoin System - CollateralVault
+            collateral_vault,
+
+            // Distributed VM and DEX - Initialize in production mode
+            distributed_protocol: None, // Initialized separately
         })
     }
 
@@ -914,6 +1167,29 @@ impl AppState {
         let balances = self.wallet_balances.read().await.clone();
         self.storage_engine.save_wallet_balances(&balances).await?;
         Ok(())
+    }
+
+    /// Initialize distributed VM and DEX protocol (for horizontal scaling)
+    pub async fn init_distributed_protocol(&mut self, local_peer_id: libp2p::PeerId) -> anyhow::Result<()> {
+        tracing::info!("🌐 Initializing distributed VM & DEX coordinators for horizontal scaling");
+
+        let protocol = q_network::DistributedProtocolManager::new(local_peer_id).await?;
+
+        self.distributed_protocol = Some(Arc::new(protocol));
+
+        tracing::info!("✅ Distributed protocol coordinators initialized - ready for multi-node collaboration");
+        tracing::info!("📝 Note: Network transport will be managed by UnifiedNetworkManager");
+
+        Ok(())
+    }
+
+    /// Get distributed protocol stats
+    pub async fn get_distributed_stats(&self) -> Option<q_network::DistributedNetworkStats> {
+        if let Some(ref protocol) = self.distributed_protocol {
+            Some(protocol.get_stats().await)
+        } else {
+            None
+        }
     }
 }
 pub mod p2p_server;

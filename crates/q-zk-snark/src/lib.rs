@@ -9,11 +9,13 @@ pub mod circuits;
 pub mod groth16;
 pub mod plonk;
 pub mod verification;
+pub mod wallet_privacy;
 
 // Re-exports for convenience
 pub use circuits::*;
 pub use groth16::*;
 pub use plonk::*;
+pub use wallet_privacy::*;
 
 /// Core SNARK trait that all proof systems must implement
 pub trait SNARK<F: ark_ff::Field> {

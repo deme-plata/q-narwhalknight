@@ -82,9 +82,27 @@ async fn launch_validator_node(config: NodeConfig) -> Result<tokio::process::Chi
     // Create data directory
     tokio::fs::create_dir_all(&config.data_dir).await?;
 
-    // Get absolute path to binary
-    let binary_path = std::env::current_dir()?
-        .join("target/x86_64-unknown-linux-gnu/release/q-api-server");
+    // Get absolute path to binary - search in multiple locations
+    let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
+        .ok()
+        .and_then(|manifest_dir| {
+            std::path::PathBuf::from(&manifest_dir)
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+    let possible_paths = vec![
+        workspace_root.join("target/release/q-api-server"),
+        workspace_root.join("target/x86_64-unknown-linux-gnu/release/q-api-server"),
+        std::env::current_dir()?.join("target/release/q-api-server"),
+        std::env::current_dir()?.join("target/x86_64-unknown-linux-gnu/release/q-api-server"),
+    ];
+
+    let binary_path = possible_paths.into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("q-api-server binary not found. Searched: {:?}", workspace_root))?;
 
     // Launch q-api-server with libp2p enabled
     let child = Command::new(&binary_path)
@@ -144,9 +162,46 @@ async fn submit_to_node(
     Ok((total_tx, tps))
 }
 
+/// Wait for all HTTP servers to be ready
+async fn wait_for_nodes_ready(nodes: &[NodeConfig], client: &Client) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("\n⏳ Waiting for all nodes to start HTTP servers...");
+
+    let mut ready_nodes = vec![false; nodes.len()];
+    let max_wait = Duration::from_secs(180);
+    let start = Instant::now();
+
+    while start.elapsed() < max_wait {
+        let mut all_ready = true;
+
+        for (idx, config) in nodes.iter().enumerate() {
+            if !ready_nodes[idx] {
+                let url = format!("http://localhost:{}/health", config.http_port);
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        ready_nodes[idx] = true;
+                        println!("  ✅ Node {} HTTP server ready", config.node_id);
+                    }
+                    _ => {
+                        all_ready = false;
+                    }
+                }
+            }
+        }
+
+        if all_ready {
+            println!("✅ All {} nodes HTTP servers are ready!\n", nodes.len());
+            return Ok(());
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    Err("Timeout waiting for nodes to be ready".into())
+}
+
 /// Wait for nodes to discover each other via libp2p mDNS
 async fn wait_for_peer_discovery(nodes: &[NodeConfig]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n⏳ Waiting for libp2p peer discovery (mDNS)...");
+    println!("⏳ Waiting for libp2p peer discovery (mDNS)...");
 
     // Give nodes 10 seconds to discover each other via mDNS
     for i in 1..=10 {
@@ -162,6 +217,88 @@ async fn wait_for_peer_discovery(nodes: &[NodeConfig]) -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// Query shadow mode metrics from all nodes
+async fn query_shadow_mode_metrics(
+    nodes: &[NodeConfig],
+    client: &Client,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!();
+    println!("================================================================================");
+    println!("🎭 SHADOW MODE CONSENSUS MONITORING");
+    println!("================================================================================");
+    println!("Querying Q-Resonance shadow mode performance...");
+    println!();
+
+    for config in nodes {
+        let url = format!("http://localhost:{}/api/v1/consensus/shadow-metrics", config.http_port);
+
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(metrics) => {
+                        println!("📊 Node {} Shadow Mode Metrics:", config.node_id);
+
+                        if let Some(data) = metrics.get("data") {
+                            let shadow_active = data.get("shadow_mode_active")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            if shadow_active {
+                                let total_rounds = data.get("total_rounds").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let agreement_rounds = data.get("agreement_rounds").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let agreement_rate = data.get("current_agreement_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let primary_latency = data.get("primary_avg_latency_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let shadow_latency = data.get("shadow_avg_latency_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let latency_improvement = data.get("latency_improvement").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let migration_recommended = data.get("migration_recommended").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                                println!("  ✅ Shadow Mode: ACTIVE");
+                                println!("  📈 Observation Rounds: {}/{}", total_rounds, 100);
+                                println!("  🤝 Agreement Rounds: {}", agreement_rounds);
+                                println!("  📊 Agreement Rate: {:.1}%", agreement_rate * 100.0);
+                                println!("  ⚡ Primary (DAG-Knight) Latency: {:.2}ms", primary_latency);
+                                println!("  🌊 Shadow (Q-Resonance) Latency: {:.2}ms", shadow_latency);
+                                println!("  🚀 Latency Improvement: {:.1}%", latency_improvement);
+
+                                if migration_recommended {
+                                    println!("  ✨ MIGRATION RECOMMENDED: Q-Resonance outperforming DAG-Knight!");
+                                } else {
+                                    println!("  ⏳ Migration Status: Collecting more data");
+                                }
+
+                                if let Some(perf) = data.get("performance_comparison") {
+                                    let shadow_faster = perf.get("shadow_is_faster").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let speedup = perf.get("speedup_factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
+
+                                    if shadow_faster {
+                                        println!("  🎯 Q-Resonance is {:.2}x FASTER than DAG-Knight!", speedup);
+                                    } else {
+                                        println!("  📊 DAG-Knight currently faster (shadow learning)");
+                                    }
+                                }
+                            } else {
+                                println!("  ⚠️  Shadow Mode: INACTIVE");
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => {
+                        println!("  ⚠️  Node {}: Failed to parse metrics: {}", config.node_id, e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                println!("  ⚠️  Node {}: Shadow mode not available (HTTP {})", config.node_id, resp.status());
+            }
+            Err(e) => {
+                println!("  ⚠️  Node {}: Connection failed: {}", config.node_id, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_distributed_libp2p_1m_tps() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("================================================================================");
@@ -172,7 +309,10 @@ async fn test_distributed_libp2p_1m_tps() -> Result<(), Box<dyn std::error::Erro
     println!();
 
     // Configuration: 4 validator nodes
-    let num_nodes = 4;
+    let num_nodes = std::env::var("Q_NUM_NODES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
     let base_http_port = 9100;
     let base_p2p_port = 9200;
 
@@ -204,14 +344,13 @@ async fn test_distributed_libp2p_1m_tps() -> Result<(), Box<dyn std::error::Erro
                 return Err(e);
             }
         }
-        // Stagger node launches slightly
-        sleep(Duration::from_millis(500)).await;
+        // Stagger node launches to prevent OpenBLAS initialization race condition
+        // Increased to 30 seconds to allow each node to complete Q-Resonance initialization
+        // (OpenBLAS has global locks that cause deadlock when multiple processes init simultaneously)
+        sleep(Duration::from_secs(30)).await;
     }
 
-    println!("\n✅ All {} nodes launched successfully\n", num_nodes);
-
-    // Wait for peer discovery
-    wait_for_peer_discovery(&node_configs).await?;
+    println!("\n✅ All {} nodes launched successfully", num_nodes);
 
     // HTTP client configuration
     let client = Arc::new(
@@ -220,6 +359,12 @@ async fn test_distributed_libp2p_1m_tps() -> Result<(), Box<dyn std::error::Erro
             .timeout(Duration::from_secs(120))
             .build()?
     );
+
+    // Wait for HTTP servers to be ready
+    wait_for_nodes_ready(&node_configs, &client).await?;
+
+    // Wait for peer discovery
+    wait_for_peer_discovery(&node_configs).await?;
 
     // Run benchmark: Each client submits to different nodes
     println!("================================================================================");
@@ -332,6 +477,9 @@ async fn test_distributed_libp2p_1m_tps() -> Result<(), Box<dyn std::error::Erro
     println!("Consensus Integration: DAG-Knight vertex gossip");
     println!("Transport:             TCP + Noise encryption + Yamux multiplexing");
     println!();
+
+    // Query shadow mode metrics from all nodes
+    let _ = query_shadow_mode_metrics(&node_configs, &client).await;
 
     // Cleanup: Kill all node processes
     println!("🧹 Cleaning up validator nodes...");

@@ -67,6 +67,10 @@ tokio-socks = "0.5"
 axum = { workspace = true }
 tower-http = { workspace = true }
 
+# SSE client for real-time mining rewards
+eventsource-client = "0.12"
+futures = { workspace = true }
+
 # JSON-RPC for Stratum protocol
 jsonrpc-core = "18.0"
 serde_with = "3.4"

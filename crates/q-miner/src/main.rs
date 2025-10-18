@@ -4,6 +4,7 @@ use console::style;
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
 use tokio::signal;
 use tracing::{error, info, warn};
+use chrono::{DateTime, Utc};
 
 // Simplified command-line arguments
 #[derive(Parser)]
@@ -46,6 +47,25 @@ pub struct HardwareInfo {
     pub cpu_threads: usize,
     pub cuda_devices: usize,
     pub opencl_devices: usize,
+}
+
+// Mining challenge from API server
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MiningChallenge {
+    pub challenge_hash: String,
+    pub difficulty_target: String,
+    pub block_height: u64,
+    pub vdf_iterations: u32,
+    pub block_reward: f64,
+    pub expires_at: DateTime<Utc>,
+}
+
+// API response wrapper
+#[derive(Debug, serde::Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    data: Option<T>,
+    error: Option<String>,
 }
 
 #[tokio::main]
@@ -100,9 +120,14 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Validate wallet format
-        if !wallet.starts_with("qnk") || wallet.len() != 67 {
-            error!("❌ Invalid wallet address format. Must start with 'qnk' and be 67 characters long.");
+        // Validate wallet format - support both QUG (qnk + 64 hex) and AQUA (qnka + 62 hex) wallets
+        let is_qug_wallet = wallet.starts_with("qnk") && wallet.len() == 67;
+        let is_aqua_wallet = wallet.starts_with("qnka") && wallet.len() == 66;
+
+        if !is_qug_wallet && !is_aqua_wallet {
+            error!("❌ Invalid wallet address format.");
+            error!("   QUG wallet: 'qnk' + 64 hex chars (67 total)");
+            error!("   AQUA wallet: 'qnka' + 62 hex chars (66 total)");
             std::process::exit(1);
         }
 
@@ -196,12 +221,20 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     let monitor_handle = tokio::spawn(async move {
         hash_rate_monitor(monitor_counter, monitor_running).await;
     });
-    
+
+    // Start SSE listener for real-time mining rewards
+    let sse_wallet = wallet.clone();
+    let sse_running = is_running.clone();
+    let sse_handle = tokio::spawn(async move {
+        start_sse_listener(sse_wallet, sse_running).await;
+    });
+
     if gpu_enabled {
         info!("🚀 GPU mining would be enabled (placeholder)");
     }
-    
+
     info!("✅ Q-NarwhalKnight miner started successfully!");
+    info!("🎧 Connected to SSE stream for real-time rewards");
     info!("Press Ctrl+C to stop mining...");
     
     // Wait for shutdown signal
@@ -215,10 +248,11 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
         let _ = handle.await;
     }
     monitor_handle.abort();
-    
+    sse_handle.abort();
+
     let total_hashes = hash_counter.load(Ordering::Relaxed);
     info!("👋 Q-NarwhalKnight miner stopped. Total hashes: {}", total_hashes);
-    
+
     Ok(())
 }
 
@@ -256,35 +290,91 @@ async fn mining_thread(
 
     let mut nonce = thread_id as u64 * 1_000_000;
     let batch_size = (intensity as u64) * 10_000;
-
-    // Difficulty target (for demonstration - easy target)
-    let target = [0x00u8, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+    let api_url = "http://localhost:8080";
 
     let client = reqwest::Client::new();
 
+    // Fetch initial mining challenge
+    let mut current_challenge = match fetch_mining_challenge(api_url).await {
+        Ok(challenge) => {
+            info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
+                 thread_id, challenge.block_height, challenge.block_reward);
+            challenge
+        }
+        Err(e) => {
+            error!("❌ Thread {} failed to fetch initial challenge: {}", thread_id, e);
+            error!("   Make sure q-api-server is running on {}", api_url);
+            return;
+        }
+    };
+
+    let mut challenge_hash = match hex_to_bytes(&current_challenge.challenge_hash) {
+        Ok(hash) => hash,
+        Err(e) => {
+            error!("❌ Thread {} failed to decode challenge hash: {}", thread_id, e);
+            return;
+        }
+    };
+
+    let mut target = match hex_to_bytes(&current_challenge.difficulty_target) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("❌ Thread {} failed to decode difficulty target: {}", thread_id, e);
+            return;
+        }
+    };
+
+    let mut last_challenge_refresh = std::time::Instant::now();
+    let challenge_refresh_interval = std::time::Duration::from_secs(50); // Refresh before 60s expiry
+
     while is_running.load(Ordering::SeqCst) {
+        // Refresh challenge if expired or near expiration
+        if last_challenge_refresh.elapsed() >= challenge_refresh_interval {
+            match fetch_mining_challenge(api_url).await {
+                Ok(new_challenge) => {
+                    if new_challenge.block_height != current_challenge.block_height {
+                        info!("🔄 Thread {} updated challenge: block #{} -> #{}",
+                             thread_id, current_challenge.block_height, new_challenge.block_height);
+                    }
+                    current_challenge = new_challenge;
+
+                    // Decode new challenge hash and difficulty
+                    if let Ok(hash) = hex_to_bytes(&current_challenge.challenge_hash) {
+                        challenge_hash = hash;
+                    }
+                    if let Ok(t) = hex_to_bytes(&current_challenge.difficulty_target) {
+                        target = t;
+                    }
+
+                    last_challenge_refresh = std::time::Instant::now();
+                }
+                Err(e) => {
+                    warn!("⚠️  Thread {} failed to refresh challenge: {}", thread_id, e);
+                    // Continue with existing challenge
+                }
+            }
+        }
+
         // Mine a batch of nonces
         for _ in 0..batch_size {
-            let hash = compute_dag_knight_hash(&[0u8; 32], nonce);
+            let hash = compute_dag_knight_hash(&challenge_hash, nonce);
             hash_counter.fetch_add(1, Ordering::Relaxed);
 
             // Check if solution meets difficulty target
             if hash < target {
-                info!("💎 Thread {} found solution! Nonce: {}, Hash: {:02x?}",
-                     thread_id, nonce, &hash[..8]);
+                info!("💎 Thread {} found solution! Block #{}, Nonce: {}, Hash: {:02x?}",
+                     thread_id, current_challenge.block_height, nonce, &hash[..8]);
 
-                // Submit solution to the network
+                // Submit solution to the network with challenge_hash for server-side verification
                 let solution = serde_json::json!({
                     "miner_address": wallet,
                     "nonce": nonce,
-                    "hash": hash,
-                    "difficulty_target": target
+                    "hash": hex::encode(hash),
+                    "difficulty_target": hex::encode(target),
+                    "challenge_hash": hex::encode(challenge_hash)
                 });
 
-                match client.post("http://localhost:8090/api/v1/mining/submit")
+                match client.post(format!("{}/api/v1/mining/submit", api_url))
                     .json(&solution)
                     .send()
                     .await
@@ -298,6 +388,8 @@ async fn mining_thread(
                                     }
                                 }
                             }
+                        } else {
+                            warn!("❌ Solution rejected: HTTP {}", resp.status());
                         }
                     }
                     Err(e) => {
@@ -322,26 +414,171 @@ async fn hash_rate_monitor(
 ) {
     let mut last_hash_count = 0u64;
     let mut last_time = std::time::Instant::now();
-    
+
     while is_running.load(Ordering::SeqCst) {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        
+
         let current_hash_count = hash_counter.load(Ordering::Relaxed);
         let current_time = std::time::Instant::now();
-        
+
         let hashes_computed = current_hash_count - last_hash_count;
         let time_elapsed = current_time.duration_since(last_time).as_secs_f64();
-        
+
         if time_elapsed > 0.0 {
             let hash_rate = hashes_computed as f64 / time_elapsed;
-            
-            info!("📊 Hash Rate: {:.2} H/s ({:.2} KH/s) - Total: {}", 
+
+            info!("📊 Hash Rate: {:.2} H/s ({:.2} KH/s) - Total: {}",
                  hash_rate, hash_rate / 1000.0, current_hash_count);
         }
-        
+
         last_hash_count = current_hash_count;
         last_time = current_time;
     }
+}
+
+/// SSE listener for real-time mining rewards
+async fn start_sse_listener(wallet: String, is_running: Arc<AtomicBool>) {
+    use eventsource_client::{self as eventsource, Client as _};
+    use futures::StreamExt;
+
+    // Include wallet_address parameter for filtered SSE events
+    let url = format!("http://localhost:8080/api/v1/events?wallet_address={}", wallet);
+
+    loop {
+        if !is_running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let client = match eventsource::ClientBuilder::for_url(&url) {
+            Ok(builder) => builder.build(),
+            Err(e) => {
+                warn!("Failed to create SSE client: {}", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        let mut stream = client.stream();
+
+        info!("🎧 Connected to SSE stream at {}", url);
+
+        while is_running.load(Ordering::SeqCst) {
+            match stream.next().await {
+                Some(Ok(eventsource::SSE::Event(ev))) => {
+                    // Handle mining_reward events
+                    if ev.event_type == "mining_reward" {
+                        match serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            Ok(data) => {
+                                if let Some(miner_address) = data.get("miner_address").and_then(|v| v.as_str()) {
+                                    if miner_address == wallet {
+                                        let reward_qnk = data.get("reward_qnk")
+                                            .and_then(|v| v.as_f64())
+                                            .unwrap_or(0.0);
+                                        let block_height = data.get("block_height")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let nonce = data.get("nonce")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+
+                                        // Display celebratory reward notification
+                                        info!("");
+                                        info!("╔═══════════════════════════════════════════════════╗");
+                                        info!("║   💎 MINING REWARD RECEIVED!                      ║");
+                                        info!("╠═══════════════════════════════════════════════════╣");
+                                        info!("║   Reward: {:<40} ║", format!("{:.8} QNK", reward_qnk));
+                                        info!("║   Block:  {:<40} ║", format!("#{}", block_height));
+                                        info!("║   Nonce:  {:<40} ║", nonce);
+                                        info!("╚═══════════════════════════════════════════════════╝");
+                                        info!("");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse mining_reward event: {}", e);
+                            }
+                        }
+                    }
+
+                    // Handle balance_updated events
+                    if ev.event_type == "balance_updated" {
+                        match serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            Ok(data) => {
+                                if let Some(wallet_address) = data.get("wallet_address").and_then(|v| v.as_str()) {
+                                    if wallet_address == wallet {
+                                        if let Some(change_reason) = data.get("change_reason").and_then(|v| v.as_str()) {
+                                            if change_reason == "mining_reward" {
+                                                let new_balance = data.get("new_balance")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0);
+                                                info!("💰 Balance Updated: {:.8} QNK", new_balance);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse balance_updated event: {}", e);
+                            }
+                        }
+                    }
+                }
+                Some(Ok(eventsource::SSE::Comment(_))) => {
+                    // Ignore comments
+                }
+                Some(Err(e)) => {
+                    warn!("SSE stream error: {}", e);
+                    break;
+                }
+                None => {
+                    warn!("SSE stream ended");
+                    break;
+                }
+            }
+        }
+
+        // Reconnect after delay if still running
+        if is_running.load(Ordering::SeqCst) {
+            warn!("Reconnecting to SSE stream in 5 seconds...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    info!("🛑 SSE listener stopped");
+}
+
+/// Fetch current mining challenge from API server
+async fn fetch_mining_challenge(api_url: &str) -> Result<MiningChallenge> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/mining/challenge", api_url);
+
+    let response = client.get(&url)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to fetch mining challenge: HTTP {}", response.status());
+    }
+
+    let api_response: ApiResponse<MiningChallenge> = response.json().await?;
+
+    if !api_response.success {
+        let error_msg = api_response.error.unwrap_or_else(|| "Unknown error".to_string());
+        anyhow::bail!("API returned error: {}", error_msg);
+    }
+
+    api_response.data.ok_or_else(|| anyhow::anyhow!("Missing challenge data in API response"))
+}
+
+/// Decode hex string to byte array
+fn hex_to_bytes(hex_str: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(hex_str)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("Expected 32 bytes, got {}", bytes.len());
+    }
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&bytes);
+    Ok(result)
 }
 
 /// DAG-Knight VDF mining algorithm
@@ -350,16 +587,16 @@ fn compute_dag_knight_hash(input: &[u8; 32], nonce: u64) -> [u8; 32] {
     let mut hasher_input = Vec::with_capacity(40);
     hasher_input.extend_from_slice(input);
     hasher_input.extend_from_slice(&nonce.to_le_bytes());
-    
+
     // Initial hash
     let initial_hash = blake3::hash(&hasher_input);
-    
+
     // VDF computation (simplified - 100 iterations for demo)
     let mut current = initial_hash.as_bytes().to_vec();
     for _ in 0..100 {
         current = blake3::hash(&current).as_bytes().to_vec();
     }
-    
+
     let mut result = [0u8; 32];
     result.copy_from_slice(&current[..32]);
     result

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload } from 'lucide-react';
+import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send } from 'lucide-react';
 
 type ContractCategory = 'tokens' | 'defi' | 'rwa' | 'governance';
 type DeploymentStep = 'select' | 'basics' | 'features' | 'review' | 'deploying' | 'success';
@@ -19,6 +19,7 @@ interface DeployedContract {
     governance?: boolean;
     pausable?: boolean;
     upgradeable?: boolean;
+    airdrop?: boolean;
   };
   isPaused?: boolean;
   logoUrl?: string; // libp2p IPFS CID for logo
@@ -148,25 +149,106 @@ export default function VittuaVMScreen() {
     staking: true,
     governance: false,
     pausable: true,
-    upgradeable: false
+    upgradeable: false,
+    airdrop: true
   });
 
-  // Deployed contracts - fetched from API
-  // Load deployed contracts from localStorage
-  const [deployedContracts, setDeployedContracts] = useState<DeployedContract[]>(() => {
-    const saved = localStorage.getItem('deployedContracts');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Deployed contracts - fetched from blockchain backend API
+  const [deployedContracts, setDeployedContracts] = useState<DeployedContract[]>([]);
+  const [loadingContracts, setLoadingContracts] = useState(true);
+  const [lastDeployedAddress, setLastDeployedAddress] = useState<string>('');
 
-  // Save deployed contracts to localStorage whenever they change
+  // Load contracts from localStorage on mount for instant display
   React.useEffect(() => {
-    localStorage.setItem('deployedContracts', JSON.stringify(deployedContracts));
-  }, [deployedContracts]);
+    const walletAddress = localStorage.getItem('walletAddress');
+    if (!walletAddress) return;
+
+    const cacheKey = `deployedContracts_${walletAddress}`;
+    const cached = localStorage.getItem(cacheKey);
+
+    if (cached) {
+      try {
+        const contracts = JSON.parse(cached);
+        // Convert date strings back to Date objects
+        const parsedContracts = contracts.map((c: any) => ({
+          ...c,
+          deployedAt: new Date(c.deployedAt)
+        }));
+        setDeployedContracts(parsedContracts);
+        console.log('📦 Loaded', parsedContracts.length, 'contracts from cache');
+      } catch (error) {
+        console.error('Failed to parse cached contracts:', error);
+      }
+    }
+  }, []);
+
+  // Fetch deployed contracts from backend API based on wallet address
+  React.useEffect(() => {
+    const fetchDeployedContracts = async () => {
+      try {
+        setLoadingContracts(true);
+
+        // Get wallet address
+        const walletAddress = localStorage.getItem('walletAddress');
+        if (!walletAddress) {
+          console.log('No wallet address found - skipping contract fetch');
+          setLoadingContracts(false);
+          return;
+        }
+
+        console.log('📡 Fetching deployed contracts for wallet:', walletAddress);
+
+        // Fetch contracts from backend API
+        const response = await fetch(`/api/v1/contracts/user/${walletAddress}`);
+
+        if (!response.ok) {
+          console.warn('Failed to fetch contracts:', response.status);
+          setLoadingContracts(false);
+          return;
+        }
+
+        const result = await response.json();
+
+        if (result.success && result.data) {
+          // Map backend contract data to frontend format
+          const contracts: DeployedContract[] = result.data.map((c: any) => ({
+            address: c.address, // Already has qnk prefix from backend
+            name: c.name,
+            symbol: c.symbol || 'N/A',
+            type: c.contract_type,
+            deployedAt: new Date(c.deployed_at * 1000), // Convert Unix timestamp
+            features: c.features || {},
+            isPaused: false,
+          }));
+
+          console.log('✅ Loaded', contracts.length, 'deployed contracts from blockchain');
+          setDeployedContracts(contracts);
+
+          // Cache contracts in localStorage for instant display on next mount
+          const cacheKey = `deployedContracts_${walletAddress}`;
+          localStorage.setItem(cacheKey, JSON.stringify(contracts));
+          console.log('💾 Cached contracts to localStorage');
+        }
+      } catch (error) {
+        console.error('Failed to fetch deployed contracts:', error);
+      } finally {
+        setLoadingContracts(false);
+      }
+    };
+
+    fetchDeployedContracts();
+
+    // Refresh contracts every 30 seconds
+    const interval = setInterval(fetchDeployedContracts, 30000);
+    return () => clearInterval(interval);
+  }, [step]); // Re-fetch when returning to 'select' step
 
   // Contract control states
   const [mintAmount, setMintAmount] = useState('');
   const [burnAmount, setBurnAmount] = useState('');
   const [reflectionRate, setReflectionRate] = useState('2');
+  const [airdropAddresses, setAirdropAddresses] = useState('');
+  const [airdropAmount, setAirdropAmount] = useState('');
 
   const toggleFeature = (feature: keyof typeof features) => {
     setFeatures(prev => ({ ...prev, [feature]: !prev[feature] }));
@@ -331,72 +413,84 @@ export default function VittuaVMScreen() {
       console.log('📝 Contract metadata:', metadata);
       console.log('📊 Metadata size:', metadataBytes.length, 'bytes');
 
-      // Sign transaction via wallet endpoint
-      const zeroAddress = new Array(32).fill(0); // Contract deployment address (all zeros)
+      // Deploy contract via backend API (bypassing the zero-address transaction method)
+      // Get wallet address for contract ownership
+      const walletAddress = localStorage.getItem('walletAddress');
+      if (!walletAddress) {
+        throw new Error('No wallet address found - cannot determine contract owner');
+      }
 
-      const signRequest = {
-        to: zeroAddress,
-        amount: 0, // No QUG transfer, just deployment
-        fee: fee,
-        password: '', // In production, prompt for password
-        data: metadataBytes, // Contract metadata in transaction data
+      console.log('🚀 Deploying contract via backend API...');
+      console.log('👤 Contract owner:', walletAddress);
+      console.log('📝 Contract type:', selectedTemplate?.id);
+
+      // Map frontend template ID to backend contract type
+      const contractTypeMap: Record<string, string> = {
+        'secure-token': 'secure_token',
+        'advanced-token': 'advanced_token',
+        'rwa-token': 'rwa_token',
+        'governance': 'governance',
+        'private-dex': 'private_dex',
       };
 
-      console.log('✍️  Signing contract deployment transaction...');
-      console.log('📋 Using wallet ID:', walletId);
+      const backendContractType = contractTypeMap[selectedTemplate?.id || ''] || 'secure_token';
 
-      const signResponse = await fetch(`/api/v1/wallets/${walletId}/sign`, {
+      // Prepare deployment request
+      // Note: initialSupply is sent as-is (human-readable amount like "1000000")
+      // The backend and display layer handle decimal conversion (÷10^18) for display only
+      const deploymentRequest = {
+        contract_type: backendContractType,
+        owner: walletAddress,
+        parameters: {
+          name: contractName,
+          symbol: tokenSymbol,
+          initialSupply: initialSupply, // Send human-readable amount
+          logoIpfsCid: logoIpfsCid || undefined,
+          ...features, // Include all feature flags
+        },
+        deployment_options: {
+          test_deployment: false,
+          auto_verify: true,
+          enable_governance: features.governance || false,
+          enable_upgrades: features.upgradeable || false,
+          gas_limit: fee,
+          deploy_with_proxy: false,
+        },
+      };
+
+      console.log('📡 Sending deployment request:', deploymentRequest);
+
+      // Call the contract deployment API
+      const deployResponse = await fetch('/api/v1/contracts/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(signRequest),
+        body: JSON.stringify(deploymentRequest),
       });
 
-      if (!signResponse.ok) {
-        const error = await signResponse.json();
-        throw new Error(error.error || 'Failed to sign transaction');
+      if (!deployResponse.ok) {
+        const error = await deployResponse.json();
+        throw new Error(error.error || 'Failed to deploy contract via API');
       }
 
-      const signResult = await signResponse.json();
-      console.log('📦 Sign response:', signResult);
+      const deployResult = await deployResponse.json();
+      console.log('✅ Contract deployment response:', deployResult);
 
-      // Validate the response structure
-      if (!signResult || !signResult.success) {
-        throw new Error(signResult?.error || 'Transaction signing failed');
+      // Validate deployment result
+      if (!deployResult.success || !deployResult.data) {
+        throw new Error(deployResult.error || 'Contract deployment failed');
       }
 
-      if (!signResult.data) {
-        throw new Error('No transaction data returned from signing');
+      // Extract the actual contract address from the response
+      const contractAddress = deployResult.data.contract_address;
+
+      if (!contractAddress) {
+        throw new Error('Backend did not return a contract address');
       }
 
-      const signedTx = signResult.data;
+      console.log('🎉 Contract successfully deployed at:', contractAddress);
 
-      // Validate signed transaction has required fields
-      if (!signedTx.id) {
-        console.error('Invalid signed transaction:', signedTx);
-        throw new Error('Signed transaction is missing ID field');
-      }
-
-      console.log('✅ Transaction signed:', signedTx.id);
-      console.log('📡 Broadcasting to blockchain...');
-
-      // Submit transaction to blockchain
-      const submitResponse = await fetch('/api/v1/transactions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transaction: signedTx }),
-      });
-
-      if (!submitResponse.ok) {
-        const error = await submitResponse.json();
-        throw new Error(error.error || 'Failed to submit transaction');
-      }
-
-      const submitResult = await submitResponse.json();
-      console.log('✅ Contract deployed on blockchain!', submitResult);
-
-      // Convert transaction ID (byte array) to hex string with qnk prefix
-      const txIdArray = Array.isArray(signedTx.id) ? signedTx.id : Object.values(signedTx.id);
-      const contractAddress = 'qnk' + txIdArray.map((b: number) => b.toString(16).padStart(2, '0')).join('');
+      // Save the deployed address for success screen display
+      setLastDeployedAddress(contractAddress);
 
       // Add deployed contract to local state
       const newContract: DeployedContract = {
@@ -411,7 +505,14 @@ export default function VittuaVMScreen() {
         logoDataUrl: logoPreview || undefined,
       };
 
-      setDeployedContracts(prev => [...prev, newContract]);
+      const updatedContracts = [...deployedContracts, newContract];
+      setDeployedContracts(updatedContracts);
+
+      // Update localStorage cache immediately (walletAddress already defined above)
+      const cacheKey = `deployedContracts_${walletAddress}`;
+      localStorage.setItem(cacheKey, JSON.stringify(updatedContracts));
+      console.log('💾 Updated cache with newly deployed contract');
+
       setStep('success');
 
     } catch (error: any) {
@@ -421,28 +522,186 @@ export default function VittuaVMScreen() {
     }
   };
 
-  const handleMint = (contract: DeployedContract) => {
-    console.log(`Minting ${mintAmount} ${contract.symbol}`);
-    setMintAmount('');
+  const handleMint = async (contract: DeployedContract) => {
+    if (!mintAmount || parseFloat(mintAmount) <= 0) {
+      alert('Please enter a valid amount to mint');
+      return;
+    }
+
+    try {
+      console.log(`🪙 Minting ${mintAmount} ${contract.symbol} for contract ${contract.address}`);
+
+      const response = await fetch('/api/v1/contracts/mint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: contract.address,
+          amount: mintAmount,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to mint tokens');
+      }
+
+      const result = await response.json();
+      console.log('✅ Mint successful:', result);
+      alert(`Successfully minted ${mintAmount} ${contract.symbol}!`);
+      setMintAmount('');
+    } catch (error: any) {
+      console.error('❌ Mint failed:', error);
+      alert(`Mint failed: ${error.message}`);
+    }
   };
 
-  const handleBurn = (contract: DeployedContract) => {
-    console.log(`Burning ${burnAmount} ${contract.symbol}`);
-    setBurnAmount('');
+  const handleBurn = async (contract: DeployedContract) => {
+    if (!burnAmount || parseFloat(burnAmount) <= 0) {
+      alert('Please enter a valid amount to burn');
+      return;
+    }
+
+    try {
+      console.log(`🔥 Burning ${burnAmount} ${contract.symbol} from contract ${contract.address}`);
+
+      const response = await fetch('/api/v1/contracts/burn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: contract.address,
+          amount: burnAmount,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to burn tokens');
+      }
+
+      const result = await response.json();
+      console.log('✅ Burn successful:', result);
+      alert(`Successfully burned ${burnAmount} ${contract.symbol}!`);
+      setBurnAmount('');
+    } catch (error: any) {
+      console.error('❌ Burn failed:', error);
+      alert(`Burn failed: ${error.message}`);
+    }
   };
 
-  const handleTogglePause = (contract: DeployedContract) => {
-    setDeployedContracts(prev =>
-      prev.map(c =>
-        c.address === contract.address
-          ? { ...c, isPaused: !c.isPaused }
-          : c
-      )
-    );
+  const handleAirdrop = async (contract: DeployedContract) => {
+    if (!airdropAddresses || !airdropAmount || parseFloat(airdropAmount) <= 0) {
+      alert('Please enter valid addresses and amount');
+      return;
+    }
+
+    // Parse addresses (comma or newline separated)
+    const addresses = airdropAddresses
+      .split(/[\n,]+/)
+      .map(addr => addr.trim())
+      .filter(addr => addr.length > 0);
+
+    if (addresses.length === 0) {
+      alert('Please enter at least one address');
+      return;
+    }
+
+    try {
+      console.log(`✈️ Airdropping ${airdropAmount} ${contract.symbol} to ${addresses.length} addresses`);
+
+      const response = await fetch('/api/v1/contracts/airdrop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: contract.address,
+          recipients: addresses,
+          amount_per_recipient: airdropAmount,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to airdrop tokens');
+      }
+
+      const result = await response.json();
+      console.log('✅ Airdrop successful:', result);
+      alert(`Successfully airdropped ${airdropAmount} ${contract.symbol} to ${addresses.length} addresses!`);
+      setAirdropAddresses('');
+      setAirdropAmount('');
+    } catch (error: any) {
+      console.error('❌ Airdrop failed:', error);
+      alert(`Airdrop failed: ${error.message}`);
+    }
   };
 
-  const handleUpdateReflection = (contract: DeployedContract) => {
-    console.log(`Setting reflection rate to ${reflectionRate}% for ${contract.symbol}`);
+  const handleTogglePause = async (contract: DeployedContract) => {
+    try {
+      const newPauseState = !contract.isPaused;
+      console.log(`${newPauseState ? 'Pausing' : 'Resuming'} contract ${contract.address}`);
+
+      const response = await fetch('/api/v1/contracts/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: contract.address,
+          paused: newPauseState,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to update pause state');
+      }
+
+      const result = await response.json();
+      console.log('✅ Pause state updated:', result);
+
+      // Update local state
+      setDeployedContracts(prev =>
+        prev.map(c =>
+          c.address === contract.address
+            ? { ...c, isPaused: newPauseState }
+            : c
+        )
+      );
+
+      alert(`Contract ${newPauseState ? 'paused' : 'resumed'} successfully!`);
+    } catch (error: any) {
+      console.error('❌ Failed to update pause state:', error);
+      alert(`Failed to ${contract.isPaused ? 'resume' : 'pause'} contract: ${error.message}`);
+    }
+  };
+
+  const handleUpdateReflection = async (contract: DeployedContract) => {
+    if (!reflectionRate || parseFloat(reflectionRate) < 0 || parseFloat(reflectionRate) > 10) {
+      alert('Please enter a valid reflection rate between 0% and 10%');
+      return;
+    }
+
+    try {
+      console.log(`Setting reflection rate to ${reflectionRate}% for ${contract.symbol}`);
+
+      const response = await fetch('/api/v1/contracts/reflection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: contract.address,
+          rate: reflectionRate,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to update reflection rate');
+      }
+
+      const result = await response.json();
+      console.log('✅ Reflection rate updated:', result);
+      alert(`Reflection rate updated to ${reflectionRate}% for ${contract.symbol}!`);
+    } catch (error: any) {
+      console.error('❌ Failed to update reflection rate:', error);
+      alert(`Failed to update reflection rate: ${error.message}`);
+    }
   };
 
   return (
@@ -692,6 +951,19 @@ export default function VittuaVMScreen() {
                         <div className="text-sm text-gray-400">Enable burning/destroying tokens</div>
                       </div>
                     </label>
+
+                    <label className="flex items-center gap-3 p-4 bg-quantum-dark/50 rounded-lg cursor-pointer hover:bg-quantum-dark/70 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={features.airdrop}
+                        onChange={() => toggleFeature('airdrop')}
+                        className="w-5 h-5 rounded border-quantum-cyan/30 text-quantum-cyan focus:ring-quantum-cyan"
+                      />
+                      <div>
+                        <div className="font-medium text-white">Airdrop</div>
+                        <div className="text-sm text-gray-400">Enable bulk distribution to multiple addresses</div>
+                      </div>
+                    </label>
                   </div>
                 </div>
 
@@ -927,7 +1199,7 @@ export default function VittuaVMScreen() {
               <div className="bg-quantum-dark/50 rounded-lg p-4 mb-6">
                 <div className="text-sm text-gray-400 mb-2">Contract Address</div>
                 <div className="font-mono text-quantum-cyan break-all">
-                  qnk{Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)}
+                  {lastDeployedAddress || 'Deploying...'}
                 </div>
               </div>
 
@@ -977,7 +1249,7 @@ export default function VittuaVMScreen() {
       </AnimatePresence>
 
       {/* My Deployed Contracts Section */}
-      {step === 'select' && deployedContracts.length > 0 && (
+      {step === 'select' && (loadingContracts || deployedContracts.length > 0) && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -985,6 +1257,12 @@ export default function VittuaVMScreen() {
           className="space-y-4"
         >
           <h2 className="text-2xl font-bold text-white">My Deployed Contracts</h2>
+
+          {loadingContracts && (
+            <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-purple/30 rounded-xl p-6 text-center">
+              <p className="text-gray-400">Loading deployed contracts from blockchain...</p>
+            </div>
+          )}
 
           <div className="space-y-4">
             {deployedContracts.map((contract) => (
@@ -1077,6 +1355,46 @@ export default function VittuaVMScreen() {
                             >
                               Burn
                             </motion.button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Airdrop Control */}
+                      {contract.features.airdrop && (
+                        <div className="bg-quantum-dark/50 rounded-lg p-4 md:col-span-2">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Send className="w-4 h-4 text-quantum-blue" />
+                            <span className="font-medium text-white">Airdrop Tokens</span>
+                          </div>
+                          <div className="space-y-2">
+                            <textarea
+                              value={airdropAddresses}
+                              onChange={(e) => setAirdropAddresses(e.target.value)}
+                              placeholder="Enter addresses (one per line or comma-separated)&#10;qnk1abc...&#10;qnk1def..."
+                              rows={3}
+                              className="w-full bg-quantum-dark/70 border border-quantum-blue/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-blue/50 focus:outline-none resize-none"
+                            />
+                            <div className="flex gap-2">
+                              <input
+                                type="number"
+                                value={airdropAmount}
+                                onChange={(e) => setAirdropAmount(e.target.value)}
+                                placeholder="Amount per address"
+                                className="flex-1 bg-quantum-dark/70 border border-quantum-blue/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-blue/50 focus:outline-none"
+                              />
+                              <motion.button
+                                onClick={() => handleAirdrop(contract)}
+                                disabled={!airdropAddresses || !airdropAmount}
+                                className="bg-gradient-to-r from-quantum-blue to-quantum-cyan hover:from-quantum-blue/80 hover:to-quantum-cyan/80 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                whileHover={{ scale: 1.02 }}
+                                whileTap={{ scale: 0.98 }}
+                              >
+                                Airdrop
+                              </motion.button>
+                            </div>
+                            <p className="text-xs text-gray-500">
+                              Send tokens to multiple addresses at once
+                            </p>
                           </div>
                         </div>
                       )}

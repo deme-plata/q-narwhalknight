@@ -1,0 +1,71 @@
+[
+  {
+    "Character": {
+      "name": "Dr. Anya Volkov (The Architect)",
+      "description": "Former GRU cyber warfare commander, Dimitri's older sister, recruited Elena's mother in 1999, Kronos founding member and strategic mastermind",
+      "traits": ["brilliant", "manipulative", "patient", "idealistic", "strategic", "charismatic"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "Irina Kuznetsova (Babushka)",
+      "description": "Ex-KGB quartermaster, now black market arms dealer at Izmailovsky Market, Dimitri's informant",
+      "traits": ["cunning", "resourceful", "mercenary", "pragmatic", "connected"],
+      "relationships": []
+    }
+  },
+  {
+    "Location": {
+      "name": "Sheremetyevo Airport, Moscow",
+      "description": "Moscow's primary international airport, FSB surveillance hub, Elena's arrival point",
+      "atmosphere": "Sterile, heavily monitored, sub-zero temperatures outside, bureaucratic paranoia inside",
+      "significance": ["Elena's Moscow entry point", "FSB surveillance detection", "First layer of Russian security"]
+    }
+  },
+  {
+    "Location": {
+      "name": "Izmailovsky Flea Market",
+      "description": "Sprawling Moscow flea market, Soviet-era contraband hub, black market for quantum-resistant hardware",
+      "atmosphere": "Chaotic, polyglot, surveillance-heavy, nostalgic Soviet kitsch meets cutting-edge tech smuggling",
+      "significance": ["Equipment acquisition site", "Chen's ambush location", "Dimitri's intelligence network hub"]
+    }
+  },
+  {
+    "Location": {
+      "name": "Gorky Park (Winter)",
+      "description": "Historic Moscow park, frozen in winter, conceals entrance to Cold War bunker beneath fountain",
+      "atmosphere": "Desolate, frozen, wind-swept, layers of Soviet history buried beneath snow",
+      "significance": ["Bunker entrance location", "Infiltration staging ground", "Symbolic Cold War battlefield"]
+    }
+  },
+  {
+    "Location": {
+      "name": "Moscow River Embankment",
+      "description": "Frozen river embankment, emergency tunnel exit point, three-way siege location",
+      "atmosphere": "Exposed, frozen, surrounded by hostile forces, ice cracking underfoot",
+      "significance": ["Escape tunnel exit", "Chapter 5 cliffhanger location", "Three-faction convergence point"]
+    }
+  },
+  {
+    "Technology": {
+      "name": "Quantum Fragment Tracker",
+      "description": "Entanglement-based tracking device embedded in Kill Switch Fragment, impossible to detect or disable",
+      "technical_details": [
+        "Uses quantum entanglement for position tracking",
+        "Embedded in dilithium-crystal hardware",
+        "Undetectable by classical electronic countermeasures",
+        "Provides real-time location to Kronos",
+        "Represents Kronos's surveillance superiority"
+      ]
+    }
+  },
+  {
+    "Location": {
+      "name": "Zamoskvorechye Safe House",
+      "description": "Elena's temporary Moscow base, overlooking Moskva River, Soviet-era apartment building",
+      "atmosphere": "Cramped, cold, anonymous, peeling wallpaper and pre-digital security (mechanical locks)",
+      "significance": ["Elena's Moscow staging area", "Planning location", "Old-school tradecraft refuge"]
+    }
+  }
+]

@@ -4,6 +4,8 @@ import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet,
 import TokenDetailsModal from './TokenDetailsModal';
 import LiquidityModal from './LiquidityModal';
 import TokenSelectorModal from './TokenSelectorModal';
+import NitroSuccessModal from './NitroSuccessModal';
+import MintQUGUSDModal from './MintQUGUSDModal';
 import { qnkAPI } from '../services/api';
 
 interface Token {
@@ -60,17 +62,43 @@ export default function DexScreen() {
   const [boostCost, setBoostCost] = useState(100); // Points to spend on boost
   const [isFromTokenSelectorOpen, setIsFromTokenSelectorOpen] = useState(false);
   const [isToTokenSelectorOpen, setIsToTokenSelectorOpen] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successModalData, setSuccessModalData] = useState<any>(null);
+  const [isMintQUGUSDModalOpen, setIsMintQUGUSDModalOpen] = useState(false);
 
   // Load Nitro points from localStorage and boosted tokens from backend with SSE real-time updates
   useEffect(() => {
     let mounted = true;
     let eventSource: EventSource | null = null;
 
-    // Load Nitro points from localStorage (user's balance)
-    const storedPoints = localStorage.getItem('nitroPoints');
-    if (storedPoints) {
-      setNitroPoints(parseInt(storedPoints, 10));
+    // Load Nitro points from localStorage (per wallet address)
+    const walletAddress = localStorage.getItem('walletAddress') || '';
+    if (walletAddress) {
+      const storedPoints = localStorage.getItem(`nitroPoints_${walletAddress}`);
+      if (storedPoints) {
+        setNitroPoints(parseInt(storedPoints, 10));
+      }
     }
+
+    // Listen for nitro points updates from other components (e.g., TokenBar)
+    const handleNitroPointsUpdate = () => {
+      const updatedPoints = localStorage.getItem(`nitroPoints_${walletAddress}`);
+      if (updatedPoints && mounted) {
+        setNitroPoints(parseInt(updatedPoints, 10));
+        console.log('✅ Nitro points updated in DexScreen:', updatedPoints);
+      }
+    };
+
+    // Listen for custom event from TokenBar when nitro points are purchased
+    window.addEventListener('nitroPointsUpdated', handleNitroPointsUpdate);
+
+    // Also listen for storage events (works across tabs/windows)
+    window.addEventListener('storage', (e) => {
+      if (e.key === `nitroPoints_${walletAddress}` && e.newValue && mounted) {
+        setNitroPoints(parseInt(e.newValue, 10));
+        console.log('✅ Nitro points synced via storage event:', e.newValue);
+      }
+    });
 
     // Load initial boosted tokens from backend API
     const fetchNitroBoosts = async () => {
@@ -109,17 +137,20 @@ export default function DexScreen() {
       eventSource.addEventListener('nitro_boost', (event) => {
         if (!mounted) return;
         try {
-          const data = JSON.parse(event.data);
-          console.log('🚀 Received Nitro boost event:', data);
+          const parsed = JSON.parse(event.data);
+          console.log('🚀 Received Nitro boost event:', parsed);
+
+          // Extract data from wrapper - backend sends {type: "NitroBoost", data: {...}}
+          const data = parsed.data || parsed;
 
           // Update boosted tokens map
           setBoostedTokens(prev => {
             const newMap = new Map(prev);
             const tokenId = data.token_id;
-            const pointsAdded = data.points;
-            const existingPoints = newMap.get(tokenId) || 0;
-            newMap.set(tokenId, existingPoints + pointsAdded);
-            console.log(`Updated ${tokenId}: ${existingPoints} -> ${existingPoints + pointsAdded} points`);
+            const totalPoints = data.total_points;
+            // Use total_points from backend (which is already aggregated) instead of adding
+            newMap.set(tokenId, totalPoints);
+            console.log(`✅ Updated ${tokenId} Nitro boost: ${totalPoints} total points`);
             return newMap;
           });
 
@@ -147,13 +178,17 @@ export default function DexScreen() {
       eventSource.addEventListener('nitro_boosts_update', (event) => {
         if (!mounted) return;
         try {
-          const data = JSON.parse(event.data);
-          console.log('📊 Received full Nitro boosts update:', data);
+          const parsed = JSON.parse(event.data);
+          console.log('📊 Received full Nitro boosts update:', parsed);
+
+          // Extract data from wrapper
+          const data = parsed.data || parsed;
 
           // Full update of all boosts
           if (data.boosts) {
             const boostMap = new Map(Object.entries(data.boosts) as [string, number][]);
             setBoostedTokens(boostMap);
+            console.log('✅ Updated all Nitro boosts:', Object.keys(data.boosts).length, 'tokens');
           }
         } catch (err) {
           console.error('Failed to parse Nitro boosts update event:', err);
@@ -164,8 +199,11 @@ export default function DexScreen() {
       eventSource.addEventListener('token_price_update', (event) => {
         if (!mounted) return;
         try {
-          const data = JSON.parse(event.data);
-          console.log('📈 Received token price update:', data);
+          const parsed = JSON.parse(event.data);
+          console.log('📈 Received token price update:', parsed);
+
+          // Extract data from wrapper
+          const data = parsed.data || parsed;
 
           // Update token in list
           setTokens(prev => prev.map(token =>
@@ -182,8 +220,11 @@ export default function DexScreen() {
       eventSource.addEventListener('token_transaction', (event) => {
         if (!mounted) return;
         try {
-          const data = JSON.parse(event.data);
-          console.log('📜 Received token transaction:', data);
+          const parsed = JSON.parse(event.data);
+          console.log('📜 Received token transaction:', parsed);
+
+          // Extract data from wrapper
+          const data = parsed.data || parsed;
 
           // Update token volume in real-time if we have the data
           if (data.token_id && data.value) {
@@ -211,6 +252,7 @@ export default function DexScreen() {
 
     return () => {
       mounted = false;
+      window.removeEventListener('nitroPointsUpdated', handleNitroPointsUpdate);
       if (eventSource) {
         console.log('🔌 Closing SSE connection for Nitro boosts');
         eventSource.close();
@@ -218,59 +260,157 @@ export default function DexScreen() {
     };
   }, []);
 
-  // Fetch real tokens from API
+  // Fetch real tokens from API with SSE real-time updates
   useEffect(() => {
+    let mounted = true;
+    let sseEventSource: EventSource | null = null;
+
     const fetchTokens = async () => {
       try {
         // Get wallet address for balance fetching
         const walletAddress = localStorage.getItem('walletAddress') || '';
 
-        // Fetch native QUG balance
+        // Fetch native QUG, QUGUSD, and USD balances using multi-token API
         let nativeQugBalance = 0;
+        let qugusdBalance = 0;
+        let usdBalance = 0;
         if (walletAddress) {
+          console.log('🔍 [DEX] Fetching multi-token balance for wallet:', walletAddress);
           try {
-            const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
-            if (balanceResponse.success && balanceResponse.data) {
-              nativeQugBalance = balanceResponse.data.balance_qnk || 0;
+            const multiTokenResponse = await qnkAPI.getMultiTokenBalance();
+            console.log('📊 [DEX] Multi-token balance API response:', multiTokenResponse);
+            if (multiTokenResponse.success && multiTokenResponse.data) {
+              // Extract QUG balance (already in human-readable form)
+              if (multiTokenResponse.data.tokens && multiTokenResponse.data.tokens.QUG) {
+                nativeQugBalance = parseFloat(multiTokenResponse.data.tokens.QUG.balance) || 0;
+                console.log('✅ [DEX] Native QUG balance fetched:', nativeQugBalance, 'QUG');
+              } else {
+                console.warn('⚠️ [DEX] QUG balance not in multi-token response');
+              }
+              // Extract QUGUSD balance (already in human-readable form)
+              if (multiTokenResponse.data.tokens && multiTokenResponse.data.tokens.QUGUSD) {
+                qugusdBalance = parseFloat(multiTokenResponse.data.tokens.QUGUSD.balance) || 0;
+                console.log('✅ [DEX] QUGUSD balance fetched:', qugusdBalance, 'QUGUSD');
+              }
+            } else {
+              console.warn('⚠️ [DEX] Multi-token balance fetch unsuccessful:', multiTokenResponse);
+              console.warn('⚠️ [DEX] API error:', multiTokenResponse.error);
+
+              // FALLBACK: Try single wallet balance API (same as Dashboard uses)
+              console.log('🔄 [DEX] Trying fallback: getWalletBalance');
+              try {
+                const fallbackResponse = await qnkAPI.getWalletBalance(walletAddress);
+                console.log('📊 [DEX] Fallback balance response:', fallbackResponse);
+                if (fallbackResponse.success && fallbackResponse.data) {
+                  nativeQugBalance = fallbackResponse.data.balance_qnk || 0;
+                  console.log('✅ [DEX] Fallback QUG balance fetched:', nativeQugBalance, 'QUG');
+                } else {
+                  // FINAL FALLBACK: Use cached balance from localStorage (what Dashboard uses)
+                  const cachedBalance = localStorage.getItem('cachedBalance');
+                  if (cachedBalance) {
+                    nativeQugBalance = parseFloat(cachedBalance);
+                    console.log('💰 [DEX] Using cached balance from localStorage:', nativeQugBalance);
+                  }
+                }
+              } catch (fallbackError) {
+                console.error('❌ [DEX] Fallback balance fetch failed:', fallbackError);
+                // FINAL FALLBACK: Use cached balance from localStorage
+                const cachedBalance = localStorage.getItem('cachedBalance');
+                if (cachedBalance) {
+                  nativeQugBalance = parseFloat(cachedBalance);
+                  console.log('💰 [DEX] Using cached balance from localStorage (error fallback):', nativeQugBalance);
+                }
+              }
             }
           } catch (error) {
-            console.error('Failed to fetch native QUG balance:', error);
+            console.error('❌ [DEX] Failed to fetch multi-token balance:', error);
+            // FALLBACK: Use cached balance from localStorage
+            const cachedBalance = localStorage.getItem('cachedBalance');
+            if (cachedBalance) {
+              nativeQugBalance = parseFloat(cachedBalance);
+              console.log('💰 [DEX] Using cached balance from localStorage (catch fallback):', nativeQugBalance);
+            }
           }
+        } else {
+          console.warn('⚠️ [DEX] No wallet address found in localStorage');
+        }
+
+        // Fetch all liquidity pools to calculate real liquidity per token
+        let poolsByToken: Map<string, number> = new Map();
+        try {
+          const poolsResponse = await qnkAPI.getLiquidityPools();
+          if (poolsResponse.success && poolsResponse.data) {
+            // Aggregate liquidity by token
+            poolsResponse.data.forEach((pool: any) => {
+              // Add liquidity for token0
+              const token0 = pool.token0 === 'QUG' ? 'native-qug' : pool.token0 === 'QUGUSD' ? 'qugusd-stable' : pool.token0;
+              poolsByToken.set(token0, (poolsByToken.get(token0) || 0) + (pool.reserve0 || 0));
+
+              // Add liquidity for token1
+              const token1 = pool.token1 === 'QUG' ? 'native-qug' : pool.token1 === 'QUGUSD' ? 'qugusd-stable' : pool.token1;
+              poolsByToken.set(token1, (poolsByToken.get(token1) || 0) + (pool.reserve1 || 0));
+            });
+            console.log('✅ Calculated liquidity from pools:', Object.fromEntries(poolsByToken));
+          }
+        } catch (error) {
+          console.error('Failed to fetch liquidity pools:', error);
         }
 
         // Fetch real price from oracle API
         let qugPrice = 42.50;
-        let qugChange = 12.8;
-        let qugVolume = 1850000;
+        let qugChange = 0;
+        let qugVolume = 0;
         try {
           const oracleResponse = await qnkAPI.getOraclePrice('QUG/USD');
           if (oracleResponse.success && oracleResponse.data) {
             qugPrice = oracleResponse.data.price;
-            qugChange = oracleResponse.data.change_24h;
-            qugVolume = oracleResponse.data.volume_24h;
-            console.log('✅ Fetched QUG price from oracle:', qugPrice);
+            qugChange = oracleResponse.data.change_24h || 0;
+            qugVolume = oracleResponse.data.volume_24h || 0;
+            console.log('✅ Fetched QUG price from oracle:', qugPrice, 'volume:', qugVolume);
           }
         } catch (error) {
-          console.error('Failed to fetch QUG price from oracle, using default:', error);
+          console.error('Failed to fetch QUG price from oracle:', error);
         }
 
         // Fetch QUGUSD price from oracle
         let qugusdPrice = 1.00;
-        let qugusdChange = 0.02;
-        let qugusdVolume = 950000;
+        let qugusdChange = 0;
+        let qugusdVolume = 0;
         try {
           const oracleResponse = await qnkAPI.getOraclePrice('QUGUSD/USD');
           if (oracleResponse.success && oracleResponse.data) {
             qugusdPrice = oracleResponse.data.price;
-            qugusdChange = oracleResponse.data.change_24h;
-            qugusdVolume = oracleResponse.data.volume_24h;
-            console.log('✅ Fetched QUGUSD price from oracle:', qugusdPrice);
+            qugusdChange = oracleResponse.data.change_24h || 0;
+            qugusdVolume = oracleResponse.data.volume_24h || 0;
+            console.log('✅ Fetched QUGUSD price from oracle:', qugusdPrice, 'volume:', qugusdVolume);
           }
         } catch (error) {
-          console.error('Failed to fetch QUGUSD price from oracle, using default:', error);
+          console.error('Failed to fetch QUGUSD price from oracle:', error);
         }
 
-        // Add native QUG and QUGUSD stablecoin
+        // Fetch USD balance from payment API
+        if (walletAddress) {
+          try {
+            const usdResponse = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/payment/balance`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ wallet_address: walletAddress }),
+            });
+
+            if (usdResponse.ok) {
+              const usdData = await usdResponse.json();
+              if (usdData.success && usdData.data) {
+                usdBalance = parseFloat(usdData.data.balance_usd || '0');
+                console.log('✅ [DEX] USD balance fetched:', usdBalance, 'USD');
+              }
+            }
+          } catch (error) {
+            console.error('❌ [DEX] Failed to fetch USD balance:', error);
+          }
+        }
+
+        // Add native QUG, QUGUSD stablecoin, and USD
+        console.log('🔧 Creating QUG token with balance:', nativeQugBalance);
         const nativeTokens: Token[] = [
           {
             id: 'native-qug',
@@ -280,12 +420,12 @@ export default function DexScreen() {
             price: qugPrice,
             change24h: qugChange,
             volume24h: qugVolume,
-            liquidity: 8500000,
+            liquidity: poolsByToken.get('native-qug') || 0,
             marketCap: 625000000,
             totalSupply: 21000000,
             circulatingSupply: 14700000,
             holders: 18432,
-            icon: '💎',
+            icon: 'qug-logo',
             features: {
               reflection: true,
               autoLiquidity: true,
@@ -306,16 +446,16 @@ export default function DexScreen() {
             id: 'qugusd-stable',
             symbol: 'QUGUSD',
             name: 'Quillon USD',
-            balance: 0,
+            balance: qugusdBalance,
             price: qugusdPrice,
             change24h: qugusdChange,
             volume24h: qugusdVolume,
-            liquidity: 12000000,
+            liquidity: poolsByToken.get('qugusd-stable') || 0,
             marketCap: 125000000,
             totalSupply: 125000000,
             circulatingSupply: 125000000,
             holders: 5600,
-            icon: '💵',
+            icon: 'qugusd-logo',
             features: {
               reflection: false,
               autoLiquidity: true,
@@ -332,14 +472,57 @@ export default function DexScreen() {
             website: 'https://quillon.xyz',
             whitepaper: 'https://quillon.xyz/qugusd',
           },
+          {
+            id: 'fiat-usd',
+            symbol: 'USD',
+            name: 'US Dollar',
+            balance: usdBalance,
+            price: 1.00,
+            change24h: 0,
+            volume24h: 0,
+            liquidity: poolsByToken.get('fiat-usd') || 0,
+            marketCap: 0,
+            totalSupply: 0,
+            circulatingSupply: 0,
+            holders: 0,
+            icon: 'usd-logo',
+            features: {
+              reflection: false,
+              autoLiquidity: false,
+              buybackAndBurn: false,
+              antiWhale: false,
+              quantumSecured: false,
+            },
+            fees: {
+              buy: 0,
+              sell: 0,
+              transfer: 0,
+            },
+            description: 'USD (United States Dollar) - Traditional fiat currency integrated with quantum blockchain via Stripe payment processing. Enables instant conversion between crypto and fiat with real-time settlement.',
+            website: 'https://quillon.xyz',
+            whitepaper: 'https://quillon.xyz/usd-integration',
+          },
         ];
 
         const response = await qnkAPI.getSupportedTokens();
         let enrichedTokens = nativeTokens;
 
+        // Also fetch user-deployed contracts to include in Available Tokens
+        let userDeployedTokens: any[] = [];
+        if (walletAddress) {
+          try {
+            const userContractsResponse = await qnkAPI.getUserContracts(walletAddress);
+            if (userContractsResponse.success && userContractsResponse.data) {
+              userDeployedTokens = userContractsResponse.data;
+              console.log('✅ Fetched user deployed contracts:', userDeployedTokens.length, 'contracts');
+            }
+          } catch (error) {
+            console.log('ℹ️ No user deployed contracts found or error fetching:', error);
+          }
+        }
+
         if (response.success && response.data) {
-          // Get wallet address for balance checks
-          const walletAddress = localStorage.getItem('walletAddress') || '';
+          // Get wallet address for balance checks (already defined above, no need to redefine)
 
           // Convert API token data, excluding duplicates
           const apiTokensPromises = response.data
@@ -365,19 +548,22 @@ export default function DexScreen() {
 
               // Fetch custom token price from oracle (if available)
               let customPrice = 1.0; // Default price
-              let customChange = 0.0;
-              let customVolume = 0.0;
+              let customChange = 0;
+              let customVolume = 0;
               try {
                 const oracleResponse = await qnkAPI.getOraclePrice(apiToken.address);
                 if (oracleResponse.success && oracleResponse.data) {
                   customPrice = oracleResponse.data.price;
                   customChange = oracleResponse.data.change_24h || 0;
                   customVolume = oracleResponse.data.volume_24h || 0;
-                  console.log(`✅ Fetched ${apiToken.symbol} price from oracle:`, customPrice);
+                  console.log(`✅ Fetched ${apiToken.symbol} price from oracle:`, customPrice, 'volume:', customVolume);
                 }
               } catch (error) {
-                console.log(`ℹ️ No oracle price for ${apiToken.symbol}, using default`);
+                console.log(`ℹ️ No oracle price for ${apiToken.symbol}, using defaults`);
               }
+
+              // Get real liquidity from pools for this token
+              const tokenLiquidity = poolsByToken.get(apiToken.address) || 0;
 
               return {
                 id: apiToken.address,
@@ -387,7 +573,7 @@ export default function DexScreen() {
                 price: customPrice,
                 change24h: customChange,
                 volume24h: customVolume,
-                liquidity: actualSupply || 3000000,
+                liquidity: tokenLiquidity,
                 marketCap: 225000000,
                 totalSupply: actualSupply || 10000000,
                 circulatingSupply: actualSupply || 10000000,
@@ -415,15 +601,180 @@ export default function DexScreen() {
           const apiTokens = await Promise.all(apiTokensPromises);
           enrichedTokens = [...nativeTokens, ...apiTokens];
         }
-        setTokens(enrichedTokens);
+
+        // Convert user-deployed contracts to Token objects
+        if (userDeployedTokens.length > 0) {
+          console.log('🔧 Converting user deployed contracts to Token objects:', userDeployedTokens.length);
+          const userTokensPromises = userDeployedTokens.map(async (contract) => {
+            console.log(`🔍 Processing contract ${contract.symbol}:`, {
+              address: contract.address,
+              decimals: contract.decimals,
+              total_supply: contract.total_supply
+            });
+
+            // Calculate actual supply using decimals
+            const decimals = contract.decimals || 18;
+            const rawSupply = contract.total_supply || 0;
+            const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+
+            // Fetch balance for this token if wallet is available
+            let tokenBalance = 0;
+            if (walletAddress) {
+              try {
+                const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, contract.address);
+                console.log(`📊 Balance response for ${contract.symbol}:`, balanceResponse);
+                if (balanceResponse.success && balanceResponse.data) {
+                  // Balance from backend is in smallest units, convert to human-readable
+                  const rawBalance = balanceResponse.data.balance || 0;
+                  tokenBalance = rawBalance / Math.pow(10, decimals);
+                  console.log(`✅ Converted ${contract.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
+                } else {
+                  console.warn(`⚠️ Balance fetch unsuccessful for ${contract.symbol}:`, balanceResponse);
+                }
+              } catch (error) {
+                console.error(`Failed to fetch balance for ${contract.symbol}:`, error);
+              }
+            }
+
+            // Fetch custom token price from oracle (if available)
+            let customPrice = 1.0; // Default price
+            let customChange = 0;
+            let customVolume = 0;
+            try {
+              const oracleResponse = await qnkAPI.getOraclePrice(contract.address);
+              if (oracleResponse.success && oracleResponse.data) {
+                customPrice = oracleResponse.data.price;
+                customChange = oracleResponse.data.change_24h || 0;
+                customVolume = oracleResponse.data.volume_24h || 0;
+                console.log(`✅ Fetched ${contract.symbol} price from oracle:`, customPrice);
+              }
+            } catch (error) {
+              console.log(`ℹ️ No oracle price for ${contract.symbol}, using defaults`);
+            }
+
+            // Get real liquidity from pools for this token
+            const tokenLiquidity = poolsByToken.get(contract.address) || 0;
+
+            return {
+              id: contract.address,
+              symbol: contract.symbol,
+              name: contract.name || contract.symbol,
+              balance: tokenBalance,
+              price: customPrice,
+              change24h: customChange,
+              volume24h: customVolume,
+              liquidity: tokenLiquidity,
+              marketCap: 0,
+              totalSupply: actualSupply || 0,
+              circulatingSupply: actualSupply || 0,
+              holders: 0,
+              icon: '🪙',
+              features: {
+                reflection: false,
+                autoLiquidity: false,
+                buybackAndBurn: false,
+                antiWhale: false,
+                quantumSecured: true,
+              },
+              fees: {
+                buy: 0,
+                sell: 0,
+                transfer: 0,
+              },
+              description: `${contract.name || contract.symbol} is a custom token deployed on the Quillon blockchain with quantum-resistant security.`,
+              website: 'https://quillon.xyz',
+              whitepaper: undefined,
+            };
+          });
+
+          const userTokens = await Promise.all(userTokensPromises);
+
+          // Filter out any user tokens that are already in enrichedTokens (avoid duplicates by symbol)
+          const existingSymbols = new Set(enrichedTokens.map(t => t.symbol));
+          const newUserTokens = userTokens.filter(t => !existingSymbols.has(t.symbol));
+
+          console.log(`✅ Adding ${newUserTokens.length} user tokens to Available Tokens (${userTokens.length - newUserTokens.length} duplicates filtered)`);
+          enrichedTokens = [...enrichedTokens, ...newUserTokens];
+        }
+        if (mounted) {
+          setTokens(enrichedTokens);
+        }
       } catch (error) {
         console.error('Failed to fetch tokens:', error);
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
 
+    // Initial fetch
     fetchTokens();
+
+    // Set up SSE for real-time balance updates (same pattern as Dashboard)
+    const currentWalletForSSE = localStorage.getItem('walletAddress') || '';
+    const sseUrl = import.meta.env.VITE_API_URL ?
+      `${import.meta.env.VITE_API_URL}/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}` :
+      `/api/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}`;
+
+    console.log('📡 [DEX] Connecting to SSE for balance updates:', sseUrl);
+
+    try {
+      sseEventSource = new EventSource(sseUrl);
+
+      sseEventSource.onopen = () => {
+        console.log('✅ [DEX] SSE connection established for real-time balance updates');
+      };
+
+      // Listen for balance-updated events from backend (sent after swaps, transfers, etc.)
+      sseEventSource.addEventListener('balance-updated', (event: MessageEvent) => {
+        if (!mounted) return;
+
+        try {
+          const data = JSON.parse(event.data);
+          console.log('💰 [DEX] Balance update SSE event received:', data);
+
+          // Validate this event is for our wallet
+          const currentWalletAddress = localStorage.getItem('walletAddress');
+          const currentHex = (currentWalletAddress?.startsWith('qnk')
+            ? currentWalletAddress.substring(3)
+            : currentWalletAddress)?.toLowerCase();
+          const eventHex = data.data?.wallet_address?.toLowerCase() || data.wallet_address?.toLowerCase();
+
+          if (currentHex && eventHex === currentHex) {
+            console.log('✅ [DEX] Balance update confirmed for current wallet - refreshing tokens');
+            fetchTokens();
+          } else {
+            console.log('⚠️ [DEX] Balance update ignored (different wallet)');
+          }
+        } catch (error) {
+          console.error('❌ [DEX] Failed to parse balance-updated event:', error);
+        }
+      });
+
+      sseEventSource.onerror = (error) => {
+        console.error('❌ [DEX] SSE connection error:', error);
+      };
+    } catch (error) {
+      console.error('❌ [DEX] Failed to establish SSE connection:', error);
+    }
+
+    // Listen for CDP mint events to refresh QUGUSD balance
+    const handleCDPMint = () => {
+      console.log('💵 CDP mint detected in DexScreen - refreshing tokens');
+      fetchTokens();
+    };
+
+    window.addEventListener('cdp-mint', handleCDPMint);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('cdp-mint', handleCDPMint);
+      if (sseEventSource) {
+        console.log('🔌 [DEX] Closing SSE connection');
+        sseEventSource.close();
+      }
+    };
   }, []);
 
   // Fetch liquidity pools
@@ -659,10 +1010,10 @@ export default function DexScreen() {
         return;
       }
 
-      // Deduct points from local state
+      // Deduct points from local state (per wallet address)
       const newPoints = nitroPoints - boostCost;
       setNitroPoints(newPoints);
-      localStorage.setItem('nitroPoints', newPoints.toString());
+      localStorage.setItem(`nitroPoints_${walletAddress}`, newPoints.toString());
 
       // Update local boosted tokens map
       const newBoosted = new Map(boostedTokens);
@@ -687,7 +1038,15 @@ export default function DexScreen() {
 
       setNitroBoostToken(null);
       setBoostCost(100);
-      alert(`🚀 Nitro Boost activated!\n\nSpent ${boostCost} points on ${nitroBoostToken.symbol}\n\nRemaining Points: ${newPoints}\nTotal Boost on ${nitroBoostToken.symbol}: ${existingPoints + boostCost} points`);
+
+      // Show success modal instead of alert
+      setSuccessModalData({
+        tokenSymbol: nitroBoostToken.symbol,
+        points: boostCost,
+        remainingPoints: newPoints,
+        totalBoost: existingPoints + boostCost
+      });
+      setShowSuccessModal(true);
 
     } catch (error) {
       console.error('Failed to add Nitro boost:', error);
@@ -923,7 +1282,27 @@ export default function DexScreen() {
                   {/* Token Info */}
                   <div className="p-4 bg-gradient-to-br from-orange-500/10 to-red-500/10 border border-orange-500/30 rounded-xl">
                     <div className="flex items-center gap-3 mb-3">
-                      <div className="text-3xl">{nitroBoostToken.icon}</div>
+                      <div className="text-3xl">
+                        {(nitroBoostToken.icon === 'qug-logo' || nitroBoostToken.icon === 'qugusd-logo' || nitroBoostToken.icon === 'usd-logo') ? (
+                          <div className="relative w-10 h-10">
+                            <div className="absolute inset-0 rounded-full" style={{
+                              background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                              padding: '2px'
+                            }}>
+                              <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
+                                <img
+                                  src="/quillon-logo.png"
+                                  alt="Quillon"
+                                  className="w-full h-full object-contain"
+                                  style={{ filter: 'invert(1)' }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          nitroBoostToken.icon
+                        )}
+                      </div>
                       <div>
                         <div className="font-bold text-white text-lg">{nitroBoostToken.symbol}</div>
                         <div className="text-sm text-gray-400">{nitroBoostToken.name}</div>
@@ -1092,19 +1471,146 @@ export default function DexScreen() {
                     value={swapAmount}
                     onChange={(e) => setSwapAmount(e.target.value)}
                     placeholder="0.0"
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 pr-32 text-white text-xl focus:outline-none focus:border-quantum-cyan/50 transition-colors"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 pr-36 text-white text-xl focus:outline-none focus:border-quantum-cyan/50 transition-colors"
                   />
                   <button
                     onClick={() => setIsFromTokenSelectorOpen(true)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-all flex items-center gap-2"
                   >
-                    <span className="text-xl">{tokens.find(t => t.symbol === swapFrom)?.icon || '💎'}</span>
+                    {/* Proper Logo for QUG */}
+                    {swapFrom === 'QUG' ? (
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-yellow-400 font-bold text-xs">Q</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : swapFrom === 'QUGUSD' ? (
+                      /* Proper Logo for QUGUSD */
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #10b981 0%, #34d399 50%, #10b981 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-green-400 font-bold text-xs">$</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xl">{tokens.find(t => t.symbol === swapFrom)?.icon || '💎'}</span>
+                    )}
                     <span>{swapFrom}</span>
                     <span className="text-xs opacity-70">▼</span>
                   </button>
                 </div>
-                <div className="text-xs text-gray-500">
-                  Balance: {tokens.find(t => t.symbol === swapFrom)?.balance.toFixed(4) || '0.0000'}
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-gray-500">
+                    Balance: {tokens.find(t => t.symbol === swapFrom)?.balance.toFixed(4) || '0.0000'}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      if (fromToken) {
+                        setSwapAmount(fromToken.balance.toString());
+                      }
+                    }}
+                    className="text-quantum-cyan hover:text-quantum-purple transition-colors font-medium"
+                  >
+                    MAX
+                  </button>
+                </div>
+              </div>
+
+              {/* KILLER AWESOME SLIDER */}
+              <div className="space-y-3 py-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm text-gray-400">Quick Select Amount</label>
+                  <span className="text-xs font-bold bg-gradient-to-r from-quantum-cyan to-quantum-purple bg-clip-text text-transparent">
+                    {(() => {
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      if (!fromToken || !swapAmount) return '0%';
+                      const percentage = (parseFloat(swapAmount) / fromToken.balance) * 100;
+                      return percentage.toFixed(0) + '%';
+                    })()}
+                  </span>
+                </div>
+                <div className="relative">
+                  {/* Slider Track with Gradient */}
+                  <div className="h-3 bg-white/5 rounded-full overflow-hidden relative">
+                    <motion.div
+                      className="absolute inset-y-0 left-0 rounded-full"
+                      style={{
+                        background: 'linear-gradient(90deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%)',
+                        width: `${(() => {
+                          const fromToken = tokens.find(t => t.symbol === swapFrom);
+                          if (!fromToken || !swapAmount) return 0;
+                          return Math.min((parseFloat(swapAmount) / fromToken.balance) * 100, 100);
+                        })()}%`
+                      }}
+                      animate={{
+                        boxShadow: [
+                          '0 0 10px rgba(6, 182, 212, 0.5)',
+                          '0 0 20px rgba(139, 92, 246, 0.8)',
+                          '0 0 10px rgba(236, 72, 153, 0.5)',
+                          '0 0 20px rgba(139, 92, 246, 0.8)',
+                          '0 0 10px rgba(6, 182, 212, 0.5)',
+                        ]
+                      }}
+                      transition={{
+                        duration: 3,
+                        repeat: Infinity,
+                        ease: "easeInOut"
+                      }}
+                    />
+                  </div>
+
+                  {/* Slider Input */}
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={(() => {
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      if (!fromToken || !swapAmount) return 0;
+                      return Math.min((parseFloat(swapAmount) / fromToken.balance) * 100, 100);
+                    })()}
+                    onChange={(e) => {
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      if (fromToken) {
+                        const percentage = parseFloat(e.target.value) / 100;
+                        const amount = fromToken.balance * percentage;
+                        setSwapAmount(amount.toFixed(8));
+                      }
+                    }}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                </div>
+
+                {/* Quick Select Buttons */}
+                <div className="flex gap-2">
+                  {[25, 50, 75, 100].map((percentage) => (
+                    <motion.button
+                      key={percentage}
+                      onClick={() => {
+                        const fromToken = tokens.find(t => t.symbol === swapFrom);
+                        if (fromToken) {
+                          const amount = fromToken.balance * (percentage / 100);
+                          setSwapAmount(amount.toFixed(8));
+                        }
+                      }}
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      className="flex-1 py-2 bg-white/5 hover:bg-gradient-to-r hover:from-quantum-cyan/20 hover:to-quantum-purple/20 border border-white/10 hover:border-quantum-cyan/50 rounded-lg text-xs font-medium text-gray-400 hover:text-white transition-all"
+                    >
+                      {percentage}%
+                    </motion.button>
+                  ))}
                 </div>
               </div>
 
@@ -1120,23 +1626,62 @@ export default function DexScreen() {
 
               {/* To Token */}
               <div className="space-y-2">
-                <label className="text-sm text-gray-400">To</label>
+                <label className="text-sm text-gray-400">To (Estimated)</label>
                 <div className="relative">
                   <input
                     type="text"
-                    value={swapAmount ? (parseFloat(swapAmount) * 0.95).toFixed(4) : ''}
+                    value={(() => {
+                      if (!swapAmount) return '';
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const toToken = tokens.find(t => t.symbol === swapTo);
+                      if (!fromToken || !toToken) return '';
+                      // Calculate actual exchange rate using oracle prices
+                      // Account for 0.3% DEX fee
+                      const exchangeRate = (fromToken.price / toToken.price) * 0.997;
+                      return (parseFloat(swapAmount) * exchangeRate).toFixed(4);
+                    })()}
                     placeholder="0.0"
                     readOnly
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 pr-32 text-white text-xl focus:outline-none"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-4 pr-36 text-white text-xl focus:outline-none"
                   />
                   <button
                     onClick={() => setIsToTokenSelectorOpen(true)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-all flex items-center gap-2"
                   >
-                    <span className="text-xl">{tokens.find(t => t.symbol === swapTo)?.icon || '💵'}</span>
+                    {/* Proper Logo for QUG */}
+                    {swapTo === 'QUG' ? (
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-yellow-400 font-bold text-xs">Q</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : swapTo === 'QUGUSD' ? (
+                      /* Proper Logo for QUGUSD */
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #10b981 0%, #34d399 50%, #10b981 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-green-400 font-bold text-xs">$</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xl">{tokens.find(t => t.symbol === swapTo)?.icon || '💵'}</span>
+                    )}
                     <span>{swapTo}</span>
                     <span className="text-xs opacity-70">▼</span>
                   </button>
+                </div>
+                <div className="text-xs text-gray-500 flex items-center gap-1">
+                  <TrendingUp className="w-3 h-3" />
+                  Price includes 0.3% DEX fee
                 </div>
               </div>
 
@@ -1144,7 +1689,16 @@ export default function DexScreen() {
               <div className="space-y-2 text-sm p-4 bg-white/5 rounded-xl">
                 <div className="flex justify-between text-gray-400">
                   <span>Rate</span>
-                  <span className="text-white">1 {swapFrom} ≈ 0.95 {swapTo}</span>
+                  <span className="text-white">
+                    1 {swapFrom} ≈ {(() => {
+                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const toToken = tokens.find(t => t.symbol === swapTo);
+                      if (!fromToken || !toToken) return '0.00';
+                      // Calculate actual exchange rate using oracle prices (before fees)
+                      const exchangeRate = fromToken.price / toToken.price;
+                      return exchangeRate.toFixed(2);
+                    })()} {swapTo}
+                  </span>
                 </div>
                 <div className="flex justify-between text-gray-400">
                   <span>Slippage</span>
@@ -1178,26 +1732,99 @@ export default function DexScreen() {
                     return;
                   }
 
+                  // Handle USD (Stripe balance) swaps - convert to QUGUSD first
+                  if (fromToken.id === 'fiat-usd') {
+                    // USD → anything: convert USD to QUGUSD, then swap QUGUSD → target
+                    try {
+                      const usdAmount = parseFloat(swapAmount);
+
+                      // Step 1: Convert USD to QUGUSD (1:1 conversion, 0.1% fee)
+                      const qugusdAmount = usdAmount * 0.999; // 0.1% conversion fee
+
+                      // Deduct USD balance and mint QUGUSD
+                      const convertResponse = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/payment/convert-to-qugusd`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          wallet_address: walletAddress,
+                          usd_amount: swapAmount,
+                        }),
+                      });
+
+                      if (!convertResponse.ok) {
+                        const errorData = await convertResponse.json();
+                        alert(`❌ USD conversion failed: ${errorData.error || 'Unknown error'}`);
+                        return;
+                      }
+
+                      const convertData = await convertResponse.json();
+                      if (!convertData.success) {
+                        alert(`❌ USD conversion failed: ${convertData.error || 'Unknown error'}`);
+                        return;
+                      }
+
+                      // Step 2: If target is QUGUSD, we're done
+                      if (toToken.id === 'qugusd-stable') {
+                        alert(`✅ Conversion successful!\n\nConverted: $${swapAmount} USD\nReceived: ${qugusdAmount.toFixed(4)} QUGUSD\n\nConversion fee: 0.1%`);
+                        setSwapAmount('');
+                        return;
+                      }
+
+                      // Step 3: If target is something else, swap QUGUSD → target
+                      const expectedOutput = qugusdAmount * (1.0 / toToken.price); // QUGUSD is $1
+                      const minOutput = expectedOutput * 0.995;
+
+                      const swapResponse = await qnkAPI.executeSwap({
+                        from_token: 'QUGUSD',
+                        to_token: toToken.id === 'native-qug' ? 'QUG' : toToken.id,
+                        amount_in: Math.floor(qugusdAmount * 100_000_000),
+                        min_amount_out: Math.floor(minOutput * 100_000_000),
+                        wallet_address: walletAddress
+                      });
+
+                      if (swapResponse.success && swapResponse.data) {
+                        alert(`✅ USD swap successful!\n\nStep 1: $${swapAmount} USD → ${qugusdAmount.toFixed(4)} QUGUSD\nStep 2: ${qugusdAmount.toFixed(4)} QUGUSD → ${(swapResponse.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}\n\nTotal received: ${(swapResponse.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}`);
+                        setSwapAmount('');
+                      } else {
+                        alert(`❌ Swap failed after USD conversion: ${swapResponse.error || 'Unknown error'}\n\nYour USD was converted to QUGUSD but the swap failed.`);
+                      }
+                    } catch (error) {
+                      console.error('USD swap failed:', error);
+                      alert('❌ USD swap failed. Please try again.');
+                    }
+                    return;
+                  }
+
+                  // Prevent swapping TO USD (can only swap FROM USD)
+                  if (toToken.id === 'fiat-usd') {
+                    alert('❌ Cannot swap to USD directly.\n\nUSD is your Stripe wallet balance (off-chain). You can:\n1. Swap tokens → QUGUSD\n2. Withdraw QUGUSD to USD via bank transfer (coming soon)');
+                    return;
+                  }
+
                   if (fromToken.balance < parseFloat(swapAmount)) {
                     alert(`Insufficient ${swapFrom} balance. You have ${fromToken.balance.toFixed(4)}`);
                     return;
                   }
 
-                  try {
-                    const expectedOutput = parseFloat(swapAmount) * (toToken.price / fromToken.price);
+                  try{
+                    // Fix: swap ratio should be fromToken.price / toToken.price
+                    const expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
                     const minOutput = expectedOutput * 0.995;
 
                     const response = await qnkAPI.executeSwap({
                       from_token: fromToken.id === 'native-qug' ? 'QUG' : fromToken.id,
                       to_token: toToken.id === 'qugusd-stable' ? 'QUGUSD' : toToken.id,
-                      amount_in: Math.floor(parseFloat(swapAmount) * 1_000_000_000),
-                      min_amount_out: Math.floor(minOutput * 1_000_000_000),
+                      amount_in: Math.floor(parseFloat(swapAmount) * 100_000_000), // 8 decimals (1e8)
+                      min_amount_out: Math.floor(minOutput * 100_000_000), // 8 decimals (1e8)
                       wallet_address: walletAddress
                     });
 
                     if (response.success && response.data) {
-                      alert(`✅ Swap successful!\n\nSwapped: ${swapAmount} ${swapFrom}\nReceived: ${(response.data.amount_out / 1_000_000_000).toFixed(4)} ${swapTo}\n\nTransaction: ${response.data.transaction_id}`);
-                      window.location.reload();
+                      alert(`✅ Swap successful!\n\nSwapped: ${swapAmount} ${swapFrom}\nReceived: ${(response.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}\n\nTransaction: ${response.data.transaction_id}`);
+                      // Reset swap amount
+                      setSwapAmount('');
+                      // Balance will update automatically via SSE balance-updated event from backend
+                      console.log('🔄 Swap completed - waiting for SSE balance-updated event');
                     } else {
                       alert(`❌ Swap failed: ${response.error || 'Unknown error'}`);
                     }
@@ -1323,13 +1950,156 @@ export default function DexScreen() {
                       {/* Pool Actions */}
                       <div className="flex gap-2 mt-3">
                         <button
-                          onClick={() => {
+                          onClick={async () => {
+                            console.log('🔍 Add More clicked for pool:', pool);
+                            console.log('🔍 Looking for token:', pool.token0, 'length:', pool.token0.length);
+                            console.log('🔍 Available tokens:', tokens.map(t => ({ id: t.id, symbol: t.symbol })));
+
                             // Find the token object for this pool's token0
-                            const token0Obj = tokens.find(t => t.symbol === pool.token0 || t.id === pool.token0);
+                            let token0Obj = tokens.find(t => t.symbol === pool.token0 || t.id === pool.token0);
+                            console.log('🔍 Found token in list?', token0Obj ? 'YES' : 'NO');
+
+                            // If not found, try to fetch it or search by different methods
+                            if (!token0Obj) {
+                              // Case 1: token0 looks like a contract address (long string)
+                              if (pool.token0.length > 20) {
+                                console.log('🔍 Token not in list, fetching from contract:', pool.token0);
+                                try {
+                                  const contractInfo = await qnkAPI.getContractInfo(pool.token0);
+                                  console.log('📊 Contract info response:', contractInfo);
+                                  if (contractInfo.success && contractInfo.data) {
+                                    const contract = contractInfo.data;
+                                    const walletAddress = localStorage.getItem('walletAddress') || '';
+                                    let tokenBalance = 0;
+
+                                    if (walletAddress) {
+                                      const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, pool.token0);
+                                      if (balanceResponse.success && balanceResponse.data) {
+                                        tokenBalance = balanceResponse.data.balance || 0;
+                                      }
+                                    }
+
+                                    const decimals = contract.decimals || 18;
+                                    const rawSupply = contract.total_supply || 0;
+                                    const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+
+                                    token0Obj = {
+                                      id: pool.token0,
+                                      symbol: contract.token_symbol || contract.symbol || 'CUSTOM',
+                                      name: contract.token_name || contract.name || 'Custom Token',
+                                      balance: tokenBalance,
+                                      price: 1.0,
+                                      change24h: 0,
+                                      volume24h: 0,
+                                      liquidity: actualSupply,
+                                      marketCap: 0,
+                                      totalSupply: actualSupply,
+                                      circulatingSupply: actualSupply,
+                                      holders: 0,
+                                      icon: '🪙',
+                                      features: {
+                                        reflection: false,
+                                        autoLiquidity: false,
+                                        buybackAndBurn: false,
+                                        antiWhale: false,
+                                        quantumSecured: true,
+                                      },
+                                      fees: {
+                                        buy: 0,
+                                        sell: 0,
+                                        transfer: 0,
+                                      },
+                                      description: `${contract.token_name || 'Custom token'} deployed on Quillon blockchain`,
+                                    };
+                                    console.log('✅ Fetched token from contract:', token0Obj);
+                                  }
+                                } catch (error) {
+                                  console.error('Failed to fetch token contract info:', error);
+                                }
+                              } else {
+                                // Case 2: token0 is a symbol (short string like "TEST5")
+                                // Try to find the contract address from user's deployed contracts
+                                console.log('🔍 token0 appears to be a symbol:', pool.token0);
+                                console.log('🔍 Searching for contract address via user contracts...');
+
+                                try {
+                                  const walletAddress = localStorage.getItem('walletAddress') || '';
+                                  if (!walletAddress) {
+                                    console.error('❌ No wallet address found');
+                                    throw new Error('No wallet address');
+                                  }
+
+                                  const response = await qnkAPI.getUserContracts(walletAddress);
+                                  console.log('📊 User contracts response:', response);
+
+                                  if (response.success && response.data) {
+                                    const foundToken = response.data.find(t => t.symbol === pool.token0);
+                                    if (foundToken) {
+                                      console.log('✅ Found contract address:', foundToken.address);
+                                      // Now fetch with the contract address
+                                      const contractInfo = await qnkAPI.getContractInfo(foundToken.address);
+                                      if (contractInfo.success && contractInfo.data) {
+                                        const contract = contractInfo.data;
+                                        const walletAddress = localStorage.getItem('walletAddress') || '';
+                                        let tokenBalance = 0;
+
+                                        if (walletAddress) {
+                                          const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, foundToken.address);
+                                          if (balanceResponse.success && balanceResponse.data) {
+                                            tokenBalance = balanceResponse.data.balance || 0;
+                                          }
+                                        }
+
+                                        const decimals = contract.decimals || 18;
+                                        const rawSupply = contract.total_supply || 0;
+                                        const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+
+                                        token0Obj = {
+                                          id: foundToken.address,
+                                          symbol: contract.token_symbol || contract.symbol || pool.token0,
+                                          name: contract.token_name || contract.name || pool.token0,
+                                          balance: tokenBalance,
+                                          price: 1.0,
+                                          change24h: 0,
+                                          volume24h: 0,
+                                          liquidity: actualSupply,
+                                          marketCap: 0,
+                                          totalSupply: actualSupply,
+                                          circulatingSupply: actualSupply,
+                                          holders: 0,
+                                          icon: '🪙',
+                                          features: {
+                                            reflection: false,
+                                            autoLiquidity: false,
+                                            buybackAndBurn: false,
+                                            antiWhale: false,
+                                            quantumSecured: true,
+                                          },
+                                          fees: {
+                                            buy: 0,
+                                            sell: 0,
+                                            transfer: 0,
+                                          },
+                                          description: `${contract.token_name || 'Custom token'} deployed on Quillon blockchain`,
+                                        };
+                                        console.log('✅ Fetched token via symbol lookup:', token0Obj);
+                                      }
+                                    } else {
+                                      console.warn('⚠️ Symbol not found in supported tokens');
+                                    }
+                                  }
+                                } catch (error) {
+                                  console.error('Failed to lookup token by symbol:', error);
+                                }
+                              }
+                            }
+
                             if (token0Obj) {
+                              console.log('✅ Opening liquidity modal with token:', token0Obj);
                               setLiquidityToken(token0Obj);
                             } else {
-                              alert(`Token ${pool.token0} not found in available tokens`);
+                              console.error('❌ Token not found after all lookup attempts');
+                              alert(`❌ Token ${pool.token0} not found.\n\nPlease check:\n1. Token contract is deployed\n2. Token is registered in the system\n3. Check browser console for details`);
                             }
                           }}
                           className="flex-1 py-2 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-lg text-white text-sm font-medium hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
@@ -1469,7 +2239,25 @@ export default function DexScreen() {
                         <td className="py-4 px-4">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-xl">
-                              {token.icon}
+                              {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
+                                <div className="relative w-7 h-7">
+                                  <div className="absolute inset-0 rounded-full" style={{
+                                    background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                                    padding: '1px'
+                                  }}>
+                                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
+                                      <img
+                                        src="/quillon-logo.png"
+                                        alt="Quillon"
+                                        className="w-full h-full object-contain"
+                                        style={{ filter: 'invert(1)' }}
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                token.icon
+                              )}
                             </div>
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
@@ -1524,6 +2312,18 @@ export default function DexScreen() {
                         {/* Actions */}
                         <td className="py-4 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-2">
+                            {/* Special Mint button for QUGUSD - deposits QUG as collateral to mint QUGUSD */}
+                            {token.symbol === 'QUGUSD' && (
+                              <motion.button
+                                onClick={() => setIsMintQUGUSDModalOpen(true)}
+                                className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg text-white font-medium hover:shadow-lg hover:shadow-green-500/50 transition-all flex items-center gap-2"
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                              >
+                                <span className="text-lg">💵</span>
+                                Mint USD
+                              </motion.button>
+                            )}
                             <motion.button
                               onClick={() => {
                                 setSwapFrom(token.symbol);
@@ -1582,6 +2382,25 @@ export default function DexScreen() {
       </div>
       )}
       </div>
+
+      {/* Mint QUGUSD Modal */}
+      <MintQUGUSDModal
+        isOpen={isMintQUGUSDModalOpen}
+        onClose={() => setIsMintQUGUSDModalOpen(false)}
+        userQUGBalance={tokens.find(t => t.symbol === 'QUG')?.balance || 0}
+        onSuccess={() => {
+          // Don't reload - let the CDP event system handle updates
+          console.log('✅ CDP mint success callback - no reload needed');
+        }}
+      />
+
+      {/* Nitro Success Modal */}
+      <NitroSuccessModal
+        isOpen={showSuccessModal}
+        onClose={() => setShowSuccessModal(false)}
+        type="activation"
+        data={successModalData}
+      />
     </>
   );
 }

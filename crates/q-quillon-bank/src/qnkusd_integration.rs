@@ -11,7 +11,8 @@
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use q_types::{Error, NodeId, Phase, Result};
+use q_types::{NodeId, Phase};
+use anyhow::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
@@ -347,7 +348,7 @@ impl QNKUSDSystem {
 
         // Check system state
         if matches!(*self.emergency_state.read().await, EmergencyState::Shutdown) {
-            return Err(Error::from("System in quantum wave collapse - minting paused"));
+            return Err(anyhow::anyhow!("System in quantum wave collapse - minting paused"));
         }
 
         // Create mint request
@@ -375,7 +376,7 @@ impl QNKUSDSystem {
         drop(config);
 
         if mint_request.qnkusd_amount > max_mintable {
-            return Err(Error::from("Insufficient collateral for requested QNKUSD amount"));
+            return Err(anyhow::anyhow!("Insufficient collateral for requested QNKUSD amount"));
         }
 
         // Check quantum stability impact
@@ -385,7 +386,7 @@ impl QNKUSDSystem {
             .await?;
 
         if stability_impact.wave_function_distortion > 0.8 {
-            return Err(Error::from("Mint would cause quantum decoherence - rejected"));
+            return Err(anyhow::anyhow!("Mint would cause quantum decoherence - rejected"));
         }
 
         // Generate privacy proof if required
@@ -720,7 +721,7 @@ impl QNKUSDCollateralManager {
     async fn calculate_quantum_collateral_value(&self, request: &QNKUSDMintRequest) -> Result<BigDecimal> {
         // Get real-time price from oracle
         let price_usd = self.oracle_interface.get_price(&request.collateral_type).await
-            .map_err(|e| Error::from(format!("Failed to fetch price from oracle: {}", e)))?;
+            .map_err(|e| anyhow::anyhow!("Failed to fetch price from oracle: {}", e))?;
 
         // Calculate total collateral value in USD
         let collateral_value = &request.collateral_amount * &price_usd;

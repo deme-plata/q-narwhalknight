@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff } from 'lucide-react';
+import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import QRScanner from './QRScanner';
+import QRDisplay from './QRDisplay';
 
 interface TransactionScreenV2Props {
   currentBalance?: number;
@@ -40,6 +42,10 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
   const [, setMixingSessionId] = useState<string>('');
   const [, setMixingProgress] = useState(0);
   const [, setMixingStage] = useState<string>('');
+
+  // QR Code states
+  const [showQRScanner, setShowQRScanner] = useState(false);
+  const [showQRDisplay, setShowQRDisplay] = useState(false);
 
   // Get wallet address from localStorage
   const getWalletAddress = () => {
@@ -100,29 +106,40 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
   };
 
   const validateTransaction = (): { valid: boolean; error?: string } => {
+    console.log('💰 TransactionScreenV2: validateTransaction called');
+    console.log('💰 currentBalance prop:', currentBalance);
+    console.log('💰 transaction.amount:', transaction.amount);
+
     if (!transaction.toAddress.trim()) {
       return { valid: false, error: 'Please enter recipient address' };
     }
-    
+
     if (!transaction.amount.trim()) {
       return { valid: false, error: 'Please enter amount' };
     }
-    
+
     const amount = parseFloat(transaction.amount);
     if (isNaN(amount) || amount <= 0) {
       return { valid: false, error: 'Please enter a valid amount' };
     }
-    
+
     const fee = 0.00001; // QUG
     const totalRequired = amount + fee;
-    
+
+    console.log('💰 Balance check:');
+    console.log('   Amount:', amount);
+    console.log('   Fee:', fee);
+    console.log('   Total required:', totalRequired);
+    console.log('   Current balance:', currentBalance);
+    console.log('   Has sufficient balance?', currentBalance >= totalRequired);
+
     if (currentBalance < totalRequired) {
-      return { 
-        valid: false, 
-        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amount} + ${fee} fee), Available: ${currentBalance.toFixed(8)} QUG` 
+      return {
+        valid: false,
+        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amount} + ${fee} fee), Available: ${currentBalance.toFixed(8)} QUG`
       };
     }
-    
+
     return { valid: true };
   };
 
@@ -302,6 +319,36 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
     }));
   };
 
+  const handleQRScan = (scannedData: string) => {
+    // Parse QR code data - it could be just an address or a payment request
+    let address = scannedData;
+    let amount = '';
+
+    try {
+      // Check if it's a payment request URI (e.g., quillon:address?amount=123&memo=test)
+      if (scannedData.startsWith('quillon:')) {
+        const url = new URL(scannedData);
+        address = url.pathname.replace('//', '');
+        const amountParam = url.searchParams.get('amount');
+        const memoParam = url.searchParams.get('memo');
+        if (amountParam) amount = amountParam;
+        if (memoParam) {
+          setTransaction(prev => ({ ...prev, memo: memoParam }));
+        }
+      }
+    } catch (e) {
+      // If parsing fails, treat it as a simple address
+      console.log('QR code is a simple address:', scannedData);
+    }
+
+    setTransaction(prev => ({
+      ...prev,
+      toAddress: address,
+      ...(amount && { amount })
+    }));
+    setShowQRScanner(false);
+  };
+
   return (
     <div className="max-w-2xl mx-auto space-y-8">
       {/* Header */}
@@ -380,10 +427,25 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
                   className="w-full px-4 py-4 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan transition-colors pr-12"
                   placeholder="qnk1abc123... or alice.qnk"
                 />
-                <button className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-quantum-cyan transition-colors">
-                  <QrCode className="w-5 h-5" />
+                <button
+                  onClick={() => setShowQRScanner(true)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-quantum-cyan transition-colors"
+                  title="Scan QR Code"
+                >
+                  <Camera className="w-5 h-5" />
                 </button>
               </div>
+            </div>
+
+            {/* Show My QR Code Button */}
+            <div>
+              <button
+                onClick={() => setShowQRDisplay(true)}
+                className="w-full py-3 px-4 bg-amber-600/10 border border-amber-500/30 rounded-xl text-amber-300 font-medium flex items-center justify-center gap-2 hover:bg-amber-600/20 transition-colors"
+              >
+                <QrCode className="w-5 h-5" />
+                <span>Show My QR Code (Receive)</span>
+              </button>
             </div>
 
             {/* Amount */}
@@ -667,6 +729,22 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
           </div>
         </div>
       </div>
+
+      {/* QR Code Scanner Modal */}
+      <QRScanner
+        isOpen={showQRScanner}
+        onScan={handleQRScan}
+        onClose={() => setShowQRScanner(false)}
+      />
+
+      {/* QR Code Display Modal */}
+      <QRDisplay
+        isOpen={showQRDisplay}
+        data={getWalletAddress()}
+        title="Receive QUG"
+        subtitle="Scan this QR code to send tokens to your wallet"
+        onClose={() => setShowQRDisplay(false)}
+      />
     </div>
   );
 }

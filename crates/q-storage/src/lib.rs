@@ -673,6 +673,118 @@ impl QStorage {
         Ok(())
     }
 
+    /// Save token balance to persistent storage
+    /// Key format: token_balance_{wallet_hex}_{token_hex}
+    pub async fn save_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32], amount: u64) -> Result<()> {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+        let value = amount.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!(
+            "🪙 Saved token balance: wallet={}, token={}, amount={}",
+            hex::encode(wallet_address),
+            hex::encode(token_address),
+            amount
+        );
+        Ok(())
+    }
+
+    /// Get a single token balance from persistent storage
+    pub async fn get_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> Result<u64> {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) => {
+                if bytes.len() == 8 {
+                    let amount = u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]);
+                    debug!(
+                        "🪙 Loaded token balance: wallet={}, token={}, amount={}",
+                        hex::encode(wallet_address),
+                        hex::encode(token_address),
+                        amount
+                    );
+                    Ok(amount)
+                } else {
+                    warn!(
+                        "Invalid token balance data length for wallet {} token {}",
+                        hex::encode(wallet_address),
+                        hex::encode(token_address)
+                    );
+                    Ok(0)
+                }
+            }
+            None => {
+                debug!(
+                    "🪙 Token balance not found in storage: wallet={}, token={}",
+                    hex::encode(wallet_address),
+                    hex::encode(token_address)
+                );
+                Ok(0)
+            }
+        }
+    }
+
+    /// Load all token balances from persistent storage
+    pub async fn load_token_balances(&self) -> Result<HashMap<([u8; 32], [u8; 32]), u64>> {
+        let mut balances = HashMap::new();
+        let prefix = "token_balance_".as_bytes();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(addresses) = key_str.strip_prefix("token_balance_") {
+                            // Parse "wallet_hex_token_hex"
+                            let parts: Vec<&str> = addresses.split('_').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(wallet_bytes), Ok(token_bytes)) = (hex::decode(parts[0]), hex::decode(parts[1])) {
+                                    if wallet_bytes.len() == 32 && token_bytes.len() == 32 && value.len() == 8 {
+                                        let mut wallet_address = [0u8; 32];
+                                        let mut token_address = [0u8; 32];
+                                        wallet_address.copy_from_slice(&wallet_bytes);
+                                        token_address.copy_from_slice(&token_bytes);
+                                        let amount = u64::from_le_bytes([
+                                            value[0], value[1], value[2], value[3], value[4], value[5],
+                                            value[6], value[7],
+                                        ]);
+                                        balances.insert((wallet_address, token_address), amount);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                info!(
+                    "🪙 Loaded {} token balances from persistent storage",
+                    balances.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan token balances: {}", e);
+            }
+        }
+
+        Ok(balances)
+    }
+
+    /// Save multiple token balances atomically
+    pub async fn save_token_balances(&self, balances: &HashMap<([u8; 32], [u8; 32]), u64>) -> Result<()> {
+        let mut batch_ops = Vec::new();
+
+        for ((wallet_address, token_address), amount) in balances {
+            let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+            let value = amount.to_le_bytes().to_vec();
+            batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
+        }
+
+        self.hot_db.write_batch(batch_ops).await?;
+        info!(
+            "🪙 Saved {} token balances to persistent storage",
+            balances.len()
+        );
+        Ok(())
+    }
+
     /// Save transaction to persistent storage
     pub async fn save_transaction(&self, tx: &q_types::Transaction) -> Result<()> {
         let tx_data = bincode::serialize(tx)?;
@@ -744,6 +856,345 @@ impl QStorage {
         self.hot_db.delete(CF_TRANSACTIONS, tx_id).await?;
         debug!("🗑️ Deleted transaction: {}", hex::encode(tx_id));
         Ok(())
+    }
+
+    /// Save smart contract to persistent storage
+    pub async fn save_contract(&self, address: &[u8; 32], contract_data: &[u8]) -> Result<()> {
+        let key = format!("contract_{}", hex::encode(address));
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), contract_data).await?;
+        debug!("📜 Saved smart contract: {}", hex::encode(address));
+        Ok(())
+    }
+
+    /// Load smart contract from persistent storage
+    pub async fn load_contract(&self, address: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let key = format!("contract_{}", hex::encode(address));
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(contract_data) => {
+                debug!("📜 Loaded smart contract: {}", hex::encode(address));
+                Ok(Some(contract_data))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load all smart contracts from persistent storage
+    pub async fn load_all_contracts(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let prefix = "contract_".as_bytes();
+        let mut contracts = Vec::new();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(hex_addr) = key_str.strip_prefix("contract_") {
+                            if let Ok(addr_bytes) = hex::decode(hex_addr) {
+                                if addr_bytes.len() == 32 {
+                                    contracts.push((addr_bytes, value));
+                                }
+                            }
+                        }
+                    }
+                }
+                info!("📜 Loaded {} smart contracts from persistent storage", contracts.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan smart contracts: {}", e);
+            }
+        }
+
+        Ok(contracts)
+    }
+
+    /// Delete smart contract from persistent storage
+    pub async fn delete_contract(&self, address: &[u8; 32]) -> Result<()> {
+        let key = format!("contract_{}", hex::encode(address));
+        self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
+        debug!("🗑️ Deleted smart contract: {}", hex::encode(address));
+        Ok(())
+    }
+
+    /// Save liquidity pool to persistent storage
+    /// Pool ID format: "QUG-QUGUSD" or similar token pair identifier
+    pub async fn save_liquidity_pool(&self, pool_id: &str, pool_data: &[u8]) -> Result<()> {
+        let key = format!("liquidity_pool:{}", pool_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), pool_data).await?;
+        debug!("💧 Saved liquidity pool: {}", pool_id);
+        Ok(())
+    }
+
+    /// Load all liquidity pools from persistent storage
+    /// Returns map of pool_id -> serialized pool data
+    pub async fn load_liquidity_pools(&self) -> Result<HashMap<String, Vec<u8>>> {
+        let mut pools = HashMap::new();
+        let prefix = b"liquidity_pool:";
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(pool_id) = key_str.strip_prefix("liquidity_pool:") {
+                            pools.insert(pool_id.to_string(), value);
+                        }
+                    }
+                }
+                info!(
+                    "💧 Loaded {} liquidity pools from persistent storage",
+                    pools.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan liquidity pools: {}", e);
+            }
+        }
+
+        Ok(pools)
+    }
+
+    /// Delete liquidity pool from persistent storage
+    pub async fn delete_liquidity_pool(&self, pool_id: &str) -> Result<()> {
+        let key = format!("liquidity_pool:{}", pool_id);
+        self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
+        debug!("🗑️ Deleted liquidity pool: {}", pool_id);
+        Ok(())
+    }
+
+    /// Save benchmark timestamp for IP rate limiting
+    /// Key format: benchmark_ip:{ip_address}
+    pub async fn save_benchmark_timestamp(&self, ip_address: &str, timestamp: u64) -> Result<()> {
+        let key = format!("benchmark_ip:{}", ip_address);
+        let value = timestamp.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!("⏰ Saved benchmark timestamp for IP: {}", ip_address);
+        Ok(())
+    }
+
+    /// Load benchmark timestamp for IP rate limiting
+    /// Returns None if IP has never run benchmark, Some(timestamp) otherwise
+    pub async fn load_benchmark_timestamp(&self, ip_address: &str) -> Result<Option<u64>> {
+        let key = format!("benchmark_ip:{}", ip_address);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) => {
+                if bytes.len() == 8 {
+                    let timestamp = u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]);
+                    debug!("⏰ Loaded benchmark timestamp for IP {}: {}", ip_address, timestamp);
+                    Ok(Some(timestamp))
+                } else {
+                    warn!("Invalid benchmark timestamp data length for IP {}", ip_address);
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if IP is rate limited for benchmark (DISABLED - no rate limiting)
+    /// Returns (is_limited, minutes_remaining)
+    pub async fn check_benchmark_rate_limit(&self, ip_address: &str) -> Result<(bool, u64)> {
+        const COOLDOWN_SECONDS: u64 = 0; // DISABLED - no rate limiting
+
+        match self.load_benchmark_timestamp(ip_address).await? {
+            Some(last_timestamp) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let elapsed = now.saturating_sub(last_timestamp);
+
+                if elapsed < COOLDOWN_SECONDS {
+                    let remaining_seconds = COOLDOWN_SECONDS - elapsed;
+                    let remaining_minutes = (remaining_seconds + 59) / 60; // Round up
+                    debug!("🚫 IP {} is rate limited, {} minutes remaining", ip_address, remaining_minutes);
+                    Ok((true, remaining_minutes))
+                } else {
+                    debug!("✅ IP {} is not rate limited", ip_address);
+                    Ok((false, 0))
+                }
+            }
+            None => {
+                debug!("✅ IP {} has never run benchmark", ip_address);
+                Ok((false, 0))
+            }
+        }
+    }
+
+    /// Get USD balance for a wallet (in cents)
+    /// Key format: usd_balance:{wallet_address_hex}
+    pub async fn get_usd_balance(&self, wallet_address: &str) -> Result<u64> {
+        let key = format!("usd_balance:{}", wallet_address);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) => {
+                if bytes.len() == 8 {
+                    let balance_cents = u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]);
+                    debug!("💵 Loaded USD balance for {}: {} cents", wallet_address, balance_cents);
+                    Ok(balance_cents)
+                } else {
+                    warn!("Invalid USD balance data length for wallet {}", wallet_address);
+                    Ok(0)
+                }
+            }
+            None => {
+                debug!("💵 USD balance not found for wallet {}, returning 0", wallet_address);
+                Ok(0)
+            }
+        }
+    }
+
+    /// Credit USD balance to a wallet (amount in cents)
+    /// Adds the specified amount to the current balance
+    pub async fn credit_usd_balance(&self, wallet_address: &str, amount_cents: u64) -> Result<()> {
+        let current_balance = self.get_usd_balance(wallet_address).await?;
+        let new_balance = current_balance.saturating_add(amount_cents);
+
+        let key = format!("usd_balance:{}", wallet_address);
+        let value = new_balance.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+
+        info!("💵 Credited {} cents to {}, new balance: {} cents",
+            amount_cents, wallet_address, new_balance);
+        Ok(())
+    }
+
+    /// Debit USD balance from a wallet (amount in cents)
+    /// Returns error if insufficient balance
+    pub async fn debit_usd_balance(&self, wallet_address: &str, amount_cents: u64) -> Result<()> {
+        let current_balance = self.get_usd_balance(wallet_address).await?;
+
+        if current_balance < amount_cents {
+            return Err(anyhow::anyhow!(
+                "Insufficient USD balance: has {} cents, needs {} cents",
+                current_balance,
+                amount_cents
+            ));
+        }
+
+        let new_balance = current_balance - amount_cents;
+
+        let key = format!("usd_balance:{}", wallet_address);
+        let value = new_balance.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+
+        info!("💵 Debited {} cents from {}, new balance: {} cents",
+            amount_cents, wallet_address, new_balance);
+        Ok(())
+    }
+
+    /// Set USD balance for a wallet directly (amount in cents)
+    /// This is used for admin operations or migrations
+    pub async fn set_usd_balance(&self, wallet_address: &str, balance_cents: u64) -> Result<()> {
+        let key = format!("usd_balance:{}", wallet_address);
+        let value = balance_cents.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+
+        info!("💵 Set USD balance for {} to {} cents", wallet_address, balance_cents);
+        Ok(())
+    }
+
+    /// Load all USD balances from persistent storage
+    /// Returns map of wallet_address -> balance_cents
+    pub async fn load_all_usd_balances(&self) -> Result<HashMap<String, u64>> {
+        let mut balances = HashMap::new();
+        let prefix = b"usd_balance:";
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(wallet_address) = key_str.strip_prefix("usd_balance:") {
+                            if value.len() == 8 {
+                                let balance_cents = u64::from_le_bytes([
+                                    value[0], value[1], value[2], value[3],
+                                    value[4], value[5], value[6], value[7],
+                                ]);
+                                balances.insert(wallet_address.to_string(), balance_cents);
+                            }
+                        }
+                    }
+                }
+                info!("💵 Loaded {} USD wallet balances from persistent storage", balances.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan USD balances: {}", e);
+            }
+        }
+
+        Ok(balances)
+    }
+
+    /// Save password hash to persistent storage (bcrypt hash)
+    /// Key format: wallet_password_{address_hex}
+    pub async fn save_password_hash(&self, address: &[u8; 32], password_hash: &str) -> Result<()> {
+        let key = format!("wallet_password_{}", hex::encode(address));
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), password_hash.as_bytes()).await?;
+        debug!(
+            "🔐 Saved password hash for address: {}",
+            hex::encode(address)
+        );
+        Ok(())
+    }
+
+    /// Load password hash from persistent storage
+    pub async fn load_password_hash(&self, address: &[u8; 32]) -> Result<Option<String>> {
+        let key = format!("wallet_password_{}", hex::encode(address));
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) => {
+                match String::from_utf8(bytes) {
+                    Ok(password_hash) => {
+                        debug!(
+                            "🔐 Loaded password hash for address: {}",
+                            hex::encode(address)
+                        );
+                        Ok(Some(password_hash))
+                    }
+                    Err(e) => {
+                        warn!("Invalid password hash UTF-8 for address {}: {}", hex::encode(address), e);
+                        Ok(None)
+                    }
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load all password hashes from persistent storage
+    /// Returns map of address -> bcrypt_hash
+    pub async fn load_password_hashes(&self) -> Result<HashMap<[u8; 32], String>> {
+        let mut hashes = HashMap::new();
+        let prefix = "wallet_password_".as_bytes();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(hex_addr) = key_str.strip_prefix("wallet_password_") {
+                            if let Ok(addr_bytes) = hex::decode(hex_addr) {
+                                if addr_bytes.len() == 32 {
+                                    let mut address = [0u8; 32];
+                                    address.copy_from_slice(&addr_bytes);
+                                    if let Ok(password_hash) = String::from_utf8(value) {
+                                        hashes.insert(address, password_hash);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                info!(
+                    "🔐 Loaded {} password hashes from persistent storage",
+                    hashes.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan password hashes: {}", e);
+            }
+        }
+
+        Ok(hashes)
     }
 }
 

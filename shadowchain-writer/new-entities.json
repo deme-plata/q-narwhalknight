@@ -1,0 +1,111 @@
+[
+  {
+    "Character": {
+      "name": "Dr. Yuki Tanaka (Phoenix)",
+      "description": "Former NIST cryptographer, Crystals-Kyber designer, guilt-driven whistleblower dying from radiation exposure",
+      "traits": ["brilliant", "haunted", "maternal", "idealistic-turned-cynical", "dying"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "Dr. Rajesh Krishnan",
+      "description": "Quantum physicist at Centre for Quantum Technologies Singapore, hostage to Kronos via family threats",
+      "traits": ["brilliant", "compromised", "family-man", "desperate", "conflicted"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "Dr. Sarah Chen",
+      "description": "MSS operative, quantum security specialist, methodical chess player who knows Elena's past",
+      "traits": ["methodical", "patient", "lethal", "nationalist", "competent"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "The Architect",
+      "description": "Kronos leadership, identity unknown, strategic mastermind who recruited Elena's mother",
+      "traits": ["manipulative", "brilliant", "patient", "infrastructure-focused", "philosophical"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "Dimitri Volkov",
+      "description": "FSB Directorate T officer, Elena's ex-lover, guardian of Moscow fragment, Kronos insurance policy",
+      "traits": ["charismatic", "dangerous", "ambiguous-loyalty", "survivor", "pragmatic"],
+      "relationships": []
+    }
+  },
+  {
+    "Character": {
+      "name": "Dr. Katerina Voss",
+      "description": "Elena's mother, deceased cryptographer, Kronos founding member, died from radiation poisoning",
+      "traits": ["brilliant", "idealistic", "tragic", "visionary", "deceased"],
+      "relationships": []
+    }
+  },
+  {
+    "Location": {
+      "name": "Zurich Altstadt",
+      "description": "Historic old town, dead drop territory, centuries of espionage history",
+      "atmosphere": "Surveillance-heavy, tourist crowds provide cover, ordered Swiss precision",
+      "significance": ["Phoenix's operational zone", "Elena-Tanaka first contact", "Neutral ground"]
+    }
+  },
+  {
+    "Location": {
+      "name": "ETH Zurich Quantum Lab",
+      "description": "Cutting-edge quantum research facility, home to post-quantum algorithm research",
+      "atmosphere": "Sterile, high-security, intellectually charged, faraday-caged servers",
+      "significance": ["Where quantum threat and cure born", "Phoenix revelation location", "Kronos infiltration site"]
+    }
+  },
+  {
+    "Location": {
+      "name": "Newton Food Centre, Singapore",
+      "description": "Hawker center, intelligence community neutral ground, surveillance hub",
+      "atmosphere": "Humid, crowded, every angle surveilled, polyglot chaos with steam and neon",
+      "significance": ["Krishnan meeting site", "Chen surveillance", "Escape sequence location"]
+    }
+  },
+  {
+    "Location": {
+      "name": "Moscow Quantum Facility",
+      "description": "Cold War bunker beneath Gorky Park, repurposed quantum lab, Phase One Kronos site",
+      "atmosphere": "Frozen, paranoid, retro-Soviet meets cutting-edge quantum, underground and isolated",
+      "significance": ["Chapter 5 destination", "Dimitri's territory", "Kill switch fragment location", "Potential trap"]
+    }
+  },
+  {
+    "Organization": {
+      "name": "Kronos Collective",
+      "description": "Shadow organization of corporate titans, intelligence agencies, and tech monopolists seeking quantum dominance",
+      "members": [],
+      "agenda": "Control post-quantum cryptographic infrastructure, achieve cryptographic supremacy, build shadow government"
+    }
+  },
+  {
+    "Technology": {
+      "name": "Quantum Supremacy Network",
+      "description": "Distributed quantum processors linked via entanglement-based communication, 68+ logical qubits",
+      "technical_details": [
+        "68 logical qubits (current), scaling to 4096",
+        "Fault-tolerant error correction",
+        "Shor's algorithm capable (RSA-2048 breaking)",
+        "6-month timeline to complete Q-Day capability",
+        "Distributed across multiple facilities globally"
+      ]
+    }
+  },
+  {
+    "MacGuffin": {
+      "name": "Kill Switch Fragment",
+      "description": "Quantum algorithm designed by Yuki Tanaka - backdoor to the backdoor, can poison Kronos quantum processors",
+      "importance": "Only way to stop Kronos after they achieve quantum supremacy, hidden in Moscow fragment",
+      "location": "Moscow facility, guarded by Dimitri Volkov"
+    }
+  }
+]

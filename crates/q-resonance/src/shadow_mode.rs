@@ -314,19 +314,60 @@ impl ShadowModeCoordinator {
             self.auto_adjust_resonance_weight(&metrics).await;
         }
 
-        // Log comparison
+        // Enhanced logging - always log key metrics, details on interval
+        info!("🎭 Shadow Mode Round {} Complete:", round);
+        info!("   ⚔️  Primary (DAG-Knight): {} txs in {:.2}ms", primary_count, primary_time_ms);
+        info!("   🌊 Shadow (Resonance): {} txs in {:.2}ms", shadow_count, shadow_time_ms);
+        info!("   📊 Round Agreement: {:.1}% ({}/{} matched)",
+              round_agreement * 100.0, matches, primary_count);
+        info!("   📈 Overall Agreement: {:.1}% ({} rounds)",
+              metrics.current_agreement_rate * 100.0, metrics.total_rounds);
+        info!("   ⚡ Performance: Shadow is {:.1}x {} than Primary",
+              if shadow_time_ms < primary_time_ms {
+                  primary_time_ms / shadow_time_ms
+              } else {
+                  shadow_time_ms / primary_time_ms
+              },
+              if shadow_time_ms < primary_time_ms { "faster" } else { "slower" });
+        info!("   ⚖️  Resonance Weight: {:.2}%", metrics.current_resonance_weight * 100.0);
+
+        // Detailed comparison on interval
         if round % self.config.log_interval_rounds == 0 {
-            info!("🎭 Shadow Mode Comparison (Round {}):", round);
-            info!("   Primary commits: {} txs in {:.2}ms", primary_count, primary_time_ms);
-            info!("   Shadow ordered: {} txs in {:.2}ms", shadow_count, shadow_time_ms);
-            info!("   Agreement: {:.1}% ({}/{} matched)",
-                  round_agreement * 100.0, matches, primary_count);
-            info!("   Overall agreement: {:.1}%", metrics.current_agreement_rate * 100.0);
-            info!("   Resonance weight: {:.2}", metrics.current_resonance_weight);
+            info!("📊 ═══════════════════════════════════════════════════════════");
+            info!("📊 SHADOW MODE DETAILED METRICS (Round {})", round);
+            info!("📊 ═══════════════════════════════════════════════════════════");
+            info!("   Total Rounds: {}", metrics.total_rounds);
+            info!("   Agreement Rounds: {} ({:.1}%)",
+                  metrics.agreement_rounds,
+                  (metrics.agreement_rounds as f64 / metrics.total_rounds as f64) * 100.0);
+            info!("   Total Transactions: {}", metrics.total_transactions);
+            info!("   Matching Transactions: {} ({:.1}%)",
+                  metrics.matching_transactions,
+                  metrics.current_agreement_rate * 100.0);
+            info!("   Primary Avg Latency: {:.2}ms", metrics.primary_avg_latency_ms);
+            info!("   Shadow Avg Latency: {:.2}ms", metrics.shadow_avg_latency_ms);
+            info!("   Byzantine (Primary): {}", metrics.primary_byzantine_detected);
+            info!("   Byzantine (Shadow): {}", metrics.shadow_byzantine_detected);
 
             if metrics.migration_recommended {
-                info!("   ✅ Migration to Resonance recommended!");
+                info!("   ✅ MIGRATION RECOMMENDED - Criteria Met!");
+                info!("      Agreement: {:.1}% >= {:.1}% ✓",
+                      metrics.current_agreement_rate * 100.0,
+                      self.config.agreement_threshold * 100.0);
+                info!("      Rounds: {} >= {} ✓",
+                      metrics.total_rounds,
+                      self.config.observation_rounds);
+            } else if metrics.total_rounds >= self.config.observation_rounds {
+                warn!("   ⚠️  Migration NOT recommended - Criteria not met");
+                warn!("      Agreement: {:.1}% < {:.1}% threshold",
+                      metrics.current_agreement_rate * 100.0,
+                      self.config.agreement_threshold * 100.0);
+            } else {
+                info!("   ⏳ Observation Phase: {}/{} rounds",
+                      metrics.total_rounds,
+                      self.config.observation_rounds);
             }
+            info!("📊 ═══════════════════════════════════════════════════════════");
         }
 
         Ok(())

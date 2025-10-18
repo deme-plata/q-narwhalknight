@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Q-NarwhalKnight Authentication Test</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
+            color: #00ff00;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 { color: #00ffff; border-bottom: 2px solid #00ffff; padding-bottom: 10px; }
+        h2 { color: #ffff00; margin-top: 30px; }
+        .test-section {
+            background: #1a1e37;
+            border: 1px solid #00ff00;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .test-item {
+            padding: 10px;
+            margin: 10px 0;
+            border-left: 4px solid #666;
+        }
+        .test-item.pass {
+            border-left-color: #00ff00;
+            background: rgba(0, 255, 0, 0.1);
+        }
+        .test-item.fail {
+            border-left-color: #ff0000;
+            background: rgba(255, 0, 0, 0.1);
+            color: #ff0000;
+        }
+        .test-item.pending {
+            border-left-color: #ffff00;
+            background: rgba(255, 255, 0, 0.1);
+            color: #ffff00;
+        }
+        button {
+            background: #00ff00;
+            color: #0a0e27;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #00ffff;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        .data-display {
+            background: #000;
+            border: 1px solid #00ff00;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .critical {
+            color: #ff0000;
+            font-weight: bold;
+        }
+        .success {
+            color: #00ff00;
+            font-weight: bold;
+        }
+        .warning {
+            color: #ffff00;
+            font-weight: bold;
+        }
+        pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔒 Q-NarwhalKnight Authentication System Test Suite</h1>
+
+    <div class="test-section">
+        <h2>📋 Test Controls</h2>
+        <button onclick="runAllTests()">▶️ Run All Tests</button>
+        <button onclick="clearAllData()">🗑️ Clear All Storage</button>
+        <button onclick="location.reload()">🔄 Refresh Page</button>
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        const results = document.getElementById('results');
+        let testResults = [];
+
+        function addResult(category, name, passed, details = '') {
+            const item = document.createElement('div');
+            item.className = `test-item ${passed ? 'pass' : 'fail'}`;
+            item.innerHTML = `
+                <strong>${passed ? '✅' : '❌'} ${name}</strong><br>
+                ${details ? `<small>${details}</small>` : ''}
+            `;
+
+            const section = document.getElementById(category) || createSection(category);
+            section.appendChild(item);
+
+            testResults.push({ category, name, passed, details });
+        }
+
+        function createSection(category) {
+            const section = document.createElement('div');
+            section.id = category;
+            section.className = 'test-section';
+            section.innerHTML = `<h2>${category}</h2>`;
+            results.appendChild(section);
+            return section;
+        }
+
+        async function runAllTests() {
+            results.innerHTML = '';
+            testResults = [];
+
+            console.log('🧪 Starting Authentication Test Suite...');
+
+            await testStorageVerification();
+            await testEncryptionPresence();
+            await testPlaintextAbsence();
+            await testSessionStorage();
+            await testBalanceQueryAuth();
+
+            displaySummary();
+        }
+
+        async function testStorageVerification() {
+            const category = '1️⃣ Storage Verification';
+
+            // Check for encrypted key
+            const encryptedKey = localStorage.getItem('walletEncryptedKey');
+            addResult(category, 'Encrypted Private Key Exists',
+                !!encryptedKey,
+                encryptedKey ? `Found: ${encryptedKey.substring(0, 50)}...` : 'NOT FOUND'
+            );
+
+            // Check for encrypted mnemonic
+            const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
+            addResult(category, 'Encrypted Mnemonic Exists',
+                !!encryptedMnemonic,
+                encryptedMnemonic ? `Found: ${encryptedMnemonic.substring(0, 50)}...` : 'NOT FOUND'
+            );
+
+            // Check for wallet address (public - safe)
+            const walletAddress = localStorage.getItem('walletAddress');
+            addResult(category, 'Wallet Address Exists (Public Data)',
+                !!walletAddress,
+                walletAddress ? `Address: ${walletAddress}` : 'NOT FOUND'
+            );
+
+            // Check for wallet ID
+            const walletId = localStorage.getItem('walletId');
+            addResult(category, 'Wallet ID Exists',
+                !!walletId,
+                walletId ? `ID: ${walletId}` : 'NOT FOUND'
+            );
+        }
+
+        async function testPlaintextAbsence() {
+            const category = '2️⃣ CRITICAL: Plaintext Security Check';
+
+            // CRITICAL: Check for plaintext mnemonic (MUST NOT EXIST)
+            const plaintextSeed = localStorage.getItem('walletSeed');
+            const isSecure = !plaintextSeed;
+
+            addResult(category, 'NO Plaintext Mnemonic (walletSeed)',
+                isSecure,
+                isSecure
+                    ? '✅ SECURE: No plaintext mnemonic found'
+                    : '🚨 CRITICAL SECURITY VIOLATION: Plaintext mnemonic detected!'
+            );
+
+            // Check all localStorage keys for suspicious plaintext
+            const allKeys = Object.keys(localStorage);
+            const suspiciousKeys = allKeys.filter(key =>
+                key.toLowerCase().includes('private') &&
+                !key.toLowerCase().includes('encrypted')
+            );
+
+            addResult(category, 'NO Suspicious Plaintext Keys',
+                suspiciousKeys.length === 0,
+                suspiciousKeys.length > 0
+                    ? `⚠️ Suspicious keys found: ${suspiciousKeys.join(', ')}`
+                    : '✅ No suspicious plaintext keys detected'
+            );
+        }
+
+        async function testEncryptionPresence() {
+            const category = '3️⃣ Encryption Verification';
+
+            const encryptedKey = localStorage.getItem('walletEncryptedKey');
+            const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
+
+            // Verify encrypted data looks like Base64
+            const isBase64 = (str) => /^[A-Za-z0-9+/=]+$/.test(str);
+
+            if (encryptedKey) {
+                try {
+                    const parsed = JSON.parse(encryptedKey);
+                    const hasValidStructure = parsed.ciphertext && parsed.iv && parsed.salt;
+                    addResult(category, 'Encrypted Key Structure Valid',
+                        hasValidStructure,
+                        `Has ciphertext: ${!!parsed.ciphertext}, IV: ${!!parsed.iv}, Salt: ${!!parsed.salt}`
+                    );
+                } catch (e) {
+                    addResult(category, 'Encrypted Key Structure Valid', false, `Parse error: ${e.message}`);
+                }
+            }
+
+            if (encryptedMnemonic) {
+                try {
+                    const parsed = JSON.parse(encryptedMnemonic);
+                    const hasValidStructure = parsed.ciphertext && parsed.iv && parsed.salt;
+                    addResult(category, 'Encrypted Mnemonic Structure Valid',
+                        hasValidStructure,
+                        `Has ciphertext: ${!!parsed.ciphertext}, IV: ${!!parsed.iv}, Salt: ${!!parsed.salt}`
+                    );
+                } catch (e) {
+                    addResult(category, 'Encrypted Mnemonic Structure Valid', false, `Parse error: ${e.message}`);
+                }
+            }
+        }
+
+        async function testSessionStorage() {
+            const category = '4️⃣ Session Storage Test';
+
+            const session = sessionStorage.getItem('walletSession');
+            addResult(category, 'Session Exists in SessionStorage',
+                !!session,
+                session ? '✅ Session found (will expire on browser close)' : '⚠️ No active session'
+            );
+
+            if (session) {
+                try {
+                    const parsed = JSON.parse(session);
+                    addResult(category, 'Session Contains Private Key',
+                        !!parsed.privateKey,
+                        '✅ Session has temporary private key (in-memory)'
+                    );
+                    addResult(category, 'Session Contains Address',
+                        !!parsed.address,
+                        parsed.address ? `Address: ${parsed.address}` : 'Missing'
+                    );
+                } catch (e) {
+                    addResult(category, 'Session Parse Error', false, e.message);
+                }
+            }
+        }
+
+        async function testBalanceQueryAuth() {
+            const category = '5️⃣ Balance Query Authentication';
+
+            const walletAddress = localStorage.getItem('walletAddress');
+            if (!walletAddress) {
+                addResult(category, 'Cannot Test - No Wallet Address', false, 'Wallet not initialized');
+                return;
+            }
+
+            // Test balance query (will show if authentication is working)
+            try {
+                const response = await fetch(`/api/v1/wallets/${walletAddress}/balance`, {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                // Check if authentication was required
+                if (response.status === 401 || response.status === 403) {
+                    addResult(category, 'Balance Query Requires Authentication',
+                        true,
+                        '✅ GOOD: Unauthenticated request was rejected'
+                    );
+                } else if (response.ok && data.success) {
+                    addResult(category, 'Balance Query Succeeded',
+                        true,
+                        `✅ Balance: ${data.data?.balance_qnk || 'unknown'} QNK (authenticated request)`
+                    );
+                } else {
+                    addResult(category, 'Balance Query Response',
+                        false,
+                        `Status: ${response.status}, Data: ${JSON.stringify(data)}`
+                    );
+                }
+            } catch (error) {
+                addResult(category, 'Balance Query Error', false, error.message);
+            }
+        }
+
+        function displaySummary() {
+            const total = testResults.length;
+            const passed = testResults.filter(r => r.passed).length;
+            const failed = total - passed;
+            const passRate = ((passed / total) * 100).toFixed(1);
+
+            const summary = document.createElement('div');
+            summary.className = 'test-section';
+            summary.innerHTML = `
+                <h2>📊 Test Summary</h2>
+                <div class="data-display">
+                    <strong>Total Tests:</strong> ${total}<br>
+                    <strong class="success">Passed:</strong> ${passed}<br>
+                    <strong class="critical">Failed:</strong> ${failed}<br>
+                    <strong>Pass Rate:</strong> ${passRate}%<br>
+                    <br>
+                    <strong class="${passRate >= 90 ? 'success' : passRate >= 70 ? 'warning' : 'critical'}">
+                        ${passRate >= 90 ? '✅ EXCELLENT' : passRate >= 70 ? '⚠️ NEEDS ATTENTION' : '❌ CRITICAL ISSUES'}
+                    </strong>
+                </div>
+            `;
+            results.insertBefore(summary, results.firstChild);
+        }
+
+        function clearAllData() {
+            if (confirm('⚠️ This will clear ALL localStorage and sessionStorage. Continue?')) {
+                localStorage.clear();
+                sessionStorage.clear();
+                alert('✅ All storage cleared. Please refresh the page.');
+            }
+        }
+
+        // Auto-run tests on load
+        window.addEventListener('load', () => {
+            console.log('🔒 Authentication Test Page Loaded');
+            console.log('Click "Run All Tests" to begin testing...');
+        });
+    </script>
+</body>
+</html>

@@ -145,26 +145,21 @@ pub async fn add_liquidity(
 
         // Deduct token0 (native QUG or token)
         if is_native_token0 {
-            // Deduct native QUG
-            if let Some(balance) = wallet_balances.get_mut(&provider) {
-                if *balance < request.amount0 {
-                    return Ok(Json(ApiResponse::error(format!(
-                        "Insufficient QUG balance. Required: {}, Available: {}",
-                        request.amount0, *balance
-                    ))));
-                }
-                *balance -= request.amount0;
-                tracing::info!(
-                    "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
-                    request.amount0 as f64 / 100_000_000.0,
-                    hex::encode(provider),
-                    *balance as f64 / 100_000_000.0
-                );
-            } else {
-                return Ok(Json(ApiResponse::error(
-                    "Provider wallet not found".to_string(),
-                )));
+            // Deduct native QUG - initialize if needed
+            let balance = wallet_balances.entry(provider).or_insert(0);
+            if *balance < request.amount0 {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Insufficient QUG balance. Required: {}, Available: {}",
+                    request.amount0, *balance
+                ))));
             }
+            *balance -= request.amount0;
+            tracing::info!(
+                "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
+                request.amount0 as f64 / 100_000_000.0,
+                hex::encode(provider),
+                *balance as f64 / 100_000_000.0
+            );
         } else {
             // Deduct token0 (token contract) - resolve symbol if needed
             let token0_addr = if request.token0.starts_with("0x") || request.token0.starts_with("qnk") {
@@ -234,26 +229,21 @@ pub async fn add_liquidity(
 
         // Deduct token1 (native QUG or token)
         if is_native_token1 {
-            // Deduct native QUG
-            if let Some(balance) = wallet_balances.get_mut(&provider) {
-                if *balance < request.amount1 {
-                    return Ok(Json(ApiResponse::error(format!(
-                        "Insufficient QUG balance. Required: {}, Available: {}",
-                        request.amount1, *balance
-                    ))));
-                }
-                *balance -= request.amount1;
-                tracing::info!(
-                    "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
-                    request.amount1 as f64 / 100_000_000.0,
-                    hex::encode(provider),
-                    *balance as f64 / 100_000_000.0
-                );
-            } else {
-                return Ok(Json(ApiResponse::error(
-                    "Provider wallet not found".to_string(),
-                )));
+            // Deduct native QUG - initialize if needed
+            let balance = wallet_balances.entry(provider).or_insert(0);
+            if *balance < request.amount1 {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Insufficient QUG balance. Required: {}, Available: {}",
+                    request.amount1, *balance
+                ))));
             }
+            *balance -= request.amount1;
+            tracing::info!(
+                "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
+                request.amount1 as f64 / 100_000_000.0,
+                hex::encode(provider),
+                *balance as f64 / 100_000_000.0
+            );
         } else {
             // Deduct token1 (token contract)
             let balance_key = (provider, token1_addr);
@@ -347,6 +337,19 @@ pub async fn add_liquidity(
                 pool.reserve0,
                 pool.reserve1
             );
+
+            // ✅ Persist updated liquidity pool to storage
+            let pool_clone = pool.clone();
+            drop(pools); // Release write lock before async I/O
+
+            if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
+                if let Err(e) = state.storage_engine.save_liquidity_pool(&existing_pool_id, &pool_data).await {
+                    tracing::warn!("Failed to persist updated liquidity pool: {}", e);
+                } else {
+                    tracing::info!("💾 Persisted updated liquidity pool: {}", existing_pool_id);
+                }
+            }
+
             (existing_pool_id.clone(), "added")
         } else {
             // Pool was removed between read and write locks - create new one
@@ -365,6 +368,7 @@ pub async fn add_liquidity(
                 provider,
                 created_at: chrono::Utc::now(),
             };
+            let pool_clone = pool.clone();
             pools.insert(new_pool_id.clone(), pool);
             tracing::info!(
                 "💰 Created liquidity pool {} with reserves: {} / {}",
@@ -372,6 +376,16 @@ pub async fn add_liquidity(
                 request.amount0,
                 request.amount1
             );
+
+            // ✅ Persist new liquidity pool to storage
+            if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
+                if let Err(e) = state.storage_engine.save_liquidity_pool(&new_pool_id, &pool_data).await {
+                    tracing::warn!("Failed to persist new liquidity pool: {}", e);
+                } else {
+                    tracing::info!("💾 Persisted new liquidity pool: {}", new_pool_id);
+                }
+            }
+
             (new_pool_id, "created")
         }
     } else {
@@ -392,6 +406,7 @@ pub async fn add_liquidity(
             created_at: chrono::Utc::now(),
         };
 
+        let pool_clone = pool.clone();
         let mut pools = state.liquidity_pools.write().await;
         pools.insert(new_pool_id.clone(), pool);
         tracing::info!(
@@ -400,6 +415,16 @@ pub async fn add_liquidity(
             request.amount0,
             request.amount1
         );
+
+        // ✅ Persist new liquidity pool to storage
+        if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
+            if let Err(e) = state.storage_engine.save_liquidity_pool(&new_pool_id, &pool_data).await {
+                tracing::warn!("Failed to persist new liquidity pool: {}", e);
+            } else {
+                tracing::info!("💾 Persisted new liquidity pool: {}", new_pool_id);
+            }
+        }
+
         (new_pool_id, "created")
     };
 
@@ -423,6 +448,8 @@ pub async fn add_liquidity(
             request.amount0, request.token0, request.amount1, request.token1
         )
         .into_bytes(),
+        token_type: q_types::TokenType::QUG,
+        fee_token_type: q_types::TokenType::QUGUSD,
     };
 
     // Store transaction
@@ -620,6 +647,14 @@ pub async fn remove_liquidity(
             // Remove pool entirely
             pools.remove(&request.pool_id);
             tracing::info!("🗑️ Removed liquidity pool {} (100% withdrawn)", request.pool_id);
+
+            // ✅ Delete pool from storage
+            drop(pools); // Release write lock before async I/O
+            if let Err(e) = state.storage_engine.delete_liquidity_pool(&request.pool_id).await {
+                tracing::warn!("Failed to delete liquidity pool from storage: {}", e);
+            } else {
+                tracing::info!("💾 Deleted liquidity pool from storage: {}", request.pool_id);
+            }
         } else {
             // Update pool reserves
             if let Some(pool) = pools.get_mut(&request.pool_id) {
@@ -631,6 +666,18 @@ pub async fn remove_liquidity(
                     pool.reserve0,
                     pool.reserve1
                 );
+
+                // ✅ Persist updated pool to storage
+                let pool_clone = pool.clone();
+                drop(pools); // Release write lock before async I/O
+
+                if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
+                    if let Err(e) = state.storage_engine.save_liquidity_pool(&request.pool_id, &pool_data).await {
+                        tracing::warn!("Failed to persist updated liquidity pool after removal: {}", e);
+                    } else {
+                        tracing::info!("💾 Persisted updated liquidity pool: {}", request.pool_id);
+                    }
+                }
             }
         }
     }

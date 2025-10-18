@@ -16,6 +16,7 @@ authors.workspace = true
 q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-narwhal-core = { path = "../q-narwhal-core" }
+q-aegis-ql = { path = "../q-aegis-ql" }
 
 # Core numerical computation
 num-complex = "0.4"
@@ -28,6 +29,7 @@ rayon = "1.7"
 # Cryptographic primitives
 sha3 = "0.10"
 blake3 = "1.5"
+hex = { workspace = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

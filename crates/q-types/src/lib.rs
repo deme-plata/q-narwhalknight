@@ -45,6 +45,94 @@ pub type Amount = u64;
 /// Address type (Phase 0: Ed25519 public key hash)
 pub type Address = [u8; 32];
 
+/// Token type for dual-token economics (QUG mining token + QUGUSD stablecoin)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TokenType {
+    /// QUG - Native mining token (21M fixed supply, deflationary)
+    QUG,
+    /// QUGUSD - Algorithmic stablecoin pegged to USD ($1.00)
+    QUGUSD,
+}
+
+/// Token information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenInfo {
+    pub token_type: TokenType,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub max_supply: Option<u64>, // None for QUGUSD (unlimited if collateralized)
+}
+
+/// QUG token constants
+pub const QUG_DECIMALS: u8 = 8;
+pub const QUG_MAX_SUPPLY: u64 = 2_100_000_000_000_000; // 21M * 10^8
+pub const QUG_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x55, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, // "QUG" in hex + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// QUGUSD token constants
+pub const QUGUSD_DECIMALS: u8 = 8;
+pub const QUGUSD_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0x00, 0x00, // "QUGUSD" in hex + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Bank master account address for fee collection
+pub const BANK_MASTER_ACCOUNT: [u8; 32] = [
+    0x42, 0x41, 0x4E, 0x4B, 0x00, 0x00, 0x00, 0x00, // "BANK" in hex + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+impl TokenInfo {
+    /// Get QUG token information
+    pub fn qug() -> Self {
+        Self {
+            token_type: TokenType::QUG,
+            name: "Quillon".to_string(),
+            symbol: "QUG".to_string(),
+            decimals: QUG_DECIMALS,
+            max_supply: Some(QUG_MAX_SUPPLY),
+        }
+    }
+
+    /// Get QUGUSD token information
+    pub fn qugusd() -> Self {
+        Self {
+            token_type: TokenType::QUGUSD,
+            name: "Quillon USD".to_string(),
+            symbol: "QUGUSD".to_string(),
+            decimals: QUGUSD_DECIMALS,
+            max_supply: None, // Unlimited if properly collateralized
+        }
+    }
+}
+
+impl TokenType {
+    /// Get the reserved token address for this token type
+    pub fn address(&self) -> [u8; 32] {
+        match self {
+            TokenType::QUG => QUG_TOKEN_ADDRESS,
+            TokenType::QUGUSD => QUGUSD_TOKEN_ADDRESS,
+        }
+    }
+
+    /// Get token info for this token type
+    pub fn info(&self) -> TokenInfo {
+        match self {
+            TokenType::QUG => TokenInfo::qug(),
+            TokenType::QUGUSD => TokenInfo::qugusd(),
+        }
+    }
+}
+
 /// Hash256 type for general cryptographic hashing
 pub type Hash256 = [u8; 32];
 
@@ -63,6 +151,20 @@ pub struct Transaction {
     pub signature: Vec<u8>, // Will be Signature in Phase 0, expandable for PQ
     pub timestamp: DateTime<Utc>,
     pub data: Vec<u8>, // Contract call data or arbitrary transaction payload
+    #[serde(default = "default_token_type")]
+    pub token_type: TokenType, // QUG or QUGUSD
+    #[serde(default = "default_fee_token_type")]
+    pub fee_token_type: TokenType, // Token used to pay fees (default: QUGUSD)
+}
+
+/// Default token type for backwards compatibility
+fn default_token_type() -> TokenType {
+    TokenType::QUG
+}
+
+/// Default fee token type
+fn default_fee_token_type() -> TokenType {
+    TokenType::QUGUSD
 }
 
 /// DAG vertex (Narwhal block)

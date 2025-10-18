@@ -4,9 +4,21 @@
 
 The rain carved neon rivers down the graffiti-scarred walls of Kreuzberg, each droplet catching fragments of light from the Bitcoin ATM's amber glow. Elena Voss pressed herself deeper into the doorway's shadow, her breath forming momentary clouds in the October chill. The Nexus Veil protocol hummed silently through the mesh network nodes hidden throughout the district—invisible infrastructure for the invisible people.
 
+Berlin specialized in chaos—squats and startups, artists and anarchists, all layered over Cold War ruins and medieval foundations. Order existed here only as something to resist, to subvert, to spray-paint over. The graffiti behind her read "FREIHEIT IST ORDNUNG" in dripping neon pink—Freedom is Order—the kind of paradox that made Berlin what it was.
+
+Elena had chosen Berlin precisely because it was the opposite of everywhere she'd worked before. MI6 had been all order: protocols, hierarchies, reports filed in triplicate. Tangier had been chaos pretending to be order, a city where every rule had twelve exceptions. Berlin was honest about what it was: a place where disorder was the default, where anonymity came from noise rather than silence.
+
 *Three minutes until the next blockchain anchor.*
 
 She'd been watching the café across the narrow street for forty-seven minutes. Long enough to catalog the patterns: the barista's methodical movements, the cyclist who passed every twelve minutes, the automated delivery drone's predictable route. Long enough to spot the watcher in the second-floor window.
+
+Waiting was a skill she'd learned young—her mother had been a master of it. Katerina Voss had spent Elena's entire childhood "waiting for clearance" or "waiting for results" or just... waiting. Always working late. Always traveling for conferences.
+
+Elena remembered her tenth birthday. Her mother had promised to be home for the party. The cake melted slowly over three hours while Elena watched the door, until finally her grandmother explained that "Mama's work was very important."
+
+Even then, Elena had known: whatever her mother was doing, it mattered more than birthday parties.
+
+She'd never imagined it meant choosing to disappear entirely.
 
 Elena's augmented contact lens flickered with a priority alert: **QUANTUM_ANCHOR_IMMINENT**. The next consensus round would either validate her transaction or expose her location to every hunter on the network. Six months of careful preparation compressed into the next 180 seconds.
 

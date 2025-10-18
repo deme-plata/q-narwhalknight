@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion';
-import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity } from 'lucide-react';
+import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { qnkAPI } from '../services/api';
 
 interface TokenDetails {
   id: string;
@@ -44,6 +45,22 @@ interface PriceDataPoint {
   volume: number;
 }
 
+interface TokenTransaction {
+  id: string;
+  timestamp: number;
+  type: 'buy' | 'sell' | 'transfer';
+  amount: number;
+  price: number;
+  value: number;
+  from: string;
+  to: string;
+  txHash: string;
+}
+
+type SortField = 'timestamp' | 'amount' | 'value' | 'type';
+type SortOrder = 'asc' | 'desc';
+type TransactionFilter = 'all' | 'buy' | 'sell' | 'transfer';
+
 export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalProps) {
   const [timeframe, setTimeframe] = useState<'1H' | '24H' | '7D' | '30D' | '1Y'>('24H');
   const [priceData, setPriceData] = useState<PriceDataPoint[]>([]);
@@ -51,51 +68,146 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
   const [hoveredPoint, setHoveredPoint] = useState<PriceDataPoint | null>(null);
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
 
-  // Generate realistic high-resolution price data (100ms intervals)
+  // Transaction table state
+  const [transactions, setTransactions] = useState<TokenTransaction[]>([]);
+  const [sortField, setSortField] = useState<SortField>('timestamp');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  const [filterType, setFilterType] = useState<TransactionFilter>('all');
+
+  // Fetch real price history from backend with SSE real-time updates
   useEffect(() => {
     if (!token) return;
+    let mounted = true;
+    let eventSource: EventSource | null = null;
 
-    const generatePriceData = () => {
-      const now = Date.now();
-      const intervals: Record<typeof timeframe, { duration: number; points: number }> = {
-        '1H': { duration: 3600000, points: 36000 }, // 100ms intervals for 1 hour
-        '24H': { duration: 86400000, points: 864000 }, // 100ms intervals for 24 hours
-        '7D': { duration: 604800000, points: 6048000 }, // 100ms intervals for 7 days
-        '30D': { duration: 2592000000, points: 25920000 }, // 100ms intervals for 30 days
-        '1Y': { duration: 31536000000, points: 315360000 }, // 100ms intervals for 1 year
-      };
-
-      const { duration, points } = intervals[timeframe];
-      const data: PriceDataPoint[] = [];
-      const basePrice = token.price;
-      const volatility = 0.02; // 2% volatility
-
-      let currentPrice = basePrice * (1 - (token.change24h / 100));
-
-      // Generate data points with realistic price movement
-      for (let i = 0; i < points; i++) {
-        const timestamp = now - duration + (i * 100); // 100ms intervals
-
-        // Random walk with trend
-        const trend = (token.change24h / 100) * (i / points);
-        const randomChange = (Math.random() - 0.5) * volatility;
-        currentPrice = currentPrice * (1 + randomChange + (trend / points));
-
-        // Add some volume variance
-        const volume = token.volume24h * (0.5 + Math.random()) / points;
-
-        data.push({
-          timestamp,
-          price: currentPrice,
-          volume
-        });
+    // Fetch initial price history from backend
+    const fetchPriceHistory = async () => {
+      try {
+        const response = await qnkAPI.getTokenPriceHistory(token.id, timeframe);
+        if (response.success && response.data && mounted) {
+          setPriceData(response.data);
+          console.log('✅ Loaded price history from backend:', response.data.length, 'data points');
+        }
+      } catch (error) {
+        console.error('Failed to fetch price history:', error);
+        // Fallback to current price if no history available
+        if (mounted) {
+          setPriceData([{
+            timestamp: Date.now(),
+            price: token.price,
+            volume: token.volume24h
+          }]);
+        }
       }
-
-      return data;
     };
 
-    setPriceData(generatePriceData());
+    fetchPriceHistory();
+
+    // Set up SSE for real-time price updates
+    const sseUrl = import.meta.env.VITE_API_URL ?
+      `${import.meta.env.VITE_API_URL}/v1/events` :
+      '/api/v1/events';
+
+    try {
+      eventSource = new EventSource(sseUrl);
+
+      eventSource.addEventListener('token_price_update', (event) => {
+        if (!mounted) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.token_id === token.id) {
+            console.log('📈 Received price update for token:', data);
+            // Append new data point to chart
+            setPriceData(prev => [...prev, {
+              timestamp: data.timestamp * 1000, // Convert to milliseconds
+              price: data.price,
+              volume: data.volume_24h || 0
+            }].slice(-100000)); // Keep last 100k points for performance
+          }
+        } catch (err) {
+          console.error('Failed to parse price update:', err);
+        }
+      });
+
+    } catch (error) {
+      console.error('Failed to establish SSE connection:', error);
+    }
+
+    return () => {
+      mounted = false;
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
   }, [token, timeframe]);
+
+  // Fetch real transaction history from backend with SSE real-time updates
+  useEffect(() => {
+    if (!token) return;
+    let mounted = true;
+    let eventSource: EventSource | null = null;
+
+    // Fetch initial transaction history from backend
+    const fetchTransactions = async () => {
+      try {
+        const response = await qnkAPI.getTokenTransactions(token.id);
+        if (response.success && response.data && mounted) {
+          setTransactions(response.data);
+          console.log('✅ Loaded transactions from backend:', response.data.length, 'transactions');
+        }
+      } catch (error) {
+        console.error('Failed to fetch transactions:', error);
+        if (mounted) {
+          setTransactions([]);
+        }
+      }
+    };
+
+    fetchTransactions();
+
+    // Set up SSE for real-time transaction updates
+    const sseUrl = import.meta.env.VITE_API_URL ?
+      `${import.meta.env.VITE_API_URL}/v1/events` :
+      '/api/v1/events';
+
+    try {
+      eventSource = new EventSource(sseUrl);
+
+      eventSource.addEventListener('token_transaction', (event) => {
+        if (!mounted) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.token_id === token.id) {
+            console.log('📜 Received transaction for token:', data);
+            // Prepend new transaction to list (keep last 100)
+            setTransactions(prev => [{
+              id: data.tx_hash,
+              timestamp: data.timestamp,
+              type: data.type,
+              amount: data.amount,
+              price: data.price,
+              value: data.value,
+              from: data.from,
+              to: data.to,
+              txHash: data.tx_hash,
+            }, ...prev].slice(0, 100));
+          }
+        } catch (err) {
+          console.error('Failed to parse transaction:', err);
+        }
+      });
+
+    } catch (error) {
+      console.error('Failed to establish SSE connection:', error);
+    }
+
+    return () => {
+      mounted = false;
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, [token]);
 
   // Draw the price chart on canvas
   useEffect(() => {
@@ -247,6 +359,61 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
     setMousePosition({ x: 0, y: 0 });
   };
 
+  // Sort and filter transactions
+  const filteredAndSortedTransactions = () => {
+    // Filter by type
+    let filtered = transactions;
+    if (filterType !== 'all') {
+      filtered = transactions.filter(tx => tx.type === filterType);
+    }
+
+    // Sort by selected field
+    const sorted = [...filtered].sort((a, b) => {
+      let comparison = 0;
+
+      switch (sortField) {
+        case 'timestamp':
+          comparison = a.timestamp - b.timestamp;
+          break;
+        case 'amount':
+          comparison = a.amount - b.amount;
+          break;
+        case 'value':
+          comparison = a.value - b.value;
+          break;
+        case 'type':
+          comparison = a.type.localeCompare(b.type);
+          break;
+      }
+
+      return sortOrder === 'asc' ? comparison : -comparison;
+    });
+
+    return sorted;
+  };
+
+  // Toggle sort field and order
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      // Toggle order if same field
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      // Set new field with desc as default
+      setSortField(field);
+      setSortOrder('desc');
+    }
+  };
+
+  // Get sort icon for column
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) {
+      return <ArrowUpDown className="w-4 h-4 opacity-40" />;
+    }
+    return sortOrder === 'asc'
+      ? <ArrowUp className="w-4 h-4 text-quantum-cyan" />
+      : <ArrowDown className="w-4 h-4 text-quantum-cyan" />;
+  };
+
   const formatLargeNumber = (num: number) => {
     if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
     if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
@@ -284,7 +451,25 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-2xl flex items-center justify-center text-3xl shadow-lg">
-                  {token.icon}
+                  {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
+                    <div className="relative w-12 h-12">
+                      <div className="absolute inset-0 rounded-full" style={{
+                        background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                        padding: '2px'
+                      }}>
+                        <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
+                          <img
+                            src="/quillon-logo.png"
+                            alt="Quillon"
+                            className="w-full h-full object-contain"
+                            style={{ filter: 'invert(1)' }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    token.icon
+                  )}
                 </div>
                 <div>
                   <h2 className="text-3xl font-black text-white">{token.name}</h2>
@@ -327,118 +512,316 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
             )}
           </div>
 
-          {/* Price Chart */}
-          <div className="relative z-10 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-white">Price Chart (100ms Resolution)</h3>
-              <div className="flex gap-2">
-                {(['1H', '24H', '7D', '30D', '1Y'] as const).map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setTimeframe(tf)}
-                    className={`px-4 py-2 rounded-lg font-medium transition-all ${
-                      timeframe === tf
-                        ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
-                        : 'bg-white/5 text-gray-400 hover:bg-white/10'
-                    }`}
-                  >
-                    {tf}
-                  </button>
-                ))}
+          {/* Two Column Layout: Graph + Info */}
+          <div className="relative z-10 p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* LEFT COLUMN: Price Chart */}
+            <div className="flex flex-col">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-white">Price Chart (100ms Resolution)</h3>
+                <div className="flex gap-1">
+                  {(['1H', '24H', '7D', '30D', '1Y'] as const).map((tf) => (
+                    <button
+                      key={tf}
+                      onClick={() => setTimeframe(tf)}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                        timeframe === tf
+                          ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                      }`}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="relative bg-black/40 rounded-2xl p-4 border border-quantum-cyan/20 flex-1">
+                <canvas
+                  ref={canvasRef}
+                  width={1200}
+                  height={600}
+                  className="w-full h-full cursor-crosshair"
+                  onMouseMove={handleCanvasMouseMove}
+                  onMouseLeave={handleCanvasMouseLeave}
+                />
               </div>
             </div>
 
-            <div className="relative bg-black/40 rounded-2xl p-4 border border-quantum-cyan/20">
-              <canvas
-                ref={canvasRef}
-                width={1200}
-                height={400}
-                className="w-full h-[400px] cursor-crosshair"
-                onMouseMove={handleCanvasMouseMove}
-                onMouseLeave={handleCanvasMouseLeave}
-              />
+            {/* RIGHT COLUMN: All Info */}
+            <div className="flex flex-col gap-6 overflow-y-auto max-h-[700px]">
+              {/* Stats Grid */}
+              <div>
+                <h3 className="text-xl font-bold text-white mb-4">Market Stats</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <StatCard
+                    icon={<Activity className="w-5 h-5" />}
+                    label="Market Cap"
+                    value={formatLargeNumber(token.marketCap)}
+                    color="from-cyan-500 to-blue-500"
+                  />
+                  <StatCard
+                    icon={<Coins className="w-5 h-5" />}
+                    label="Total Supply"
+                    value={formatLargeNumber(token.totalSupply)}
+                    color="from-purple-500 to-pink-500"
+                  />
+                  <StatCard
+                    icon={<Droplet className="w-5 h-5" />}
+                    label="Liquidity"
+                    value={formatLargeNumber(token.liquidity)}
+                    color="from-green-500 to-teal-500"
+                  />
+                  <StatCard
+                    icon={<Users className="w-5 h-5" />}
+                    label="Holders"
+                    value={token.holders.toLocaleString()}
+                    color="from-orange-500 to-red-500"
+                  />
+                </div>
+              </div>
+
+              {/* Transaction Fees */}
+              <div>
+                <h3 className="text-xl font-bold text-white mb-4">Transaction Fees</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  <FeeCard label="Buy" percentage={token.fees.buy} />
+                  <FeeCard label="Sell" percentage={token.fees.sell} />
+                  <FeeCard label="Transfer" percentage={token.fees.transfer} />
+                </div>
+              </div>
+
+              {/* Token Features */}
+              <div>
+                <h3 className="text-xl font-bold text-white mb-4">Token Features</h3>
+                <div className="grid grid-cols-1 gap-3">
+                  <FeatureCard
+                    icon={<Droplet className="w-5 h-5" />}
+                    title="Reflection"
+                    description="Earn passive rewards from every transaction"
+                    active={token.features.reflection}
+                  />
+                  <FeatureCard
+                    icon={<Zap className="w-5 h-5" />}
+                    title="Auto-Liquidity"
+                    description="Automatic liquidity pool growth"
+                    active={token.features.autoLiquidity}
+                  />
+                  <FeatureCard
+                    icon={<Activity className="w-5 h-5" />}
+                    title="Buyback & Burn"
+                    description="Deflationary token mechanics"
+                    active={token.features.buybackAndBurn}
+                  />
+                  <FeatureCard
+                    icon={<Shield className="w-5 h-5" />}
+                    title="Anti-Whale"
+                    description="Protection against large holders"
+                    active={token.features.antiWhale}
+                  />
+                  <FeatureCard
+                    icon={<Shield className="w-5 h-5" />}
+                    title="Quantum Security"
+                    description="Post-quantum cryptographic protection"
+                    active={token.features.quantumSecured}
+                  />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <h3 className="text-xl font-bold text-white mb-4">About {token.name}</h3>
+                <p className="text-gray-300 leading-relaxed text-sm">{token.description}</p>
+              </div>
             </div>
           </div>
 
-          {/* Stats Grid */}
-          <div className="relative z-10 p-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard
-              icon={<Activity className="w-5 h-5" />}
-              label="Market Cap"
-              value={formatLargeNumber(token.marketCap)}
-              color="from-cyan-500 to-blue-500"
-            />
-            <StatCard
-              icon={<Coins className="w-5 h-5" />}
-              label="Total Supply"
-              value={formatLargeNumber(token.totalSupply)}
-              color="from-purple-500 to-pink-500"
-            />
-            <StatCard
-              icon={<Droplet className="w-5 h-5" />}
-              label="Liquidity"
-              value={formatLargeNumber(token.liquidity)}
-              color="from-green-500 to-teal-500"
-            />
-            <StatCard
-              icon={<Users className="w-5 h-5" />}
-              label="Holders"
-              value={token.holders.toLocaleString()}
-              color="from-orange-500 to-red-500"
-            />
-          </div>
-
-          {/* Token Features */}
+          {/* Transaction History */}
           <div className="relative z-10 p-6">
-            <h3 className="text-xl font-bold text-white mb-4">Token Features</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <FeatureCard
-                icon={<Droplet className="w-6 h-6" />}
-                title="Reflection"
-                description="Earn passive rewards from every transaction"
-                active={token.features.reflection}
-              />
-              <FeatureCard
-                icon={<Zap className="w-6 h-6" />}
-                title="Auto-Liquidity"
-                description="Automatic liquidity pool growth"
-                active={token.features.autoLiquidity}
-              />
-              <FeatureCard
-                icon={<Activity className="w-6 h-6" />}
-                title="Buyback & Burn"
-                description="Deflationary token mechanics"
-                active={token.features.buybackAndBurn}
-              />
-              <FeatureCard
-                icon={<Shield className="w-6 h-6" />}
-                title="Anti-Whale"
-                description="Protection against large holders"
-                active={token.features.antiWhale}
-              />
-              <FeatureCard
-                icon={<Shield className="w-6 h-6" />}
-                title="Quantum Security"
-                description="Post-quantum cryptographic protection"
-                active={token.features.quantumSecured}
-              />
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold text-white">Transaction History</h3>
+
+              {/* Filter Controls */}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-gray-400" />
+                  <span className="text-sm text-gray-400">Filter:</span>
+                </div>
+                <div className="flex gap-2">
+                  {(['all', 'buy', 'sell', 'transfer'] as TransactionFilter[]).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setFilterType(filter)}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                        filterType === filter
+                          ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                      }`}
+                    >
+                      {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
-          </div>
 
-          {/* Transaction Fees */}
-          <div className="relative z-10 p-6">
-            <h3 className="text-xl font-bold text-white mb-4">Transaction Fees</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <FeeCard label="Buy Fee" percentage={token.fees.buy} />
-              <FeeCard label="Sell Fee" percentage={token.fees.sell} />
-              <FeeCard label="Transfer Fee" percentage={token.fees.transfer} />
+            {/* Transaction Table */}
+            <div className="bg-black/40 backdrop-blur-xl rounded-2xl border border-white/10 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gradient-to-r from-quantum-cyan/10 to-quantum-purple/10 border-b border-white/10">
+                    <tr>
+                      <th className="px-4 py-3 text-left">
+                        <button
+                          onClick={() => handleSort('type')}
+                          className="flex items-center gap-2 text-sm font-bold text-white hover:text-quantum-cyan transition-colors"
+                        >
+                          Type
+                          {getSortIcon('type')}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-left">
+                        <button
+                          onClick={() => handleSort('timestamp')}
+                          className="flex items-center gap-2 text-sm font-bold text-white hover:text-quantum-cyan transition-colors"
+                        >
+                          Time
+                          {getSortIcon('timestamp')}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleSort('amount')}
+                          className="flex items-center gap-2 text-sm font-bold text-white hover:text-quantum-cyan transition-colors ml-auto"
+                        >
+                          Amount
+                          {getSortIcon('amount')}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-right">
+                        <span className="text-sm font-bold text-white">Price</span>
+                      </th>
+                      <th className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleSort('value')}
+                          className="flex items-center gap-2 text-sm font-bold text-white hover:text-quantum-cyan transition-colors ml-auto"
+                        >
+                          Value
+                          {getSortIcon('value')}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-left">
+                        <span className="text-sm font-bold text-white">From</span>
+                      </th>
+                      <th className="px-4 py-3 text-left">
+                        <span className="text-sm font-bold text-white">To</span>
+                      </th>
+                      <th className="px-4 py-3 text-center">
+                        <span className="text-sm font-bold text-white">Tx Hash</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {filteredAndSortedTransactions().length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                          No transactions found
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredAndSortedTransactions().map((tx) => (
+                        <motion.tr
+                          key={tx.id}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className="hover:bg-white/5 transition-colors"
+                        >
+                          {/* Type */}
+                          <td className="px-4 py-3">
+                            <span
+                              className={`px-2 py-1 rounded-lg text-xs font-bold ${
+                                tx.type === 'buy'
+                                  ? 'bg-quantum-green/20 text-quantum-green'
+                                  : tx.type === 'sell'
+                                  ? 'bg-red-500/20 text-red-400'
+                                  : 'bg-quantum-purple/20 text-quantum-purple'
+                              }`}
+                            >
+                              {tx.type.toUpperCase()}
+                            </span>
+                          </td>
+
+                          {/* Time */}
+                          <td className="px-4 py-3">
+                            <div className="text-sm text-gray-300">
+                              {new Date(tx.timestamp).toLocaleDateString()}
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              {new Date(tx.timestamp).toLocaleTimeString()}
+                            </div>
+                          </td>
+
+                          {/* Amount */}
+                          <td className="px-4 py-3 text-right">
+                            <div className="text-sm font-medium text-white">
+                              {tx.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </div>
+                            <div className="text-xs text-gray-500">{token.symbol}</div>
+                          </td>
+
+                          {/* Price */}
+                          <td className="px-4 py-3 text-right">
+                            <span className="text-sm text-gray-300">
+                              ${tx.price.toFixed(4)}
+                            </span>
+                          </td>
+
+                          {/* Value */}
+                          <td className="px-4 py-3 text-right">
+                            <span className="text-sm font-medium text-white">
+                              ${tx.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </span>
+                          </td>
+
+                          {/* From */}
+                          <td className="px-4 py-3">
+                            <span className="text-xs font-mono text-gray-400">
+                              {tx.from.slice(0, 6)}...{tx.from.slice(-4)}
+                            </span>
+                          </td>
+
+                          {/* To */}
+                          <td className="px-4 py-3">
+                            <span className="text-xs font-mono text-gray-400">
+                              {tx.to.slice(0, 6)}...{tx.to.slice(-4)}
+                            </span>
+                          </td>
+
+                          {/* Tx Hash */}
+                          <td className="px-4 py-3 text-center">
+                            <a
+                              href={`https://explorer.quillon.xyz/tx/${tx.txHash}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-mono text-quantum-cyan hover:text-quantum-purple transition-colors inline-flex items-center gap-1"
+                            >
+                              {tx.txHash.slice(0, 6)}...
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </td>
+                        </motion.tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Transaction count */}
+              <div className="px-4 py-3 bg-white/5 border-t border-white/10">
+                <p className="text-sm text-gray-400 text-center">
+                  Showing {filteredAndSortedTransactions().length} of {transactions.length} transactions
+                </p>
+              </div>
             </div>
-          </div>
-
-          {/* Description */}
-          <div className="relative z-10 p-6">
-            <h3 className="text-xl font-bold text-white mb-4">About {token.name}</h3>
-            <p className="text-gray-300 leading-relaxed">{token.description}</p>
           </div>
 
           {/* Links */}

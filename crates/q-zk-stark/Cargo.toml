@@ -18,6 +18,8 @@ thiserror = "1.0"
 # Serialization
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+bincode = "1.3"
+chrono = "0.4"
 
 # Cryptographic operations  
 sha3 = "0.10"
@@ -34,6 +36,7 @@ num-traits = "0.2"
 
 # Performance and benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
+rayon = "1.8"  # Parallel processing for batch operations
 
 # Logging and metrics
 tracing = "0.1"

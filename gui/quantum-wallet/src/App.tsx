@@ -10,6 +10,7 @@ import DownloadNodeScreen from './components/DownloadNodeScreen';
 import SettingsScreen from './components/SettingsScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
+import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
 import './App.css';
 
@@ -60,9 +61,8 @@ function App() {
   useEffect(() => {
     if (!authenticated) return;
 
-    console.log('🎬 App.tsx: Setting up SSE for real-time balance updates');
+    console.log('🎬 App.tsx: Setting up authenticated SSE for real-time balance updates');
 
-    let eventSource: EventSource | null = null;
     let mounted = true;
 
     const fetchNodeStatus = async () => {
@@ -84,9 +84,61 @@ function App() {
 
               if (balanceData.success && balanceData.data) {
                 walletBalance = balanceData.data.balance_qnk || 0;
+                // Cache balance for use after refresh
+                localStorage.setItem('cachedBalance', walletBalance.toString());
+                console.log('💰 App.tsx: Cached balance from API:', walletBalance);
+              } else {
+                // Authentication failed - calculate from faucet transactions
+                console.warn('⚠️ App.tsx: Balance fetch failed, calculating from transaction history');
+
+                // First try cached balance
+                const cachedBalance = localStorage.getItem('cachedBalance');
+                if (cachedBalance && parseFloat(cachedBalance) > 0) {
+                  walletBalance = parseFloat(cachedBalance);
+                  console.log('💰 App.tsx: Using cached balance:', walletBalance);
+                } else {
+                  // Calculate from faucet transactions as fallback
+                  try {
+                    const storedTxs = localStorage.getItem('faucetTransactions');
+                    if (storedTxs) {
+                      const transactions = JSON.parse(storedTxs);
+                      walletBalance = transactions.reduce((total: number, tx: any) => {
+                        return total + (tx.type === 'receive' ? tx.amount : 0);
+                      }, 0);
+                      console.log('💰 App.tsx: Calculated balance from faucet transactions:', walletBalance, 'QNK');
+                      // Cache the calculated balance
+                      localStorage.setItem('cachedBalance', walletBalance.toString());
+                    }
+                  } catch (txErr) {
+                    console.error('Failed to calculate balance from transactions:', txErr);
+                  }
+                }
               }
             } catch (balanceErr) {
               console.warn('Failed to fetch wallet balance:', balanceErr);
+
+              // Fallback 1: use cached balance from localStorage
+              const cachedBalance = localStorage.getItem('cachedBalance');
+              if (cachedBalance && parseFloat(cachedBalance) > 0) {
+                walletBalance = parseFloat(cachedBalance);
+                console.log('💰 App.tsx: Using cached balance (error fallback):', walletBalance);
+              } else {
+                // Fallback 2: calculate from faucet transactions
+                try {
+                  const storedTxs = localStorage.getItem('faucetTransactions');
+                  if (storedTxs) {
+                    const transactions = JSON.parse(storedTxs);
+                    walletBalance = transactions.reduce((total: number, tx: any) => {
+                      return total + (tx.type === 'receive' ? tx.amount : 0);
+                    }, 0);
+                    console.log('💰 App.tsx: Calculated balance from faucet transactions (error fallback):', walletBalance, 'QNK');
+                    // Cache the calculated balance
+                    localStorage.setItem('cachedBalance', walletBalance.toString());
+                  }
+                } catch (txErr) {
+                  console.error('Failed to calculate balance from transactions:', txErr);
+                }
+              }
             }
           }
 
@@ -123,91 +175,176 @@ function App() {
 
     window.addEventListener('balance-update', handleBalanceUpdate);
 
-    // Set up SSE for real-time updates
-    const sseUrl = '/api/v1/events';
-    console.log('📡 App.tsx: Attempting SSE connection to:', sseUrl);
+    // Set up authenticated SSE for real-time updates with privacy filtering
+    // Using custom fetch-based SSE to support X-Wallet-Auth authentication header
+    const currentWalletAddress = localStorage.getItem('walletAddress') || '';
+    const sseUrl = `/api/v1/events?wallet_address=${encodeURIComponent(currentWalletAddress)}`;
+    console.log('📡 App.tsx: Attempting authenticated SSE connection to:', sseUrl);
+    console.log('🔐 App.tsx: SSE connection with wallet filter:', currentWalletAddress);
 
-    try {
-      eventSource = new EventSource(sseUrl);
+    // Generate authentication header for SSE connection
+    const setupAuthenticatedSSE = async () => {
+      try {
+        // Import wallet auth dynamically to generate X-Wallet-Auth header
+        const { generateAuthHeader, walletSession } = await import('./services/walletAuth');
 
-      eventSource.onopen = () => {
-        console.log('✅ App.tsx: SSE connection established');
-      };
+        // Get private key from session
+        const session = walletSession.getSession();
+        if (!session || !session.privateKey) {
+          console.error('❌ App.tsx: No wallet session found for SSE authentication');
+          return;
+        }
 
-      eventSource.onmessage = (event) => {
-        console.log('📨 App.tsx: SSE message received:', event.data);
-        if (!mounted) return;
+        // Generate authentication header
+        const authHeaderJson = await generateAuthHeader(
+          session.privateKey,
+          currentWalletAddress,
+          '/api/v1/events'
+        );
 
-        try {
-          const data = JSON.parse(event.data);
-          console.log('📦 App.tsx: SSE data parsed:', data);
+        console.log('🔐 App.tsx: Generated X-Wallet-Auth header for SSE');
 
-          // Handle balance updates from backend SSE
-          // Backend sends: { type: "balance-updated", data: { wallet_address, old_balance, new_balance, change_reason, timestamp } }
-          if (data.type === 'balance-updated' && data.data?.new_balance !== undefined) {
-            const currentWalletAddress = localStorage.getItem('walletAddress');
-            // Strip "qnk" prefix for comparison since backend sends hex without prefix
-            const currentHex = currentWalletAddress?.startsWith('qnk')
-              ? currentWalletAddress.substring(3)
-              : currentWalletAddress;
-            const eventHex = data.data.wallet_address;
+        // Set up custom SSE using fetch with authentication
+        const response = await fetch(sseUrl, {
+          method: 'GET',
+          headers: {
+            'Accept': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'X-Wallet-Auth': authHeaderJson,
+          },
+        });
 
-            console.log('💰 App.tsx: Balance update SSE event:', {
-              eventWallet: eventHex,
-              currentWallet: currentHex,
-              match: eventHex === currentHex,
-              newBalance: data.data.new_balance,
-              reason: data.data.change_reason
-            });
+        if (!response.ok) {
+          throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`);
+        }
 
-            // Only update if this balance event is for the current wallet
-            if (!currentHex || eventHex === currentHex) {
-              console.log('✅ App.tsx: Balance update applied:', data.data.new_balance);
-              setNodeData(prev => ({ ...prev, balance: data.data.new_balance }));
-            } else {
-              console.log('❌ App.tsx: Balance update ignored (not for current wallet)');
+        if (!response.body) {
+          throw new Error('SSE response has no body');
+        }
+
+        console.log('✅ App.tsx: Authenticated SSE connection established');
+
+        // Process SSE stream using ReadableStream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        // SSE event parser state
+        let eventType = '';
+        let eventData = '';
+
+        const processLine = (line: string) => {
+          if (line.startsWith('event:')) {
+            eventType = line.substring(6).trim();
+          } else if (line.startsWith('data:')) {
+            eventData = line.substring(5).trim();
+          } else if (line === '') {
+            // Empty line signals end of event
+            if (eventType && eventData) {
+              handleSSEEvent(eventType, eventData);
+              eventType = '';
+              eventData = '';
             }
           }
+        };
 
-          // Handle faucet events
-          if (data.type === 'faucet-dispensed') {
-            console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
-            fetchNodeStatus();
+        const handleSSEEvent = (type: string, data: string) => {
+          if (!mounted) return;
+
+          console.log(`📨 App.tsx: SSE event received - type: ${type}`, data);
+
+          try {
+            const parsedData = JSON.parse(data);
+
+            if (type === 'balance-updated') {
+              // CRITICAL FIX: Backend wraps data in {type: "BalanceUpdated", data: {...}}
+              const balanceData = parsedData.data || parsedData;
+
+              const currentWalletAddress = localStorage.getItem('walletAddress');
+              // Strip "qnk" prefix for comparison since backend sends hex without prefix
+              const currentHex = currentWalletAddress?.startsWith('qnk')
+                ? currentWalletAddress.substring(3)
+                : currentWalletAddress;
+
+              // Handle both formats: with or without "qnk" prefix in the event
+              let eventHex = balanceData.wallet_address;
+              if (eventHex?.startsWith('qnk')) {
+                eventHex = eventHex.substring(3);
+              }
+
+              console.log('💰 App.tsx: Balance update SSE event:', {
+                eventWallet: eventHex,
+                currentWallet: currentHex,
+                match: eventHex === currentHex,
+                newBalance: balanceData.new_balance,
+                reason: balanceData.change_reason
+              });
+
+              // Only update if this balance event is for the current wallet
+              if (currentHex && eventHex === currentHex) {
+                console.log('✅ App.tsx: Balance update applied:', balanceData.new_balance);
+                setNodeData(prev => ({ ...prev, balance: balanceData.new_balance }));
+                // Also update cached balance
+                localStorage.setItem('cachedBalance', balanceData.new_balance.toString());
+              } else {
+                console.log('❌ App.tsx: Balance update ignored (not for current wallet)');
+              }
+            } else if (type === 'faucet-dispensed') {
+              console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
+              fetchNodeStatus();
+            } else {
+              console.log(`📨 App.tsx: SSE event type '${type}' received:`, parsedData);
+            }
+          } catch (error) {
+            console.error('❌ App.tsx: Error processing SSE event:', error);
           }
+        };
 
-          // Handle transaction events
-          if (data.type === 'transaction-confirmed' || data.type === 'transaction-submitted') {
-            console.log('🔄 App.tsx: Transaction event - refreshing balance');
-            fetchNodeStatus();
+        // Read stream continuously
+        const readStream = async () => {
+          try {
+            while (mounted) {
+              const { done, value } = await reader.read();
+
+              if (done) {
+                console.log('🔄 App.tsx: SSE stream ended, will reconnect...');
+                break;
+              }
+
+              // Decode chunk and add to buffer
+              buffer += decoder.decode(value, { stream: true });
+
+              // Process complete lines
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+              for (const line of lines) {
+                processLine(line);
+              }
+            }
+          } catch (error) {
+            console.error('❌ App.tsx: SSE stream read error:', error);
+          } finally {
+            reader.releaseLock();
           }
+        };
 
-          // Handle block updates
-          if (data.type === 'block-confirmed' || data.type === 'consensus-round') {
-            console.log('⛓️ App.tsx: Block confirmed - updating status');
-            fetchNodeStatus();
-          }
-        } catch (error) {
-          console.error('❌ App.tsx: Error processing SSE event:', error);
-        }
-      };
+        // Start reading the stream
+        readStream();
 
-      eventSource.onerror = (error) => {
-        console.error('❌ App.tsx: SSE connection error:', error);
-        if (eventSource?.readyState === EventSource.CLOSED) {
-          console.log('🔄 App.tsx: SSE connection closed, will retry...');
-        }
-      };
-    } catch (error) {
-      console.error('❌ App.tsx: Failed to establish SSE connection:', error);
-    }
+      } catch (error) {
+        console.error('❌ App.tsx: Failed to establish authenticated SSE connection:', error);
+      }
+    };
+
+    // Initialize authenticated SSE connection
+    setupAuthenticatedSSE();
 
     return () => {
       console.log('🎬 App.tsx: useEffect cleanup - closing SSE');
       mounted = false;
       window.removeEventListener('balance-update', handleBalanceUpdate);
-      if (eventSource) {
-        eventSource.close();
-      }
+      // SSE stream will automatically stop when mounted = false
     };
   }, [authenticated]);
 
@@ -245,6 +382,14 @@ function App() {
 
   console.log('✅ Authenticated - Rendering main app');
 
+  // Handle token click - navigate to DEX screen with token selected
+  const handleTokenClick = (token: any) => {
+    console.log('Token clicked:', token);
+    setCurrentScreen('dex');
+    // Store selected token in localStorage for DEX to pick up
+    localStorage.setItem('selectedToken', JSON.stringify(token));
+  };
+
   return (
     <div className="min-h-screen bg-quantum-dark relative overflow-hidden">
       <QuantumBackground />
@@ -259,14 +404,17 @@ function App() {
           isOnline={nodeData.isOnline}
           qci={nodeData.qci}
         />
-        
+
+        {/* Token Bar - Below TopBar */}
+        <TokenBar onTokenClick={handleTokenClick} />
+
         <div className="flex flex-1 lg:flex-row">
-          <Navigation 
-            currentScreen={currentScreen} 
+          <Navigation
+            currentScreen={currentScreen}
             onNavigate={setCurrentScreen}
             className="lg:w-20 xl:w-64"
           />
-          
+
           <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
             {currentScreen === 'dashboard' && <Dashboard key="dashboard-stable" />}
             {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}

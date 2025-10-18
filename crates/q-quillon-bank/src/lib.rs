@@ -30,7 +30,7 @@ pub mod oracle_integration;
 pub mod klaw_oracle;
 pub mod consensus_bridge;
 pub mod qnkusd_integration;
-pub mod atomic_swap_integration;
+// pub mod atomic_swap_integration; // Disabled - depends on q-bitcoin-bridge which is deactivated
 
 /// Core Quillon Banking system that orchestrates all financial services
 pub struct QuillonBankSystem {

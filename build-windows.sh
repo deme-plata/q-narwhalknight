@@ -1,70 +1,121 @@
 #!/bin/bash
-# Q-NarwhalKnight Windows Build Script
-# Cross-compiles miner for Windows x86_64
+# Windows Build Script for Q-NarwhalKnight
+# Builds Windows .exe using MinGW cross-compilation
 
-set -e
+set -e  # Exit on error
 
-echo "🪟 Q-NarwhalKnight Windows x86_64 Build"
+echo "🪟 Q-NarwhalKnight Windows Build Script"
 echo "========================================"
 echo ""
 
 # Colors for output
 GREEN='\033[0;32m'
-CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Check if target is installed
-if ! rustup target list --installed | grep -q "x86_64-pc-windows-gnu"; then
-    echo -e "${YELLOW}Installing Windows target...${NC}"
-    rustup target add x86_64-pc-windows-gnu
-fi
+# Check prerequisites
+echo "📋 Checking prerequisites..."
 
-# Check if MinGW is installed
 if ! command -v x86_64-w64-mingw32-gcc &> /dev/null; then
-    echo -e "${YELLOW}MinGW not found. Please install: apt-get install mingw-w64${NC}"
+    echo -e "${RED}❌ MinGW gcc not found${NC}"
+    echo "Install with: apt-get install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64"
     exit 1
 fi
 
-echo -e "${CYAN}Building Q-Miner for Windows x86_64...${NC}"
+if ! rustup target list | grep -q "x86_64-pc-windows-gnu (installed)"; then
+    echo -e "${YELLOW}⚠️  Windows target not installed, installing...${NC}"
+    rustup target add x86_64-pc-windows-gnu
+fi
+
+echo -e "${GREEN}✅ Prerequisites OK${NC}"
 echo ""
 
-# Build the miner with optimizations
-RUSTFLAGS="-C target-cpu=native -C opt-level=3" \
-    cargo build \
-    --release \
-    --target x86_64-pc-windows-gnu \
-    --package q-miner \
-    --bin q-miner
+# Clean previous build (optional)
+if [ "$1" == "--clean" ]; then
+    echo "🧹 Cleaning previous build..."
+    cargo clean --target x86_64-pc-windows-gnu
+    echo ""
+fi
 
-# Check if build succeeded
-if [ $? -eq 0 ]; then
+# Build
+echo "🔨 Building Windows executable..."
+echo "   Target: x86_64-pc-windows-gnu"
+echo "   Mode: Release"
+echo "   Package: q-api-server"
+echo ""
+
+# Use 10-hour timeout as specified in CLAUDE.md
+if timeout 36000 cargo build --release --target x86_64-pc-windows-gnu --package q-api-server; then
     echo ""
-    echo -e "${GREEN}✓ Build successful!${NC}"
-    echo ""
-    echo "Windows executable:"
-    ls -lh target/x86_64-pc-windows-gnu/release/q-miner.exe
+    echo -e "${GREEN}✅ Build successful!${NC}"
     echo ""
 
-    # Create downloads directory
-    mkdir -p gui/quantum-wallet/dist-final/downloads
+    # Show build info
+    EXE_PATH="target/x86_64-pc-windows-gnu/release/q-api-server.exe"
+    if [ -f "$EXE_PATH" ]; then
+        SIZE=$(du -h "$EXE_PATH" | cut -f1)
+        echo "📦 Output:"
+        echo "   Location: $EXE_PATH"
+        echo "   Size: $SIZE"
+        echo ""
 
-    # Copy to downloads
-    cp target/x86_64-pc-windows-gnu/release/q-miner.exe \
-       gui/quantum-wallet/dist-final/downloads/q-miner-windows-x64.exe
+        # Create a package directory
+        PACKAGE_DIR="q-narwhalknight-windows"
+        echo "📁 Creating package directory: $PACKAGE_DIR"
+        mkdir -p "$PACKAGE_DIR"
 
-    echo -e "${GREEN}✓ Copied to: gui/quantum-wallet/dist-final/downloads/q-miner-windows-x64.exe${NC}"
-    echo ""
-    echo "File size: $(du -h target/x86_64-pc-windows-gnu/release/q-miner.exe | cut -f1)"
-    echo ""
-    echo -e "${CYAN}Ready for download at: http://localhost:8080/downloads/q-miner-windows-x64.exe${NC}"
-    echo ""
-    echo "To test on Windows:"
-    echo "  1. Download q-miner-windows-x64.exe"
-    echo "  2. Open PowerShell or CMD"
-    echo "  3. Run: .\\q-miner-windows-x64.exe --mode solo --wallet YOUR_ADDRESS --threads 8"
-    echo ""
+        # Copy executable
+        cp "$EXE_PATH" "$PACKAGE_DIR/"
+
+        # Copy Windows DLLs if they exist
+        if [ -d "q-narwhalknight-windows" ]; then
+            echo "   Copying Windows DLLs..."
+            cp q-narwhalknight-windows/*.dll "$PACKAGE_DIR/" 2>/dev/null || true
+        fi
+
+        # Create README
+        cat > "$PACKAGE_DIR/README.txt" << 'EOF'
+Q-NarwhalKnight Windows Release
+
+To run the server:
+1. Extract all files to a folder
+2. Open Command Prompt in that folder
+3. Run: q-api-server.exe --port 8080
+
+Environment Variables (optional):
+- Q_DB_PATH=./data        - Database directory
+- Q_P2P_PORT=9001         - P2P networking port
+- RUST_LOG=info           - Logging level
+
+For more information, visit:
+https://github.com/deme-plata/q-narwhalknight
+EOF
+
+        # Create archive
+        ARCHIVE="q-narwhalknight-windows-$(date +%Y%m%d).zip"
+        echo "   Creating archive: $ARCHIVE"
+        zip -r "$ARCHIVE" "$PACKAGE_DIR/" > /dev/null 2>&1 || echo "   (zip not available, skipping archive)"
+
+        echo ""
+        echo -e "${GREEN}🎉 Package complete!${NC}"
+        echo "   Directory: $PACKAGE_DIR/"
+        if [ -f "$ARCHIVE" ]; then
+            echo "   Archive: $ARCHIVE"
+        fi
+        echo ""
+        echo "📝 Enhanced Logging Features:"
+        echo "   ✅ Shadow mode real-time metrics"
+        echo "   ✅ API endpoint request logging"
+        echo "   ✅ Performance comparison tracking"
+        echo "   ✅ Migration readiness indicators"
+    else
+        echo -e "${RED}❌ Build output not found at $EXE_PATH${NC}"
+        exit 1
+    fi
 else
-    echo -e "${YELLOW}❌ Build failed${NC}"
+    echo ""
+    echo -e "${RED}❌ Build failed!${NC}"
+    echo "Check the error messages above for details."
     exit 1
 fi

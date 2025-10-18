@@ -23,6 +23,7 @@ use q_wallet::{
     dilithium_wallet::Dilithium5KeyPair,
     sphincs_wallet::{SphincsPlusKeyPair, OperationType},
 };
+use q_aegis_ql::{AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
 
 /// Cryptographic scheme used for authentication
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +36,10 @@ pub enum AuthScheme {
     Dilithium5,
     /// Critical operations: Dilithium5 + SPHINCS+ (~55 KB total)
     UltraSecure,
+    /// AEGIS-QL: Fast post-quantum lattice-based crypto (~2 KB signature)
+    AegisQL,
+    /// AEGIS-QL Hybrid: Ed25519 + AEGIS-QL (dual signature)
+    AegisQLHybrid,
 }
 
 impl AuthScheme {
@@ -45,6 +50,8 @@ impl AuthScheme {
             Self::Hybrid => "Hybrid Ed25519+Dilithium5 (Phase Q1)",
             Self::Dilithium5 => "Post-Quantum Dilithium5 (Phase Q2)",
             Self::UltraSecure => "Ultra-Secure Dilithium5+SPHINCS+ (Critical)",
+            Self::AegisQL => "AEGIS-QL Post-Quantum Lattice-Based (Fast)",
+            Self::AegisQLHybrid => "Hybrid Ed25519+AEGIS-QL (Performance)",
         }
     }
 }
@@ -72,6 +79,10 @@ pub struct AuthHeader {
     /// Operation type (determines if SPHINCS+ is required)
     #[serde(default)]
     pub operation_type: Option<OperationType>,
+    /// AEGIS-QL signature (if scheme uses AEGIS-QL)
+    pub aegis_signature: Option<String>,
+    /// AEGIS-QL public key (required for AEGIS-QL verification)
+    pub aegis_public_key: Option<String>,
 }
 
 fn default_scheme() -> AuthScheme {
@@ -122,11 +133,17 @@ where
                 message: "Invalid X-Wallet-Auth header format".to_string(),
             })?;
 
+        eprintln!("🔍 [AUTH DEBUG] Received X-Wallet-Auth header: {}", auth_header);
+        eprintln!("🔍 [AUTH DEBUG] Request path: {}", parts.uri.path());
+
         // Parse JSON authentication header
         let auth: AuthHeader = serde_json::from_str(auth_header).map_err(|e| AuthError {
             error: "invalid_auth_json".to_string(),
             message: format!("Invalid authentication JSON: {}", e),
         })?;
+
+        eprintln!("🔍 [AUTH DEBUG] Parsed auth - address: {}, timestamp: {}, scheme: {:?}",
+                  auth.address, auth.timestamp, auth.scheme);
 
         // Check timestamp to prevent replay attacks (max 5 minutes old)
         let now = Utc::now().timestamp();
@@ -169,6 +186,8 @@ where
         hasher.update(parts.uri.path().as_bytes());
         let message = hasher.finalize();
 
+        eprintln!("🔍 [AUTH DEBUG] Challenge message hash: {}", hex::encode(&message));
+
         // Verify signature(s) based on scheme
         match auth.scheme {
             AuthScheme::Ed25519 => {
@@ -187,6 +206,14 @@ where
                 verify_dilithium5(&auth, &address, &message)?;
                 verify_sphincs_plus(&auth, &address, &message)?;
             }
+            AuthScheme::AegisQL => {
+                verify_aegis_ql(&auth, &address, &message)?;
+            }
+            AuthScheme::AegisQLHybrid => {
+                // BOTH Ed25519 AND AEGIS-QL must verify
+                verify_ed25519(&auth, &address, &message)?;
+                verify_aegis_ql(&auth, &address, &message)?;
+            }
         }
 
         // Authentication successful!
@@ -204,6 +231,10 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
         error: "missing_ed25519_signature".to_string(),
         message: "Ed25519 signature required for this scheme".to_string(),
     })?;
+
+    eprintln!("🔍 [AUTH DEBUG] Verifying Ed25519 signature: {}", signature_hex);
+    eprintln!("🔍 [AUTH DEBUG] Message to verify: {}", hex::encode(message));
+    eprintln!("🔍 [AUTH DEBUG] Public key (address): {}", hex::encode(address));
 
     let sig_bytes = hex::decode(signature_hex).map_err(|_| AuthError {
         error: "invalid_signature".to_string(),
@@ -329,6 +360,47 @@ fn verify_sphincs_plus(auth: &AuthHeader, address: &Address, message: &[u8]) -> 
         return Err(AuthError {
             error: "invalid_sphincs_signature".to_string(),
             message: "SPHINCS+ signature verification failed".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Verify AEGIS-QL post-quantum lattice-based signature
+fn verify_aegis_ql(auth: &AuthHeader, address: &Address, message: &[u8]) -> Result<(), AuthError> {
+    let signature_json = auth.aegis_signature.as_ref().ok_or_else(|| AuthError {
+        error: "missing_aegis_signature".to_string(),
+        message: "AEGIS-QL signature required for this scheme".to_string(),
+    })?;
+
+    let public_key_json = auth.aegis_public_key.as_ref().ok_or_else(|| AuthError {
+        error: "missing_aegis_public_key".to_string(),
+        message: "AEGIS-QL public key required for verification".to_string(),
+    })?;
+
+    // Deserialize AEGIS-QL signature from JSON
+    let signature: AegisSignature = serde_json::from_str(signature_json).map_err(|e| AuthError {
+        error: "invalid_aegis_signature".to_string(),
+        message: format!("Invalid AEGIS-QL signature format: {}", e),
+    })?;
+
+    // Deserialize AEGIS-QL public key from JSON
+    let public_key: AegisPublicKey = serde_json::from_str(public_key_json).map_err(|e| AuthError {
+        error: "invalid_aegis_public_key".to_string(),
+        message: format!("Invalid AEGIS-QL public key format: {}", e),
+    })?;
+
+    // Verify the AEGIS-QL signature
+    let aegis = AegisQL::new();
+    let is_valid = aegis.verify(message, &signature, &public_key).map_err(|e| AuthError {
+        error: "aegis_verification_failed".to_string(),
+        message: format!("AEGIS-QL verification error: {:?}", e),
+    })?;
+
+    if !is_valid {
+        return Err(AuthError {
+            error: "invalid_aegis_signature".to_string(),
+            message: "AEGIS-QL signature verification failed".to_string(),
         });
     }
 

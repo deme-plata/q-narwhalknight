@@ -202,6 +202,25 @@ pub enum StreamEvent {
         price_impact: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// Mining reward earned event
+    MiningReward {
+        miner_address: String,
+        reward_qnk: f64,
+        nonce: u64,
+        block_height: u64,
+        difficulty: String,
+        hash_rate: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// Mining statistics update
+    MiningStats {
+        miner_address: String,
+        total_rewards: f64,
+        total_blocks_found: u64,
+        current_balance: f64,
+        avg_hash_rate: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
     /// Custom event for mining rewards and other custom types
     Custom {
         event_type: String,
@@ -277,13 +296,28 @@ impl EventBroadcaster {
     }
 }
 
-/// SSE endpoint for real-time event streaming
-/// Usage: GET /api/v1/events
+/// SSE endpoint for real-time event streaming with privacy filtering
+/// Usage: GET /api/v1/events?wallet_address=<address>
+/// Requires: X-Wallet-Auth header for authentication (optional but recommended)
 pub async fn sse_events(
     State(state): State<Arc<AppState>>,
-    TypedHeader(user_agent): TypedHeader<headers::UserAgent>,
+    user_agent: Option<TypedHeader<headers::UserAgent>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>> {
-    info!("New SSE client connected: {}", user_agent.as_str());
+    let user_agent_str = user_agent
+        .as_ref()
+        .map(|ua| ua.as_str())
+        .unwrap_or("rust-client");
+    info!("New SSE client connected: {}", user_agent_str);
+
+    // Extract wallet_address filter parameter (optional)
+    let wallet_filter = params.get("wallet_address").cloned();
+
+    if let Some(ref wallet) = wallet_filter {
+        info!("🔐 SSE connection established for wallet: {}", wallet);
+    } else {
+        warn!("⚠️ SSE connection without wallet filter - will receive all events (privacy risk)");
+    }
 
     // Create a manual stream that keeps the receiver alive
     let rx = state.event_broadcaster.subscribe();
@@ -295,36 +329,138 @@ pub async fn sse_events(
         broadcaster_clone.subscriber_count()
     );
 
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        match rx.recv().await {
-            Ok(event) => match serde_json::to_string(&event) {
-                Ok(json) => {
-                    debug!("SSE sending event: {}", event_type_name(&event));
-                    Some((
-                        Ok(Event::default().event(event_type_name(&event)).data(json)),
-                        rx,
-                    ))
+    // Helper function to check if event is relevant to the wallet
+    let is_event_relevant = move |event: &StreamEvent, filter: &Option<String>| -> bool {
+        // If no filter specified, allow all events (backward compatibility, but not recommended)
+        let Some(wallet_addr) = filter else {
+            return true;
+        };
+
+        // Normalize wallet address (remove "qnk" prefix if present)
+        let normalized_filter = if wallet_addr.starts_with("qnk") {
+            wallet_addr[3..].to_string()
+        } else {
+            wallet_addr.clone()
+        };
+
+        match event {
+            // Transaction events - filter by from or to address
+            StreamEvent::TransactionSubmitted { transaction, .. } => {
+                // Check if wallet is sender or receiver
+                let from_hex = hex::encode(&transaction.from);
+                let to_hex = hex::encode(&transaction.to);
+
+                from_hex == normalized_filter || to_hex == normalized_filter
+            },
+
+            // Transaction status updates - need to check transaction details
+            // For now, allow all status updates (they're small events)
+            StreamEvent::TransactionStatusUpdate { .. } => true,
+
+            // Balance updates - only send if it's for this wallet
+            StreamEvent::BalanceUpdated { wallet_address, .. } => {
+                let normalized_event = if wallet_address.starts_with("qnk") {
+                    wallet_address[3..].to_string()
+                } else {
+                    wallet_address.clone()
+                };
+                normalized_event == normalized_filter
+            },
+
+            // Faucet events - only send if it's for this wallet
+            StreamEvent::FaucetDispensed { wallet_address, .. } => {
+                let normalized_event = if wallet_address.starts_with("qnk") {
+                    wallet_address[3..].to_string()
+                } else {
+                    wallet_address.clone()
+                };
+                normalized_event == normalized_filter
+            },
+
+            // Mining rewards - only send if it's for this wallet
+            StreamEvent::MiningReward { miner_address, .. } => {
+                let normalized_event = if miner_address.starts_with("qnk") {
+                    miner_address[3..].to_string()
+                } else {
+                    miner_address.clone()
+                };
+                normalized_event == normalized_filter
+            },
+
+            // Mining stats - only send if it's for this wallet
+            StreamEvent::MiningStats { miner_address, .. } => {
+                let normalized_event = if miner_address.starts_with("qnk") {
+                    miner_address[3..].to_string()
+                } else {
+                    miner_address.clone()
+                };
+                normalized_event == normalized_filter
+            },
+
+            // Swap events - only send if it's for this wallet
+            StreamEvent::SwapExecuted { wallet_address, .. } => {
+                let normalized_event = if wallet_address.starts_with("qnk") {
+                    wallet_address[3..].to_string()
+                } else {
+                    wallet_address.clone()
+                };
+                normalized_event == normalized_filter
+            },
+
+            // Public events that everyone should see
+            StreamEvent::NodeStatusUpdate { .. } |
+            StreamEvent::BlockFinalized { .. } |
+            StreamEvent::MetricsUpdate { .. } |
+            StreamEvent::TokenPriceUpdate { .. } |
+            StreamEvent::LiquidityPoolUpdate { .. } |
+            StreamEvent::NitroBoostsUpdate { .. } => true,
+
+            // All other events are private - filter them out
+            _ => false,
+        }
+    };
+
+    let stream = futures_util::stream::unfold((rx, wallet_filter), move |(mut rx, filter)| async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    // Filter event based on wallet address
+                    if !is_event_relevant(&event, &filter) {
+                        // Skip this event, continue to next
+                        continue;
+                    }
+
+                    match serde_json::to_string(&event) {
+                        Ok(json) => {
+                            debug!("SSE sending filtered event: {} to wallet: {:?}",
+                                event_type_name(&event), filter);
+                            return Some((
+                                Ok(Event::default().event(event_type_name(&event)).data(json)),
+                                (rx, filter),
+                            ));
+                        }
+                        Err(e) => {
+                            error!("Failed to serialize event: {}", e);
+                            return Some((Err(axum::Error::new(e)), (rx, filter)));
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!("Failed to serialize event: {}", e);
-                    Some((Err(axum::Error::new(e)), rx))
-                }
-            },
-            Err(e) => {
-                match e {
-                    tokio::sync::broadcast::error::RecvError::Lagged(n) => {
-                        warn!("SSE client lagged behind by {} events, continuing", n);
-                        Some((
-                            Ok(Event::default()
-                                .event("sse-lag")
-                                .data(format!("{{\"lagged_events\": {}}}", n))),
-                            rx,
-                        ))
-                    }
-                    tokio::sync::broadcast::error::RecvError::Closed => {
-                        debug!("SSE broadcast channel closed");
-                        None // End the stream
-                    }
+                    return match e {
+                        tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+                            warn!("SSE client lagged behind by {} events, continuing", n);
+                            Some((
+                                Ok(Event::default()
+                                    .event("sse-lag")
+                                    .data(format!("{{\"lagged_events\": {}}}", n))),
+                                (rx, filter),
+                            ))
+                        }
+                        tokio::sync::broadcast::error::RecvError::Closed => {
+                            debug!("SSE broadcast channel closed");
+                            None // End the stream
+                        }
+                    };
                 }
             }
         }
@@ -494,6 +630,8 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::TokenPriceUpdate { .. } => "token_price_update".to_string(),
         StreamEvent::LiquidityPoolUpdate { .. } => "liquidity_pool_update".to_string(),
         StreamEvent::SwapExecuted { .. } => "swap_executed".to_string(),
+        StreamEvent::MiningReward { .. } => "mining_reward".to_string(),
+        StreamEvent::MiningStats { .. } => "mining_stats".to_string(),
         StreamEvent::Custom { event_type, .. } => event_type.clone(),
     }
 }
@@ -804,6 +942,48 @@ impl HighPerformanceEmitter {
             amount_out,
             wallet_address,
             price_impact,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit mining reward event
+    pub async fn emit_mining_reward(
+        &self,
+        miner_address: String,
+        reward_qnk: f64,
+        nonce: u64,
+        block_height: u64,
+        difficulty: String,
+        hash_rate: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::MiningReward {
+            miner_address,
+            reward_qnk,
+            nonce,
+            block_height,
+            difficulty,
+            hash_rate,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit mining statistics update
+    pub async fn emit_mining_stats(
+        &self,
+        miner_address: String,
+        total_rewards: f64,
+        total_blocks_found: u64,
+        current_balance: f64,
+        avg_hash_rate: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::MiningStats {
+            miner_address,
+            total_rewards,
+            total_blocks_found,
+            current_balance,
+            avg_hash_rate,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await

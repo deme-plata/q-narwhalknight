@@ -10,7 +10,7 @@ use reqwest::{Client, ClientBuilder};
 use sha2::{Sha256, Digest};
 use chrono::Utc;
 
-const API_BASE: &str = "http://localhost:9050";
+const API_BASE: &str = "http://localhost:8200";
 const MAX_CONCURRENT: usize = 100;
 
 #[derive(Debug, Clone)]

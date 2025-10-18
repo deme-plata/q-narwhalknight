@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { Pickaxe, Download, Cpu, Zap, Award, TrendingUp, AlertCircle, ExternalLink, Terminal } from 'lucide-react';
+import MiningDashboard from './MiningDashboard';
 
 export default function MiningScreen() {
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -35,6 +36,17 @@ export default function MiningScreen() {
           </p>
         </div>
       </div>
+
+      {/* Mining Dashboard with Real-Time SSE Updates */}
+      {walletAddress && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+        >
+          <MiningDashboard />
+        </motion.div>
+      )}
 
       {/* Austrian Economics Notice */}
       <motion.div
@@ -238,7 +250,7 @@ export default function MiningScreen() {
         <h3 className="text-lg font-bold text-white mb-3">Learn More About Q-NarwhalKnight Mining</h3>
         <div className="space-y-2">
           <a
-            href="https://github.com/deme-plata/q-narwhalknight"
+            href="https://code.quillon.xyz/"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 text-quantum-cyan hover:text-quantum-cyan/80 transition-colors"

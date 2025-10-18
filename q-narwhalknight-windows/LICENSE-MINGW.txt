@@ -1,0 +1,64 @@
+MinGW-w64 Runtime Libraries License
+===================================
+
+This distribution includes the following runtime libraries from the MinGW-w64 project:
+
+1. libgfortran-5.dll (3.3MB) - GNU Fortran Runtime Library
+2. libgcc_s_seh-1.dll (149KB) - GCC Runtime Library (SEH exception handling)
+3. libquadmath-0.dll (374KB) - GCC Quad-Precision Math Library
+4. libwinpthread-1.dll (607KB) - MinGW-w64 POSIX Threads Library
+
+SOURCE AND ATTRIBUTION:
+-----------------------
+These libraries are from the MinGW-w64 project:
+- Project: https://www.mingw-w64.org/
+- Source: https://sourceforge.net/projects/mingw-w64/
+- MSYS2 Distribution: https://www.msys2.org/
+
+LICENSE INFORMATION:
+--------------------
+
+libgfortran-5.dll, libgcc_s_seh-1.dll, libquadmath-0.dll:
+---------------------------------------------------------
+These libraries are part of the GNU Compiler Collection (GCC) and are licensed under:
+
+GNU General Public License v3.0 (GPLv3) with GCC Runtime Library Exception
+
+The GCC Runtime Library Exception allows these runtime libraries to be
+distributed with proprietary software without requiring the proprietary
+software itself to be licensed under the GPL.
+
+Full license text: https://www.gnu.org/licenses/gcc-exception-3.1.html
+
+Key points of the GCC Runtime Library Exception:
+- You may distribute these runtime libraries with your program
+- Your program does not need to be GPL-licensed
+- You must include this license notice when redistributing
+- The libraries themselves remain under GPLv3 + Runtime Exception
+
+libwinpthread-1.dll:
+-------------------
+Licensed under permissive terms (MinGW-w64 runtime license):
+- MIT License / BSD-style license
+- Freely redistributable with attribution
+
+REDISTRIBUTION:
+---------------
+These libraries are redistributed in binary form as permitted by their
+respective licenses. No modifications have been made to the original
+compiled libraries.
+
+DISCLAIMER:
+-----------
+These libraries are provided "as is" without warranty of any kind.
+The MinGW-w64 project and the GCC project provide these libraries.
+Q-NarwhalKnight redistributes them for user convenience.
+
+For complete source code and license details, visit:
+- MinGW-w64: https://www.mingw-w64.org/
+- GCC: https://gcc.gnu.org/
+
+================================================================================
+Q-NarwhalKnight itself is licensed under the MIT License (see LICENSE file)
+These runtime libraries retain their original licenses as described above.
+================================================================================

@@ -12,7 +12,31 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-use crate::{HiggsBit, PhysicalConstants, field_dynamics::HiggsPotential};
+use crate::{HiggsBit, PhysicalConstants};
+
+/// Higgs field potential (simplified - field_dynamics module disabled)
+#[derive(Debug, Clone)]
+pub struct HiggsPotential {
+    pub potential_value: f64,
+    pub field_value: f64,
+}
+
+impl HiggsPotential {
+    pub fn new_vacuum(constants: &PhysicalConstants) -> Self {
+        Self {
+            potential_value: constants.vacuum_expectation_value_sq,
+            field_value: constants.vacuum_expectation_value_sq,
+        }
+    }
+
+    pub fn is_stable(&self) -> bool {
+        true // Simplified - always stable
+    }
+
+    pub fn potential_energy(&self) -> f64 {
+        self.potential_value
+    }
+}
 
 /// High-capacity Higgs field memory system
 #[derive(Debug)]
@@ -44,7 +68,7 @@ pub struct HiggsMemoryBank {
     pub access_pattern: Vec<(usize, Instant)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MemoryBankMetadata {
     /// Creation timestamp
     pub created_at: Instant,
@@ -135,7 +159,7 @@ impl HiggsMemorySystem {
             expected_lifetime: Duration::from_secs(3600 * 24 * 365), // 1 year default
         };
 
-        let field_potential = crate::field_dynamics::HiggsPotential::new_vacuum(&self.constants);
+        let field_potential = HiggsPotential::new_vacuum(&self.constants);
 
         let bank = HiggsMemoryBank {
             id: bank_id.clone(),
@@ -160,28 +184,44 @@ impl HiggsMemorySystem {
         data: &[bool],
     ) -> Result<()> {
         let start_time = Instant::now();
-        
-        let bank = self.memory_banks
-            .get_mut(bank_id)
-            .context("Memory bank not found")?;
 
-        if address + data.len() > bank.bits.len() {
-            return Err(anyhow::anyhow!("Write operation exceeds bank capacity"));
-        }
+        // First, get the bank to check capacity and get field potential
+        let (field_potential, capacity) = {
+            let bank = self.memory_banks
+                .get(bank_id)
+                .context("Memory bank not found")?;
+
+            if address + data.len() > bank.bits.len() {
+                return Err(anyhow::anyhow!("Write operation exceeds bank capacity"));
+            }
+
+            (bank.field_potential.clone(), bank.bits.len())
+        };
 
         debug!("Writing {} bits to bank '{}' at address {}", data.len(), bank_id, address);
 
         // Perform write with error correction encoding
         let encoded_data = self.error_correction.encode(data)?;
-        
+
+        // Pre-calculate pulse intensity parameters (inline to avoid borrow conflicts)
+        let field_deviation = (field_potential.field_value * field_potential.field_value - self.constants.vacuum_expectation_value_sq).abs();
+        let adjustment_factor = 1.0 + field_deviation / self.constants.vacuum_expectation_value_sq;
+        let lloyd_factor = self.constants.lloyd_correction_factor;
+
+        // Now get mutable access to the bank for writing
+        let bank = self.memory_banks
+            .get_mut(bank_id)
+            .context("Memory bank not found")?;
+
         for (i, &bit) in encoded_data.iter().enumerate() {
             if address + i >= bank.bits.len() {
                 break;
             }
-            
-            // Calculate optimal pulse parameters
-            let pulse_intensity = self.calculate_optimal_pulse_intensity(bit, &bank.field_potential);
-            
+
+            // Calculate optimal pulse intensity (inlined)
+            let base_intensity = if bit { 2.0 } else { 1.0 };
+            let pulse_intensity = base_intensity * adjustment_factor * lloyd_factor;
+
             bank.bits[address + i].lloyd_write(
                 bit,
                 pulse_intensity,
@@ -255,7 +295,7 @@ impl HiggsMemorySystem {
         let base_intensity = if bit { 2.0 } else { 1.0 };
         
         // Adjust based on current field state
-        let field_deviation = (potential.field_value.norm_sqr() - self.constants.vacuum_expectation_value_sq).abs();
+        let field_deviation = (potential.field_value * potential.field_value - self.constants.vacuum_expectation_value_sq).abs();
         let adjustment_factor = 1.0 + field_deviation / self.constants.vacuum_expectation_value_sq;
         
         base_intensity * adjustment_factor * self.constants.lloyd_correction_factor
@@ -295,43 +335,70 @@ impl HiggsMemorySystem {
     /// Perform garbage collection and defragmentation
     pub async fn garbage_collect(&mut self) -> Result<GarbageCollectionResult> {
         info!("Starting Higgs memory garbage collection");
-        
+
         let start_time = Instant::now();
         let mut reclaimed_bits = 0;
         let mut compacted_banks = 0;
+
+        // Pre-calculate corruption detection parameters
+        let max_deviation = self.constants.vacuum_expectation_value_sq * 0.1; // 10% tolerance
+        let vev_sq = self.constants.vacuum_expectation_value_sq;
 
         for (bank_id, bank) in self.memory_banks.iter_mut() {
             // Check for unused/corrupted bits
             let mut valid_bits = 0;
             let mut corrupted_bits = 0;
-            
+
             for bit in &mut bank.bits {
                 if bit.last_modified.elapsed() > Duration::from_secs(3600) {
                     // Reset old bits to vacuum state
                     *bit = HiggsBit::new(&self.constants);
                     reclaimed_bits += 1;
-                } else if self.is_bit_corrupted(bit).await? {
-                    // Attempt correction
-                    if self.correct_corrupted_bit(bit).await? {
-                        valid_bits += 1;
-                    } else {
-                        *bit = HiggsBit::new(&self.constants);
-                        corrupted_bits += 1;
-                    }
                 } else {
-                    valid_bits += 1;
+                    // Inline corruption check
+                    let deviation = (bit.local_v_e_sq - vev_sq).abs();
+                    let phase_reasonable = bit.laser_phase >= 0.0 && bit.laser_phase <= 2.0 * std::f64::consts::PI;
+                    let is_corrupted = deviation > max_deviation || !phase_reasonable || bit.lloyd_information_density < 0.0;
+
+                    if is_corrupted {
+                        // Inline correction
+                        if bit.local_v_e_sq.is_nan() || bit.local_v_e_sq.is_infinite() {
+                            bit.local_v_e_sq = vev_sq;
+                        }
+
+                        if bit.laser_phase.is_nan() || bit.laser_phase.is_infinite() {
+                            bit.laser_phase = 0.0;
+                        }
+
+                        if bit.lloyd_information_density < 0.0 {
+                            bit.lloyd_information_density = 0.0;
+                        }
+
+                        bit.last_modified = Instant::now();
+
+                        // Check if correction was successful
+                        let corrected_deviation = (bit.local_v_e_sq - vev_sq).abs();
+                        if corrected_deviation < max_deviation {
+                            valid_bits += 1;
+                        } else {
+                            *bit = HiggsBit::new(&self.constants);
+                            corrupted_bits += 1;
+                        }
+                    } else {
+                        valid_bits += 1;
+                    }
                 }
             }
 
             if reclaimed_bits > 0 || corrupted_bits > 0 {
                 compacted_banks += 1;
-                debug!("Bank '{}': {} valid, {} reclaimed, {} corrupted", 
+                debug!("Bank '{}': {} valid, {} reclaimed, {} corrupted",
                        bank_id, valid_bits, reclaimed_bits, corrupted_bits);
             }
         }
 
         let gc_time = start_time.elapsed();
-        
+
         info!("Garbage collection complete: {} bits reclaimed, {} banks compacted, time: {:?}",
               reclaimed_bits, compacted_banks, gc_time);
 
@@ -341,37 +408,6 @@ impl HiggsMemorySystem {
             gc_time,
             corrupted_bits_fixed: 0, // TODO: track this
         })
-    }
-
-    /// Check if a bit is corrupted
-    async fn is_bit_corrupted(&self, bit: &HiggsBit) -> Result<bool> {
-        // Check if field values are within reasonable bounds
-        let deviation = (bit.local_v_e_sq - self.constants.vacuum_expectation_value_sq).abs();
-        let max_deviation = self.constants.vacuum_expectation_value_sq * 0.1; // 10% tolerance
-        
-        let phase_reasonable = bit.laser_phase >= 0.0 && bit.laser_phase <= 2.0 * std::f64::consts::PI;
-        
-        Ok(deviation > max_deviation || !phase_reasonable || bit.lloyd_information_density < 0.0)
-    }
-
-    /// Attempt to correct a corrupted bit
-    async fn correct_corrupted_bit(&self, bit: &mut HiggsBit) -> Result<bool> {
-        // Simple correction: reset to nearest valid state
-        if bit.local_v_e_sq.is_nan() || bit.local_v_e_sq.is_infinite() {
-            bit.local_v_e_sq = self.constants.vacuum_expectation_value_sq;
-        }
-        
-        if bit.laser_phase.is_nan() || bit.laser_phase.is_infinite() {
-            bit.laser_phase = 0.0;
-        }
-        
-        if bit.lloyd_information_density < 0.0 {
-            bit.lloyd_information_density = 0.0;
-        }
-        
-        bit.last_modified = Instant::now();
-        
-        Ok(true) // Assume correction succeeded
     }
 
     /// Get memory system statistics
@@ -402,7 +438,7 @@ impl HiggsMemorySystem {
     /// Calculate field stability for a bank
     async fn calculate_field_stability(&self, potential: &HiggsPotential) -> f64 {
         let energy = potential.potential_energy();
-        let is_stable = potential.is_stable(&self.constants);
+        let is_stable = potential.is_stable();
         
         if is_stable && energy < 0.0 {
             1.0 // Perfect stability
@@ -575,15 +611,24 @@ impl WearLevelingSystem {
 
     /// Record a write operation
     pub async fn record_write(&mut self, bank_id: &str, address: usize, length: usize) {
-        let bank_counts = self.write_counts.entry(bank_id.to_string()).or_insert_with(HashMap::new);
-        
-        for addr in address..address + length {
-            *bank_counts.entry(addr).or_insert(0) += 1;
-            
-            // Check if remapping is needed (threshold: 10000 writes)
-            if bank_counts[&addr] > 10000 {
-                self.create_remapping(bank_id, addr).await;
+        let mut addresses_to_remap = Vec::new();
+
+        {
+            let bank_counts = self.write_counts.entry(bank_id.to_string()).or_insert_with(HashMap::new);
+
+            for addr in address..address + length {
+                *bank_counts.entry(addr).or_insert(0) += 1;
+
+                // Check if remapping is needed (threshold: 10000 writes)
+                if bank_counts.get(&addr).copied().unwrap_or(0) > 10000 {
+                    addresses_to_remap.push(addr);
+                }
             }
+        }
+
+        // Perform remapping after releasing the borrow
+        for addr in addresses_to_remap {
+            self.create_remapping(bank_id, addr).await;
         }
     }
 
@@ -634,7 +679,7 @@ impl WearLevelingSystem {
 }
 
 // Result structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GarbageCollectionResult {
     pub reclaimed_bits: usize,
     pub compacted_banks: usize,
@@ -642,7 +687,7 @@ pub struct GarbageCollectionResult {
     pub corrupted_bits_fixed: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DefragmentationResult {
     pub moved_bits: usize,
     pub freed_space: usize,
@@ -650,7 +695,7 @@ pub struct DefragmentationResult {
     pub final_used_bits: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MemorySystemStatistics {
     pub total_banks: usize,
     pub bank_statistics: HashMap<String, BankStatistics>,
@@ -658,7 +703,7 @@ pub struct MemorySystemStatistics {
     pub wear_leveling_stats: WearLevelingStatistics,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BankStatistics {
     pub capacity_bits: usize,
     pub used_bits: usize,

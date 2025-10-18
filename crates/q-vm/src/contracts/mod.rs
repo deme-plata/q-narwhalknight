@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 pub mod orobit_smart_contracts;
 pub mod security;
+pub mod collateral_vault;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{
@@ -18,6 +19,12 @@ pub use orobit_smart_contracts::{
 pub use security::{
     AccessControl, AuditStatus, Pausable, PullPayment, ReentrancyGuard, Roles, SafeMath, SecurityAnalyzer,
     SecurityConfig, SecurityReport, SecuritySuite,
+};
+
+// Re-export collateral vault types
+pub use collateral_vault::{
+    CollateralVault, LiquidationResult, MintResult, PositionHealth, RedeemResult, VaultStats,
+    LIQUIDATION_BONUS, LIQUIDATION_RATIO, MIN_COLLATERAL_RATIO, WARNING_RATIO,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,11 +94,26 @@ pub struct ContractRegistry {
 }
 
 impl ContractRegistry {
-    pub async fn new() -> anyhow::Result<Self> {
-        Ok(Self {
+    /// Create a new ContractRegistry with an existing Orobit ecosystem
+    ///
+    /// This is the preferred constructor as it allows sharing the ecosystem
+    /// instance (with storage) across the application.
+    pub fn new_with_ecosystem(ecosystem: std::sync::Arc<OrobitSmartContractEcosystem>) -> Self {
+        Self {
             contracts: std::sync::RwLock::new(HashMap::new()),
-            orobit_ecosystem: std::sync::Arc::new(OrobitSmartContractEcosystem::new().await?),
-        })
+            orobit_ecosystem: ecosystem,
+        }
+    }
+
+    /// Create a new ContractRegistry with a fresh ecosystem (NO STORAGE)
+    ///
+    /// ⚠️ DEPRECATED: This creates an ecosystem WITHOUT persistent storage.
+    /// Use `new_with_ecosystem()` instead to share the storage-backed ecosystem.
+    #[deprecated(note = "Use new_with_ecosystem() to share storage-backed ecosystem")]
+    pub async fn new() -> anyhow::Result<Self> {
+        eprintln!("⚠️⚠️⚠️ WARNING: ContractRegistry::new() creates ecosystem WITHOUT storage!");
+        eprintln!("⚠️⚠️⚠️ Use new_with_ecosystem() instead for persistence!");
+        panic!("DEPRECATED: ContractRegistry::new() should not be called! Use new_with_ecosystem() instead.");
     }
 
     pub fn get(&self, address: &[u8; 32]) -> Option<std::sync::Arc<Contract>> {
@@ -112,9 +134,10 @@ impl ContractRegistry {
         parameters: HashMap<String, serde_json::Value>,
         options: DeploymentOptions,
     ) -> anyhow::Result<String> {
-        self.orobit_ecosystem
+        let (contract_id, _address) = self.orobit_ecosystem
             .deploy_contract(contract_type, deployer, parameters, options)
-            .await
+            .await?;
+        Ok(contract_id)
     }
 
     /// Get available Orobit contract templates

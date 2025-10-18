@@ -72,6 +72,18 @@ pub enum AppearanceImportance {
     Cameo,     // Brief appearance
 }
 
+impl EntityType {
+    pub fn name(&self) -> &str {
+        match self {
+            EntityType::Character { name, .. } => name,
+            EntityType::Technology { name, .. } => name,
+            EntityType::Location { name, .. } => name,
+            EntityType::MacGuffin { name, .. } => name,
+            EntityType::Organization { name, .. } => name,
+        }
+    }
+}
+
 impl Entity {
     pub fn name(&self) -> &str {
         match &self.entity_type {
