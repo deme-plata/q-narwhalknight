@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 q-types = { path = "../q-types" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

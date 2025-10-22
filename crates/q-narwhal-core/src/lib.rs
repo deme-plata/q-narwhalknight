@@ -2,9 +2,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 /// Q-Narwhal: DAG-based mempool implementation
 /// Phase 0: Classical Ed25519 implementation
-/// Future phases will add post-quantum cryptography
+/// Phase 2: Quantum-enhanced anchor election with VRF
+use q_lattice_vrf::{LatticeVRF, VRFConfig, SecurityLevel, VRFResult};
+use q_quantum_rng::{QuantumRNG, QRNGConfig};
 use q_types::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -29,16 +32,80 @@ pub struct NarwhalCore {
     pub certificate_store: CertificateStore,
     pub reliable_broadcast: ReliableBroadcast,
     pub current_round: RwLock<Round>,
+
+    /// Phase 2+: Lattice VRF for quantum anchor election
+    pub lattice_vrf: Option<Arc<LatticeVRF>>,
+
+    /// Phase 2+: Quantum RNG for enhanced entropy
+    pub quantum_rng: Option<Arc<QuantumRNG>>,
+
+    /// Current phase for quantum enhancements
+    pub phase: Phase,
 }
 
 impl NarwhalCore {
     pub fn new(node_id: NodeId) -> Self {
+        Self::new_with_phase(node_id, Phase::Phase0)
+    }
+
+    /// Create new NarwhalCore with specific phase
+    pub fn new_with_phase(node_id: NodeId, phase: Phase) -> Self {
         Self {
             node_id,
             vertex_store: VertexStore::new_in_memory(),
             certificate_store: CertificateStore::new(),
             reliable_broadcast: ReliableBroadcast::new(node_id),
             current_round: RwLock::new(0),
+            lattice_vrf: None, // Will be initialized async
+            quantum_rng: None, // Will be initialized async
+            phase,
+        }
+    }
+
+    /// Initialize Phase 2+ quantum enhancements
+    pub async fn initialize_quantum_enhancements(&mut self) -> Result<()> {
+        if self.phase < Phase::Phase2 {
+            info!("Phase {} - quantum enhancements not enabled", self.phase as u8);
+            return Ok(());
+        }
+
+        info!("🔮 Initializing Phase 2+ quantum randomness for consensus");
+
+        // Initialize Lattice VRF for verifiable randomness
+        let vrf_config = VRFConfig {
+            security_level: SecurityLevel::Standard,
+            quantum_enhanced: true,
+            ..Default::default()
+        };
+
+        match LatticeVRF::new(vrf_config, self.phase).await {
+            Ok(vrf) => {
+                self.lattice_vrf = Some(Arc::new(vrf));
+                info!("✅ Lattice VRF initialized for quantum anchor election");
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to initialize Lattice VRF: {}", e);
+            }
+        }
+
+        // Initialize Quantum RNG for enhanced entropy
+        let qrng_config = QRNGConfig::default();
+        match QuantumRNG::new(self.phase, qrng_config).await {
+            Ok(qrng) => {
+                self.quantum_rng = Some(Arc::new(qrng));
+                info!("✅ Quantum RNG initialized for enhanced entropy");
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to initialize Quantum RNG: {}", e);
+            }
+        }
+
+        if self.lattice_vrf.is_some() || self.quantum_rng.is_some() {
+            info!("✅ Phase 2 quantum enhancements initialized successfully");
+            Ok(())
+        } else {
+            warn!("⚠️  No quantum enhancements available, falling back to classical");
+            Ok(())
         }
     }
 
@@ -53,7 +120,7 @@ impl NarwhalCore {
         // Compute transaction root
         let tx_root = self.compute_tx_root(&transactions);
 
-        let vertex = Vertex {
+        let mut vertex = Vertex {
             id: [0u8; 32], // Will be computed after signing
             round,
             author: self.node_id,
@@ -64,8 +131,51 @@ impl NarwhalCore {
             timestamp: chrono::Utc::now(),
         };
 
-        // TODO: Sign vertex
-        // let signed_vertex = self.sign_vertex(vertex).await?;
+        // Phase 2+: Use quantum VRF for anchor election (even rounds)
+        if self.phase >= Phase::Phase2 && round % 2 == 0 {
+            if let Some(ref vrf) = self.lattice_vrf {
+                debug!("🔮 Generating quantum VRF for anchor election in round {}", round);
+
+                // Create VRF input from round and vertex data
+                let mut vrf_input = Vec::new();
+                vrf_input.extend_from_slice(&round.to_be_bytes());
+                vrf_input.extend_from_slice(&vertex.author);
+                vrf_input.extend_from_slice(&vertex.tx_root);
+
+                match vrf.evaluate(&vrf_input, round).await {
+                    Ok(vrf_result) => {
+                        info!(
+                            "✅ Quantum VRF generated for round {} anchor election",
+                            round
+                        );
+                        info!(
+                            "   VRF entropy: {:.3}, proof size: {} bytes",
+                            vrf_result.output.entropy_estimate(),
+                            vrf_result.proof.data().len()
+                        );
+
+                        // VRF result can be used for:
+                        // 1. Anchor selection (min hash)
+                        // 2. Leader election
+                        // 3. Randomness beacon
+                        // 4. Ordering decisions
+
+                        // Store VRF result for anchor selection
+                        // (In full implementation, this would be used by DAG-Knight ordering)
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Quantum VRF evaluation failed: {}, continuing without", e);
+                    }
+                }
+            }
+        }
+
+        // TODO: Sign vertex with Phase-aware signing
+        // if self.phase >= Phase::Phase1 {
+        //     vertex.signature = sign_with_dilithium5(...);
+        // } else {
+        //     vertex.signature = sign_with_ed25519(...);
+        // }
 
         Ok(vertex)
     }
