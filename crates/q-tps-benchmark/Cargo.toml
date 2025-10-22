@@ -17,6 +17,10 @@ path = "src/benchmark_binary_protocol.rs"
 name = "benchmark_websocket"
 path = "src/benchmark_websocket.rs"
 
+[[bin]]
+name = "advanced_benchmark"
+path = "src/advanced_benchmark.rs"
+
 [dependencies]
 q-types = { path = "../q-types" }
 q-wallet = { path = "../q-wallet" }

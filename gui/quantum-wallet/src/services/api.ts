@@ -629,13 +629,25 @@ class QNarwhalKnightAPI {
     password?: string;
   }): Promise<ApiResponse<any>> {
     try {
-      // Get wallet address from localStorage
-      const walletAddress = localStorage.getItem('walletAddress') || '';
+      // Get wallet address from session (same source as balance display)
+      const session = walletSession.getSession();
+      let walletAddress = '';
 
-      // Add 'from' field to request
+      if (session && session.address) {
+        // Convert address bytes to hex string
+        const addressArray = Array.prototype.slice.call(session.address);
+        walletAddress = addressArray
+          .map((b: number) => b.toString(16).padStart(2, '0'))
+          .join('');
+      } else {
+        // Fallback to localStorage if no session
+        walletAddress = localStorage.getItem('walletAddress') || '';
+      }
+
+      // Add 'from' field to request (can be empty, backend will use node default)
       const requestWithFrom = {
         ...request,
-        from: walletAddress
+        from: walletAddress || undefined  // If empty, backend uses node's address
       };
 
       const response = await fetch(`${this.baseURL}/v1/mixer/send`, {

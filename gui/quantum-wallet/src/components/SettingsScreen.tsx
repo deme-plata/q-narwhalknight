@@ -480,9 +480,20 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                       onClick={async () => {
                         try {
                           // Get wallet address from local storage
-                          const walletAddress = localStorage.getItem('currentWallet') || 'default_wallet';
+                          const walletAddress = localStorage.getItem('currentWallet');
+
+                          console.log('[PaaS] Generating API key...', {
+                            hasWallet: !!walletAddress,
+                            wallet: walletAddress
+                          });
+
+                          if (!walletAddress) {
+                            alert('Please create or select a wallet first before generating an API key.');
+                            return;
+                          }
 
                           // Call real API to generate PaaS API key
+                          console.log('[PaaS] Calling API endpoint...');
                           const response = await fetch('http://localhost:8080/api/v1/privacy/paas/api-keys/generate', {
                             method: 'POST',
                             headers: {
@@ -495,28 +506,51 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                             })
                           });
 
+                          console.log('[PaaS] API response status:', response.status, response.statusText);
+
                           if (!response.ok) {
-                            throw new Error(`API request failed: ${response.status}`);
+                            const errorText = await response.text();
+                            console.error('[PaaS] API error response:', errorText);
+                            throw new Error(`API request failed: ${response.status} ${response.statusText}`);
                           }
 
                           const data = await response.json();
+                          console.log('[PaaS] API response data:', data);
 
-                          if (data.success && data.data) {
+                          if (data.success && data.data && data.data.api_key) {
                             const input = document.querySelector('input[type="password"][placeholder*="paas_"]') as HTMLInputElement;
                             if (input) {
                               input.type = 'text';
                               input.value = data.data.api_key;
+                              console.log('[PaaS] API key generated successfully:', data.data.key_id);
+
+                              // Show success message
+                              const successDiv = document.createElement('div');
+                              successDiv.className = 'text-green-400 text-sm mt-2';
+                              successDiv.textContent = '✓ API key generated successfully! (Visible for 5 seconds)';
+                              input.parentElement?.appendChild(successDiv);
+
                               // Show key for 5 seconds then hide it
                               setTimeout(() => {
                                 input.type = 'password';
+                                successDiv.remove();
                               }, 5000);
+                            } else {
+                              console.error('[PaaS] Could not find password input element');
+                              alert('API key generated but could not display it. Check console.');
                             }
                           } else {
+                            console.error('[PaaS] API returned unsuccessful response:', data);
                             alert('Failed to generate API key: ' + (data.error || 'Unknown error'));
                           }
-                        } catch (error) {
-                          console.error('Error generating PaaS API key:', error);
-                          alert('Error generating API key. Please try again.');
+                        } catch (error: any) {
+                          console.error('[PaaS] Error generating PaaS API key:', error);
+                          console.error('[PaaS] Error details:', {
+                            message: error?.message,
+                            stack: error?.stack,
+                            type: error?.constructor?.name
+                          });
+                          alert(`Error generating API key: ${error?.message || 'Please try again.'}\n\nCheck browser console (F12) for details.`);
                         }
                       }}
                     >
