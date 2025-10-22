@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced OAuth2 Integration - Quillon Wallet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 800px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            color: #718096;
+            margin-bottom: 30px;
+            font-size: 16px;
+        }
+
+        .status {
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .status.success {
+            background: #c6f6d5;
+            border: 1px solid #68d391;
+            color: #22543d;
+        }
+
+        .status.error {
+            background: #fed7d7;
+            border: 1px solid #fc8181;
+            color: #742a2a;
+        }
+
+        .status.info {
+            background: #bee3f8;
+            border: 1px solid #63b3ed;
+            color: #2c5282;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 14px 32px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-right: 12px;
+            margin-bottom: 12px;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+        }
+
+        button.danger {
+            background: linear-gradient(135deg, #fc8181 0%, #f56565 100%);
+        }
+
+        .wallet-info {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .wallet-info h3 {
+            color: #2d3748;
+            margin-bottom: 12px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .info-row:last-child {
+            border-bottom: none;
+        }
+
+        .info-label {
+            color: #718096;
+            font-weight: 500;
+        }
+
+        .info-value {
+            color: #2d3748;
+            font-family: 'Courier New', monospace;
+        }
+
+        .transaction-form {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            color: #4a5568;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.2s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .token-display {
+            background: #2d3748;
+            color: #68d391;
+            padding: 16px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            word-break: break-all;
+            margin-top: 12px;
+            display: none;
+        }
+
+        .scopes-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .scope-badge {
+            background: #667eea;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Advanced OAuth2 Integration</h1>
+        <p class="subtitle">Complete OAuth2 flow demonstration with Quillon Wallet</p>
+
+        <div id="status" class="status"></div>
+
+        <div id="auth-section">
+            <h3 style="margin-bottom: 16px;">Step 1: Authentication</h3>
+            <button onclick="authorize()">🚀 Authorize with Quillon Wallet</button>
+            <button class="secondary" onclick="showDeveloperInfo()">👨‍💻 Developer Info</button>
+        </div>
+
+        <div id="wallet-info" class="wallet-info">
+            <h3>🎯 Connected Wallet</h3>
+            <div class="info-row">
+                <span class="info-label">Wallet Address:</span>
+                <span class="info-value" id="wallet-address">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Balance:</span>
+                <span class="info-value" id="wallet-balance">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Scopes:</span>
+                <div class="scopes-list" id="scopes-list"></div>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Token Expires:</span>
+                <span class="info-value" id="token-expiry">-</span>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <button onclick="refreshToken()">🔄 Refresh Token</button>
+                <button class="secondary" onclick="getUserInfo()">ℹ️ Get User Info</button>
+                <button class="danger" onclick="revokeAccess()">🚫 Revoke Access</button>
+            </div>
+
+            <div id="access-token" class="token-display"></div>
+        </div>
+
+        <div id="transaction-form" class="transaction-form">
+            <h3 style="margin-bottom: 16px;">💸 Send Transaction</h3>
+            <div class="form-group">
+                <label for="recipient">Recipient Address</label>
+                <input type="text" id="recipient" placeholder="0x..." />
+            </div>
+            <div class="form-group">
+                <label for="amount">Amount (QUG)</label>
+                <input type="number" id="amount" placeholder="0.00" step="0.01" />
+            </div>
+            <button onclick="sendTransaction()">📤 Send Transaction</button>
+        </div>
+    </div>
+
+    <!-- Quillon OAuth2 SDK -->
+    <script src="../quillon-oauth2-sdk.js"></script>
+
+    <script>
+        // OAuth2 Configuration
+        const config = {
+            clientId: 'demo-oauth2-app',
+            clientSecret: 'demo-secret-key-12345',
+            redirectUri: window.location.origin + window.location.pathname,
+            apiBaseUrl: 'http://localhost:8090/api/v1',
+            scopes: ['read:balance', 'read:transactions', 'write:transactions']
+        };
+
+        // Initialize Quillon OAuth2 Client
+        const oauth = new QuillonOAuth2Client(config);
+
+        // Status display helper
+        function showStatus(message, type = 'info') {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.style.display = 'block';
+
+            if (type === 'success') {
+                setTimeout(() => {
+                    status.style.display = 'none';
+                }, 5000);
+            }
+        }
+
+        // Start OAuth2 authorization flow
+        async function authorize() {
+            try {
+                showStatus('🚀 Redirecting to Quillon Wallet authorization...', 'info');
+                await oauth.authorize();
+            } catch (error) {
+                showStatus('❌ Authorization failed: ' + error.message, 'error');
+            }
+        }
+
+        // Handle OAuth callback
+        async function handleCallback() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            const error = urlParams.get('error');
+
+            if (error) {
+                showStatus('❌ Authorization denied: ' + error, 'error');
+                return;
+            }
+
+            if (code) {
+                try {
+                    showStatus('🔄 Exchanging authorization code for access token...', 'info');
+                    await oauth.handleCallback();
+
+                    // Clear URL parameters
+                    window.history.replaceState({}, document.title, window.location.pathname);
+
+                    showStatus('✅ Successfully authenticated!', 'success');
+                    await displayWalletInfo();
+                } catch (error) {
+                    showStatus('❌ Token exchange failed: ' + error.message, 'error');
+                }
+            }
+        }
+
+        // Display wallet information
+        async function displayWalletInfo() {
+            try {
+                const userInfo = await oauth.getUserInfo();
+
+                document.getElementById('wallet-address').textContent = userInfo.wallet_address;
+                document.getElementById('wallet-balance').textContent =
+                    userInfo.balance_qug ? `${userInfo.balance_qug.toFixed(8)} QUG` : 'N/A';
+
+                // Display scopes
+                const scopesList = document.getElementById('scopes-list');
+                scopesList.innerHTML = '';
+                config.scopes.forEach(scope => {
+                    const badge = document.createElement('span');
+                    badge.className = 'scope-badge';
+                    badge.textContent = scope;
+                    scopesList.appendChild(badge);
+                });
+
+                // Calculate token expiry
+                const token = oauth.getAccessToken();
+                if (token) {
+                    const expiryDate = new Date(token.expires_at);
+                    document.getElementById('token-expiry').textContent = expiryDate.toLocaleString();
+
+                    // Show token (first 20 chars)
+                    document.getElementById('access-token').textContent =
+                        'Access Token: ' + token.access_token.substring(0, 20) + '...';
+                    document.getElementById('access-token').style.display = 'block';
+                }
+
+                document.getElementById('wallet-info').style.display = 'block';
+                document.getElementById('transaction-form').style.display = 'block';
+                document.getElementById('auth-section').style.display = 'none';
+            } catch (error) {
+                showStatus('❌ Failed to fetch user info: ' + error.message, 'error');
+            }
+        }
+
+        // Refresh access token
+        async function refreshToken() {
+            try {
+                showStatus('🔄 Refreshing access token...', 'info');
+                await oauth.refreshToken();
+                showStatus('✅ Token refreshed successfully!', 'success');
+                await displayWalletInfo();
+            } catch (error) {
+                showStatus('❌ Token refresh failed: ' + error.message, 'error');
+            }
+        }
+
+        // Get user info
+        async function getUserInfo() {
+            try {
+                showStatus('🔄 Fetching user information...', 'info');
+                const userInfo = await oauth.getUserInfo();
+                showStatus('✅ User info retrieved: ' + JSON.stringify(userInfo, null, 2), 'success');
+                console.log('User Info:', userInfo);
+            } catch (error) {
+                showStatus('❌ Failed to get user info: ' + error.message, 'error');
+            }
+        }
+
+        // Revoke access
+        async function revokeAccess() {
+            if (!confirm('Are you sure you want to revoke access to this application?')) {
+                return;
+            }
+
+            try {
+                showStatus('🔄 Revoking access...', 'info');
+                await oauth.revokeToken();
+                showStatus('✅ Access revoked successfully!', 'success');
+
+                // Reset UI
+                document.getElementById('wallet-info').style.display = 'none';
+                document.getElementById('transaction-form').style.display = 'none';
+                document.getElementById('auth-section').style.display = 'block';
+            } catch (error) {
+                showStatus('❌ Failed to revoke access: ' + error.message, 'error');
+            }
+        }
+
+        // Send transaction
+        async function sendTransaction() {
+            const recipient = document.getElementById('recipient').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+
+            if (!recipient || !amount) {
+                showStatus('❌ Please fill in all fields', 'error');
+                return;
+            }
+
+            try {
+                showStatus('🔄 Sending transaction...', 'info');
+
+                const response = await oauth.makeAuthenticatedRequest('/transactions', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        to: recipient,
+                        amount: Math.floor(amount * 100_000_000) // Convert to base units
+                    })
+                });
+
+                showStatus('✅ Transaction sent! TX ID: ' + response.tx_id, 'success');
+
+                // Clear form
+                document.getElementById('recipient').value = '';
+                document.getElementById('amount').value = '';
+
+                // Refresh balance
+                await displayWalletInfo();
+            } catch (error) {
+                showStatus('❌ Transaction failed: ' + error.message, 'error');
+            }
+        }
+
+        // Show developer information
+        function showDeveloperInfo() {
+            const info = `
+🔧 OAuth2 Configuration:
+━━━━━━━━━━━━━━━━━━━━━━━━
+Client ID: ${config.clientId}
+Redirect URI: ${config.redirectUri}
+API Base URL: ${config.apiBaseUrl}
+Scopes: ${config.scopes.join(', ')}
+
+📚 Available Methods:
+━━━━━━━━━━━━━━━━━━━━━━━━
+• oauth.authorize() - Start auth flow
+• oauth.getUserInfo() - Get user data
+• oauth.refreshToken() - Refresh token
+• oauth.revokeToken() - Revoke access
+• oauth.makeAuthenticatedRequest() - API calls
+
+🔗 OAuth2 Endpoints:
+━━━━━━━━━━━━━━━━━━━━━━━━
+• /api/v1/oauth2/authorize
+• /api/v1/oauth2/token
+• /api/v1/oauth2/userinfo
+• /api/v1/oauth2/revoke
+• /api/v1/oauth2/register
+
+📖 Documentation:
+━━━━━━━━━━━━━━━━━━━━━━━━
+See README.md for full documentation
+            `;
+
+            alert(info);
+        }
+
+        // Check if authenticated on page load
+        window.addEventListener('load', async () => {
+            await handleCallback();
+
+            if (oauth.isAuthenticated()) {
+                await displayWalletInfo();
+            }
+        });
+    </script>
+</body>
+</html>

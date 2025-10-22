@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quillon OAuth2 - Basic Integration Example</title>
+  <script src="../quillon-oauth2-sdk.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #333;
+    }
+
+    .container {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+    }
+
+    h1 {
+      color: #667eea;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+    }
+
+    button {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      margin-right: 10px;
+      margin-bottom: 10px;
+      transition: transform 0.2s;
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .user-info {
+      background: #f5f5f5;
+      padding: 20px;
+      border-radius: 8px;
+      margin-top: 20px;
+    }
+
+    .user-info h3 {
+      margin-top: 0;
+      color: #667eea;
+    }
+
+    .balance {
+      font-size: 24px;
+      font-weight: bold;
+      color: #764ba2;
+      margin: 10px 0;
+    }
+
+    .wallet-address {
+      font-family: monospace;
+      background: #e0e0e0;
+      padding: 10px;
+      border-radius: 4px;
+      word-break: break-all;
+      margin: 10px 0;
+    }
+
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .section {
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid #e0e0e0;
+    }
+
+    input {
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      width: 100%;
+      margin-bottom: 10px;
+      box-sizing: border-box;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 Quillon Wallet OAuth2 Demo</h1>
+    <p class="subtitle">Integrate blockchain authentication into your website</p>
+
+    <!-- Login Section -->
+    <div id="login-section">
+      <p>Connect your Quillon Wallet to access blockchain features:</p>
+      <button id="login-btn">Connect Quillon Wallet</button>
+    </div>
+
+    <!-- User Dashboard (shown after login) -->
+    <div id="dashboard-section" class="hidden">
+      <div class="user-info">
+        <h3>👤 Connected Wallet</h3>
+        <div class="wallet-address" id="wallet-address"></div>
+
+        <h3>💰 Balance</h3>
+        <div class="balance" id="balance">Loading...</div>
+
+        <button id="refresh-balance-btn">Refresh Balance</button>
+        <button id="logout-btn">Disconnect</button>
+      </div>
+
+      <!-- Send Transaction Section -->
+      <div class="section">
+        <h3>💸 Send Transaction</h3>
+        <label for="recipient">Recipient Address:</label>
+        <input type="text" id="recipient" placeholder="0x...">
+
+        <label for="amount">Amount (QUG):</label>
+        <input type="number" id="amount" placeholder="10.5" step="0.00000001">
+
+        <button id="send-btn">Send Transaction</button>
+      </div>
+
+      <!-- Transaction History -->
+      <div class="section">
+        <h3>📜 Recent Transactions</h3>
+        <div id="transactions">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Status Messages -->
+    <div id="status" class="hidden"></div>
+  </div>
+
+  <script>
+    // Initialize OAuth2 client
+    const client = new QullionOAuth2Client({
+      clientId: 'your-client-id-here',
+      clientSecret: 'your-client-secret-here', // NEVER expose in production! Use server-side proxy
+      redirectUri: window.location.origin + window.location.pathname,
+      scopes: ['read:balance', 'send:transaction', 'read:transactions'],
+      walletUrl: 'http://localhost:5173', // Development
+      apiUrl: 'http://localhost:8080' // Development
+    });
+
+    // DOM elements
+    const loginSection = document.getElementById('login-section');
+    const dashboardSection = document.getElementById('dashboard-section');
+    const loginBtn = document.getElementById('login-btn');
+    const logoutBtn = document.getElementById('logout-btn');
+    const walletAddressEl = document.getElementById('wallet-address');
+    const balanceEl = document.getElementById('balance');
+    const refreshBalanceBtn = document.getElementById('refresh-balance-btn');
+    const sendBtn = document.getElementById('send-btn');
+    const recipientInput = document.getElementById('recipient');
+    const amountInput = document.getElementById('amount');
+    const transactionsEl = document.getElementById('transactions');
+    const statusEl = document.getElementById('status');
+
+    // Show status message
+    function showStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.className = isError ? 'status error' : 'status success';
+      statusEl.classList.remove('hidden');
+      setTimeout(() => statusEl.classList.add('hidden'), 5000);
+    }
+
+    // Initialize on page load
+    async function init() {
+      // Check if this is a callback from OAuth2
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.has('code')) {
+        try {
+          await client.handleCallback();
+          // Clean up URL
+          window.history.replaceState({}, document.title, window.location.pathname);
+          showStatus('Successfully connected to Quillon Wallet!');
+        } catch (error) {
+          showStatus('Login failed: ' + error.message, true);
+          return;
+        }
+      }
+
+      // Check if already authenticated
+      if (client.isAuthenticated()) {
+        await showDashboard();
+      } else {
+        showLogin();
+      }
+    }
+
+    // Show login screen
+    function showLogin() {
+      loginSection.classList.remove('hidden');
+      dashboardSection.classList.add('hidden');
+    }
+
+    // Show dashboard
+    async function showDashboard() {
+      loginSection.classList.add('hidden');
+      dashboardSection.classList.remove('hidden');
+
+      try {
+        // Get user info
+        const userInfo = await client.getUserInfo();
+        walletAddressEl.textContent = userInfo.wallet_address;
+
+        // Load balance
+        await loadBalance();
+
+        // Load transactions
+        await loadTransactions();
+      } catch (error) {
+        showStatus('Error loading dashboard: ' + error.message, true);
+        showLogin();
+      }
+    }
+
+    // Load balance
+    async function loadBalance() {
+      try {
+        const balance = await client.getBalance('QUG');
+        balanceEl.textContent = (balance / 100000000).toFixed(8) + ' QUG';
+      } catch (error) {
+        balanceEl.textContent = 'Error loading balance';
+        showStatus('Error: ' + error.message, true);
+      }
+    }
+
+    // Load transactions
+    async function loadTransactions() {
+      try {
+        const transactions = await client.getTransactionHistory(10);
+
+        if (transactions.length === 0) {
+          transactionsEl.innerHTML = '<p>No transactions yet</p>';
+          return;
+        }
+
+        transactionsEl.innerHTML = transactions.map(tx => `
+          <div style="background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 4px;">
+            <strong>${tx.token}</strong> ${(tx.amount / 100000000).toFixed(8)}<br>
+            <small>${tx.from.substring(0, 16)}... → ${tx.to.substring(0, 16)}...</small><br>
+            <small>Status: ${tx.status}</small>
+          </div>
+        `).join('');
+      } catch (error) {
+        transactionsEl.innerHTML = '<p>Error loading transactions</p>';
+        showStatus('Error: ' + error.message, true);
+      }
+    }
+
+    // Event Listeners
+    loginBtn.addEventListener('click', async () => {
+      await client.authorize();
+    });
+
+    logoutBtn.addEventListener('click', async () => {
+      await client.revoke();
+      showLogin();
+      showStatus('Disconnected from Quillon Wallet');
+    });
+
+    refreshBalanceBtn.addEventListener('click', loadBalance);
+
+    sendBtn.addEventListener('click', async () => {
+      const recipient = recipientInput.value;
+      const amount = parseFloat(amountInput.value);
+
+      if (!recipient || !amount) {
+        showStatus('Please enter recipient and amount', true);
+        return;
+      }
+
+      try {
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Sending...';
+
+        const result = await client.sendTransaction({
+          to: recipient,
+          amount: Math.floor(amount * 100000000), // Convert to base units
+          token: 'QUG'
+        });
+
+        showStatus('Transaction sent successfully!');
+        recipientInput.value = '';
+        amountInput.value = '';
+
+        // Refresh data
+        await loadBalance();
+        await loadTransactions();
+      } catch (error) {
+        showStatus('Transaction failed: ' + error.message, true);
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send Transaction';
+      }
+    });
+
+    // Initialize
+    init();
+  </script>
+</body>
+</html>

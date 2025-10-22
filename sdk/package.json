@@ -1,0 +1,35 @@
+{
+  "name": "@quillon/oauth2-sdk",
+  "version": "1.0.0",
+  "description": "OAuth2 SDK for integrating Quillon Wallet authentication into third-party websites",
+  "main": "quillon-oauth2-sdk.js",
+  "types": "quillon-oauth2-sdk.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "quillon",
+    "oauth2",
+    "blockchain",
+    "wallet",
+    "authentication",
+    "post-quantum",
+    "cryptocurrency"
+  ],
+  "author": "Quillon Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deme-plata/q-narwhalknight"
+  },
+  "bugs": {
+    "url": "https://github.com/deme-plata/q-narwhalknight/issues"
+  },
+  "homepage": "https://api.quillon.xyz",
+  "files": [
+    "quillon-oauth2-sdk.js",
+    "quillon-oauth2-sdk.d.ts",
+    "README.md",
+    "examples/"
+  ]
+}
