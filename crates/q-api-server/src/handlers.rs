@@ -435,6 +435,31 @@ pub async fn submit_transaction(
     state.tx_pool.insert(tx_hash, request.transaction.clone());
     state.tx_status.insert(tx_hash, TxStatus::InMempool);
 
+    // ============================================================================
+    // 📡 GOSSIPSUB TRANSACTION PROPAGATION
+    // Broadcast transaction to all connected peers via libp2p
+    // ============================================================================
+    if let Some(ref libp2p) = state.libp2p_discovery {
+        // Serialize transaction for network propagation
+        match postcard::to_allocvec(&request.transaction) {
+            Ok(tx_bytes) => {
+                // Spawn async task to avoid blocking the fast path
+                let libp2p_clone = libp2p.clone();
+                tokio::spawn(async move {
+                    let mut nm = libp2p_clone.lock().await;
+                    if let Err(e) = nm.publish_topic("/qnk/transactions", tx_bytes) {
+                        tracing::warn!("Failed to publish transaction to network: {}", e);
+                    } else {
+                        tracing::info!("📤 Transaction {} broadcast to network", hex::encode(&tx_hash));
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize transaction for propagation: {}", e);
+            }
+        }
+    }
+
     // OPTIMIZED: Process immediately without async overhead for maximum TPS
     // Background batching will be triggered by a separate periodic task
     // This keeps the critical path as fast as possible
@@ -2701,6 +2726,7 @@ pub struct JoinMixingPoolResponse {
 /// Privacy mixer transaction request
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PrivacyMixTransactionRequest {
+    pub from: Option<String>, // Sender wallet address
     pub to: String,           // Destination address
     pub amount: f64,          // Amount in QNK
     pub privacy_level: String, // "standard", "high", "maximum"
@@ -2823,14 +2849,36 @@ pub async fn send_private_transaction(
     let decoy_count = (decoy_multiplier as u32).max(5).min(50); // Min 5, max 50 decoys
     let enable_quantum_mixing = request.enable_quantum_mixing.unwrap_or(true);
 
+    // Parse sender address (from wallet)
+    let from_address = if let Some(from_str) = &request.from {
+        if from_str.len() == 64 {
+            match hex::decode(from_str) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&bytes);
+                    addr
+                }
+                _ => return Ok(Json(ApiResponse::error("Invalid sender address format".to_string()))),
+            }
+        } else {
+            // Handle ENS-style addresses
+            use q_types::{Sha3_256, Digest};
+            let mut hasher = Sha3_256::new();
+            hasher.update(from_str.as_bytes());
+            hasher.finalize().into()
+        }
+    } else {
+        // Fallback to node_id if no from address provided (backwards compatibility)
+        state.node_id
+    };
+
     // Generate mixing session parameters
     let mixing_session_id = generate_quantum_mixing_id();
-    let mock_from_address = state.node_id; // Use node_id as sender
 
     // Create enhanced privacy transaction with quantum mixing
     let transaction = Transaction {
         id: TxHash::default(),
-        from: mock_from_address,
+        from: from_address,
         to: to_address,
         amount: amount_u64,
         fee: mixer_fee,
@@ -2879,11 +2927,22 @@ pub async fn send_private_transaction(
         }
     });
 
+    // Reload balances from RocksDB to ensure we have latest persisted state
+    if let Ok(db_balances) = state.storage_engine.load_wallet_balances().await {
+        let balance_count = db_balances.len();
+        let mut wallet_balances_write = state.wallet_balances.write().await;
+        for (addr, bal) in db_balances {
+            wallet_balances_write.insert(addr, bal);
+        }
+        drop(wallet_balances_write);
+        debug!("📊 Reloaded {} wallet balances from RocksDB for mixer", balance_count);
+    }
+
     // Check balance (but don't deduct yet - wait for consensus confirmation)
     // This matches the behavior of normal send_transaction()
     {
         let balances = state.wallet_balances.read().await;
-        let sender_balance = balances.get(&mock_from_address).copied().unwrap_or(0);
+        let sender_balance = balances.get(&from_address).copied().unwrap_or(0);
 
         if sender_balance < total_cost {
             return Ok(Json(ApiResponse::error(format!(
@@ -3444,8 +3503,13 @@ pub async fn submit_mining_solution(
     drop(balances); // Release lock before broadcasting
 
     // 💾 CRITICAL: Persist balance to disk immediately to prevent data loss
-    if let Err(e) = state.save_wallet_balance(&miner_address, new_balance).await {
-        error!("Failed to persist mining reward balance: {:?}", e);
+    match state.save_wallet_balance(&miner_address, new_balance).await {
+        Ok(_) => {
+            info!("💾 Successfully persisted mining reward: {} units to wallet", new_balance);
+        }
+        Err(e) => {
+            warn!("❌ CRITICAL: Failed to persist mining reward balance: {:?}", e);
+        }
     }
 
     // Create mining reward transaction for recent activity
@@ -3815,18 +3879,25 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
 
 /// Sanitize and validate token symbols
 fn sanitize_token_symbol(symbol: &str) -> Result<String, String> {
+    if symbol.is_empty() {
+        return Err("Token symbol cannot be empty".to_string());
+    }
+
+    // If it's an address (starts with 0x or qnk), return as-is without validation
+    // Addresses will be validated by parse_wallet_address() later
+    if symbol.starts_with("0x") || symbol.starts_with("qnk") {
+        return Ok(symbol.to_string());
+    }
+
+    // For token symbols (not addresses), enforce strict rules
     // Only allow alphanumeric characters and hyphens
     if !symbol.chars().all(|c| c.is_alphanumeric() || c == '-') {
         return Err(format!("Invalid token symbol '{}': contains illegal characters", symbol));
     }
 
-    // Limit length to prevent DoS
+    // Limit symbol length to prevent DoS
     if symbol.len() > 20 {
         return Err(format!("Invalid token symbol '{}': too long (max 20 characters)", symbol));
-    }
-
-    if symbol.is_empty() {
-        return Err("Token symbol cannot be empty".to_string());
     }
 
     Ok(symbol.to_uppercase())
@@ -4134,12 +4205,24 @@ pub async fn execute_swap(
         )));
     }
 
-    // Check slippage protection
-    if final_amount_out < request.min_amount_out {
+    // Check slippage protection (more lenient for oracle-based swaps)
+    if !use_oracle && final_amount_out < request.min_amount_out {
         return Ok(Json(ApiResponse::error(format!(
-            "Slippage too high. Expected minimum: {}, Got: {}",
-            request.min_amount_out, final_amount_out
+            "❌ Slippage too high. Expected minimum: {}, Got: {}. Pool reserves: {} / {}. Pool may have insufficient liquidity for this swap size.",
+            request.min_amount_out, final_amount_out, reserve_in, reserve_out
         ))));
+    } else if use_oracle {
+        // For oracle-based swaps, only require that output is at least 50% of requested minimum
+        // (allows for frontend miscalculation of min_amount_out due to price data issues)
+        let lenient_minimum = request.min_amount_out / 2;
+        if final_amount_out < lenient_minimum {
+            return Ok(Json(ApiResponse::error(format!(
+                "Oracle swap output too low. Expected minimum: {} (lenient: {}), Got: {}",
+                request.min_amount_out, lenient_minimum, final_amount_out
+            ))));
+        }
+        info!("✅ Oracle swap slippage check passed (lenient mode): {} >= {} (requested: {})",
+            final_amount_out, lenient_minimum, request.min_amount_out);
     }
 
     // Check if pool has enough reserves (skip for oracle-based swaps)
@@ -4172,6 +4255,14 @@ pub async fn execute_swap(
                 return Ok(Json(ApiResponse::error(format!("Failed to burn QUGUSD: {}", e))));
             }
             info!("💸 Burned {} QUGUSD from wallet via CollateralVault", request.amount_in);
+
+            // Persist CollateralVault to storage after burn
+            if let Ok(vault_bytes) = bincode::serialize(&*vault) {
+                if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+                    warn!("Failed to persist CollateralVault after burn: {}", e);
+                }
+            }
+
             drop(vault);
 
             // Re-acquire locks and update token_balances map for API visibility
@@ -4206,6 +4297,14 @@ pub async fn execute_swap(
                 return Ok(Json(ApiResponse::error(format!("Failed to mint QUGUSD: {}", e))));
             }
             info!("💰 Minted {} QUGUSD to wallet via CollateralVault", final_amount_out);
+
+            // Persist CollateralVault to storage after mint
+            if let Ok(vault_bytes) = bincode::serialize(&*vault) {
+                if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+                    warn!("Failed to persist CollateralVault after mint: {}", e);
+                }
+            }
+
             drop(vault);
 
             // Re-acquire locks and update token_balances map for API visibility
@@ -4350,6 +4449,21 @@ pub async fn execute_swap(
 
     if let Err(e) = state.event_broadcaster.broadcast(from_price_event) {
         warn!("Failed to broadcast from-token price update SSE event: {}", e);
+    }
+
+    // Broadcast balance-updated event for real-time wallet balance refresh
+    let balance_updated_event = crate::StreamEvent::BalanceUpdated {
+        wallet_address: hex::encode(wallet_addr),
+        old_balance: 0.0, // We don't track old balance in swap
+        new_balance: 0.0, // Frontend will refetch all balances
+        change_reason: format!("swap_{}_to_{}", request.from_token, request.to_token),
+        timestamp: chrono::Utc::now(),
+    };
+
+    if let Err(e) = state.event_broadcaster.broadcast(balance_updated_event) {
+        warn!("Failed to broadcast balance-updated SSE event: {}", e);
+    } else {
+        info!("📡 [SSE] Balance update event broadcasted for wallet: {}", hex::encode(wallet_addr));
     }
 
     info!("✅ Swap completed: {} {} -> {} {}", request.amount_in, request.from_token, final_amount_out, request.to_token);

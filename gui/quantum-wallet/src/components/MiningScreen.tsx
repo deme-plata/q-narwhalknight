@@ -18,7 +18,7 @@ export default function MiningScreen() {
     navigator.clipboard.writeText(command);
   };
 
-  const miningCommand = `./q-miner --mode solo --wallet ${walletAddress} --threads 4 --intensity 7`;
+  const miningCommand = `./q-miner --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server http://185.182.185.227:8080`;
 
   return (
     <div className="space-y-6">
@@ -119,28 +119,56 @@ export default function MiningScreen() {
           <div className="grid md:grid-cols-2 gap-4">
             <motion.button
               onClick={() => handleDownloadMiner('linux')}
-              className="bg-gradient-to-r from-quantum-cyan to-quantum-blue hover:from-quantum-cyan/80 hover:to-quantum-blue/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3"
+              className="bg-gradient-to-r from-quantum-cyan to-quantum-blue hover:from-quantum-cyan/80 hover:to-quantum-blue/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              <Download className="w-5 h-5" />
-              Linux x86_64
+              <div className="flex items-center gap-3">
+                <Download className="w-5 h-5" />
+                <span>Linux x86_64</span>
+              </div>
+              <span className="text-xs text-quantum-cyan/70">13 MB • CPU Mining</span>
             </motion.button>
 
             <motion.button
               onClick={() => handleDownloadMiner('windows')}
-              className="bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3"
+              className="bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              <Download className="w-5 h-5" />
-              Windows x64
+              <div className="flex items-center gap-3">
+                <Download className="w-5 h-5" />
+                <span>Windows x64</span>
+              </div>
+              <span className="text-xs text-quantum-purple/70">22 MB • CPU Mining</span>
+            </motion.button>
+
+            <motion.button
+              onClick={() => window.open('/downloads/q-miner-macos-x64', '_blank')}
+              className="bg-gradient-to-r from-quantum-green to-quantum-cyan hover:from-quantum-green/80 hover:to-quantum-cyan/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <div className="flex items-center gap-3">
+                <Download className="w-5 h-5" />
+                <span>macOS Intel (x64)</span>
+              </div>
+              <span className="text-xs text-quantum-green/70">8.7 MB • CPU Mining</span>
+            </motion.button>
+
+            <motion.button
+              onClick={() => window.open('/downloads/q-miner-macos-arm64', '_blank')}
+              className="bg-gradient-to-r from-quantum-orange to-quantum-yellow hover:from-quantum-orange/80 hover:to-quantum-yellow/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <div className="flex items-center gap-3">
+                <Download className="w-5 h-5" />
+                <span>macOS Apple Silicon (ARM64)</span>
+              </div>
+              <span className="text-xs text-quantum-orange/70">8.3 MB • CPU Mining</span>
             </motion.button>
           </div>
-
-          <p className="text-center text-gray-400 text-sm">
-            macOS and ARM builds coming soon
-          </p>
         </div>
       </motion.div>
 
@@ -168,6 +196,14 @@ export default function MiningScreen() {
                 <p className="text-quantum-purple text-sm mb-1">🪟 Windows:</p>
                 <code className="font-mono text-xs text-gray-300">Rename q-miner-windows-x64.exe to q-miner.exe</code>
               </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-green text-sm mb-1">🍎 macOS Intel:</p>
+                <code className="font-mono text-xs text-gray-300">chmod +x q-miner-macos-x64 && mv q-miner-macos-x64 q-miner</code>
+              </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-orange text-sm mb-1">🍎 macOS Apple Silicon:</p>
+                <code className="font-mono text-xs text-gray-300">chmod +x q-miner-macos-arm64 && mv q-miner-macos-arm64 q-miner</code>
+              </div>
             </div>
           </div>
 
@@ -187,9 +223,9 @@ export default function MiningScreen() {
           <div>
             <p className="text-gray-300 mb-2">3. Optional parameters:</p>
             <div className="bg-quantum-dark/50 rounded-lg p-3 text-sm text-gray-300 space-y-1">
-              <p><code className="text-quantum-cyan">--threads 4</code> - Number of CPU threads to use</p>
+              <p><code className="text-quantum-cyan">--threads 4</code> - Number of CPU threads to use (0 = all cores)</p>
               <p><code className="text-quantum-cyan">--intensity 7</code> - Mining intensity (1-10)</p>
-              <p><code className="text-quantum-cyan">--api-url http://localhost:8080</code> - Custom API endpoint</p>
+              <p><code className="text-quantum-cyan">--server http://185.182.185.227:8080</code> - Server URL (defaults to localhost:8080)</p>
             </div>
           </div>
 

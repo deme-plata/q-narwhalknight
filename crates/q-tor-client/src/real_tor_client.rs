@@ -4,11 +4,10 @@
 /// Supports onion services, SOCKS5 proxy, and circuit management
 use anyhow::{anyhow, Result};
 use arti_client::{TorClient as ArtiClient, TorClientConfig};
-use arti_hyper::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    net::{SocketAddr, IpAddr},
+    net::SocketAddr,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -16,12 +15,11 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{broadcast, Mutex, RwLock},
-    time::{interval, sleep},
+    time::interval,
 };
 use tor_hsservice::OnionService;
 use tor_rtcompat::tokio::TokioNativeTlsRuntime;
-use tracing::{debug, error, info, warn};
-use url::Url;
+use tracing::{debug, info, warn};
 
 /// Tor client configuration
 #[derive(Debug, Clone)]

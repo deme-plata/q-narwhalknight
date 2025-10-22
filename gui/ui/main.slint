@@ -85,14 +85,14 @@ component StatusIndicator inherits VerticalBox {
 
 component PrimaryButton inherits Button {
     in property <string> button-icon: "";
-    
-    text: button-icon != "" ? button-icon + " " + root.text : root.text;
+
+    // Don't override text - just use it directly
 }
 
 component SecondaryButton inherits Button {
     in property <string> button-icon: "";
-    
-    text: button-icon != "" ? button-icon + " " + root.text : root.text;
+
+    // Don't override text - just use it directly
 }
 
 component QuantumInput inherits LineEdit {
@@ -235,7 +235,8 @@ component WalletCard inherits Rectangle {
     callback create-wallet();
     callback export-wallet();
     callback show-mnemonic();
-    
+    callback show-restore();
+
     background: Colors.card-background;
     border-radius: 12px;
     height: 200px;
@@ -325,7 +326,7 @@ component WalletCard inherits Rectangle {
                 text: "Restore";
                 button-icon: "🔄";
                 clicked => {
-                    root.show-restore-dialog = true;
+                    show-restore();
                 }
             }
         }
@@ -336,58 +337,59 @@ component SendTransactionPanel inherits Rectangle {
     in property <string> wallet-id;
     in-out property <string> recipient;
     in-out property <float> amount;
+    in-out property <string> amount-text;
     callback submit-tx(string, float);
-    
+
     background: Colors.card-background;
     border-radius: 12px;
     border-width: 1px;
     border-color: Colors.border-color;
-    
+
     VerticalBox {
         padding: 20px;
         spacing: 15px;
-        
+
         Text {
             text: "💸 Send Transaction";
             color: Colors.text-primary;
             font-size: 18px;
             font-weight: 700;
         }
-        
+
         VerticalBox {
             spacing: 10px;
-            
+
             Text {
                 text: "Recipient Address";
                 color: Colors.text-secondary;
                 font-size: 12px;
             }
-            
+
             QuantumInput {
                 placeholder: "Enter quantum address...";
                 text <=> recipient;
             }
         }
-        
+
         VerticalBox {
             spacing: 10px;
-            
+
             Text {
                 text: "Amount (QNK)";
                 color: Colors.text-secondary;
                 font-size: 12px;
             }
-            
+
             QuantumInput {
                 placeholder: "0.000000";
-                text <=> amount;
+                text <=> amount-text;
             }
         }
-        
+
         PrimaryButton {
             text: "Send QNK";
             button-icon: "🚀";
-            enabled: wallet-id != "Not created" && recipient != "" && amount > 0;
+            enabled: wallet-id != "Not created" && recipient != "" && amount-text != "";
             clicked => {
                 submit-tx(recipient, amount);
             }
@@ -694,14 +696,16 @@ component QuantumWallet inherits VerticalBox {
     in property <string> precision-balance;
     in-out property <string> recipient;
     in-out property <float> amount;
+    in-out property <string> amount-text;
     callback create-wallet();
     callback export-wallet();
     callback show-mnemonic();
+    callback show-restore();
     callback submit-tx(string, float);
-    
+
     spacing: 20px;
     padding: 20px;
-    
+
     WalletCard {
         wallet-id: root.wallet-id;
         wallet-status: root.wallet-status;
@@ -709,12 +713,14 @@ component QuantumWallet inherits VerticalBox {
         create-wallet => { root.create-wallet(); }
         export-wallet => { root.export-wallet(); }
         show-mnemonic => { root.show-mnemonic(); }
+        show-restore => { root.show-restore(); }
     }
-    
+
     SendTransactionPanel {
         wallet-id: root.wallet-id;
         recipient <=> root.recipient;
         amount <=> root.amount;
+        amount-text <=> root.amount-text;
         submit-tx(recipient, amount) => { root.submit-tx(recipient, amount); }
     }
 }
@@ -790,6 +796,9 @@ export component MainWindow inherits Window {
     // Transaction properties
     in-out property <string> recipient: "";
     in-out property <float> amount: 0.0;
+    in-out property <string> amount-text: "";
+    in-out property <string> tx-hash: "";
+    in-out property <string> tx-status: "";
     in-out property <string> tx-status-unknown: "";
     in-out property <string> tx-status-pending: "";
     
@@ -804,6 +813,7 @@ export component MainWindow inherits Window {
     in-out property <string> current-phase: "Phase 2";
     in-out property <int> tor-circuits: 4;
     in-out property <float> network-health: 0.75;
+    in-out property <float> anonymity-score: 0.85;
     
     // ========== CALLBACKS ==========
     callback create-wallet();
@@ -813,6 +823,7 @@ export component MainWindow inherits Window {
     callback append-log(string);
     callback refresh-metrics();
     callback show-mnemonic();
+    callback show-restore();
     callback restore-wallet(string);
     callback export-wallet();
     callback show-add-wallet-ui();
@@ -870,9 +881,11 @@ export component MainWindow inherits Window {
                     precision-balance: root.precision-balance;
                     recipient <=> root.recipient;
                     amount <=> root.amount;
+                    amount-text <=> root.amount-text;
                     create-wallet => { root.create-wallet(); }
                     export-wallet => { root.export-wallet(); }
                     show-mnemonic => { root.show-mnemonic(); }
+                    show-restore => { root.show-restore(); }
                     submit-tx(recipient, amount) => { root.submit-tx(recipient, amount); }
                 }
             }

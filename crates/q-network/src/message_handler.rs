@@ -182,30 +182,37 @@ impl MessageHandler {
 
     /// Process incoming network message
     pub async fn handle_message(&self, message: NetworkMessage, source: libp2p::PeerId) -> Result<()> {
+        info!("🔵 [MESSAGE HANDLER] Received {} message from peer {}",
+              message.message_type(), source);
+
         // Update statistics
         {
             let mut stats = self.message_stats.write().await;
             stats.total_messages += 1;
-            
+
             // Estimate message size (simplified)
             let estimated_size = match &message {
                 NetworkMessage::Vertex(_) => 1024,
                 NetworkMessage::Certificate(_) => 512,
-                NetworkMessage::SyncResponse { vertices, certificates } => 
+                NetworkMessage::SyncResponse { vertices, certificates } =>
                     (vertices.len() * 1024 + certificates.len() * 512) as u64,
                 _ => 256,
             };
             stats.bytes_transferred += estimated_size;
+
+            info!("📊 [STATS] Total messages: {}, Bytes transferred: {} KB",
+                  stats.total_messages, stats.bytes_transferred / 1024);
         }
 
         // Validate message
         if let Err(e) = message.validate() {
-            warn!("Invalid message from {}: {}", source, e);
+            warn!("❌ [VALIDATION] Invalid message from {}: {}", source, e);
             self.increment_error_count().await;
             return Ok(());
         }
 
-        debug!("Processing {} message from {}", message.message_type(), source);
+        info!("✅ [VALIDATION] Message validated successfully");
+        debug!("🔄 [PROCESSING] Starting {} message processing", message.message_type());
 
         // Process message by type
         match message {
@@ -252,13 +259,20 @@ impl MessageHandler {
 
     /// Handle vertex message
     async fn handle_vertex(&self, vertex: Vertex, source: libp2p::PeerId) -> Result<()> {
-        info!("Received vertex {} from {} for round {}", 
-              hex::encode(vertex.id), source, vertex.round);
+        info!("🟢 [VERTEX RECEIVED] ==========================================");
+        info!("🟢 [VERTEX] ID: {}", hex::encode(&vertex.id[..8]));
+        info!("🟢 [VERTEX] Round: {}", vertex.round);
+        info!("🟢 [VERTEX] Author: {}", hex::encode(&vertex.author[..8]));
+        info!("🟢 [VERTEX] From peer: {}", source);
+        info!("🟢 [VERTEX] Transactions: {} txs", vertex.transactions.len());
+        info!("🟢 [VERTEX] Parents: {} parent vertices", vertex.parents.len());
+        info!("🟢 [VERTEX] Timestamp: {}", vertex.timestamp);
 
         // Update stats
         {
             let mut stats = self.message_stats.write().await;
             stats.vertices_received += 1;
+            info!("📊 [VERTEX STATS] Total vertices received: {}", stats.vertices_received);
         }
 
         // Cache the vertex
@@ -266,12 +280,17 @@ impl MessageHandler {
             let mut cache = self.message_cache.write().await;
             let message_hash = self.compute_message_hash(&NetworkMessage::Vertex(vertex.clone()))?;
             cache.insert(message_hash, NetworkMessage::Vertex(vertex.clone()));
+            info!("💾 [CACHE] Vertex cached with hash: {}", hex::encode(&message_hash[..8]));
         }
 
-        // Forward to consensus layer
+        // Forward to consensus layer (Bracha's Reliable Broadcast)
+        info!("📤 [FORWARDING] Sending vertex to Bracha's Reliable Broadcast protocol...");
         if self.vertex_tx.send(vertex).is_err() {
-            warn!("No receivers for vertex messages");
+            warn!("⚠️ [FORWARDING] No receivers for vertex messages - consensus may not be running!");
+        } else {
+            info!("✅ [FORWARDING] Vertex forwarded to consensus layer successfully");
         }
+        info!("🟢 [VERTEX COMPLETE] ==========================================\n");
 
         Ok(())
     }

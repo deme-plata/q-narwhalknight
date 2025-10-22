@@ -183,6 +183,122 @@ q-api-server.exe --port 8080`}
             </p>
           </div>
         </motion.div>
+
+        {/* macOS Build from Source */}
+        <motion.div
+          className="p-8 bg-gradient-to-br from-quantum-green/20 to-quantum-cyan/10 backdrop-blur-xl border border-quantum-green/30 rounded-2xl"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+        >
+          <div className="flex items-center gap-4 mb-6">
+            <div className="w-16 h-16 bg-quantum-green/20 rounded-xl flex items-center justify-center">
+              <Terminal className="w-8 h-8 text-quantum-green" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-white">macOS (Build from Source)</h2>
+              <p className="text-gray-400">Intel & Apple Silicon - Native Compilation</p>
+            </div>
+          </div>
+
+          <div className="space-y-4 mb-6">
+            <div className="p-4 bg-quantum-green/10 border border-quantum-green/30 rounded-xl">
+              <p className="text-quantum-green font-bold mb-2">✅ Native macOS Performance</p>
+              <p className="text-gray-300 text-sm">
+                Build natively on your Mac for optimal performance and full feature support. The build process is automated and takes ~10-15 minutes.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-white font-medium">Full Feature Set</p>
+                  <p className="text-sm text-gray-400">All quantum consensus features enabled</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-white font-medium">Optimized for Your Hardware</p>
+                  <p className="text-sm text-gray-400">Native compilation for M1/M2/M3/M4 or Intel</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-white font-medium">Latest Code</p>
+                  <p className="text-sm text-gray-400">Always get the newest features and fixes</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Start Guide */}
+          <div className="space-y-4">
+            <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-green/20">
+              <p className="text-sm font-bold text-white mb-3">📋 Prerequisites (one-time setup):</p>
+              <div className="space-y-2">
+                <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                  <p className="text-quantum-green text-xs font-bold mb-1">Step 1: Install Homebrew (if not installed)</p>
+                  <pre className="text-xs text-gray-300 overflow-x-auto">
+{`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`}
+                  </pre>
+                </div>
+
+                <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                  <p className="text-quantum-green text-xs font-bold mb-1">Step 2: Install Rust</p>
+                  <pre className="text-xs text-gray-300 overflow-x-auto">
+{`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env`}
+                  </pre>
+                </div>
+
+                <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                  <p className="text-quantum-green text-xs font-bold mb-1">Step 3: Install Build Tools</p>
+                  <pre className="text-xs text-gray-300 overflow-x-auto">
+{`brew install cmake pkg-config openssl`}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-cyan/20">
+              <p className="text-sm font-bold text-white mb-3">🚀 Build & Run Q-NarwhalKnight:</p>
+              <pre className="text-xs text-quantum-cyan overflow-x-auto">
+{`# Clone the repository
+git clone https://code.quillon.xyz/repo.git q-narwhalknight
+cd q-narwhalknight
+
+# Build the API server (takes ~10-15 minutes)
+cargo build --release --package q-api-server
+
+# Run the server
+./target/release/q-api-server --port 8080`}
+              </pre>
+              <p className="text-xs text-quantum-green mt-3">
+                ✅ Server will start on http://localhost:8080 with full API and consensus features
+              </p>
+            </div>
+
+            <div className="p-4 bg-quantum-purple/10 border border-quantum-purple/30 rounded-xl">
+              <p className="text-sm font-bold text-quantum-purple mb-2">💡 Pro Tips:</p>
+              <ul className="text-gray-300 text-xs space-y-1">
+                <li>• First build will download dependencies (~5 min), subsequent builds are faster</li>
+                <li>• On Apple Silicon (M1/M2/M3/M4), the binary will be optimized for ARM64</li>
+                <li>• Use <code className="text-quantum-cyan">--release</code> for production performance (10x faster)</li>
+                <li>• The binary will be at <code className="text-quantum-cyan">./target/release/q-api-server</code></li>
+              </ul>
+            </div>
+
+            <div className="p-4 bg-quantum-indigo/10 border border-quantum-indigo/30 rounded-xl">
+              <p className="text-sm font-bold text-white mb-2">🔄 Alternative: Pre-built macOS Miner</p>
+              <p className="text-gray-400 text-xs">
+                For mining only, download the pre-compiled <a href="/mining" className="text-quantum-cyan hover:underline">macOS miner binaries</a> (Intel & Apple Silicon available)
+              </p>
+            </div>
+          </div>
+        </motion.div>
       </div>
 
       {/* System Requirements */}

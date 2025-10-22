@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Book, Code2, Zap, Wallet, Network, Lock, Menu, X, Rocket, ArrowRight, CheckCircle2, Cpu } from 'lucide-react';
+import { Book, Code2, Zap, Wallet, Network, Lock, Menu, X, Rocket, ArrowRight, CheckCircle2, Cpu, Shield } from 'lucide-react';
 import APIEndpoints from './components/APIEndpoints';
 import WalletExamples from './components/WalletExamples';
 import DEXExamples from './components/DEXExamples';
 import WebSocketGuide from './components/WebSocketGuide';
 import SmartContractGuide from './components/SmartContractGuide';
+import OAuth2Integration from './components/OAuth2Integration';
+import PrivacyAsAService from './components/PrivacyAsAService';
 
-type Tab = 'overview' | 'endpoints' | 'wallet' | 'dex' | 'contracts' | 'websocket';
+type Tab = 'overview' | 'endpoints' | 'wallet' | 'dex' | 'contracts' | 'websocket' | 'oauth2' | 'paas';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
@@ -20,6 +22,8 @@ function App() {
     { id: 'dex' as Tab, label: 'DEX Building', icon: Network },
     { id: 'contracts' as Tab, label: 'Smart Contracts', icon: Cpu },
     { id: 'websocket' as Tab, label: 'WebSocket Streams', icon: Zap },
+    { id: 'oauth2' as Tab, label: 'OAuth2', icon: Lock },
+    { id: 'paas' as Tab, label: 'Privacy-as-a-Service', icon: Shield },
   ];
 
   return (
@@ -132,6 +136,16 @@ function App() {
           {activeTab === 'websocket' && (
             <motion.div key="websocket" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} transition={{ duration: 0.3 }}>
               <WebSocketGuide />
+            </motion.div>
+          )}
+          {activeTab === 'oauth2' && (
+            <motion.div key="oauth2" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} transition={{ duration: 0.3 }}>
+              <OAuth2Integration />
+            </motion.div>
+          )}
+          {activeTab === 'paas' && (
+            <motion.div key="paas" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} transition={{ duration: 0.3 }}>
+              <PrivacyAsAService />
             </motion.div>
           )}
         </AnimatePresence>

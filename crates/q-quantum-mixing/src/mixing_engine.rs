@@ -90,7 +90,7 @@ pub struct MixingEngineConfig {
 impl Default for MixingEngineConfig {
     fn default() -> Self {
         Self {
-            max_mixing_time: Duration::from_secs(300), // 5 minutes
+            max_mixing_time: Duration::from_secs(600), // 10 minutes for large batches
             ring_size: 11,
             quantum_enhanced: true,
             validate_fees: true,
@@ -150,12 +150,15 @@ impl QuantumMixingEngine {
     }
 
     /// Execute complete mixing round with Chaumian protocol
-    /// **SERVER ALPHA**: Real Chaumian mixing implementation
+    /// **SERVER ALPHA**: Real Chaumian mixing implementation with constant-time operations
     pub async fn execute_mixing_round(&self, participants: Vec<PoolParticipant>) -> Result<MixingResult> {
         let round_id = Uuid::new_v4();
         let round_start = Instant::now();
-        
+
         info!("Starting mixing round {} with {} participants", round_id, participants.len());
+
+        // Calculate target execution time based on participant count for timing consistency
+        let target_execution_time = self.calculate_target_execution_time(participants.len());
 
         // Ensure all systems are initialized
         self.ensure_initialized().await?;
@@ -193,8 +196,17 @@ impl QuantumMixingEngine {
         info!("Phase 6: Final validation");
         self.validate_mixing_result(&participants, &outputs, &mixing_proof).await?;
 
+        let actual_duration = round_start.elapsed();
+
+        // Timing normalization - add delay to reach target execution time for constant-time operation
+        if actual_duration < target_execution_time {
+            let delay = target_execution_time - actual_duration;
+            tokio::time::sleep(delay).await;
+            debug!("Added {:.2}ms delay for timing consistency", delay.as_secs_f64() * 1000.0);
+        }
+
         let mixing_duration = round_start.elapsed();
-        
+
         // Clear current round state
         {
             let mut current_round = self.current_round.write().await;
@@ -210,27 +222,36 @@ impl QuantumMixingEngine {
             mixing_duration,
         };
 
-        info!("Mixing round {} completed in {:?}", round_id, mixing_duration);
+        info!("Mixing round {} completed in {:?} (target: {:?})", round_id, mixing_duration, target_execution_time);
         Ok(result)
     }
 
-    /// Phase 2: Generate stealth addresses for all outputs
+    /// Phase 2: Generate stealth addresses for all outputs (optimized for large batches)
     async fn generate_stealth_addresses(&self, participants: &[PoolParticipant]) -> Result<HashMap<Uuid, StealthAddress>> {
         debug!("Generating stealth addresses for {} participants", participants.len());
-        
+
         let stealth_gen = self.stealth_generator.read().await;
         let generator = stealth_gen.as_ref()
             .ok_or_else(|| MixingError::ConfigError("Stealth generator not initialized".to_string()))?;
 
-        let mut addresses = HashMap::new();
-        
-        for participant in participants {
-            // Generate stealth address for each participant's output
-            let stealth_address = generator.generate_stealth_address(&participant.output_address).await?;
-            addresses.insert(participant.participant_id, stealth_address);
-            
-            debug!("Generated stealth address for participant {}", participant.participant_id);
+        let mut addresses = HashMap::with_capacity(participants.len()); // Pre-allocate for performance
+
+        // Batch processing for scalability
+        const BATCH_SIZE: usize = 100;
+        for chunk in participants.chunks(BATCH_SIZE) {
+            for participant in chunk {
+                // Generate stealth address for each participant's output
+                let stealth_address = generator.generate_stealth_address(&participant.output_address).await?;
+                addresses.insert(participant.participant_id, stealth_address);
+            }
+
+            // Small yield point to prevent blocking other tasks
+            if participants.len() > BATCH_SIZE {
+                tokio::task::yield_now().await;
+            }
         }
+
+        debug!("Generated {} stealth addresses in batches", addresses.len());
 
         // Apply quantum randomization to address ordering
         if self.config.quantum_enhanced {
@@ -241,36 +262,58 @@ impl QuantumMixingEngine {
         Ok(addresses)
     }
 
-    /// Phase 3: Create ring signatures for all participants
+    /// Phase 3: Create ring signatures for all participants (optimized)
     async fn create_ring_signatures(&self, participants: &[PoolParticipant]) -> Result<HashMap<Uuid, RingSignature>> {
         debug!("Creating ring signatures for {} participants", participants.len());
-        
+
         let ring_signer = self.ring_signer.read().await;
         let mut signer = ring_signer.as_ref()
             .ok_or_else(|| MixingError::ConfigError("Ring signer not initialized".to_string()))?
             .clone(); // Clone to avoid holding the read lock
 
         drop(ring_signer); // Release the read lock
-        
-        let mut signatures = HashMap::new();
-        
-        // Create ring of all participant public keys
-        let ring_keys: Vec<[u8; 32]> = participants.iter()
-            .map(|p| p.input_commitment.blinding_factor) // Use blinding factor as pseudo public key
+
+        let mut signatures = HashMap::with_capacity(participants.len()); // Pre-allocate
+
+        // Create ring of all participant output addresses (valid Ed25519 keys)
+        // Include the signer's public key in the ring for anonymity
+        let signer_pubkey = signer.get_public_key();
+        let mut ring_keys: Vec<[u8; 32]> = participants.iter()
+            .map(|p| p.output_address) // Use output addresses (valid Ed25519 keys)
             .collect();
 
-        for participant in participants {
-            // Create message to sign (commitment + output address)
-            let mut message = Vec::new();
-            message.extend_from_slice(&participant.input_commitment.commitment);
-            message.extend_from_slice(&participant.output_address);
-            
-            // Create ring signature with quantum randomness
-            let ring_signature = signer.create_ring_signature(&message, ring_keys.clone()).await?;
-            signatures.insert(participant.participant_id, ring_signature);
-            
-            debug!("Created ring signature for participant {}", participant.participant_id);
+        // Ensure signer's public key is in the ring for signature creation
+        if !ring_keys.contains(&signer_pubkey) {
+            // Add signer's key to maintain anonymity set size
+            if ring_keys.len() < self.config.ring_size {
+                ring_keys.push(signer_pubkey);
+            } else {
+                // Replace first key with signer's key
+                ring_keys[0] = signer_pubkey;
+            }
         }
+
+        // Batch processing for scalability
+        const BATCH_SIZE: usize = 100;
+        for chunk in participants.chunks(BATCH_SIZE) {
+            for participant in chunk {
+                // Create message to sign (commitment + output address)
+                let mut message = Vec::with_capacity(64);
+                message.extend_from_slice(&participant.input_commitment.commitment);
+                message.extend_from_slice(&participant.output_address);
+
+                // Create ring signature with quantum randomness
+                let ring_signature = signer.create_ring_signature(&message, ring_keys.clone()).await?;
+                signatures.insert(participant.participant_id, ring_signature);
+            }
+
+            // Yield to prevent blocking
+            if participants.len() > BATCH_SIZE {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        debug!("Created {} ring signatures in batches", signatures.len());
 
         info!("Created {} ring signatures", signatures.len());
         Ok(signatures)
@@ -284,26 +327,34 @@ impl QuantumMixingEngine {
         let prover = zkp_prover.as_ref()
             .ok_or_else(|| MixingError::ConfigError("ZK prover not initialized".to_string()))?;
 
-        // Collect input and output commitments
+        // Collect input commitments
         let input_commitments: Vec<_> = participants.iter()
             .map(|p| &p.input_commitment)
             .collect();
-        
-        let output_commitments: Vec<_> = participants.iter()
-            .map(|p| &p.input_commitment) // For now, use same commitments (amounts preserved)
+
+        // Create output commitments with fees deducted
+        let output_commitments: Vec<BalanceCommitment> = participants.iter()
+            .map(|p| {
+                let output_amount = p.input_commitment.amount
+                    .saturating_sub(p.mixing_fee); // Deduct mixing fee
+                BalanceCommitment {
+                    commitment: p.input_commitment.commitment, // Same commitment hash
+                    blinding_factor: p.input_commitment.blinding_factor,
+                    amount: output_amount, // But reduced amount
+                }
+            })
             .collect();
 
         // Generate mixing validity proof
-        let mixing_fee = participants.first()
-            .map(|p| p.mixing_fee)
-            .unwrap_or(0);
+        // Calculate TOTAL mixing fees from ALL participants
+        let total_mixing_fee: u64 = participants.iter().map(|p| p.mixing_fee).sum();
 
         let input_vec: Vec<BalanceCommitment> = input_commitments.into_iter().cloned().collect();
-        let output_vec: Vec<BalanceCommitment> = output_commitments.into_iter().cloned().collect();
+        let output_vec: Vec<BalanceCommitment> = output_commitments;
         let mixing_proof = prover.generate_mixing_proof(
             &input_vec,
             &output_vec,
-            mixing_fee
+            total_mixing_fee
         ).await?;
         
         info!("Generated mixing validity proof");
@@ -342,8 +393,15 @@ impl QuantumMixingEngine {
                 vk_hash: [0u8; 32],
             };
 
+            // Output amount = Input amount - mixing fee
+            let output_amount = participant.input_commitment.amount
+                .checked_sub(participant.mixing_fee)
+                .ok_or_else(|| MixingError::InvalidInput(
+                    "Insufficient funds for mixing fee".to_string()
+                ))?;
+
             let output = MixingOutput {
-                amount: participant.input_commitment.amount, // Amount preserved
+                amount: output_amount,
                 stealth_address: stealth_address.address,
                 ring_signature: ring_sig_bytes,
                 validity_proof,
@@ -489,6 +547,19 @@ impl QuantumMixingEngine {
         }
         
         Ok(())
+    }
+
+    /// Calculate target execution time for constant-time operations
+    /// This prevents timing side-channel attacks by normalizing execution time
+    fn calculate_target_execution_time(&self, participant_count: usize) -> Duration {
+        // Base time: 50ms + 25ms per participant
+        // This provides consistent timing regardless of actual processing speed
+        let base_time_ms = 50;
+        let per_participant_ms = 25;
+
+        let total_ms = base_time_ms + (per_participant_ms * participant_count);
+
+        Duration::from_millis(total_ms as u64)
     }
 
     /// Get current round information

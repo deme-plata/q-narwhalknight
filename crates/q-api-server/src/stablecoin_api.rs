@@ -146,10 +146,10 @@ pub async fn get_multi_token_balance(
         wallet_balances.get(&addr_bytes).copied().unwrap_or(0)
     };
 
-    // Get QUGUSD balance from token_balances map
+    // Get QUGUSD balance from CDP position (minted stablecoins)
     let qugusd_balance = {
-        let token_balances = state.token_balances.read().await;
-        token_balances.get(&(addr_bytes, QUGUSD_TOKEN_ADDRESS)).copied().unwrap_or(0)
+        let vault = state.collateral_vault.read().await;
+        vault.minted_qugusd.get(&addr_bytes).copied().unwrap_or(0)
     };
 
     // Get current QUG price from vault

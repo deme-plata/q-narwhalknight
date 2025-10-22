@@ -519,7 +519,7 @@ impl TorPrometheusMetrics {
 
     /// Get metrics in Prometheus format
     pub async fn get_metrics(&self) -> Result<String> {
-        use prometheus::Encoder;
+        
         let encoder = prometheus::TextEncoder::new();
         let metric_families = self.registry.gather();
 

@@ -271,7 +271,10 @@ const TokenSelectorModal: React.FC<TokenSelectorModalProps> = ({
                   <div className="token-main">
                     <div className="token-logo">
                       <div className="token-icon">
-                        {token.icon}
+                        {token.icon === 'qug-logo' ? '💎' :
+                         token.icon === 'qugusd-logo' ? '💵' :
+                         token.icon === 'usd-logo' ? '💵' :
+                         token.icon}
                       </div>
                       {hasNitro && (
                         <div className="nitro-badge" title="Nitro Boosted">

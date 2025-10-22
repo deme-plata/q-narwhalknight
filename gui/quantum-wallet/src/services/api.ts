@@ -95,7 +95,29 @@ class QNarwhalKnightAPI {
         }
 
         if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
+          // Try to get error details from response body (backend sends JSON ApiResponse)
+          let errorMessage = `HTTP error! status: ${response.status}`;
+          try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errorBody = await response.json();
+              if (errorBody && errorBody.error) {
+                errorMessage = errorBody.error;
+              } else if (errorBody && errorBody.message) {
+                errorMessage = errorBody.message;
+              } else {
+                errorMessage = JSON.stringify(errorBody);
+              }
+            } else {
+              const errorText = await response.text();
+              if (errorText) {
+                errorMessage = errorText;
+              }
+            }
+          } catch (e) {
+            console.warn('Failed to parse error response:', e);
+          }
+          throw new Error(errorMessage);
         }
 
         return await response.json();
@@ -607,12 +629,21 @@ class QNarwhalKnightAPI {
     password?: string;
   }): Promise<ApiResponse<any>> {
     try {
+      // Get wallet address from localStorage
+      const walletAddress = localStorage.getItem('walletAddress') || '';
+
+      // Add 'from' field to request
+      const requestWithFrom = {
+        ...request,
+        from: walletAddress
+      };
+
       const response = await fetch(`${this.baseURL}/v1/mixer/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify(requestWithFrom),
       });
 
       // Handle 404 or other non-JSON responses gracefully

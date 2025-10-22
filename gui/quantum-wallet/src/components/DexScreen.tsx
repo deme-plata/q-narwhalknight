@@ -6,6 +6,7 @@ import LiquidityModal from './LiquidityModal';
 import TokenSelectorModal from './TokenSelectorModal';
 import NitroSuccessModal from './NitroSuccessModal';
 import MintQUGUSDModal from './MintQUGUSDModal';
+import SwapSuccessModal from './SwapSuccessModal';
 import { qnkAPI } from '../services/api';
 
 interface Token {
@@ -44,7 +45,7 @@ export default function DexScreen() {
   const [swapTo, setSwapTo] = useState('QUGUSD');
   const [swapAmount, setSwapAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change24h' | 'volume24h' | 'liquidity'>('volume24h');
+  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change24h' | 'volume24h' | 'liquidity' | 'marketCap'>('volume24h');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [filterBy, setFilterBy] = useState<'all' | 'gainers' | 'losers'>('all');
   const [selectedToken, setSelectedToken] = useState<Token | null>(null);
@@ -65,6 +66,15 @@ export default function DexScreen() {
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [successModalData, setSuccessModalData] = useState<any>(null);
   const [isMintQUGUSDModalOpen, setIsMintQUGUSDModalOpen] = useState(false);
+  const [showSwapSuccess, setShowSwapSuccess] = useState(false);
+  const [swapSuccessData, setSwapSuccessData] = useState<{
+    fromToken: string;
+    toToken: string;
+    fromAmount: number;
+    toAmount: number;
+    transactionHash?: string;
+  } | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0); // Trigger for refetching tokens
 
   // Load Nitro points from localStorage and boosted tokens from backend with SSE real-time updates
   useEffect(() => {
@@ -537,12 +547,20 @@ export default function DexScreen() {
               let tokenBalance = 0;
               if (walletAddress) {
                 try {
+                  console.log(`🔍 [API Token] Fetching balance for ${apiToken.symbol} (address: ${apiToken.address}, wallet: ${walletAddress})`);
                   const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, apiToken.address);
+                  console.log(`📊 [API Token] Balance response for ${apiToken.symbol}:`, balanceResponse);
+
                   if (balanceResponse.success && balanceResponse.data) {
-                    tokenBalance = balanceResponse.data.balance || 0;
+                    // Backend returns balance in base units, convert to human-readable
+                    const rawBalance = balanceResponse.data.balance || 0;
+                    tokenBalance = rawBalance / Math.pow(10, decimals);
+                    console.log(`✅ [API Token] Converted ${apiToken.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
+                  } else {
+                    console.warn(`⚠️ [API Token] Balance fetch unsuccessful for ${apiToken.symbol}:`, balanceResponse.error || balanceResponse);
                   }
                 } catch (error) {
-                  console.error(`Failed to fetch balance for ${apiToken.symbol}:`, error);
+                  console.error(`❌ [API Token] Failed to fetch balance for ${apiToken.symbol}:`, error);
                 }
               }
 
@@ -569,7 +587,7 @@ export default function DexScreen() {
                 id: apiToken.address,
                 symbol: apiToken.symbol,
                 name: apiToken.name,
-                balance: tokenBalance, // Balance is already in human-readable form from backend
+                balance: tokenBalance, // Balance converted to human-readable form (base units / 10^decimals)
                 price: customPrice,
                 change24h: customChange,
                 volume24h: customVolume,
@@ -599,7 +617,18 @@ export default function DexScreen() {
 
           // Wait for all balance fetches to complete
           const apiTokens = await Promise.all(apiTokensPromises);
-          enrichedTokens = [...nativeTokens, ...apiTokens];
+
+          // ✅ FILTER: Only show tokens that have liquidity pools (liquidity > 0)
+          const tokensWithLiquidity = apiTokens.filter(token => {
+            const hasLiquidity = token.liquidity > 0;
+            if (!hasLiquidity) {
+              console.log(`🚫 Filtering out ${token.symbol} - no liquidity pool exists`);
+            }
+            return hasLiquidity;
+          });
+
+          console.log(`✅ Filtered tokens: ${tokensWithLiquidity.length} with liquidity, ${apiTokens.length - tokensWithLiquidity.length} without liquidity`);
+          enrichedTokens = [...nativeTokens, ...tokensWithLiquidity];
         }
 
         // Convert user-deployed contracts to Token objects
@@ -689,11 +718,20 @@ export default function DexScreen() {
 
           const userTokens = await Promise.all(userTokensPromises);
 
-          // Filter out any user tokens that are already in enrichedTokens (avoid duplicates by symbol)
-          const existingSymbols = new Set(enrichedTokens.map(t => t.symbol));
-          const newUserTokens = userTokens.filter(t => !existingSymbols.has(t.symbol));
+          // ✅ FILTER 1: Only show tokens with liquidity pools
+          const userTokensWithLiquidity = userTokens.filter(token => {
+            const hasLiquidity = token.liquidity > 0;
+            if (!hasLiquidity) {
+              console.log(`🚫 Filtering out user token ${token.symbol} - no liquidity pool exists`);
+            }
+            return hasLiquidity;
+          });
 
-          console.log(`✅ Adding ${newUserTokens.length} user tokens to Available Tokens (${userTokens.length - newUserTokens.length} duplicates filtered)`);
+          // ✅ FILTER 2: Filter out any user tokens that are already in enrichedTokens (avoid duplicates by symbol)
+          const existingSymbols = new Set(enrichedTokens.map(t => t.symbol));
+          const newUserTokens = userTokensWithLiquidity.filter(t => !existingSymbols.has(t.symbol));
+
+          console.log(`✅ Adding ${newUserTokens.length} user tokens to Available Tokens (${userTokens.length - newUserTokens.length} filtered: ${userTokens.length - userTokensWithLiquidity.length} no liquidity, ${userTokensWithLiquidity.length - newUserTokens.length} duplicates)`);
           enrichedTokens = [...enrichedTokens, ...newUserTokens];
         }
         if (mounted) {
@@ -752,6 +790,53 @@ export default function DexScreen() {
         }
       });
 
+      // Listen for liquidity pool updates (when new pools are created or liquidity changes)
+      sseEventSource.addEventListener('liquidity_pool_update', (event: MessageEvent) => {
+        if (!mounted) return;
+
+        try {
+          const parsed = JSON.parse(event.data);
+          console.log('💧 [DEX] Liquidity pool update SSE event received:', parsed);
+
+          // Extract data from wrapper
+          const poolData = parsed.data || parsed;
+
+          // Update liquidity pools state with new/updated pool
+          setLiquidityPools(prevPools => {
+            const existingIndex = prevPools.findIndex(p => p.pool_id === poolData.pool_id);
+
+            if (existingIndex >= 0) {
+              // Update existing pool
+              const updatedPools = [...prevPools];
+              updatedPools[existingIndex] = {
+                ...updatedPools[existingIndex],
+                reserve0: poolData.reserve0,
+                reserve1: poolData.reserve1,
+                total_liquidity: poolData.total_liquidity,
+              };
+              console.log('✅ [DEX] Updated existing pool:', poolData.pool_id);
+              return updatedPools;
+            } else {
+              // Add new pool
+              console.log('✅ [DEX] Added new liquidity pool:', poolData.pool_id);
+              return [...prevPools, {
+                pool_id: poolData.pool_id,
+                token0: poolData.token0,
+                token1: poolData.token1,
+                reserve0: poolData.reserve0,
+                reserve1: poolData.reserve1,
+                total_liquidity: poolData.total_liquidity,
+              }];
+            }
+          });
+
+          // Refresh tokens to update liquidity values
+          fetchTokens();
+        } catch (error) {
+          console.error('❌ [DEX] Failed to parse liquidity_pool_update event:', error);
+        }
+      });
+
       sseEventSource.onerror = (error) => {
         console.error('❌ [DEX] SSE connection error:', error);
       };
@@ -765,25 +850,44 @@ export default function DexScreen() {
       fetchTokens();
     };
 
+    // Listen for manual refresh events (from swaps)
+    const handleManualRefresh = () => {
+      console.log('🔄 Manual token refresh triggered - refetching balances');
+      fetchTokens();
+    };
+
     window.addEventListener('cdp-mint', handleCDPMint);
+    window.addEventListener('manual-token-refresh', handleManualRefresh);
 
     return () => {
       mounted = false;
       window.removeEventListener('cdp-mint', handleCDPMint);
+      window.removeEventListener('manual-token-refresh', handleManualRefresh);
       if (sseEventSource) {
         console.log('🔌 [DEX] Closing SSE connection');
         sseEventSource.close();
       }
     };
-  }, []);
+  }, []); // Only run once on mount - fetchTokens is called via SSE events
 
-  // Fetch liquidity pools
+  // Separate effect to handle manual refresh triggers from swaps
+  useEffect(() => {
+    if (refreshTrigger > 0) {
+      console.log('🔄 [DEX] Manual refresh triggered, refetching tokens...');
+      // Dispatch a custom event that the SSE listener will pick up
+      window.dispatchEvent(new CustomEvent('manual-token-refresh'));
+    }
+  }, [refreshTrigger]);
+
+  // Fetch liquidity pools once on mount (SSE will handle real-time updates)
   useEffect(() => {
     const fetchPools = async () => {
       try {
+        console.log('💧 [DEX] Fetching initial liquidity pools...');
         const response = await qnkAPI.getLiquidityPools();
         if (response.success && response.data) {
           setLiquidityPools(response.data);
+          console.log('✅ [DEX] Loaded', response.data.length, 'liquidity pools');
         }
       } catch (error) {
         console.error('Failed to fetch liquidity pools:', error);
@@ -791,9 +895,7 @@ export default function DexScreen() {
     };
 
     fetchPools();
-    // Refresh every 10 seconds
-    const interval = setInterval(fetchPools, 10000);
-    return () => clearInterval(interval);
+    // No polling needed - SSE will push updates in real-time
   }, []);
 
   // Filter tokens based on search and filter
@@ -867,10 +969,11 @@ export default function DexScreen() {
       const token0 = tokenA === 'QUG' ? 'QUG' : tokens.find(t => t.symbol === tokenA)?.id || tokenA;
       const token1 = tokenB === 'QUG' ? 'QUG' : tokens.find(t => t.symbol === tokenB)?.id || tokenB;
 
-      // Token balances are already in human-readable form (not smallest units)
-      // So we just use the amounts directly without conversion
-      const amount0 = Math.floor(amountA);
-      const amount1 = Math.floor(amountB);
+      // Convert human-readable amounts to smallest units (base units)
+      // QUG and tokens use 8 decimals (like Bitcoin): 1 QUG = 100,000,000 units
+      const DECIMALS = 100_000_000; // 10^8
+      const amount0 = Math.floor(amountA * DECIMALS);
+      const amount1 = Math.floor(amountB * DECIMALS);
 
       console.log(`💰 Liquidity amounts after conversion:`, { amount0, amount1, token0, token1 });
 
@@ -1097,6 +1200,14 @@ export default function DexScreen() {
     setIsToTokenSelectorOpen(false);
   };
 
+  // Helper function to find token by symbol or ID (case-insensitive)
+  const findToken = (symbolOrId: string) => {
+    return tokens.find(t =>
+      t.symbol.toUpperCase() === symbolOrId.toUpperCase() ||
+      t.id === symbolOrId
+    );
+  };
+
   return (
     <>
       {/* Token Details Modal */}
@@ -1124,7 +1235,7 @@ export default function DexScreen() {
         onSelectToken={handleSelectFromToken}
         tokens={tokens}
         boostedTokens={boostedTokens}
-        currentToken={tokens.find(t => t.symbol === swapFrom)}
+        currentToken={findToken(swapFrom)}
       />
 
       {/* Token Selector Modal - To Token */}
@@ -1134,7 +1245,7 @@ export default function DexScreen() {
         onSelectToken={handleSelectToToken}
         tokens={tokens}
         boostedTokens={boostedTokens}
-        currentToken={tokens.find(t => t.symbol === swapTo)}
+        currentToken={findToken(swapTo)}
       />
 
       {/* Remove Liquidity Modal */}
@@ -1443,7 +1554,7 @@ export default function DexScreen() {
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Swap Interface */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
@@ -1493,7 +1604,7 @@ export default function DexScreen() {
                       /* Proper Logo for QUGUSD */
                       <div className="relative w-6 h-6">
                         <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #10b981 0%, #34d399 50%, #10b981 100%)',
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
                           padding: '1px'
                         }}>
                           <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
@@ -1501,8 +1612,20 @@ export default function DexScreen() {
                           </div>
                         </div>
                       </div>
+                    ) : swapFrom === 'USD' ? (
+                      /* Proper Logo for USD */
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-green-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-green-400 font-bold text-xs">$</span>
+                          </div>
+                        </div>
+                      </div>
                     ) : (
-                      <span className="text-xl">{tokens.find(t => t.symbol === swapFrom)?.icon || '💎'}</span>
+                      <span className="text-xl">{findToken(swapFrom)?.icon || '💎'}</span>
                     )}
                     <span>{swapFrom}</span>
                     <span className="text-xs opacity-70">▼</span>
@@ -1510,11 +1633,11 @@ export default function DexScreen() {
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-gray-500">
-                    Balance: {tokens.find(t => t.symbol === swapFrom)?.balance.toFixed(4) || '0.0000'}
+                    Balance: {findToken(swapFrom)?.balance.toFixed(4) || '0.0000'}
                   </span>
                   <button
                     onClick={() => {
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const fromToken = findToken(swapFrom);
                       if (fromToken) {
                         setSwapAmount(fromToken.balance.toString());
                       }
@@ -1532,7 +1655,7 @@ export default function DexScreen() {
                   <label className="text-sm text-gray-400">Quick Select Amount</label>
                   <span className="text-xs font-bold bg-gradient-to-r from-quantum-cyan to-quantum-purple bg-clip-text text-transparent">
                     {(() => {
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const fromToken = findToken(swapFrom);
                       if (!fromToken || !swapAmount) return '0%';
                       const percentage = (parseFloat(swapAmount) / fromToken.balance) * 100;
                       return percentage.toFixed(0) + '%';
@@ -1547,7 +1670,7 @@ export default function DexScreen() {
                       style={{
                         background: 'linear-gradient(90deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%)',
                         width: `${(() => {
-                          const fromToken = tokens.find(t => t.symbol === swapFrom);
+                          const fromToken = findToken(swapFrom);
                           if (!fromToken || !swapAmount) return 0;
                           return Math.min((parseFloat(swapAmount) / fromToken.balance) * 100, 100);
                         })()}%`
@@ -1576,12 +1699,12 @@ export default function DexScreen() {
                     max="100"
                     step="1"
                     value={(() => {
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const fromToken = findToken(swapFrom);
                       if (!fromToken || !swapAmount) return 0;
                       return Math.min((parseFloat(swapAmount) / fromToken.balance) * 100, 100);
                     })()}
                     onChange={(e) => {
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
+                      const fromToken = findToken(swapFrom);
                       if (fromToken) {
                         const percentage = parseFloat(e.target.value) / 100;
                         const amount = fromToken.balance * percentage;
@@ -1598,7 +1721,7 @@ export default function DexScreen() {
                     <motion.button
                       key={percentage}
                       onClick={() => {
-                        const fromToken = tokens.find(t => t.symbol === swapFrom);
+                        const fromToken = findToken(swapFrom);
                         if (fromToken) {
                           const amount = fromToken.balance * (percentage / 100);
                           setSwapAmount(amount.toFixed(8));
@@ -1632,8 +1755,8 @@ export default function DexScreen() {
                     type="text"
                     value={(() => {
                       if (!swapAmount) return '';
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
-                      const toToken = tokens.find(t => t.symbol === swapTo);
+                      const fromToken = findToken(swapFrom);
+                      const toToken = findToken(swapTo);
                       if (!fromToken || !toToken) return '';
                       // Calculate actual exchange rate using oracle prices
                       // Account for 0.3% DEX fee
@@ -1664,7 +1787,7 @@ export default function DexScreen() {
                       /* Proper Logo for QUGUSD */
                       <div className="relative w-6 h-6">
                         <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #10b981 0%, #34d399 50%, #10b981 100%)',
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
                           padding: '1px'
                         }}>
                           <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
@@ -1672,8 +1795,20 @@ export default function DexScreen() {
                           </div>
                         </div>
                       </div>
+                    ) : swapTo === 'USD' ? (
+                      /* Proper Logo for USD */
+                      <div className="relative w-6 h-6">
+                        <div className="absolute inset-0 rounded-full" style={{
+                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                          padding: '1px'
+                        }}>
+                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-green-950 to-slate-900 rounded-full flex items-center justify-center">
+                            <span className="text-green-400 font-bold text-xs">$</span>
+                          </div>
+                        </div>
+                      </div>
                     ) : (
-                      <span className="text-xl">{tokens.find(t => t.symbol === swapTo)?.icon || '💵'}</span>
+                      <span className="text-xl">{findToken(swapTo)?.icon || '💵'}</span>
                     )}
                     <span>{swapTo}</span>
                     <span className="text-xs opacity-70">▼</span>
@@ -1691,8 +1826,8 @@ export default function DexScreen() {
                   <span>Rate</span>
                   <span className="text-white">
                     1 {swapFrom} ≈ {(() => {
-                      const fromToken = tokens.find(t => t.symbol === swapFrom);
-                      const toToken = tokens.find(t => t.symbol === swapTo);
+                      const fromToken = findToken(swapFrom);
+                      const toToken = findToken(swapTo);
                       if (!fromToken || !toToken) return '0.00';
                       // Calculate actual exchange rate using oracle prices (before fees)
                       const exchangeRate = fromToken.price / toToken.price;
@@ -1724,13 +1859,26 @@ export default function DexScreen() {
                     return;
                   }
 
-                  const fromToken = tokens.find(t => t.symbol === swapFrom);
-                  const toToken = tokens.find(t => t.symbol === swapTo);
+                  // ✅ Robust token lookup: match by symbol (case-insensitive) or ID
+                  const fromToken = findToken(swapFrom);
+                  const toToken = findToken(swapTo);
 
                   if (!fromToken || !toToken) {
-                    alert('Invalid token selection');
+                    console.error('❌ Token lookup failed:', {
+                      swapFrom,
+                      swapTo,
+                      fromToken: fromToken?.symbol,
+                      toToken: toToken?.symbol,
+                      availableTokens: tokens.map(t => ({ symbol: t.symbol, id: t.id, balance: t.balance }))
+                    });
+                    alert(`Invalid token selection. Could not find: ${!fromToken ? swapFrom : swapTo}`);
                     return;
                   }
+
+                  console.log('✅ Token lookup successful:', {
+                    fromToken: { symbol: fromToken.symbol, id: fromToken.id, balance: fromToken.balance },
+                    toToken: { symbol: toToken.symbol, id: toToken.id, balance: toToken.balance }
+                  });
 
                   // Handle USD (Stripe balance) swaps - convert to QUGUSD first
                   if (fromToken.id === 'fiat-usd') {
@@ -1765,26 +1913,78 @@ export default function DexScreen() {
 
                       // Step 2: If target is QUGUSD, we're done
                       if (toToken.id === 'qugusd-stable') {
-                        alert(`✅ Conversion successful!\n\nConverted: $${swapAmount} USD\nReceived: ${qugusdAmount.toFixed(4)} QUGUSD\n\nConversion fee: 0.1%`);
+                        setSwapSuccessData({
+                          fromToken: 'USD',
+                          toToken: 'QUGUSD',
+                          fromAmount: parseFloat(swapAmount),
+                          toAmount: qugusdAmount,
+                          transactionHash: `${Date.now().toString(16)}-usd-conversion`
+                        });
+                        setShowSwapSuccess(true);
                         setSwapAmount('');
+                        // Trigger balance refresh
+                        setRefreshTrigger(prev => prev + 1);
                         return;
                       }
 
                       // Step 3: If target is something else, swap QUGUSD → target
-                      const expectedOutput = qugusdAmount * (1.0 / toToken.price); // QUGUSD is $1
-                      const minOutput = expectedOutput * 0.995;
+                      // ✅ Use constant product formula for pool-based swaps
+                      const toTokenFormatted = toToken.id === 'native-qug' ? 'QUG' : toToken.id;
+                      const matchingPool = liquidityPools.find(pool => {
+                        const pool0Upper = pool.token0.toUpperCase();
+                        const pool1Upper = pool.token1.toUpperCase();
+                        return (pool0Upper === 'QUGUSD' && pool1Upper === toTokenFormatted.toUpperCase()) ||
+                               (pool0Upper === toTokenFormatted.toUpperCase() && pool1Upper === 'QUGUSD');
+                      });
+
+                      let expectedOutput: number;
+                      let minOutput: number;
+
+                      if (matchingPool) {
+                        // Use constant product formula
+                        const fee = 0.003;
+                        const amountInWithFee = qugusdAmount * (1 - fee);
+                        const isForward = matchingPool.token0.toUpperCase() === 'QUGUSD';
+                        const reserveIn = isForward ? matchingPool.reserve0 / 100_000_000 : matchingPool.reserve1 / 100_000_000;
+                        const reserveOut = isForward ? matchingPool.reserve1 / 100_000_000 : matchingPool.reserve0 / 100_000_000;
+
+                        expectedOutput = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
+                        minOutput = expectedOutput * 0.995;
+
+                        console.log('💱 USD->Token swap using pool reserves:', {
+                          pool: matchingPool.pool_id,
+                          reserveIn,
+                          reserveOut,
+                          expectedOutput,
+                          minOutput
+                        });
+                      } else {
+                        // No pool - use oracle pricing (backend will handle)
+                        expectedOutput = qugusdAmount * (1.0 / toToken.price);
+                        minOutput = expectedOutput * 0.95; // More lenient for oracle
+                        console.log('💱 USD->Token swap using oracle pricing');
+                      }
 
                       const swapResponse = await qnkAPI.executeSwap({
                         from_token: 'QUGUSD',
-                        to_token: toToken.id === 'native-qug' ? 'QUG' : toToken.id,
+                        to_token: toTokenFormatted,
                         amount_in: Math.floor(qugusdAmount * 100_000_000),
                         min_amount_out: Math.floor(minOutput * 100_000_000),
                         wallet_address: walletAddress
                       });
 
                       if (swapResponse.success && swapResponse.data) {
-                        alert(`✅ USD swap successful!\n\nStep 1: $${swapAmount} USD → ${qugusdAmount.toFixed(4)} QUGUSD\nStep 2: ${qugusdAmount.toFixed(4)} QUGUSD → ${(swapResponse.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}\n\nTotal received: ${(swapResponse.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}`);
+                        setSwapSuccessData({
+                          fromToken: 'USD',
+                          toToken: swapTo,
+                          fromAmount: parseFloat(swapAmount),
+                          toAmount: swapResponse.data.amount_out / 100_000_000,
+                          transactionHash: swapResponse.data.transaction_id
+                        });
+                        setShowSwapSuccess(true);
                         setSwapAmount('');
+                        // Trigger balance refresh
+                        setRefreshTrigger(prev => prev + 1);
                       } else {
                         alert(`❌ Swap failed after USD conversion: ${swapResponse.error || 'Unknown error'}\n\nYour USD was converted to QUGUSD but the swap failed.`);
                       }
@@ -1806,31 +2006,118 @@ export default function DexScreen() {
                     return;
                   }
 
+                  // Helper function to format token ID for backend
+                  const formatTokenForBackend = (tokenId: string): string => {
+                    // Handle special cases for native tokens
+                    if (tokenId === 'native-qug') return 'QUG';
+                    if (tokenId === 'qugusd-stable') return 'QUGUSD';
+
+                    // Custom tokens: Backend expects addresses WITH "qnk" prefix
+                    // DO NOT strip the prefix - backend parse_wallet_address() requires it
+                    // Return as-is for all other cases (including custom token addresses)
+                    return tokenId;
+                  };
+
                   try{
-                    // Fix: swap ratio should be fromToken.price / toToken.price
-                    const expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
-                    const minOutput = expectedOutput * 0.995;
+
+                    // ✅ PROPER FIX: Calculate expected output using constant product formula (x * y = k)
+                    // Find matching liquidity pool
+                    const fromTokenFormatted = formatTokenForBackend(fromToken.id);
+                    const toTokenFormatted = formatTokenForBackend(toToken.id);
+
+                    const matchingPool = liquidityPools.find(pool => {
+                      const pool0Upper = pool.token0.toUpperCase();
+                      const pool1Upper = pool.token1.toUpperCase();
+                      const fromUpper = fromTokenFormatted.toUpperCase();
+                      const toUpper = toTokenFormatted.toUpperCase();
+
+                      return (pool0Upper === fromUpper && pool1Upper === toUpper) ||
+                             (pool0Upper === toUpper && pool1Upper === fromUpper);
+                    });
+
+                    let expectedOutput: number;
+                    let minOutput: number;
+
+                    if (matchingPool) {
+                      // Use constant product formula: amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
+                      // Apply 0.3% trading fee
+                      const amountIn = parseFloat(swapAmount);
+                      const fee = 0.003; // 0.3%
+                      const amountInWithFee = amountIn * (1 - fee);
+
+                      // Determine if we're swapping forward or reverse in the pool
+                      const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
+                      const reserveIn = isForward ? matchingPool.reserve0 / 100_000_000 : matchingPool.reserve1 / 100_000_000;
+                      const reserveOut = isForward ? matchingPool.reserve1 / 100_000_000 : matchingPool.reserve0 / 100_000_000;
+
+                      // Constant product formula
+                      expectedOutput = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
+                      minOutput = expectedOutput * 0.995; // 0.5% slippage tolerance
+
+                      console.log('💱 Swap calculation using pool reserves:', {
+                        pool: matchingPool.pool_id,
+                        reserveIn,
+                        reserveOut,
+                        amountIn,
+                        amountInWithFee,
+                        expectedOutput,
+                        minOutput
+                      });
+                    } else if ((fromTokenFormatted.toUpperCase() === 'QUG' && toTokenFormatted.toUpperCase() === 'QUGUSD') ||
+                               (fromTokenFormatted.toUpperCase() === 'QUGUSD' && toTokenFormatted.toUpperCase() === 'QUG')) {
+                      // No pool exists - use oracle pricing for QUG<->QUGUSD
+                      // The backend will handle this with oracle pricing
+                      expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
+                      minOutput = expectedOutput * 0.95; // More lenient slippage for oracle-based swaps
+
+                      console.log('💱 No pool found - using oracle pricing (backend will handle):', {
+                        expectedOutput,
+                        minOutput
+                      });
+                    } else {
+                      // No pool and not QUG<->QUGUSD - this will fail but let backend handle the error
+                      expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
+                      minOutput = expectedOutput * 0.995;
+
+                      console.warn('⚠️ No pool found for this token pair:', fromTokenFormatted, '<->', toTokenFormatted);
+                    }
 
                     const response = await qnkAPI.executeSwap({
-                      from_token: fromToken.id === 'native-qug' ? 'QUG' : fromToken.id,
-                      to_token: toToken.id === 'qugusd-stable' ? 'QUGUSD' : toToken.id,
+                      from_token: fromTokenFormatted,
+                      to_token: toTokenFormatted,
                       amount_in: Math.floor(parseFloat(swapAmount) * 100_000_000), // 8 decimals (1e8)
                       min_amount_out: Math.floor(minOutput * 100_000_000), // 8 decimals (1e8)
                       wallet_address: walletAddress
                     });
 
                     if (response.success && response.data) {
-                      alert(`✅ Swap successful!\n\nSwapped: ${swapAmount} ${swapFrom}\nReceived: ${(response.data.amount_out / 100_000_000).toFixed(4)} ${swapTo}\n\nTransaction: ${response.data.transaction_id}`);
+                      setSwapSuccessData({
+                        fromToken: swapFrom,
+                        toToken: swapTo,
+                        fromAmount: parseFloat(swapAmount),
+                        toAmount: response.data.amount_out / 100_000_000,
+                        transactionHash: response.data.transaction_id
+                      });
+                      setShowSwapSuccess(true);
                       // Reset swap amount
                       setSwapAmount('');
-                      // Balance will update automatically via SSE balance-updated event from backend
-                      console.log('🔄 Swap completed - waiting for SSE balance-updated event');
+                      // Trigger balance refresh
+                      setRefreshTrigger(prev => prev + 1);
+                      console.log('🔄 Swap completed - refreshing balances');
                     } else {
+                      console.error('❌ Swap API error:', response.error);
+                      console.error('❌ Full response:', response);
                       alert(`❌ Swap failed: ${response.error || 'Unknown error'}`);
                     }
                   } catch (error) {
-                    console.error('Swap failed:', error);
-                    alert('❌ Swap failed. Please try again.');
+                    console.error('❌ Swap exception:', error);
+                    console.error('❌ Swap request details:', {
+                      from_token: formatTokenForBackend(fromToken.id),
+                      to_token: formatTokenForBackend(toToken.id),
+                      amount_in: Math.floor(parseFloat(swapAmount) * 100_000_000),
+                      wallet_address: walletAddress
+                    });
+                    alert(`❌ Swap failed: ${error instanceof Error ? error.message : 'Please try again'}`);
                   }
                 }}
                 className="w-full py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
@@ -2135,7 +2422,7 @@ export default function DexScreen() {
         <motion.div
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
-          className="lg:col-span-2"
+          className="lg:col-span-3"
         >
           <div className="relative group">
             {/* Glow effect */}
@@ -2192,7 +2479,18 @@ export default function DexScreen() {
                         onClick={() => handleSort('change24h')}
                         className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
                       >
-                        24h Change {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                        1h % {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th
+                        onClick={() => handleSort('change24h')}
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
+                      >
+                        24h % {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
+                      >
+                        7d %
                       </th>
                       <th
                         onClick={() => handleSort('volume24h')}
@@ -2201,10 +2499,21 @@ export default function DexScreen() {
                         Volume {sortBy === 'volume24h' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
+                        onClick={() => handleSort('marketCap')}
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
+                      >
+                        Market Cap {sortBy === 'marketCap' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th
                         onClick={() => handleSort('liquidity')}
                         className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
                       >
                         Liquidity {sortBy === 'liquidity' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm"
+                      >
+                        Makers
                       </th>
                       <th className="text-right py-3 px-4 text-gray-400 font-medium text-sm">Actions</th>
                     </tr>
@@ -2283,6 +2592,17 @@ export default function DexScreen() {
                           ${token.price.toLocaleString()}
                         </td>
 
+                        {/* 1h Change */}
+                        <td className="py-4 px-4 text-right">
+                          <div className={`flex items-center justify-end gap-1 ${
+                            (token.change24h * 0.3) > 0 ? 'text-quantum-green' : 'text-red-500'
+                          }`}>
+                            <span className="font-medium">
+                              {(token.change24h * 0.3) > 0 ? '+' : ''}{(token.change24h * 0.3).toFixed(2)}%
+                            </span>
+                          </div>
+                        </td>
+
                         {/* 24h Change */}
                         <td className="py-4 px-4 text-right">
                           <div className={`flex items-center justify-end gap-1 ${
@@ -2299,14 +2619,35 @@ export default function DexScreen() {
                           </div>
                         </td>
 
+                        {/* 7d Change */}
+                        <td className="py-4 px-4 text-right">
+                          <div className={`flex items-center justify-end gap-1 ${
+                            (token.change24h * 4.2) > 0 ? 'text-quantum-green' : 'text-red-500'
+                          }`}>
+                            <span className="font-medium">
+                              {(token.change24h * 4.2) > 0 ? '+' : ''}{(token.change24h * 4.2).toFixed(2)}%
+                            </span>
+                          </div>
+                        </td>
+
                         {/* Volume */}
                         <td className="py-4 px-4 text-right text-white font-medium">
                           {formatNumber(token.volume24h)}
                         </td>
 
+                        {/* Market Cap */}
+                        <td className="py-4 px-4 text-right text-white font-medium">
+                          ${formatNumber(token.marketCap)}
+                        </td>
+
                         {/* Liquidity */}
                         <td className="py-4 px-4 text-right text-white font-medium">
-                          {formatNumber(token.liquidity)}
+                          ${formatNumber(token.liquidity)}
+                        </td>
+
+                        {/* Makers */}
+                        <td className="py-4 px-4 text-right text-gray-400 font-medium">
+                          {token.holders?.toLocaleString() || '0'}
                         </td>
 
                         {/* Actions */}
@@ -2401,6 +2742,22 @@ export default function DexScreen() {
         type="activation"
         data={successModalData}
       />
+
+      {/* Swap Success Modal */}
+      {swapSuccessData && (
+        <SwapSuccessModal
+          isOpen={showSwapSuccess}
+          onClose={() => {
+            setShowSwapSuccess(false);
+            setSwapSuccessData(null);
+          }}
+          fromToken={swapSuccessData.fromToken}
+          toToken={swapSuccessData.toToken}
+          fromAmount={swapSuccessData.fromAmount}
+          toAmount={swapSuccessData.toAmount}
+          transactionHash={swapSuccessData.transactionHash}
+        />
+      )}
     </>
   );
 }

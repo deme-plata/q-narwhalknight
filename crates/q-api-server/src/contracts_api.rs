@@ -407,19 +407,65 @@ pub async fn deploy_contract(
             if let Some(initial_supply_val) = request.parameters.get("initialSupply")
                 .or_else(|| request.parameters.get("initial_supply"))
             {
-                // Parse the initial supply value - handle both u64 and large BigInt strings
-                let initial_supply_result = initial_supply_val
-                    .as_u64()
-                    .or_else(|| initial_supply_val.as_str().and_then(|s| s.parse::<u64>().ok()));
+                // Get decimals from parameters (for display purposes only)
+                let decimals = request.parameters.get("decimals")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(18) as u32;
+
+                // ULTRA-SIMPLE APPROACH: Number you enter = Number you get (in base units)
+                // User enters 1 → Gets 1 base unit
+                // User enters 1000000000 → Gets 1 billion base units
+                // User enters 10000000000000000000000 → Gets 10 sextillion base units
+                //
+                // NO multiplication or division - just use the raw number!
+
+                let initial_supply_result: Option<u64> = if let Some(supply_u64) = initial_supply_val.as_u64() {
+                    // Number fits in u64 - use it directly
+                    Some(supply_u64)
+                } else if let Some(supply_str) = initial_supply_val.as_str() {
+                    // Large number as string
+                    match supply_str.parse::<u128>() {
+                        Ok(supply_u128) => {
+                            if supply_u128 <= u64::MAX as u128 {
+                                let result = supply_u128 as u64;
+                                tracing::info!(
+                                    "✅ User entered {} base units → stored as {} base units",
+                                    supply_str,
+                                    result
+                                );
+                                Some(result)
+                            } else {
+                                tracing::error!(
+                                    "❌ Initial supply {} exceeds u64::MAX ({}). Maximum allowed: {}",
+                                    supply_str,
+                                    supply_u128,
+                                    u64::MAX
+                                );
+                                None
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!("⚠️ Could not parse initial supply string: {}", supply_str);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 match initial_supply_result {
                     Some(initial_supply) if initial_supply > 0 => {
                         // Mint tokens to deployer's wallet
                         let mut token_balances = state.token_balances.write().await;
                         token_balances.insert((deployer, contract_address.0), initial_supply);
+
+                        // Calculate human-readable amount (for logging only)
+                        let token_amount = initial_supply as f64 / 10f64.powi(decimals as i32);
                         tracing::info!(
-                            "💰 Minted {} tokens to deployer {}",
+                            "💰 Minted {} base units (displayed as {} tokens with {} decimals) to deployer {}",
                             initial_supply,
+                            token_amount,
+                            decimals,
                             hex::encode(deployer)
                         );
 
@@ -430,16 +476,7 @@ pub async fn deploy_contract(
                         }
                     }
                     None => {
-                        // Value might be too large for u64, log the error
-                        if let Some(val_str) = initial_supply_val.as_str() {
-                            tracing::warn!(
-                                "⚠️ Initial supply value '{}' is too large for u64 (max: {}). Skipping minting.",
-                                val_str,
-                                u64::MAX
-                            );
-                        } else {
-                            tracing::warn!("⚠️ Initial supply value format invalid: {:?}", initial_supply_val);
-                        }
+                        tracing::warn!("⚠️ Initial supply could not be processed - either zero or invalid format");
                     }
                     _ => {
                         // initial_supply is 0, skip minting

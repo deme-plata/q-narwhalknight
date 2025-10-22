@@ -6,7 +6,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -450,8 +450,7 @@ mod tests {
 
     fn create_test_dandelion() -> DandelionProtocol {
         let config = DandelionConfig::default();
-        let circuit_manager =
-            Arc::new(Mutex::new(CircuitManager::new(Default::default()).unwrap()));
+        let circuit_manager = Arc::new(Mutex::new(CircuitManager::mock()));
         let metrics = Arc::new(TorMetrics::new());
         let quantum_seed = [0u8; 32]; // Test seed
 

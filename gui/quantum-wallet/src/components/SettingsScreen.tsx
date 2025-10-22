@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff } from 'lucide-react';
+import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code } from 'lucide-react';
 
 interface SettingsScreenProps {
   onLogout?: () => void;
 }
 
 export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
-  const [activeTab, setActiveTab] = useState('crypto');
+  const [activeTab, setActiveTab] = useState<string>('crypto');
   const [cryptoSuite, setCryptoSuite] = useState('Q1');
   const [visualEffects, setVisualEffects] = useState({
     entanglementMoire: true,
@@ -46,6 +46,8 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
   const tabs = [
     { id: 'crypto', label: 'Crypto Agility', icon: Shield },
     { id: 'security', label: 'Security', icon: Lock },
+    { id: 'paas', label: 'Privacy-as-a-Service', icon: Cloud },
+    { id: 'oauth2', label: 'OAuth2 Settings', icon: Code },
     { id: 'visuals', label: 'Quantum Visuals', icon: Palette },
     { id: 'performance', label: 'Performance', icon: Activity },
     { id: 'network', label: 'Network', icon: Globe },
@@ -442,6 +444,359 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                     <li>• Enable shorter timeout on shared devices</li>
                     <li>• Keep your mnemonic phrase secure</li>
                     <li>• Log out when not in use</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Privacy-as-a-Service Tab */}
+        {activeTab === 'paas' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+                <Cloud className="w-6 h-6 text-quantum-cyan" />
+                PaaS API Configuration
+              </h3>
+
+              <p className="text-gray-400 mb-6">
+                Configure your Privacy-as-a-Service API keys for Bitcoin, Ethereum, and Solana privacy features.
+              </p>
+
+              <div className="space-y-4">
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <label className="block text-sm font-medium text-gray-300 mb-2">API Key</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      placeholder="paas_1a2b3c4d5e6f7g8h9i0j_..."
+                      className="flex-1 px-4 py-2 bg-quantum-dark/50 border border-quantum-purple/30 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan/60"
+                    />
+                    <motion.button
+                      className="px-4 py-2 bg-gradient-to-r from-quantum-purple to-quantum-cyan rounded-lg text-white font-medium hover:shadow-lg hover:shadow-quantum-purple/50 transition-all whitespace-nowrap"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={async () => {
+                        try {
+                          // Get wallet address from local storage
+                          const walletAddress = localStorage.getItem('currentWallet') || 'default_wallet';
+
+                          // Call real API to generate PaaS API key
+                          const response = await fetch('http://localhost:8080/api/v1/privacy/paas/api-keys/generate', {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                              wallet_address: walletAddress,
+                              tier: 'free',
+                              expires_days: 90
+                            })
+                          });
+
+                          if (!response.ok) {
+                            throw new Error(`API request failed: ${response.status}`);
+                          }
+
+                          const data = await response.json();
+
+                          if (data.success && data.data) {
+                            const input = document.querySelector('input[type="password"][placeholder*="paas_"]') as HTMLInputElement;
+                            if (input) {
+                              input.type = 'text';
+                              input.value = data.data.api_key;
+                              // Show key for 5 seconds then hide it
+                              setTimeout(() => {
+                                input.type = 'password';
+                              }, 5000);
+                            }
+                          } else {
+                            alert('Failed to generate API key: ' + (data.error || 'Unknown error'));
+                          }
+                        } catch (error) {
+                          console.error('Error generating PaaS API key:', error);
+                          alert('Error generating API key. Please try again.');
+                        }
+                      }}
+                    >
+                      Generate Key
+                    </motion.button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Generate a local API key or get one at <a href="https://quillon.xyz/console" target="_blank" rel="noopener noreferrer" className="text-quantum-cyan hover:underline">quillon.xyz/console</a>
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Subscription Tier</label>
+                  <select className="w-full px-4 py-2 bg-quantum-dark/50 border border-quantum-purple/30 rounded-lg text-white focus:outline-none focus:border-quantum-cyan/60">
+                    <option value="free">Free (10,000 calls/day)</option>
+                    <option value="professional">Professional ($499/mo)</option>
+                    <option value="enterprise">Enterprise ($1,999/mo)</option>
+                  </select>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Default Privacy Level</span>
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      { value: 'standard', label: 'Standard (ε ≈ 2.3)', description: 'Fast mixing, moderate privacy' },
+                      { value: 'maximum', label: 'Maximum (ε < 0.7)', description: 'Slower, maximum privacy' },
+                    ].map((option) => (
+                      <label
+                        key={option.value}
+                        className="block p-3 rounded-lg border border-quantum-purple/20 hover:border-quantum-purple/40 cursor-pointer"
+                      >
+                        <input
+                          type="radio"
+                          name="privacyLevel"
+                          value={option.value}
+                          defaultChecked={option.value === 'standard'}
+                          className="mr-2"
+                        />
+                        <span className="font-medium text-white">{option.label}</span>
+                        <p className="text-xs text-gray-400 ml-6">{option.description}</p>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <motion.button
+                className="w-full mt-6 py-3 px-4 bg-gradient-to-r from-quantum-cyan/20 to-quantum-purple/20 border border-quantum-cyan/30 rounded-xl text-white font-semibold hover:border-quantum-cyan/60 transition-all"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                Save API Configuration
+              </motion.button>
+            </div>
+
+            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+                <Shield className="w-6 h-6 text-quantum-green" />
+                Privacy Features
+              </h3>
+
+              <div className="space-y-4">
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Tor Relay</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 bg-quantum-green rounded-full" />
+                      <span className="text-quantum-green text-sm">Active</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Route transactions through Tor network to hide your IP address
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Transaction Mixing</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 bg-quantum-green rounded-full" />
+                      <span className="text-quantum-green text-sm">Enabled</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Mix your transactions with others for enhanced privacy
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">MEV Protection</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 bg-quantum-green rounded-full" />
+                      <span className="text-quantum-green text-sm">Enabled</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Protect Ethereum transactions from front-running
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Stealth Addresses</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 bg-quantum-green rounded-full" />
+                      <span className="text-quantum-green text-sm">Enabled</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Generate one-time addresses for unlinkable transactions
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-cyan/10 border border-quantum-cyan/30 rounded-xl">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Shield className="w-4 h-4 text-quantum-cyan" />
+                    <span className="font-semibold text-quantum-cyan">Security Model</span>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Your private keys NEVER leave your device. You sign transactions client-side, then submit signed transactions to the privacy service.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-purple/10 border border-quantum-purple/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="font-medium text-white">API Usage</span>
+                    <span className="text-quantum-cyan font-semibold">4,231 / 10,000</span>
+                  </div>
+                  <div className="w-full bg-quantum-dark/50 rounded-full h-2">
+                    <div
+                      className="bg-gradient-to-r from-quantum-cyan to-quantum-purple h-2 rounded-full"
+                      style={{ width: '42%' }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2">Daily quota resets in 6h 24m</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* OAuth2 Settings Tab */}
+        {activeTab === 'oauth2' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+                <Code className="w-6 h-6 text-quantum-purple" />
+                OAuth2 Applications
+              </h3>
+
+              <p className="text-gray-400 mb-6">
+                Manage third-party applications that have access to your wallet via OAuth2.
+              </p>
+
+              <div className="space-y-3">
+                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-lg flex items-center justify-center">
+                        <Code className="w-5 h-5 text-white" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white">Quillon API Docs</div>
+                        <div className="text-xs text-gray-400">Last accessed: 2 hours ago</div>
+                      </div>
+                    </div>
+                    <motion.button
+                      className="px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-all"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      Revoke
+                    </motion.button>
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    Permissions: Read balance, View transactions
+                  </div>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-gradient-to-br from-quantum-green to-quantum-cyan rounded-lg flex items-center justify-center">
+                        <Shield className="w-5 h-5 text-white" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white">Privacy Service</div>
+                        <div className="text-xs text-gray-400">Last accessed: 5 minutes ago</div>
+                      </div>
+                    </div>
+                    <motion.button
+                      className="px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-all"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      Revoke
+                    </motion.button>
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    Permissions: Mix transactions, Generate stealth addresses
+                  </div>
+                </div>
+              </div>
+
+              <motion.button
+                className="w-full mt-6 py-3 px-4 bg-gradient-to-r from-quantum-purple/20 to-quantum-cyan/20 border border-quantum-purple/30 rounded-xl text-white font-semibold hover:border-quantum-purple/60 transition-all flex items-center justify-center gap-2"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <Code className="w-5 h-5" />
+                Register New Application
+              </motion.button>
+            </div>
+
+            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+                <Shield className="w-6 h-6 text-quantum-cyan" />
+                Security & Permissions
+              </h3>
+
+              <div className="space-y-4">
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">OAuth2 Flow</span>
+                    <span className="text-quantum-green font-semibold">PKCE</span>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Authorization Code + PKCE for maximum security
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Token Lifetime</span>
+                    <span className="text-quantum-cyan font-semibold">1 hour</span>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Access tokens expire after 1 hour for security
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Refresh Tokens</span>
+                    <span className="text-quantum-green font-semibold">Enabled</span>
+                  </div>
+                  <p className="text-sm text-gray-400">
+                    Refresh tokens valid for 30 days
+                  </p>
+                </div>
+
+                <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium">Allowed Scopes</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <span className="px-2 py-1 bg-quantum-cyan/20 border border-quantum-cyan/30 rounded text-xs text-quantum-cyan">balance:read</span>
+                    <span className="px-2 py-1 bg-quantum-purple/20 border border-quantum-purple/30 rounded text-xs text-quantum-purple">transactions:read</span>
+                    <span className="px-2 py-1 bg-quantum-green/20 border border-quantum-green/30 rounded text-xs text-quantum-green">privacy:mix</span>
+                    <span className="px-2 py-1 bg-quantum-pink/20 border border-quantum-pink/30 rounded text-xs text-quantum-pink">privacy:tor</span>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-xl">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-quantum-yellow">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                      <line x1="12" y1="9" x2="12" y2="13"></line>
+                      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    <span className="font-semibold text-quantum-yellow">Security Best Practices</span>
+                  </div>
+                  <ul className="text-sm text-gray-400 space-y-1">
+                    <li>• Review application permissions regularly</li>
+                    <li>• Revoke access for unused applications</li>
+                    <li>• Never share OAuth2 tokens</li>
+                    <li>• Check redirect URIs before approving</li>
                   </ul>
                 </div>
               </div>

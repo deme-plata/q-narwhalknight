@@ -35,6 +35,10 @@ hyper = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http2"] }
 socket2 = "0.5"  # Advanced socket configuration for 1M+ TPS
 
+# PaaS production-grade middleware
+governor = "0.6"  # Token-bucket rate limiting with burst support
+tower_governor = "0.3"  # Governor integration for Axum/Tower
+
 # Async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -42,6 +46,7 @@ futures = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+urlencoding = "2.1"  # URL encoding for OAuth2
 uuid = { workspace = true }
 bincode = { workspace = true }
 
@@ -111,6 +116,7 @@ blake3 = { workspace = true }
 sha2 = "0.10"
 sha3 = "0.10"
 bcrypt = "0.15"  # Password hashing for wallet authentication
+argon2 = { version = "0.5", features = ["std"] }  # OWASP-recommended password hashing for API keys
 
 # High-performance concurrent collections for lock-free concurrency
 dashmap = { workspace = true }

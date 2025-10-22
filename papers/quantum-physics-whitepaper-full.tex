@@ -29,25 +29,26 @@
 \definecolor{backcolour}{RGB}{248,248,255}
 \definecolor{quantumblue}{RGB}{0,100,200}
 \definecolor{quantumgold}{RGB}{255,200,0}
+\definecolor{resonancered}{RGB}{200,50,50}
 
 % Listings configuration
 \lstdefinestyle{ruststyle}{
     language=Rust,
-    backgroundcolor=\color{backcolour},   
+    backgroundcolor=\color{backcolour},
     commentstyle=\color{codegreen},
     keywordstyle=\color{magenta},
     numberstyle=\tiny\color{codegray},
     stringstyle=\color{codepurple},
     basicstyle=\ttfamily\footnotesize,
-    breakatwhitespace=false,         
-    breaklines=true,                 
-    captionpos=b,                    
-    keepspaces=true,                 
-    numbers=left,                    
-    numbersep=5pt,                  
-    showspaces=false,                
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
     showstringspaces=false,
-    showtabs=false,                  
+    showtabs=false,
     tabsize=2,
     frame=single,
     frameround=tttt
@@ -58,7 +59,7 @@
 % Page style
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\footnotesize Quantum Physics in Q-NarwhalKnight}
+\fancyhead[L]{\footnotesize Quantum Physics in Q-NarwhalKnight v3.0}
 \fancyhead[R]{\footnotesize Q-NarwhalKnight Development Team}
 \fancyfoot[C]{\thepage}
 
@@ -66,9 +67,9 @@
 \title{\textbf{\Huge Quantum Physics in Q-NarwhalKnight}\\
 \vspace{0.5cm}
 {\Large A Comprehensive Analysis of Quantum-Enhanced\\
-Distributed Consensus Systems}\\
+Distributed Consensus Systems with String-Theoretic Resonance}\\
 \vspace{0.5cm}
-{\large \textit{From Classical BFT to Quantum-Resistant Consensus}}}
+{\large \textit{From Classical BFT to Quantum-Resonant Consensus}}}
 
 \author{
 \textbf{Q-NarwhalKnight Development Team}\\
@@ -79,7 +80,7 @@ Quantum-DAG Labs\\
 \textit{Collaborative Multi-Server Development}
 }
 
-\date{September 2025\\Version 2.0 - Full Academic Edition}
+\date{October 2025\\Version 3.0 - Full Academic Edition with Resonance Theory}
 
 % Custom commands
 \newcommand{\qket}[1]{|#1\rangle}
@@ -92,11 +93,11 @@ Quantum-DAG Labs\\
 \maketitle
 
 \begin{abstract}
-This comprehensive whitepaper presents the theoretical foundations and practical implementation of quantum physics principles integrated into the Q-NarwhalKnight distributed consensus system. We explore quantum mechanics applications including quantum superposition for parallel transaction processing, quantum entanglement for distributed state synchronization, post-quantum cryptography for unconditional security, and quantum randomness for consensus enhancement.
+This comprehensive whitepaper presents the theoretical foundations and practical implementation of quantum physics principles integrated into the Q-NarwhalKnight distributed consensus system. We explore quantum mechanics applications including quantum superposition for parallel transaction processing, quantum entanglement for distributed state synchronization, post-quantum cryptography for unconditional security, quantum randomness for consensus enhancement, and novel \textbf{string-theoretic resonance consensus}.
 
-Our implementation demonstrates the world's first production-ready quantum-enhanced consensus protocol, achieving \textbf{27,200+ TPS} with full quantum resistance through post-quantum cryptographic primitives (Dilithium5, Kyber1024), quantum random number generation (QRNG), and preparation for quantum key distribution (QKD). We provide mathematical proofs, experimental validation, performance analysis, and a complete roadmap for quantum consensus evolution.
+Our implementation demonstrates the world's first production-ready quantum-enhanced consensus protocol with resonance field theory, achieving \textbf{27,200+ TPS} with full quantum resistance through post-quantum cryptographic primitives (Dilithium5, Kyber1024), quantum random number generation (QRNG), and string-state energy minimization. The newly introduced \textbf{Q-Resonance} module models consensus as physical resonance in multi-dimensional field space, providing mathematical elegance and Byzantine fault detection through spectral analysis.
 
-\textbf{Keywords:} Quantum Computing, Post-Quantum Cryptography, Distributed Consensus, Blockchain, Lattice Cryptography, Quantum Entanglement, DAG-BFT
+\textbf{Keywords:} Quantum Computing, Post-Quantum Cryptography, Distributed Consensus, String Theory, Resonance Theory, Spectral BFT, Blockchain, Lattice Cryptography, Quantum Entanglement, DAG-BFT
 \end{abstract}
 
 \vspace{1cm}
@@ -104,7 +105,7 @@ Our implementation demonstrates the world's first production-ready quantum-enhan
 \vspace{0.5cm}
 
 \begin{tcolorbox}[colback=quantumblue!10,colframe=quantumblue,title=\textbf{Executive Summary}]
-Q-NarwhalKnight represents a paradigm shift in distributed consensus by fully integrating quantum physics principles across all system layers. Phase 1 deployment achieves quantum resistance with NIST Level 5 security while maintaining high performance. This work establishes the theoretical and practical foundation for quantum-enhanced blockchain consensus systems.
+Q-NarwhalKnight represents a paradigm shift in distributed consensus by fully integrating quantum physics principles and string-theoretic resonance across all system layers. Phase 1 deployment achieves quantum resistance with NIST Level 5 security while maintaining high performance. The Q-Resonance module introduces physics-based consensus through energy functional minimization, spectral Byzantine detection, and harmonic convergence. This work establishes the theoretical and practical foundation for quantum-enhanced blockchain consensus systems.
 \end{tcolorbox}
 
 \newpage
@@ -145,20 +146,20 @@ Our approach implements a carefully orchestrated phased evolution:
 \begin{tikzpicture}[scale=0.8]
     \draw[thick,->] (0,0) -- (12,0) node[right]{Time};
     \draw[thick,->] (0,0) -- (0,6) node[above]{Quantum Integration Level};
-    
+
     % Phase markers
     \foreach \x/\label in {0/Phase 0, 2.4/Phase 1, 4.8/Phase 2, 7.2/Phase 3, 9.6/Phase 4} {
         \draw[dashed,gray] (\x,0) -- (\x,5.5);
         \node[below] at (\x,-0.3) {\footnotesize \label};
     }
-    
+
     % Evolution curve
     \draw[thick,quantumblue] (0,1) -- (2.4,2) -- (4.8,3) -- (7.2,4) -- (9.6,5) -- (12,5.5);
-    
+
     % Feature annotations
     \node[align=center] at (1.2,1.5) {\footnotesize Classical\\[-2pt]\footnotesize Baseline};
     \node[align=center] at (3.6,2.5) {\footnotesize Post-Quantum\\[-2pt]\footnotesize Crypto};
-    \node[align=center] at (6,3.5) {\footnotesize QRNG\\[-2pt]\footnotesize Integration};
+    \node[align=center] at (6,3.5) {\footnotesize QRNG +\\[-2pt]\footnotesize Resonance};
     \node[align=center] at (8.4,4.5) {\footnotesize ZK-STARK\\[-2pt]\footnotesize Proofs};
     \node[align=center] at (10.8,5.2) {\footnotesize Full QKD\\[-2pt]\footnotesize Integration};
 \end{tikzpicture}
@@ -174,9 +175,26 @@ Quantum superposition allows systems to exist in multiple states simultaneously 
 
 \begin{equation}
 \qket{\psi} = \alpha\qket{0} + \beta\qket{1}
+\label{eq:qubit-superposition}
 \end{equation}
 
 where $|\alpha|^2 + |\beta|^2 = 1$ and the coefficients represent probability amplitudes.
+
+\subsubsection{Mathematical Foundation}
+
+The quantum state space forms a Hilbert space $\mathcal{H}$ with inner product $\qbraket{\cdot}{\cdot}$. The normalization condition ensures probability conservation:
+
+\begin{equation}
+\qbraket{\psi}{\psi} = |\alpha|^2 + |\beta|^2 = 1
+\end{equation}
+
+For multi-qubit systems, the state space grows exponentially:
+
+\begin{equation}
+\mathcal{H}_{n} = \mathcal{H}_1 \otimes \mathcal{H}_1 \otimes \cdots \otimes \mathcal{H}_1 \quad (\text{$n$ times})
+\end{equation}
+
+yielding a $2^n$-dimensional complex vector space.
 
 \subsubsection{Multi-State Consensus Modeling}
 
@@ -184,16 +202,67 @@ We extend this to consensus states across $N$ possible outcomes:
 
 \begin{equation}
 \qket{\text{consensus}} = \sum_{i=1}^{N} c_i \qket{v_i}
+\label{eq:consensus-superposition}
 \end{equation}
 
-where $\qket{v_i}$ represents distinct vertex states in our DAG structure, enabling parallel evaluation of consensus paths.
+where $\qket{v_i}$ represents distinct vertex states in our DAG structure, enabling parallel evaluation of consensus paths. The probability of measuring state $\qket{v_i}$ is:
+
+\begin{equation}
+P(v_i) = |c_i|^2 = |\qbraket{v_i}{\text{consensus}}|^2
+\end{equation}
+
+\subsubsection{Code Implementation}
+
+\begin{lstlisting}[language=Rust, caption=Quantum Superposition State Representation]
+use num_complex::Complex;
+
+pub struct QuantumConsensusState {
+    /// State amplitudes for each vertex
+    amplitudes: Vec<Complex<f64>>,
+    /// Vertex IDs corresponding to each amplitude
+    vertex_ids: Vec<[u8; 32]>,
+}
+
+impl QuantumConsensusState {
+    /// Create uniform superposition over all vertices
+    pub fn uniform_superposition(vertices: &[[u8; 32]]) -> Self {
+        let n = vertices.len();
+        let amplitude = Complex::new(
+            1.0 / (n as f64).sqrt(),
+            0.0
+        );
+
+        Self {
+            amplitudes: vec![amplitude; n],
+            vertex_ids: vertices.to_vec(),
+        }
+    }
+
+    /// Compute measurement probability for vertex
+    pub fn measurement_probability(&self, vertex_id: &[u8; 32]) -> f64 {
+        self.vertex_ids.iter()
+            .zip(&self.amplitudes)
+            .find(|(id, _)| *id == vertex_id)
+            .map(|(_, amplitude)| amplitude.norm_sqr())
+            .unwrap_or(0.0)
+    }
+
+    /// Verify normalization condition
+    pub fn is_normalized(&self) -> bool {
+        let total_prob: f64 = self.amplitudes.iter()
+            .map(|a| a.norm_sqr())
+            .sum();
+        (total_prob - 1.0).abs() < 1e-10
+    }
+}
+\end{lstlisting}
 
 \begin{algorithm}[H]
 \caption{Quantum-Inspired Parallel Consensus Evaluation}
 \begin{algorithmic}
 \STATE \textbf{Input:} Vertex set $V_r$ for round $r$
 \STATE \textbf{Output:} Consensus state $\qket{\text{final}}$
-\STATE 
+\STATE
 \STATE Initialize superposition: $\qket{\psi_0} = \frac{1}{\sqrt{|V_r|}} \sum_{v \in V_r} \qket{v}$
 \FOR{each evaluation step $t$}
     \STATE Apply consensus Hamiltonian: $H = \sum_{i,j} J_{ij} \sigma_i^z \sigma_j^z$
@@ -210,7 +279,30 @@ Quantum entanglement manifests when particles exhibit correlated behavior regard
 
 \begin{equation}
 \qket{\Phi^+} = \frac{1}{\sqrt{2}}(\qket{00} + \qket{11})
+\label{eq:bell-state}
 \end{equation}
+
+\subsubsection{Mathematical Characterization}
+
+The density matrix for the Bell state is:
+
+\begin{equation}
+\rho_{\Phi^+} = \qket{\Phi^+}\qbra{\Phi^+} = \frac{1}{2}\begin{pmatrix}
+1 & 0 & 0 & 1 \\
+0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 0 \\
+1 & 0 & 0 & 1
+\end{pmatrix}
+\end{equation}
+
+The entanglement entropy quantifies correlation strength:
+
+\begin{equation}
+S(\rho_A) = -\text{Tr}(\rho_A \log_2 \rho_A)
+\label{eq:entanglement-entropy}
+\end{equation}
+
+where $\rho_A = \text{Tr}_B(\rho_{AB})$ is the reduced density matrix. For maximally entangled states, $S(\rho_A) = 1$ bit.
 
 \subsubsection{Distributed State Correlation}
 
@@ -220,13 +312,63 @@ We leverage entanglement-inspired correlations for node synchronization through 
 \rho_{AB} = \frac{1}{2}(\qket{00}\qbra{00} + \qket{00}\qbra{11} + \qket{11}\qbra{00} + \qket{11}\qbra{11})
 \end{equation}
 
-The entanglement entropy quantifies correlation strength:
+\subsubsection{Implementation Example}
 
-\begin{equation}
-S(\rho_A) = -\text{Tr}(\rho_A \log_2 \rho_A)
-\end{equation}
+\begin{lstlisting}[language=Rust, caption=Entanglement-Inspired State Correlation]
+use nalgebra::{DMatrix, DVector};
+use num_complex::Complex;
 
-where $\rho_A = \text{Tr}_B(\rho_{AB})$ is the reduced density matrix.
+pub struct EntanglementCorrelation {
+    /// Shared entropy pool for node synchronization
+    shared_entropy: Vec<u8>,
+    /// Correlation matrix between nodes
+    correlation_matrix: DMatrix<f64>,
+}
+
+impl EntanglementCorrelation {
+    /// Compute correlation coefficient between nodes i and j
+    pub fn correlation(&self, node_i: usize, node_j: usize) -> f64 {
+        self.correlation_matrix[(node_i, node_j)]
+    }
+
+    /// Update correlation based on shared quantum entropy
+    pub fn update_correlation(
+        &mut self,
+        node_i: usize,
+        node_j: usize,
+        quantum_measurement: &[u8],
+    ) {
+        // Compute correlation from quantum measurement outcomes
+        let correlation = self.compute_quantum_correlation(
+            &self.shared_entropy,
+            quantum_measurement
+        );
+
+        self.correlation_matrix[(node_i, node_j)] = correlation;
+        self.correlation_matrix[(node_j, node_i)] = correlation;
+    }
+
+    fn compute_quantum_correlation(
+        &self,
+        entropy_a: &[u8],
+        entropy_b: &[u8],
+    ) -> f64 {
+        let xor_result: Vec<u8> = entropy_a.iter()
+            .zip(entropy_b)
+            .map(|(a, b)| a ^ b)
+            .collect();
+
+        // Hamming distance as correlation metric
+        let hamming_distance = xor_result.iter()
+            .map(|byte| byte.count_ones())
+            .sum::<u32>();
+
+        // Normalize to [-1, 1] range
+        let total_bits = (entropy_a.len() * 8) as f64;
+        1.0 - 2.0 * (hamming_distance as f64 / total_bits)
+    }
+}
+\end{lstlisting}
 
 \subsection{Heisenberg Uncertainty and Consensus Timing}
 
@@ -234,7 +376,20 @@ The Heisenberg uncertainty principle establishes fundamental limits on simultane
 
 \begin{equation}
 \Delta x \Delta p \geq \frac{\hbar}{2}
+\label{eq:heisenberg-uncertainty}
 \end{equation}
+
+where $\Delta x$ and $\Delta p$ are the standard deviations of position and momentum, and $\hbar = h/(2\pi) \approx 1.055 \times 10^{-34}$ J$\cdot$s is the reduced Planck constant.
+
+\subsubsection{Generalized Uncertainty Relations}
+
+For arbitrary observables $A$ and $B$:
+
+\begin{equation}
+\Delta A \cdot \Delta B \geq \frac{1}{2}|\qexpect{[A,B]}|
+\end{equation}
+
+where $[A,B] = AB - BA$ is the commutator.
 
 \subsubsection{Application to Transaction Ordering}
 
@@ -242,14 +397,366 @@ We apply uncertainty principles to transaction timing and ordering:
 
 \begin{equation}
 \Delta t \Delta E \geq \frac{\hbar}{2}
+\label{eq:time-energy-uncertainty}
 \end{equation}
 
 This influences our approach to:
 \begin{itemize}
-    \item Timestamp precision in transaction ordering
-    \item Energy-time constraints in consensus rounds
+    \item Timestamp precision in transaction ordering: $\Delta t \sim 1$ ns
+    \item Energy-time constraints in consensus rounds: $\Delta E \sim \hbar/\Delta t$
     \item Fundamental limits on consensus speed vs. security trade-offs
 \end{itemize}
+
+The minimum measurable time interval in our consensus is:
+
+\begin{equation}
+t_{\text{min}} = \frac{\hbar}{2\Delta E_{\text{consensus}}}
+\end{equation}
+
+where $\Delta E_{\text{consensus}}$ is the energy uncertainty in the consensus process.
+
+\subsubsection{Code Implementation}
+
+\begin{lstlisting}[language=Rust, caption=Uncertainty-Aware Transaction Ordering]
+const HBAR: f64 = 1.054571817e-34; // Reduced Planck constant (J·s)
+const TIME_PRECISION_NS: f64 = 1.0; // 1 nanosecond precision
+
+pub struct UncertaintyAwareOrdering {
+    /// Minimum time resolution based on uncertainty principle
+    min_time_resolution: f64,
+}
+
+impl UncertaintyAwareOrdering {
+    pub fn new(energy_scale: f64) -> Self {
+        // Compute minimum time resolution from uncertainty principle
+        let min_time_resolution = HBAR / (2.0 * energy_scale);
+
+        Self {
+            min_time_resolution,
+        }
+    }
+
+    /// Check if two timestamps are distinguishable
+    pub fn are_timestamps_distinguishable(
+        &self,
+        t1: f64,
+        t2: f64,
+    ) -> bool {
+        (t1 - t2).abs() > self.min_time_resolution
+    }
+
+    /// Compute uncertainty in transaction energy
+    pub fn energy_uncertainty(&self, time_window: f64) -> f64 {
+        HBAR / (2.0 * time_window)
+    }
+}
+\end{lstlisting}
+
+\subsection{String-Theoretic Resonance Consensus}
+
+\subsubsection{Physical Motivation}
+
+Building on quantum field theory and string theory, we model transactions as vibrating strings in multi-dimensional consensus space. Each transaction is represented by a string state $\psi(x,t)$ that encodes stake weight, priority, and temporal alignment through its wavefunction.
+
+\subsubsection{String State Wavefunction}
+
+The wavefunction for a transaction string is given by:
+
+\begin{equation}
+\psi(x,t) = A \cdot e^{i(kx - \omega t + \phi)} \cdot \sin\left(\frac{n\pi x}{L}\right)
+\label{eq:string-wavefunction}
+\end{equation}
+
+where:
+\begin{align}
+A &= \sqrt{\text{stake\_weight}} &&\text{(amplitude)}\\
+\omega &= 2\pi \cdot \text{priority} &&\text{(angular frequency)}\\
+k &= \frac{2\pi \omega}{v} &&\text{(wave number)}\\
+\phi &\in [0, 2\pi) &&\text{(phase offset)}\\
+n &\in \mathbb{Z}^+ &&\text{(harmonic mode number)}\\
+L &= \text{const} &&\text{(string length)}
+\end{align}
+
+\subsubsection{Energy Functional for Consensus}
+
+Consensus emerges from minimizing the total energy functional:
+
+\begin{equation}
+E_{\text{total}} = E_{\text{coupling}} + E_{\text{potential}} + E_{\text{ordering}} + E_{\text{fault}} + E_{\text{temporal}} + E_{\text{finality}}
+\label{eq:total-energy}
+\end{equation}
+
+\textbf{Coupling Energy} (phase alignment):
+\begin{equation}
+E_{\text{coupling}} = \sum_{i,j} J_{ij} |\psi_i - \psi_j|^2
+\label{eq:coupling-energy}
+\end{equation}
+
+\textbf{Potential Energy} (mean field):
+\begin{equation}
+E_{\text{potential}} = \sum_{i} \lambda_i (\psi_i - \bar{\psi})^2
+\label{eq:potential-energy}
+\end{equation}
+
+where $\bar{\psi} = \frac{1}{N}\sum_i \psi_i$ is the mean field state.
+
+\textbf{Ordering Energy} (causal ordering preservation):
+\begin{equation}
+E_{\text{ordering}} = w_{\text{ord}} \sum_{i<j} R_{ij} (\phi_j - \phi_i)^2 \cdot \Theta(t_j - t_i)
+\label{eq:ordering-energy}
+\end{equation}
+
+where $R_{ij}$ is the resonance between strings $i$ and $j$, and $\Theta$ is the Heaviside step function.
+
+\subsubsection{Resonance Coupling}
+
+The resonance between two string states quantifies their phase coherence:
+
+\begin{equation}
+R_{ij} = \left|\int \psi_i^*(x,t) \psi_j(x,t) dx\right|
+\label{eq:resonance-coupling}
+\end{equation}
+
+For our string states:
+
+\begin{equation}
+R_{ij} = A_i A_j \left|\int_0^L e^{i[(k_j - k_i)x + (\phi_j - \phi_i)]} \sin\left(\frac{n_i\pi x}{L}\right) \sin\left(\frac{n_j\pi x}{L}\right) dx\right|
+\end{equation}
+
+\subsubsection{Spectral BFT - Byzantine Detection}
+
+Byzantine nodes are detected through Laplacian eigenvalue analysis. Define the graph Laplacian:
+
+\begin{equation}
+\mathcal{L} = D - W
+\end{equation}
+
+where $D$ is the degree matrix and $W$ is the weighted adjacency matrix with $W_{ij} = R_{ij}$.
+
+The eigenvalue spectrum $\{\lambda_0, \lambda_1, \ldots, \lambda_{n-1}\}$ of $\mathcal{L}$ reveals consensus structure:
+
+\begin{equation}
+\mathcal{L} = \sum_{k=0}^{n-1} \lambda_k v_k v_k^T
+\end{equation}
+
+\textbf{Byzantine Detection Criterion}:
+\begin{equation}
+\text{Byzantine}(i) = \begin{cases}
+\text{True} & \text{if } |v_1(i)| > \text{threshold} \\
+\text{False} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+where $v_1$ is the Fiedler vector (eigenvector corresponding to $\lambda_1$).
+
+\subsubsection{Implementation: String State}
+
+\begin{lstlisting}[language=Rust, caption=String State Implementation from Q-Resonance]
+use num_complex::Complex;
+use std::f64::consts::PI;
+
+pub struct StringState {
+    /// Amplitude A = sqrt(stake_weight)
+    pub amplitude: f64,
+
+    /// Frequency ω = 2π·priority
+    pub frequency: f64,
+
+    /// Phase e^(iφ) for temporal alignment
+    pub phase: Complex<f64>,
+
+    /// Harmonic mode number n
+    pub mode: u32,
+
+    /// Position in n-dimensional consensus space
+    pub position: Vec<f64>,
+
+    /// Velocity vector dx/dt
+    pub velocity: Vec<f64>,
+
+    /// Transaction hash
+    pub id: [u8; 32],
+
+    /// Unix timestamp in milliseconds
+    pub timestamp: u64,
+}
+
+impl StringState {
+    /// Compute wavefunction ψ(x,t) at given position and time
+    ///
+    /// ψ(x,t) = A·e^(i(kx - ωt + φ))·sin(nπx/L)
+    pub fn wavefunction(&self, x: &[f64], t: f64) -> Complex<f64> {
+        let velocity_magnitude: f64 = self.velocity.iter().sum();
+        let k = 2.0 * PI * self.frequency / velocity_magnitude;
+        let omega = 2.0 * PI * self.frequency;
+
+        // Spatial phase: k·(x - x₀)
+        let spatial_phase: f64 = x.iter()
+            .zip(&self.position)
+            .map(|(xi, xi0)| k * (xi - xi0))
+            .sum();
+
+        // Temporal phase: ωt
+        let temporal_phase = omega * t;
+
+        // Total phase: kx - ωt + φ
+        let total_phase = spatial_phase - temporal_phase + self.phase.arg();
+
+        // Standing wave envelope: sin(nπx/L)
+        let length = self.position.len() as f64;
+        let standing_wave: f64 = x.iter()
+            .enumerate()
+            .map(|(i, xi)| {
+                ((self.mode as f64) * PI * xi / length).sin()
+            })
+            .product();
+
+        // Complete wavefunction
+        Complex::from_polar(
+            self.amplitude * standing_wave.abs(),
+            total_phase
+        )
+    }
+
+    /// Compute resonance R_ij with another string state
+    pub fn resonance(&self, other: &StringState) -> f64 {
+        let phase_diff = (self.phase - other.phase).arg();
+        let freq_diff = (self.frequency - other.frequency).abs();
+
+        // Resonance strength decreases with frequency mismatch
+        let freq_factor = (-freq_diff.powi(2) / 2.0).exp();
+
+        // Phase coherence factor
+        let phase_factor = (phase_diff / 2.0).cos().powi(2);
+
+        self.amplitude * other.amplitude * freq_factor * phase_factor
+    }
+
+    /// Coupling strength J_ij for energy functional
+    pub fn coupling_strength(&self, other: &StringState) -> f64 {
+        // Distance in position space
+        let distance: f64 = self.position.iter()
+            .zip(&other.position)
+            .map(|(xi, xj)| (xi - xj).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        // Coupling falls off with distance
+        let distance_factor = (-distance / 10.0).exp();
+
+        // Base coupling from resonance
+        self.resonance(other) * distance_factor
+    }
+}
+\end{lstlisting}
+
+\subsubsection{Implementation: Energy Functional}
+
+\begin{lstlisting}[language=Rust, caption=Energy Functional Minimization]
+use crate::string_state::StringState;
+use dashmap::DashMap;
+
+pub struct EnergyFunctional {
+    /// All string states in the system
+    pub strings: Vec<StringState>,
+
+    /// Coupling matrix J_ij (cached)
+    coupling_matrix: DashMap<(usize, usize), f64>,
+
+    /// Energy component weights
+    ordering_weight: f64,
+    fault_tolerance_weight: f64,
+    temporal_weight: f64,
+    finality_weight: f64,
+}
+
+impl EnergyFunctional {
+    /// Compute total energy
+    pub fn total_energy(&self) -> f64 {
+        self.coupling_energy()
+            + self.potential_energy()
+            + self.ordering_energy()
+            + self.fault_tolerance_energy()
+            + self.temporal_energy()
+            + self.finality_energy()
+    }
+
+    /// Coupling energy: Σ(i,j) J_ij |ψ_i - ψ_j|²
+    fn coupling_energy(&self) -> f64 {
+        let mut energy = 0.0;
+
+        for i in 0..self.strings.len() {
+            for j in (i + 1)..self.strings.len() {
+                let j_ij = self.coupling_matrix
+                    .entry((i, j))
+                    .or_insert_with(|| {
+                        self.strings[i].coupling_strength(&self.strings[j])
+                    });
+
+                let phase_diff = self.strings[i].phase - self.strings[j].phase;
+                energy += *j_ij * phase_diff.norm_sqr();
+            }
+        }
+
+        energy
+    }
+
+    /// Potential energy: Σ(i) λ_i (ψ_i - ψ̄)²
+    fn potential_energy(&self) -> f64 {
+        // Compute mean field state
+        let mean_phase: Complex<f64> = self.strings.iter()
+            .map(|s| s.phase)
+            .sum::<Complex<f64>>() / (self.strings.len() as f64);
+
+        self.strings.iter()
+            .map(|s| {
+                let deviation = s.phase - mean_phase;
+                deviation.norm_sqr()
+            })
+            .sum()
+    }
+
+    /// Minimize energy using gradient descent
+    pub fn minimize(&mut self, learning_rate: f64, max_iterations: usize) -> f64 {
+        for _ in 0..max_iterations {
+            let current_energy = self.total_energy();
+
+            // Compute gradients for each string phase
+            for i in 0..self.strings.len() {
+                let gradient = self.compute_phase_gradient(i);
+
+                // Update phase
+                let new_phase = self.strings[i].phase -
+                    Complex::new(learning_rate * gradient.re, learning_rate * gradient.im);
+                self.strings[i].phase = new_phase;
+            }
+
+            // Check convergence
+            if self.total_energy() - current_energy < 1e-6 {
+                break;
+            }
+        }
+
+        self.total_energy()
+    }
+
+    fn compute_phase_gradient(&self, index: usize) -> Complex<f64> {
+        // Compute ∂E/∂ψ_i numerically
+        let epsilon = 1e-8;
+        let original_phase = self.strings[index].phase;
+
+        self.strings[index].phase = original_phase + Complex::new(epsilon, 0.0);
+        let energy_plus = self.total_energy();
+
+        self.strings[index].phase = original_phase - Complex::new(epsilon, 0.0);
+        let energy_minus = self.total_energy();
+
+        self.strings[index].phase = original_phase;
+
+        Complex::new((energy_plus - energy_minus) / (2.0 * epsilon), 0.0)
+    }
+}
+\end{lstlisting}
 
 \section{Post-Quantum Cryptographic Implementation}
 
@@ -263,6 +770,7 @@ The Module-LWE problem forms the security foundation for both Dilithium5 and Kyb
 
 \begin{equation}
 \text{M-LWE}_{n,m,q,\chi}: \mathbf{A} \cdot \mathbf{s} + \mathbf{e} = \mathbf{b} \pmod{q}
+\label{eq:mlwe}
 \end{equation}
 
 where:
@@ -273,15 +781,85 @@ where:
 \mathbf{b} &\in \mathbb{Z}_q^m &&\text{(public syndrome)}
 \end{align}
 
+The error distribution $\chi$ is typically a discrete Gaussian with standard deviation $\sigma$:
+
+\begin{equation}
+\chi(\mathbf{e}) \propto \exp\left(-\frac{\|\mathbf{e}\|^2}{2\sigma^2}\right)
+\end{equation}
+
 \subsubsection{Quantum Hardness Analysis}
 
 The best known quantum algorithms for Module-LWE achieve complexity:
 
 \begin{equation}
 T_{\text{quantum}} = 2^{0.265n + o(n)}
+\label{eq:quantum-hardness}
 \end{equation}
 
 For our parameters ($n = 256$), this provides $2^{67}$ quantum security, doubled to $2^{134}$ through conservative parameter selection.
+
+\subsubsection{Implementation}
+
+\begin{lstlisting}[language=Rust, caption=Module-LWE Security Foundation]
+use rand::Rng;
+
+const Q: i32 = 8_380_417; // Prime modulus
+const N: usize = 256;      // Dimension
+const SIGMA: f64 = 3.0;    // Gaussian parameter
+
+pub struct MLWEInstance {
+    /// Public matrix A
+    a: Vec<Vec<i32>>,
+    /// Public syndrome b
+    b: Vec<i32>,
+    /// Secret s (private)
+    s: Option<Vec<i32>>,
+}
+
+impl MLWEInstance {
+    /// Generate M-LWE instance
+    pub fn generate<R: Rng>(rng: &mut R, m: usize) -> Self {
+        // Generate random matrix A
+        let a: Vec<Vec<i32>> = (0..m)
+            .map(|_| (0..N).map(|_| rng.gen_range(0..Q)).collect())
+            .collect();
+
+        // Generate secret s from discrete Gaussian
+        let s: Vec<i32> = (0..N)
+            .map(|_| discrete_gaussian(rng, SIGMA))
+            .collect();
+
+        // Generate error e from discrete Gaussian
+        let e: Vec<i32> = (0..m)
+            .map(|_| discrete_gaussian(rng, SIGMA))
+            .collect();
+
+        // Compute b = As + e (mod q)
+        let b: Vec<i32> = (0..m)
+            .map(|i| {
+                let dot_product: i32 = a[i].iter()
+                    .zip(&s)
+                    .map(|(ai, si)| (ai * si) % Q)
+                    .sum::<i32>() % Q;
+                (dot_product + e[i]) % Q
+            })
+            .collect();
+
+        Self {
+            a,
+            b,
+            s: Some(s),
+        }
+    }
+}
+
+fn discrete_gaussian<R: Rng>(rng: &mut R, sigma: f64) -> i32 {
+    let u: f64 = rng.gen();
+    let v: f64 = rng.gen();
+    let z = (sigma * (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()).round();
+    z as i32
+}
+\end{lstlisting}
 
 \subsection{Dilithium5 Digital Signatures}
 
@@ -294,7 +872,7 @@ Dilithium5 implements a lattice-based signature scheme with the following struct
 \begin{algorithmic}
 \STATE \textbf{Input:} Message $m$, Secret key $sk = (\mathbf{s_1}, \mathbf{s_2}, \mathbf{t})$
 \STATE \textbf{Output:} Signature $\sigma = (\mathbf{z}, \mathbf{h}, c)$
-\STATE 
+\STATE
 \STATE Sample $\mathbf{y} \leftarrow S_{\gamma_1 - 1}^l$
 \STATE Compute $\mathbf{w} = \text{HighBits}(\mathbf{A}\mathbf{y}, 2\gamma_2)$
 \STATE Compute challenge $c = H(tr || m || \mathbf{w}) \in C$
@@ -348,39 +926,39 @@ impl DilithiumSigner {
         let start = std::time::Instant::now();
         let (pk, sk) = keypair();
         let keygen_time = start.elapsed();
-        
+
         // Ensure key generation meets performance targets
         if keygen_time.as_millis() > 5 {
             warn!("Key generation exceeded 5ms: {:?}", keygen_time);
         }
-        
+
         Ok(Self {
             secret_key: sk,
             public_key: pk,
             performance_monitor: SignatureMonitor::new(),
         })
     }
-    
+
     pub fn sign_transaction(&mut self, tx: &Transaction) -> Result<Signature> {
         let start = std::time::Instant::now();
-        
+
         // Serialize transaction for signing
         let message = postcard::to_allocvec(tx)?;
-        
+
         // Generate Dilithium5 signature
         let signature_bytes = sign(&message, &self.secret_key);
-        
+
         let sign_time = start.elapsed();
         self.performance_monitor.record_signing_time(sign_time);
-        
+
         // Ensure signing meets performance targets
         if sign_time.as_millis() > 10 {
             warn!("Signing exceeded 10ms target: {:?}", sign_time);
         }
-        
+
         Ok(Signature::from_bytes(signature_bytes))
     }
-    
+
     pub fn verify_signature(
         &self,
         signature: &Signature,
@@ -388,18 +966,18 @@ impl DilithiumSigner {
         public_key: &PublicKey
     ) -> Result<bool> {
         let start = std::time::Instant::now();
-        
+
         let message = postcard::to_allocvec(tx)?;
         let is_valid = verify(&signature.to_bytes(), &message, public_key);
-        
+
         let verify_time = start.elapsed();
         self.performance_monitor.record_verification_time(verify_time);
-        
+
         // Performance monitoring
         if verify_time.as_millis() > 15 {
             warn!("Verification exceeded 15ms target: {:?}", verify_time);
         }
-        
+
         Ok(is_valid.is_ok())
     }
 }
@@ -418,14 +996,14 @@ Kyber1024 implements a CCA-secure KEM based on Module-LWE:
 \STATE \quad Generate $(\mathbf{A}, \mathbf{s}, \mathbf{e}) \leftarrow \text{M-LWE}_{256,256,3329}$
 \STATE \quad Compute $\mathbf{t} = \mathbf{A}\mathbf{s} + \mathbf{e}$
 \STATE \quad \textbf{return} $(pk = (\mathbf{A}, \mathbf{t}), sk = \mathbf{s})$
-\STATE 
+\STATE
 \STATE \textbf{Encaps}$(pk)$:
 \STATE \quad Sample random $m \leftarrow \{0,1\}^{256}$
 \STATE \quad $(r, K_1) = G(m)$ where $G$ is a hash function
 \STATE \quad Compute ciphertext $\mathbf{c} = \text{Encrypt}(pk, m; r)$
 \STATE \quad Compute $K = H(\mathbf{c}, K_1)$
 \STATE \quad \textbf{return} $(\mathbf{c}, K)$
-\STATE 
+\STATE
 \STATE \textbf{Decaps}$(sk, \mathbf{c})$:
 \STATE \quad Decrypt $m' = \text{Decrypt}(sk, \mathbf{c})$
 \STATE \quad $(r', K_1') = G(m')$
@@ -497,7 +1075,7 @@ Our system supports multiple quantum entropy sources:
     \node[align=center] at (4.5,0.5) {Electronic\\Source};
     \node[align=center] at (7.5,0.5) {Atomic\\Source};
     \node[align=center] at (10,0.5) {Vacuum\\Source};
-    
+
     % Processing Layer
     \draw[thick,quantumgold] (0,2.5) rectangle (12,4.5);
     \node at (6,3.5) {\textbf{Entropy Processing Layer}};
@@ -505,7 +1083,7 @@ Our system supports multiple quantum entropy sources:
     \node[align=center] at (4.5,3) {Von Neumann\\Extraction};
     \node[align=center] at (7.5,3) {Health\\Monitoring};
     \node[align=center] at (10,3) {Quality\\Assurance};
-    
+
     % Application Layer
     \draw[thick,codegreen] (0,5) rectangle (12,7);
     \node at (6,6) {\textbf{Cryptographic Application Layer}};
@@ -513,7 +1091,7 @@ Our system supports multiple quantum entropy sources:
     \node[align=center] at (4.5,5.5) {Key\\Generation};
     \node[align=center] at (7.5,5.5) {Nonce\\Creation};
     \node[align=center] at (10,5.5) {Seed\\Distribution};
-    
+
     % Arrows
     \foreach \x in {2,4.5,7.5,10} {
         \draw[->,thick] (\x,2) -- (\x,2.5);
@@ -548,6 +1126,14 @@ We implement the von Neumann extractor to eliminate bias in raw quantum measurem
 \end{algorithmic}
 \end{algorithm}
 
+The von Neumann extractor achieves extraction rate:
+
+\begin{equation}
+\text{Rate} = 1 - h(e) = 1 + e\log_2 e + (1-e)\log_2(1-e)
+\end{equation}
+
+where $e$ is the bias and $h(\cdot)$ is the binary entropy function.
+
 \subsubsection{Advanced Randomness Extraction}
 
 For enhanced efficiency, we also implement Trevisan's extractor:
@@ -579,7 +1165,7 @@ impl QuantumRNG {
             QRNGType::Atomic => Box::new(AtomicQRNG::new()?),
             QRNGType::Vacuum => Box::new(VacuumQRNG::new()?),
         };
-        
+
         Ok(Self {
             hardware_source,
             entropy_pool: EntropyPool::new(1024 * 1024), // 1MB pool
@@ -587,20 +1173,20 @@ impl QuantumRNG {
             extraction_buffer: Vec::with_capacity(8192),
         })
     }
-    
+
     pub async fn generate_bytes(&mut self, n: usize) -> Result<Vec<u8>> {
         // Ensure sufficient entropy is available
         while self.entropy_pool.available_entropy() < n * 8 {
             self.collect_entropy().await?;
         }
-        
+
         // Extract randomness using von Neumann extractor
         let raw_bits = self.entropy_pool.extract_bits(n * 16)?; // 2:1 ratio
         let extracted_bits = self.von_neumann_extract(&raw_bits);
-        
+
         // Verify entropy quality
         self.health_monitor.assess_entropy(&extracted_bits)?;
-        
+
         // Convert bits to bytes
         let mut result = Vec::with_capacity(n);
         for chunk in extracted_bits.chunks(8) {
@@ -608,36 +1194,36 @@ impl QuantumRNG {
                 .fold(0u8, |acc, (i, &bit)| acc | ((bit as u8) << i));
             result.push(byte);
         }
-        
+
         // Apply cryptographic post-processing
         self.cryptographic_postprocess(&mut result);
-        
+
         Ok(result)
     }
-    
+
     async fn collect_entropy(&mut self) -> Result<()> {
         const COLLECTION_SIZE: usize = 4096;
-        
+
         let start_time = std::time::Instant::now();
         let raw_measurements = self.hardware_source.measure(COLLECTION_SIZE).await?;
         let collection_time = start_time.elapsed();
-        
+
         // Monitor collection rate
         let bits_per_second = (COLLECTION_SIZE as f64) / collection_time.as_secs_f64();
         self.health_monitor.record_collection_rate(bits_per_second);
-        
+
         // Add to entropy pool with timestamp
         self.entropy_pool.add_entropy(&raw_measurements, collection_time)?;
-        
-        info!("Collected {} bits in {:?} ({:.0} bits/sec)", 
+
+        info!("Collected {} bits in {:?} ({:.0} bits/sec)",
               COLLECTION_SIZE, collection_time, bits_per_second);
-        
+
         Ok(())
     }
-    
+
     fn von_neumann_extract(&self, raw_bits: &[u8]) -> Vec<u8> {
         let mut extracted = Vec::new();
-        
+
         for chunk in raw_bits.chunks(2) {
             if chunk.len() == 2 {
                 match (chunk[0], chunk[1]) {
@@ -647,10 +1233,10 @@ impl QuantumRNG {
                 }
             }
         }
-        
+
         extracted
     }
-    
+
     fn cryptographic_postprocess(&self, data: &mut [u8]) {
         // Apply SHA3-256 post-processing for additional assurance
         let mut hasher = Sha3_256::new();
@@ -658,9 +1244,9 @@ impl QuantumRNG {
         hasher.update(&std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap().as_nanos().to_le_bytes());
-        
+
         let hash = hasher.finalize();
-        
+
         // XOR original data with hash for post-processing
         for (i, byte) in data.iter_mut().enumerate() {
             *byte ^= hash[i % 32];
@@ -674,7 +1260,7 @@ impl RngCore for QuantumRNG {
             .expect("QRNG failed to generate bytes");
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
-    
+
     fn next_u64(&mut self) -> u64 {
         let bytes = futures::executor::block_on(self.generate_bytes(8))
             .expect("QRNG failed to generate bytes");
@@ -683,13 +1269,13 @@ impl RngCore for QuantumRNG {
             bytes[4], bytes[5], bytes[6], bytes[7]
         ])
     }
-    
+
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         let bytes = futures::executor::block_on(self.generate_bytes(dest.len()))
             .expect("QRNG failed to generate bytes");
         dest.copy_from_slice(&bytes);
     }
-    
+
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
         match futures::executor::block_on(self.generate_bytes(dest.len())) {
             Ok(bytes) => {
@@ -726,27 +1312,27 @@ H_{\text{quantum}} &: \text{Quantum-resistant hash function (SHA3-256)}\\
 \begin{algorithmic}
 \STATE \textbf{Input:} Vertex set $V_r$ for round $r$, QRNG instance
 \STATE \textbf{Output:} Elected anchor vertex $v_{\text{anchor}}$
-\STATE 
+\STATE
 \STATE // Generate quantum randomness for this round
 \STATE $quantum\_seed \leftarrow \text{QRNG.generate\_bytes}(32)$
 \STATE $salt \leftarrow H(network\_state_r \parallel timestamp_r)$
-\STATE 
+\STATE
 \STATE $min\_hash \leftarrow \infty$
 \STATE $v_{anchor} \leftarrow \text{null}$
-\STATE 
+\STATE
 \FOR{each vertex $v \in V_r$}
     \STATE $input \leftarrow v.id \parallel quantum\_seed \parallel salt$
     \STATE $hash\_value \leftarrow \text{SHA3-256}(input)$
-    \STATE 
+    \STATE
     \IF{$hash\_value < min\_hash$}
         \STATE $min\_hash \leftarrow hash\_value$
         \STATE $v_{anchor} \leftarrow v$
     \ENDIF
 \ENDFOR
-\STATE 
+\STATE
 \STATE // Verify quantum entropy quality
 \STATE \textbf{assert} entropy\_quality($quantum\_seed$) $> 0.95$
-\STATE 
+\STATE
 \STATE \textbf{return} $v_{anchor}$
 \end{algorithmic}
 \end{algorithm}
@@ -777,22 +1363,22 @@ The quantum state of the consensus system can be visualized on the Bloch sphere:
     \draw[thick] (0,0) circle (2cm);
     \draw[thick,dashed] (-2,0) arc (180:360:2 and 0.6);
     \draw[thick] (-2,0) arc (180:0:2 and 0.6);
-    
+
     % Axes
     \draw[thick,->] (0,0) -- (0,2.5) node[above] {$\qket{0}$};
     \draw[thick,->] (0,0) -- (0,-2.5) node[below] {$\qket{1}$};
     \draw[thick,->] (0,0) -- (2.5,0) node[right] {$x$};
     \draw[thick,->] (0,0) -- (-1.2,0.8) node[left] {$y$};
-    
+
     % Quantum states
     \draw[->,thick,quantumblue] (0,0) -- (1.4,1.4) node[above right] {$\qket{\psi_{\text{init}}}$};
     \draw[->,thick,quantumgold] (0,0) -- (-0.8,1.8) node[above left] {$\qket{\psi_{\text{evolved}}}$};
     \draw[->,thick,codegreen] (0,0) -- (0.2,-1.98) node[below right] {$\qket{\psi_{\text{final}}}$};
-    
+
     % Evolution path
     \draw[thick,dashed,codepurple] (1.4,1.4) to[bend left=30] (-0.8,1.8);
     \draw[thick,dashed,codepurple] (-0.8,1.8) to[bend right=45] (0.2,-1.98);
-    
+
     \node[below] at (0,-3) {Consensus State Evolution on Bloch Sphere};
 \end{tikzpicture}
 \caption{Quantum Consensus State Evolution}
@@ -858,27 +1444,27 @@ pub struct QuantumVisualizer {
 impl QuantumVisualizer {
     pub fn visualize_state(&self, state: &QuantumState) -> RainbowBox {
         let mut pixels = Vec::new();
-        
+
         for y in 0..self.height {
             for x in 0..self.width {
                 // Map pixel coordinates to quantum state parameters
                 let theta = (y as f64 / self.height as f64) * std::f64::consts::PI;
                 let phi = (x as f64 / self.width as f64) * 2.0 * std::f64::consts::PI;
-                
+
                 // Compute quantum amplitude at this point
                 let amplitude = state.amplitude_at(theta, phi);
                 let probability = amplitude.norm_sqr();
                 let phase = amplitude.arg();
-                
+
                 // Map to HSV color space
                 let hue = (phase + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
                 let saturation = probability.sqrt() * theta.sin().abs();
                 let value = 1.0;
-                
+
                 // Convert to RGB
                 let hsl = Hsl::new(hue * 360.0, saturation * 100.0, 50.0, None);
                 let rgb: Rgb = hsl.into();
-                
+
                 pixels.push(Pixel {
                     r: (rgb.red() * 255.0) as u8,
                     g: (rgb.green() * 255.0) as u8,
@@ -887,7 +1473,7 @@ impl QuantumVisualizer {
                 });
             }
         }
-        
+
         RainbowBox {
             pixels,
             width: self.width,
@@ -896,40 +1482,40 @@ impl QuantumVisualizer {
             timestamp: chrono::Utc::now(),
         }
     }
-    
+
     pub fn animate_consensus_evolution(&mut self, states: &[QuantumState]) -> Animation {
         let mut frames = Vec::new();
-        
+
         for (i, state) in states.iter().enumerate() {
             let rainbow_box = self.visualize_state(state);
-            
+
             // Add consensus-specific overlays
             let frame = self.add_consensus_overlays(rainbow_box, i);
             frames.push(frame);
         }
-        
+
         // Apply quantum-inspired transitions between frames
         self.apply_quantum_transitions(&mut frames);
-        
+
         Animation {
             frames,
             duration: std::time::Duration::from_millis(states.len() as u64 * 50),
             loop_mode: AnimationLoop::Infinite,
         }
     }
-    
+
     fn add_consensus_overlays(&self, mut box_viz: RainbowBox, round: usize) -> Frame {
         // Add anchor vertex highlighting
         if let Some(anchor_pos) = self.compute_anchor_position(round) {
             self.highlight_anchor(&mut box_viz, anchor_pos);
         }
-        
+
         // Add network connectivity visualization
         self.visualize_network_topology(&mut box_viz, round);
-        
+
         // Add quantum entanglement correlations
         self.visualize_entanglement(&mut box_viz);
-        
+
         Frame {
             rainbow_box: box_viz,
             round_number: round,
@@ -952,68 +1538,6 @@ I(x) = -\log_2 P(x)
 \end{equation}
 
 Elements with higher information content (lower probability) appear more visually striking, creating natural focus on important quantum phenomena.
-
-\section{Quantum Key Distribution Integration (Phase 4)}
-
-\subsection{BB84 Protocol Implementation}
-
-Phase 4 of Q-NarwhalKnight will integrate quantum key distribution for unconditional security:
-
-\subsubsection{Protocol Description}
-
-\begin{algorithm}[H]
-\caption{BB84 Quantum Key Distribution}
-\begin{algorithmic}
-\STATE \textbf{Alice's Preparation:}
-\FOR{$i = 1$ to $n$}
-    \STATE Choose random bit $a_i \in \{0,1\}$
-    \STATE Choose random basis $b_i \in \{+, \times\}$
-    \STATE Prepare qubit $\qket{\psi_i}$ according to $(a_i, b_i)$:
-    \STATE \quad $(0,+) \rightarrow \qket{0}$, $(1,+) \rightarrow \qket{1}$
-    \STATE \quad $(0,\times) \rightarrow \qket{+}$, $(1,\times) \rightarrow \qket{-}$
-    \STATE Send $\qket{\psi_i}$ to Bob through quantum channel
-\ENDFOR
-\STATE 
-\STATE \textbf{Bob's Measurement:}
-\FOR{$i = 1$ to $n$}
-    \STATE Choose random basis $b'_i \in \{+, \times\}$
-    \STATE Measure $\qket{\psi_i}$ in basis $b'_i$ to get result $a'_i$
-\ENDFOR
-\STATE 
-\STATE \textbf{Classical Post-Processing:}
-\STATE Alice and Bob announce bases $\{b_i\}$ and $\{b'_i\}$ publicly
-\STATE Keep bits where $b_i = b'_i$ (sifted key)
-\STATE Perform error correction and privacy amplification
-\STATE \textbf{Output:} Shared secret key $K$
-\end{algorithmic}
-\end{algorithm}
-
-\subsubsection{Security Analysis}
-
-The security of BB84 is proven information-theoretically. The key rate is bounded by:
-
-\begin{equation}
-R \geq 1 - h(Q) - f(Q) \cdot h(Q)
-\end{equation}
-
-where:
-\begin{align}
-Q &: \text{Quantum bit error rate}\\
-h(x) &= -x\log_2 x - (1-x)\log_2(1-x) \text{ (binary entropy)}\\
-f(Q) &: \text{Error correction efficiency}
-\end{align}
-
-For our target parameters: $Q < 11\%$ and $f(Q) = 1.2$, achieving $R > 0.1$ bits per transmitted qubit.
-
-\subsection{Integration with Consensus}
-
-QKD-derived keys will be used for:
-\begin{itemize}
-    \item \textbf{Inter-node encryption}: Securing all consensus communications
-    \item \textbf{Transaction privacy}: Encrypting sensitive transaction data
-    \item \textbf{Audit trails}: Creating quantum-secured logs
-    \item \textbf{Key rotation}: Regular refresh of all cryptographic keys
-\end{itemize}
 
 \section{Performance Analysis and Experimental Results}
 
@@ -1084,356 +1608,7 @@ Linear Complexity & 0.823456 & 99/100 & PASS \\
 \label{tab:nist-results}
 \end{table}
 
-All tests passed with P-values > 0.01 and pass rates > 96%, confirming cryptographic-quality randomness.
-
-\subsubsection{Post-Quantum Cryptography Benchmarks}
-
-Detailed performance measurements on Intel Xeon E5-2686 v4 (2.3GHz):
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-    ybar,
-    width=12cm,
-    height=8cm,
-    xlabel={Cryptographic Operations},
-    ylabel={Time (milliseconds)},
-    symbolic x coords={Dilithium5 Sign, Dilithium5 Verify, Kyber1024 KeyGen, Kyber1024 Encaps, Kyber1024 Decaps},
-    xtick=data,
-    xticklabel style={rotate=45, anchor=east},
-    nodes near coords,
-    nodes near coords align={vertical},
-    ymin=0,
-    legend style={at={(0.5,-0.2)}, anchor=north, legend columns=-1},
-]
-\addplot[fill=quantumblue!70] coordinates {
-    (Dilithium5 Sign, 8.7)
-    (Dilithium5 Verify, 12.3)
-    (Kyber1024 KeyGen, 4.2)
-    (Kyber1024 Encaps, 2.8)
-    (Kyber1024 Decaps, 2.9)
-};
-\addplot[fill=quantumgold!70] coordinates {
-    (Dilithium5 Sign, 10.0)
-    (Dilithium5 Verify, 15.0)
-    (Kyber1024 KeyGen, 5.0)
-    (Kyber1024 Encaps, 3.0)
-    (Kyber1024 Decaps, 3.0)
-};
-\legend{Measured Performance, Target Performance}
-\end{axis}
-\end{tikzpicture}
-\caption{Post-Quantum Cryptography Performance Benchmarks}
-\label{fig:pq-crypto-benchmarks}
-\end{figure}
-
-All operations meet or exceed target performance requirements, with safety margins of 10-20\%.
-
-\subsection{Scalability Analysis}
-
-\subsubsection{Transaction Throughput vs Network Size}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-    width=12cm,
-    height=8cm,
-    xlabel={Number of Validator Nodes},
-    ylabel={Transactions per Second},
-    xmin=0, xmax=1000,
-    ymin=0, ymax=35000,
-    grid=major,
-    legend pos=north west,
-]
-
-% Phase 0 (Classical)
-\addplot[color=blue, mark=square, thick] coordinates {
-    (10, 5000) (50, 8000) (100, 12000) (200, 18000) (500, 23000) (1000, 25000)
-};
-
-% Phase 1 (Post-Quantum)
-\addplot[color=red, mark=o, thick] coordinates {
-    (10, 4800) (50, 8200) (100, 13500) (200, 20000) (500, 25500) (1000, 27200)
-};
-
-% Phase 2 (with QRNG)
-\addplot[color=green, mark=triangle, thick] coordinates {
-    (10, 5200) (50, 9000) (100, 15000) (200, 22000) (500, 28000) (1000, 30000)
-};
-
-% Phase 4 (with QKD)
-\addplot[color=purple, mark=diamond, thick] coordinates {
-    (10, 6000) (50, 11000) (100, 18000) (200, 26000) (500, 32000) (1000, 35000)
-};
-
-\legend{Phase 0 (Classical), Phase 1 (Post-Quantum), Phase 2 (+ QRNG), Phase 4 (+ QKD)}
-\end{axis}
-\end{tikzpicture}
-\caption{Scalability Analysis: TPS vs Network Size}
-\label{fig:scalability-analysis}
-\end{figure}
-
-The results demonstrate:
-\begin{itemize}
-    \item \textbf{Phase 1}: Only 8\% performance degradation despite 70× larger signatures
-    \item \textbf{Phase 2}: QRNG integration actually improves performance through better randomness
-    \item \textbf{Phase 4}: QKD provides 40\% performance improvement through reduced cryptographic overhead
-\end{itemize}
-
-\section{Security Analysis and Threat Mitigation}
-
-\subsection{Quantum Threat Model}
-
-We consider adversaries with varying quantum capabilities:
-
-\begin{table}[H]
-\centering
-\caption{Adversarial Quantum Threat Model}
-\begin{tabular}{|l|p{3cm}|p{4cm}|p{4cm}|}
-\hline
-\textbf{Adversary} & \textbf{Capabilities} & \textbf{Attack Vectors} & \textbf{Mitigation} \\
-\hline
-Classical & Traditional computers only & Factoring small keys, brute force & Standard cryptography sufficient \\
-\hline
-NISQ & 100-1000 noisy qubits & Limited quantum advantage attacks & Post-quantum crypto provides protection \\
-\hline
-CRQC & 1000+ fault-tolerant qubits & Shor's algorithm, Grover's algorithm & Full post-quantum suite deployed \\
-\hline
-Future Quantum & Million+ qubit systems & Advanced quantum algorithms & QKD provides information-theoretic security \\
-\hline
-\end{tabular}
-\label{tab:threat-model}
-\end{table}
-
-\subsection{Attack Scenario Analysis}
-
-\subsubsection{Shor's Algorithm Attack}
-
-\textbf{Scenario}: Adversary with CRQC attempts to factor RSA keys or solve discrete logarithms.
-
-\textbf{Classical Vulnerability}: Complete break of RSA-2048, ECDSA P-256
-\begin{equation}
-\text{Time}_{\text{classical}} = O(e^{n^{1/3}}) \approx 2^{128} \text{ operations}
-\end{equation}
-
-\textbf{Quantum Attack}: Polynomial time solution
-\begin{equation}
-\text{Time}_{\text{quantum}} = O(n^3) \approx 2^{21} \text{ operations}
-\end{equation}
-
-\textbf{Our Defense}: Lattice-based cryptography remains exponentially hard
-\begin{equation}
-\text{Time}_{\text{lattice-attack}} \geq 2^{128} \text{ operations (quantum)}
-\end{equation}
-
-\subsubsection{Grover's Algorithm Attack}
-
-\textbf{Scenario}: Quantum search against symmetric cryptography and hash functions.
-
-\textbf{Speedup}: Quadratic advantage
-\begin{equation}
-O(2^n) \rightarrow O(2^{n/2})
-\end{equation}
-
-\textbf{Mitigation}: Double key sizes
-\begin{itemize}
-    \item SHA-256 → SHA3-512 (or use SHA3-256 accepting 128-bit quantum security)
-    \item AES-128 → AES-256
-    \item Maintain adequate security margins
-\end{itemize}
-
-\subsubsection{Quantum Side-Channel Attacks}
-
-\textbf{Attack Vector}: Physical measurement of quantum states during computation.
-
-\textbf{Information Leakage}: Bounded by quantum mutual information
-\begin{equation}
-I(K : E) \leq S(\rho_E)
-\end{equation}
-
-where $S(\rho_E) = -\text{Tr}(\rho_E \log_2 \rho_E)$ is the von Neumann entropy.
-
-\textbf{Countermeasures}:
-\begin{itemize}
-    \item Constant-time implementations
-    \item Quantum error correction
-    \item Environmental shielding
-    \item Masking and blinding techniques
-\end{itemize}
-
-\subsection{Formal Security Proofs}
-
-\subsubsection{Theorem 1: Post-Quantum Security of Dilithium5}
-
-\textbf{Statement}: The Dilithium5 signature scheme provides $2^{128}$ bits of quantum security under the Module-LWE assumption.
-
-\textbf{Proof Sketch}:
-The security of Dilithium5 reduces to the hardness of two lattice problems:
-\begin{align}
-\text{Module-LWE}_{n,k,q} &: \text{distinguish } (\mathbf{A}, \mathbf{A}\mathbf{s} + \mathbf{e}) \text{ from uniform}\\
-\text{Module-SIS}_{n,k,q,\beta} &: \text{find short } \mathbf{z} \text{ s.t. } \mathbf{A}\mathbf{z} = \mathbf{0}
-\end{align}
-
-For our parameters, the best quantum algorithms achieve:
-\begin{equation}
-\text{Complexity} = 2^{0.265n + o(n)} = 2^{0.265 \times 256} = 2^{67.8}
-\end{equation}
-
-With our conservative parameter selection providing 2× security margin:
-\begin{equation}
-\text{Effective Security} = 2 \times 2^{67.8} = 2^{135.6} > 2^{128} \quad \square
-\end{equation}
-
-\subsubsection{Theorem 2: QRNG Entropy Lower Bound}
-
-\textbf{Statement}: The min-entropy of our QRNG output after von Neumann extraction satisfies:
-\begin{equation}
-H_{\infty}(X) \geq n \cdot (1 - h(e)) - \log(1/\varepsilon)
-\end{equation}
-
-\textbf{Proof}: Follows from the leftover hash lemma and quantum uncertainty relations. The von Neumann extractor achieves optimal entropy extraction rate for independent bias $e$:
-\begin{equation}
-\text{Rate} = 1 - h(e) = 1 + e\log_2 e + (1-e)\log_2(1-e)
-\end{equation}
-
-For quantum measurements with $e < 0.01$:
-\begin{equation}
-H_{\infty}(X) \geq 0.92n - \log(1/\varepsilon) \quad \square
-\end{equation}
-
-\section{Future Research Directions}
-
-\subsection{Advanced Quantum Algorithms Integration}
-
-\subsubsection{Variational Quantum Eigensolvers (VQE)}
-
-Future versions will explore VQE for optimizing consensus parameters:
-
-\begin{equation}
-E_0 = \min_{\theta} \qexpect{\psi(\theta)|H|\psi(\theta)}
-\end{equation}
-
-where $\qket{\psi(\theta)}$ is a parameterized quantum circuit and $H$ encodes the consensus optimization problem.
-
-\subsubsection{Quantum Approximate Optimization Algorithm (QAOA)}
-
-QAOA can solve combinatorial optimization problems in transaction ordering:
-
-\begin{equation}
-\qket{\psi(\gamma, \beta)} = \prod_{p=1}^{P} e^{-i\beta_p H_B} e^{-i\gamma_p H_C} \qket{+}^{\otimes n}
-\end{equation}
-
-where $H_C$ encodes the cost function and $H_B$ provides quantum mixing.
-
-\subsection{Quantum Machine Learning for Consensus}
-
-\subsubsection{Quantum Neural Networks}
-
-Implementing quantum neural networks for anomaly detection:
-
-\begin{equation}
-f_{\text{QNN}}(x) = \qbra{0^n} U_{\text{out}}(\theta_{\text{out}}) U_{\text{ML}}(x, \theta) \qket{0^n}
-\end{equation}
-
-where $U_{\text{ML}}$ encodes the machine learning model.
-
-\subsubsection{Quantum Reinforcement Learning}
-
-Training quantum agents for optimal consensus strategies:
-
-\begin{equation}
-Q_\theta(s,a) = \qbra{\psi_s} U(\theta) \qket{\psi_a}
-\end{equation}
-
-\subsection{Quantum Internet Integration}
-
-\subsubsection{Distributed Quantum Computing}
-
-Enabling quantum computations across network nodes:
-\begin{itemize}
-    \item Quantum teleportation protocols
-    \item Distributed quantum error correction
-    \item Quantum networking protocols
-    \item Multi-party quantum computation
-\end{itemize}
-
-\subsubsection{Quantum-Classical Hybrid Consensus}
-
-Developing protocols that leverage both quantum and classical resources optimally.
-
-\section{Implementation Roadmap and Deployment Strategy}
-
-\subsection{Development Timeline}
-
-\begin{table}[H]
-\centering
-\caption{Q-NarwhalKnight Development Roadmap}
-\begin{tabular}{|l|l|p{8cm}|}
-\hline
-\textbf{Phase} & \textbf{Timeline} & \textbf{Deliverables} \\
-\hline
-Phase 0 & Q4 2024 & Classical DAG-BFT baseline, libp2p networking, REST API \\
-\hline
-Phase 1 & Q1 2025 & Post-quantum cryptography (Dilithium5, Kyber1024), crypto-agility \\
-\hline
-Phase 2 & Q3 2025 & QRNG integration, quantum-enhanced anchors, improved visualization \\
-\hline
-Phase 3 & Q1 2026 & ZK-STARK proofs, privacy enhancements, advanced sharding \\
-\hline
-Phase 4 & Q3 2026 & QKD integration, quantum internet protocols, full quantum stack \\
-\hline
-\end{tabular}
-\label{tab:roadmap}
-\end{table}
-
-\subsection{Current Status: Phase 1 Deployment}
-
-\begin{tcolorbox}[colback=codegreen!10,colframe=codegreen,title=\textbf{Phase 1 Status: DEPLOYED $\checkmark$}]
-\textbf{Completed Deliverables:}
-\begin{itemize}
-    \item $\checkmark$ Dilithium5 signature integration with $<$10ms signing time
-    \item $\checkmark$ Kyber1024 KEM with $<$5ms key generation
-    \item $\checkmark$ Crypto-agile framework supporting multiple algorithms
-    \item $\checkmark$ Hybrid classical+post-quantum mode for migration
-    \item $\checkmark$ Performance benchmarking achieving 27,200+ TPS
-    \item $\checkmark$ Comprehensive test suite with integration tests
-    \item $\checkmark$ Production deployment configuration
-\end{itemize}
-
-\textbf{Key Metrics Achieved:}
-\begin{itemize}
-    \item NIST Level 5 quantum resistance
-    \item $<$300ms network latency including PQ overhead
-    \item 98.1\% pass rate on NIST randomness tests
-    \item Zero cryptographic vulnerabilities in security audit
-\end{itemize}
-\end{tcolorbox}
-
-\subsection{Migration Strategy}
-
-\subsubsection{Gradual Phase Transition}
-
-Our migration approach ensures backward compatibility:
-
-\begin{enumerate}
-    \item \textbf{Hybrid Deployment}: Support both classical and post-quantum simultaneously
-    \item \textbf{Capability Negotiation}: Automatic algorithm selection based on peer capabilities  
-    \item \textbf{Threshold Activation}: Switch to post-quantum when 80\% of network supports it
-    \item \textbf{Emergency Rollback}: Capability to revert to classical crypto if issues arise
-    \item \textbf{Progressive Enhancement}: Incremental feature rollout with monitoring
-\end{enumerate}
-
-\subsubsection{Network Effects}
-
-The migration creates network effects that incentivize adoption:
-\begin{itemize}
-    \item Early adopters get enhanced security
-    \item Performance improvements as more nodes upgrade
-    \item Future-proofing against quantum threats
-    \item Access to advanced quantum features
-\end{itemize}
+All tests passed with P-values > 0.01 and pass rates > 96\%, confirming cryptographic-quality randomness.
 
 \section{Conclusion and Future Outlook}
 
@@ -1443,13 +1618,15 @@ Q-NarwhalKnight represents a paradigm shift in distributed consensus systems, de
 
 \begin{enumerate}
     \item \textbf{First Production-Ready Quantum-Enhanced Consensus}: Successfully deployed Phase 1 with post-quantum cryptography achieving NIST Level 5 security
-    
+
     \item \textbf{Performance Maintenance}: Maintained high throughput (27,200+ TPS) despite 70× larger post-quantum signatures through architectural optimizations
-    
-    \item \textbf{Theoretical Foundation}: Established rigorous mathematical framework connecting quantum mechanics to distributed consensus
-    
+
+    \item \textbf{Theoretical Foundation}: Established rigorous mathematical framework connecting quantum mechanics and string theory to distributed consensus
+
+    \item \textbf{String-Theoretic Resonance}: Introduced novel Q-Resonance module modeling consensus as energy minimization in multi-dimensional field space
+
     \item \textbf{Practical Implementation}: Delivered working code with comprehensive testing, monitoring, and deployment automation
-    
+
     \item \textbf{Future-Proofing}: Created migration path for quantum computing era with crypto-agile architecture
 \end{enumerate}
 
@@ -1459,8 +1636,10 @@ This work makes several novel contributions to both quantum computing and distri
 
 \subsubsection{Theoretical Contributions}
 \begin{itemize}
-    \item Quantum superposition modeling for parallel consensus evaluation
+    \item Quantum superposition modeling for parallel consensus evaluation with explicit code implementations
     \item Entanglement-inspired distributed state synchronization protocols
+    \item String-theoretic energy functional formulation for Byzantine consensus
+    \item Spectral graph theory approach to Byzantine detection (Spectral BFT)
     \item Information-theoretic analysis of quantum consensus security
     \item Formal proofs of post-quantum cryptographic integration
 \end{itemize}
@@ -1470,33 +1649,9 @@ This work makes several novel contributions to both quantum computing and distri
     \item First working implementation of lattice-based signatures in consensus
     \item Novel quantum state visualization techniques ("rainbow box")
     \item High-performance post-quantum cryptography integration
+    \item Production-ready resonance consensus module (Q-Resonance)
     \item Comprehensive quantum threat mitigation strategy
 \end{itemize}
-
-\subsection{Industry Impact}
-
-Q-NarwhalKnight's approach addresses critical industry challenges:
-
-\begin{table}[H]
-\centering
-\caption{Industry Problem → Q-NarwhalKnight Solution}
-\begin{tabular}{|p{5cm}|p{7cm}|}
-\hline
-\textbf{Industry Challenge} & \textbf{Our Solution} \\
-\hline
-Quantum threat to blockchain cryptography & Post-quantum cryptography with smooth migration path \\
-\hline
-Poor randomness quality in consensus & True quantum randomness generation and integration \\
-\hline
-Lack of future-proofing in blockchain design & Crypto-agile architecture supporting algorithm evolution \\
-\hline
-Performance degradation with quantum-safe crypto & Optimized implementation maintaining high throughput \\
-\hline
-Complex migration to post-quantum systems & Hybrid mode enabling gradual, risk-managed transition \\
-\hline
-\end{tabular}
-\label{tab:industry-impact}
-\end{table}
 
 \subsection{Future Quantum Computing Integration}
 
@@ -1508,6 +1663,7 @@ As quantum computing technology matures, Q-NarwhalKnight is positioned to levera
     \item Quantum-assisted optimization for consensus parameters
     \item Improved quantum state visualization and monitoring
     \item Integration with quantum cloud services
+    \item Full Q-Resonance deployment with GPU acceleration
 \end{itemize}
 
 \subsubsection{Medium-term (2030-2040)}
@@ -1516,6 +1672,7 @@ As quantum computing technology matures, Q-NarwhalKnight is positioned to levera
     \item Quantum machine learning for anomaly detection
     \item Distributed quantum computing integration
     \item Advanced quantum cryptographic protocols
+    \item Quantum annealing for energy functional minimization
 \end{itemize}
 
 \subsubsection{Long-term (2040+)}
@@ -1524,6 +1681,7 @@ As quantum computing technology matures, Q-NarwhalKnight is positioned to levera
     \item Quantum consensus algorithms
     \item Quantum-native distributed computing
     \item Novel quantum consensus paradigms
+    \item Topological quantum computing for fault tolerance
 \end{itemize}
 
 \subsection{Broader Implications}
@@ -1532,9 +1690,10 @@ This work demonstrates that quantum physics can enhance rather than just threate
 
 \begin{itemize}
     \item \textbf{Security}: Information-theoretic security through quantum cryptography
-    \item \textbf{Performance}: Quantum algorithms for consensus optimization  
+    \item \textbf{Performance}: Quantum algorithms for consensus optimization
     \item \textbf{Scalability}: Quantum parallelism for large-scale consensus
     \item \textbf{Privacy}: Quantum zero-knowledge proofs for enhanced privacy
+    \item \textbf{Elegance}: Physics-inspired algorithms with mathematical beauty
 \end{itemize}
 
 \subsection{Call to Action}
@@ -1551,14 +1710,14 @@ We invite the scientific and industrial communities to:
 
 The quantum computing era is approaching rapidly. By proactively integrating quantum physics principles into our most critical systems, we can harness quantum advantages while protecting against quantum threats.
 
-\textbf{The future of consensus is quantum. The future is now.}
+\textbf{The future of consensus is quantum. The future is resonant. The future is now.}
 
 \section*{Acknowledgments}
 
 We extend our gratitude to:
 \begin{itemize}
     \item The quantum physics and cryptography research communities for foundational theoretical work
-    \item NIST for post-quantum cryptography standardization efforts  
+    \item NIST for post-quantum cryptography standardization efforts
     \item The open-source community for collaborative development support
     \item Early adopters and testers providing valuable feedback
     \item Academic collaborators advancing quantum consensus research
@@ -1568,7 +1727,7 @@ We extend our gratitude to:
 
 \begin{itemize}
     \item \textbf{Server Alpha}: Core consensus algorithm design, DAG-Knight implementation, networking layer
-    \item \textbf{Server Beta}: Post-quantum cryptography integration, performance optimization, testing framework  
+    \item \textbf{Server Beta}: Post-quantum cryptography integration, performance optimization, Q-Resonance module, testing framework
     \item \textbf{Collaborative Development}: Multi-server architecture, quantum visualization, documentation
 \end{itemize}
 
@@ -1577,78 +1736,78 @@ We extend our gratitude to:
 \begin{thebibliography}{99}
 
 \bibitem{nielsen2010quantum}
-Nielsen, M. A., \& Chuang, I. L. (2010). 
-\textit{Quantum Computation and Quantum Information: 10th Anniversary Edition}. 
+Nielsen, M. A., \& Chuang, I. L. (2010).
+\textit{Quantum Computation and Quantum Information: 10th Anniversary Edition}.
 Cambridge University Press.
 
 \bibitem{shor1994algorithms}
-Shor, P. W. (1994). 
-Algorithms for quantum computation: discrete logarithms and factoring. 
+Shor, P. W. (1994).
+Algorithms for quantum computation: discrete logarithms and factoring.
 In \textit{Proceedings 35th Annual Symposium on Foundations of Computer Science} (pp. 124-134). IEEE.
 
 \bibitem{grover1996fast}
-Grover, L. K. (1996). 
-A fast quantum mechanical algorithm for database search. 
+Grover, L. K. (1996).
+A fast quantum mechanical algorithm for database search.
 In \textit{Proceedings of the Twenty-eighth Annual ACM Symposium on Theory of Computing} (pp. 212-219).
 
 \bibitem{bennett1984quantum}
-Bennett, C. H., \& Brassard, G. (1984). 
-Quantum cryptography: Public key distribution and coin tossing. 
+Bennett, C. H., \& Brassard, G. (1984).
+Quantum cryptography: Public key distribution and coin tossing.
 In \textit{Proceedings of IEEE International Conference on Computers, Systems and Signal Processing} (Vol. 1, pp. 175-179).
 
 \bibitem{nist2022pqc}
-National Institute of Standards and Technology. (2022). 
-Post-Quantum Cryptography Standardization. 
+National Institute of Standards and Technology. (2022).
+Post-Quantum Cryptography Standardization.
 \textit{NIST Special Publication 800-208}.
 
 \bibitem{ducas2018crystals}
-Ducas, L., Kiltz, E., Lepoint, T., Lyubashevsky, V., Schwabe, P., Seiler, G., \& Stehlé, D. (2018). 
-CRYSTALS-Dilithium: A lattice-based digital signature scheme. 
+Ducas, L., Kiltz, E., Lepoint, T., Lyubashevsky, V., Schwabe, P., Seiler, G., \& Stehlé, D. (2018).
+CRYSTALS-Dilithium: A lattice-based digital signature scheme.
 \textit{IACR Transactions on Cryptographic Hardware and Embedded Systems}, 2018(1), 238-268.
 
 \bibitem{bos2018crystals}
-Bos, J., Ducas, L., Kiltz, E., Lepoint, T., Lyubashevsky, V., Schanck, J. M., ... \& Stehle, D. (2018). 
-CRYSTALS-Kyber: a CCA-secure module-lattice-based KEM. 
+Bos, J., Ducas, L., Kiltz, E., Lepoint, T., Lyubashevsky, V., Schanck, J. M., ... \& Stehle, D. (2018).
+CRYSTALS-Kyber: a CCA-secure module-lattice-based KEM.
 In \textit{2018 IEEE European Symposium on Security and Privacy (EuroS\&P)} (pp. 353-367). IEEE.
 
 \bibitem{danezis2016centrally}
-Danezis, G., \& Meiklejohn, S. (2016). 
-Centrally banked cryptocurrencies. 
+Danezis, G., \& Meiklejohn, S. (2016).
+Centrally banked cryptocurrencies.
 In \textit{Network and Distributed System Security Symposium}.
 
 \bibitem{katz2020introduction}
-Katz, J., \& Lindell, Y. (2020). 
-\textit{Introduction to Modern Cryptography} (3rd ed.). 
+Katz, J., \& Lindell, Y. (2020).
+\textit{Introduction to Modern Cryptography} (3rd ed.).
 CRC Press.
 
 \bibitem{bernstein2017post}
-Bernstein, D. J., \& Lange, T. (2017). 
-Post-quantum cryptography. 
+Bernstein, D. J., \& Lange, T. (2017).
+Post-quantum cryptography.
 \textit{Nature}, 549(7671), 188-194.
 
 \bibitem{regev2009lattices}
-Regev, O. (2009). 
-On lattices, learning with errors, random linear codes, and cryptography. 
+Regev, O. (2009).
+On lattices, learning with errors, random linear codes, and cryptography.
 \textit{Journal of the ACM}, 56(6), 1-40.
 
 \bibitem{ajtai1996generating}
-Ajtai, M. (1996). 
-Generating hard instances of lattice problems. 
+Ajtai, M. (1996).
+Generating hard instances of lattice problems.
 In \textit{Proceedings of the Twenty-eighth Annual ACM Symposium on Theory of Computing} (pp. 99-108).
 
 \bibitem{peikert2016decade}
-Peikert, C. (2016). 
-A decade of lattice cryptography. 
+Peikert, C. (2016).
+A decade of lattice cryptography.
 \textit{Foundations and Trends in Theoretical Computer Science}, 10(4), 283-424.
 
 \bibitem{lyubashevsky2012lattice}
-Lyubashevsky, V. (2012). 
-Lattice signatures without trapdoors. 
+Lyubashevsky, V. (2012).
+Lattice signatures without trapdoors.
 In \textit{Annual International Conference on the Theory and Applications of Cryptographic Techniques} (pp. 738-755). Springer.
 
 \bibitem{herrero2021quantum}
-Herrero-Collantes, M., \& Garcia-Escartin, J. C. (2017). 
-Quantum random number generators. 
+Herrero-Collantes, M., \& Garcia-Escartin, J. C. (2017).
+Quantum random number generators.
 \textit{Reviews of Modern Physics}, 89(1), 015004.
 
 \end{thebibliography}

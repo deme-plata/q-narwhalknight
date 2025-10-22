@@ -430,6 +430,90 @@ fn build_cli() -> Command {
                             .help("Customer segment"))
                 )
         )
+        .subcommand(
+            Command::new("paas")
+                .about("🔒 Privacy-as-a-Service management")
+                .subcommand_required(true)
+                .subcommand(Command::new("stats").about("View PaaS statistics"))
+                .subcommand(
+                    Command::new("audit")
+                        .about("Query audit records")
+                        .arg(Arg::new("wallet")
+                            .long("wallet")
+                            .value_name("ADDRESS")
+                            .help("Filter by wallet address"))
+                        .arg(Arg::new("service")
+                            .long("service")
+                            .value_name("SERVICE")
+                            .help("Filter by service type"))
+                        .arg(Arg::new("limit")
+                            .long("limit")
+                            .value_name("N")
+                            .default_value("50")
+                            .help("Maximum records to return"))
+                )
+                .subcommand(
+                    Command::new("reservations")
+                        .about("View active reservations")
+                        .arg(Arg::new("wallet")
+                            .long("wallet")
+                            .value_name("ADDRESS")
+                            .help("Filter by wallet address"))
+                )
+                .subcommand(Command::new("billing-stats").about("View billing statistics"))
+                .subcommand(Command::new("idempotency-stats").about("View idempotency cache stats"))
+                .subcommand(Command::new("pricing").about("View current pricing"))
+                .subcommand(
+                    Command::new("api-keys")
+                        .about("API key management")
+                        .subcommand_required(true)
+                        .subcommand(
+                            Command::new("list")
+                                .about("List API keys")
+                                .arg(Arg::new("wallet")
+                                    .long("wallet")
+                                    .value_name("ADDRESS")
+                                    .help("Filter by wallet address"))
+                        )
+                        .subcommand(
+                            Command::new("generate")
+                                .about("Generate new API key")
+                                .arg(Arg::new("wallet")
+                                    .long("wallet")
+                                    .value_name("ADDRESS")
+                                    .required(true)
+                                    .help("Wallet address"))
+                                .arg(Arg::new("tier")
+                                    .long("tier")
+                                    .value_name("TIER")
+                                    .required(true)
+                                    .help("API tier (free, developer, production, enterprise)"))
+                                .arg(Arg::new("expires-days")
+                                    .long("expires-days")
+                                    .value_name("DAYS")
+                                    .default_value("90")
+                                    .help("Expiration in days"))
+                        )
+                        .subcommand(
+                            Command::new("rotate")
+                                .about("Rotate API key")
+                                .arg(Arg::new("key-id")
+                                    .required(true)
+                                    .help("API key ID to rotate"))
+                        )
+                        .subcommand(
+                            Command::new("revoke")
+                                .about("Revoke API key")
+                                .arg(Arg::new("key-id")
+                                    .required(true)
+                                    .help("API key ID to revoke"))
+                                .arg(Arg::new("reason")
+                                    .long("reason")
+                                    .value_name("REASON")
+                                    .help("Reason for revocation"))
+                        )
+                )
+        )
 }
 
 async fn execute_command(matches: &ArgMatches, config: CliConfig) -> Result<()> {
@@ -466,6 +550,9 @@ async fn execute_command(matches: &ArgMatches, config: CliConfig) -> Result<()> 
         }
         Some(("analytics", sub_matches)) => {
             commands::analytics::execute(sub_matches, &config).await
+        }
+        Some(("paas", sub_matches)) => {
+            commands::paas::execute(sub_matches, &config).await
         }
         _ => {
             println!("{}", "❌ Unknown command".red());

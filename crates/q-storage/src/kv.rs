@@ -22,6 +22,9 @@ pub trait KVStore: Send + Sync {
     /// Put key-value pair in column family
     async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()>;
 
+    /// Put key-value pair in column family with SYNC (fsync to disk - survives hard kills)
+    async fn put_sync(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()>;
+
     /// Get value by key from column family
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
@@ -286,6 +289,21 @@ impl KVStore for RocksDBKV {
         Ok(())
     }
 
+    async fn put_sync(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        let cf_handle = self.get_cf(cf)?;
+
+        // Create write options with sync=true to force fsync to disk
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true); // CRITICAL: Force fsync() syscall - survives hard kills
+        write_opts.disable_wal(false); // Keep WAL enabled
+
+        self.db
+            .put_cf_opt(&cf_handle, key, value, &write_opts)
+            .context("RocksDB synced put failed")?;
+
+        Ok(())
+    }
+
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let cf_handle = self.get_cf(cf)?;
 
@@ -408,7 +426,7 @@ impl RocksDBKV {
     /// Get optimized write options
     fn write_options() -> rocksdb::WriteOptions {
         let mut opts = rocksdb::WriteOptions::default();
-        opts.set_sync(false); // Use WAL for durability, don't sync every write
+        opts.set_sync(true); // CRITICAL: Force fsync() to survive hard kills (pkill -9)
         opts.disable_wal(false); // Keep WAL for crash recovery
         opts
     }

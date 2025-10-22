@@ -6,16 +6,14 @@ use async_trait::async_trait;
 use q_types::{NodeId, Phase};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     net::SocketAddr,
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio_socks::tcp::Socks5Stream;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub mod circuit_manager;
 pub mod config;
@@ -38,7 +36,7 @@ pub use quantum_seeding::{CircuitParameters, QuantumEntropyPool, QuantumSeedingC
 
 /// Main Tor client for Q-NarwhalKnight
 pub struct QTorClient {
-    /// SOCKS proxy address for Tor connection
+    /// SOCKS proxy address for Tor connection (only used if not using embedded Arti)
     socks_proxy: SocketAddr,
     /// Circuit manager for dedicated circuits
     circuit_manager: Arc<Mutex<CircuitManager>>,
@@ -58,15 +56,23 @@ pub struct QTorClient {
     quantum_entropy: Option<Arc<QuantumEntropyPool>>,
     /// Dandelion++ protocol for privacy
     dandelion: Option<Arc<DandelionProtocol>>,
+    /// Embedded Arti Tor client (if enabled)
+    real_tor_client: Option<Arc<real_tor_client::RealTorClient>>,
 }
 
 impl QTorClient {
-    /// Create a new Tor client
+    /// Create a new Tor client with automatic fallback to embedded Arti
     pub async fn new(config: TorConfig, node_id: NodeId, phase: Phase) -> Result<Self> {
         info!(
             "🧅 Initializing Q-Tor-Client for validator {}",
             hex::encode(node_id)
         );
+
+        // Check if using embedded Arti or SOCKS proxy
+        if config.use_embedded_arti {
+            info!("Using embedded Arti client (no external Tor daemon needed)");
+            return Self::new_with_embedded_arti(config, node_id, phase).await;
+        }
 
         // Default Tor SOCKS proxy address (updated to 9150 to avoid conflict with P2P)
         let socks_proxy = config.socks_proxy_addr.unwrap_or_else(|| {
@@ -75,10 +81,19 @@ impl QTorClient {
                 .expect("Valid default SOCKS address")
         });
 
-        // Test SOCKS proxy connection
-        Self::test_socks_connection(&socks_proxy)
-            .await
-            .context("Failed to connect to Tor SOCKS proxy. Is Tor running?")?;
+        // Test SOCKS proxy connection with fallback to embedded Arti
+        match Self::test_socks_connection(&socks_proxy).await {
+            Ok(_) => {
+                info!("✅ SOCKS proxy connection successful");
+            }
+            Err(e) => {
+                warn!("⚠️ SOCKS proxy connection failed: {}", e);
+                info!("🔄 Falling back to embedded Arti client");
+                let mut arti_config = config.clone();
+                arti_config.use_embedded_arti = true;
+                return Self::new_with_embedded_arti(arti_config, node_id, phase).await;
+            }
+        }
 
         // Initialize circuit manager with 4 dedicated circuits
         let circuit_manager = Arc::new(Mutex::new(
@@ -135,6 +150,119 @@ impl QTorClient {
             current_phase: phase,
             quantum_entropy,
             dandelion: None, // Will be initialized separately
+            real_tor_client: None, // Not using embedded Arti in SOCKS mode
+        })
+    }
+
+    /// Create a new Tor client using embedded Arti (no external Tor daemon needed)
+    pub async fn new_with_embedded_arti(
+        config: TorConfig,
+        node_id: NodeId,
+        phase: Phase,
+    ) -> Result<Self> {
+        info!(
+            "🧅 Initializing Q-Tor-Client with embedded Arti for validator {}",
+            hex::encode(node_id)
+        );
+
+        // Create RealTorClient configuration
+        let arti_config = real_tor_client::TorConfig {
+            data_directory: config
+                .data_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/tmp/qnk_tor".to_string()),
+            cache_directory: config
+                .cache_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/tmp/qnk_tor_cache".to_string()),
+            socks_port: 9150,
+            bootstrap_timeout: std::time::Duration::from_secs(90),
+            circuit_timeout: std::time::Duration::from_secs(30),
+            max_circuits: config.circuit_count as u32,
+            enable_onion_service: true,
+            onion_service_port: config.rpc_port,
+            ..Default::default()
+        };
+
+        // Create embedded Arti client
+        info!("Bootstrapping embedded Arti Tor client...");
+        let real_tor_client = Arc::new(
+            real_tor_client::RealTorClient::new(arti_config)
+                .await
+                .context("Failed to create embedded Arti client")?,
+        );
+
+        info!("✅ Embedded Arti client bootstrapped successfully");
+
+        // Start background tasks for the Arti client
+        real_tor_client
+            .start_background_tasks()
+            .await
+            .context("Failed to start Arti background tasks")?;
+
+        // Use a placeholder SOCKS address (not actually used with embedded client)
+        let socks_proxy = "127.0.0.1:9150"
+            .parse()
+            .expect("Valid placeholder address");
+
+        // Initialize circuit manager (will use embedded client internally)
+        let circuit_manager = Arc::new(Mutex::new(
+            CircuitManager::new(socks_proxy, config.circuit_count).await?,
+        ));
+
+        let metrics = Arc::new(TorMetrics::new());
+
+        // Initialize quantum entropy pool if in Phase 2+
+        let quantum_entropy = if matches!(phase, Phase::Phase2 | Phase::Phase3 | Phase::Phase4) {
+            match QuantumEntropyPool::new(QuantumSeedingConfig::default()).await {
+                Ok(pool) => {
+                    info!("✅ Quantum entropy pool initialized for {:?}", phase);
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ Failed to initialize quantum entropy: {}, using classical fallback",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            debug!("Using classical entropy for {:?}", phase);
+            None
+        };
+
+        // Initialize Prometheus metrics if enabled
+        let prometheus_metrics = if config.enable_prometheus_metrics {
+            match TorPrometheusMetrics::new(PrometheusConfig::default()) {
+                Ok(prometheus) => {
+                    info!("✅ Prometheus metrics initialized");
+                    Some(Arc::new(prometheus))
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to initialize Prometheus metrics: {}", e);
+                    None
+                }
+            }
+        } else {
+            debug!("Prometheus metrics disabled");
+            None
+        };
+
+        Ok(Self {
+            socks_proxy,
+            circuit_manager,
+            onion_service: Arc::new(RwLock::new(None)),
+            config,
+            metrics,
+            prometheus_metrics,
+            node_id,
+            current_phase: phase,
+            quantum_entropy,
+            dandelion: None, // Will be initialized separately
+            real_tor_client: Some(real_tor_client),
         })
     }
 
@@ -646,6 +774,16 @@ impl QTorClient {
         Ok(())
     }
 
+    /// Get the embedded Arti client (if enabled)
+    pub fn get_real_tor_client(&self) -> Option<Arc<real_tor_client::RealTorClient>> {
+        self.real_tor_client.clone()
+    }
+
+    /// Check if using embedded Arti client
+    pub fn is_using_embedded_arti(&self) -> bool {
+        self.real_tor_client.is_some()
+    }
+
     /// Create a mock Tor client for development/testing
     pub fn mock() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
@@ -662,6 +800,7 @@ impl QTorClient {
             prometheus_metrics: None,
             quantum_entropy: None,
             dandelion: None,
+            real_tor_client: None,
         }
     }
 }

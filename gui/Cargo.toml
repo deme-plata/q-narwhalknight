@@ -7,10 +7,10 @@ edition = "2021"
 name = "qnk-gui"
 path = "src/main.rs"
 
-# Windows GUI with embedded full node
-[[bin]]
-name = "qnk-windows-node"
-path = "src/windows_node.rs"
+# Windows GUI with embedded full node (temporarily disabled - needs module refactoring)
+# [[bin]]
+# name = "qnk-windows-node"
+# path = "src/windows_node.rs"
 
 [dependencies]
 # Slint GUI framework with advanced features
@@ -30,6 +30,10 @@ serde_json = "1.0"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# BIP39 mnemonic generation
+bip39 = "2.0"
+rand = "0.8"
 
 # WebSocket support for real-time updates
 tokio-tungstenite = "0.23"
@@ -65,7 +69,7 @@ quantum-visualization = []
 advanced-animations = []
 embedded-node = [
     "q-dag-knight",
-    "q-narwhal-core", 
+    "q-narwhal-core",
     "q-network",
     "q-api-server",
     "q-wallet",
@@ -74,6 +78,7 @@ embedded-node = [
     "q-tor-client"
 ]
 windows-full = ["embedded-node"]
+full-node = ["embedded-node"]  # User-selectable full node mode
 
 # Target-specific configurations
 [target.'cfg(windows)'.dependencies]

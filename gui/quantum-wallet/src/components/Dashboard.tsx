@@ -418,6 +418,42 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         }
       ];
 
+      // Fetch QUGUSD balance (Quillon USD stablecoin)
+      let qugUsdBalance = 0;
+      try {
+        const response = await qnkAPI.getMultiTokenBalance();
+        console.log('🔍 [Dashboard] Multi-token balance response:', JSON.stringify(response, null, 2));
+        if (response.success && response.data && response.data.tokens) {
+          // API returns tokens as object with lowercase keys: { qug: {...}, qugusd: {...} }
+          const tokensObj = response.data.tokens;
+          console.log('🔍 [Dashboard] Tokens object:', JSON.stringify(tokensObj, null, 2));
+          if (tokensObj.qugusd && tokensObj.qugusd.balance !== undefined) {
+            qugUsdBalance = parseFloat(tokensObj.qugusd.balance) || 0;
+            console.log('💵 [Dashboard] QUGUSD balance fetched:', qugUsdBalance);
+          } else if (tokensObj.QUGUSD && tokensObj.QUGUSD.balance !== undefined) {
+            // Try uppercase key as fallback
+            qugUsdBalance = parseFloat(tokensObj.QUGUSD.balance) || 0;
+            console.log('💵 [Dashboard] QUGUSD balance fetched (uppercase):', qugUsdBalance);
+          } else {
+            console.warn('⚠️ [Dashboard] QUGUSD not found in tokens object');
+          }
+        } else {
+          console.warn('⚠️ [Dashboard] Response not successful or missing data');
+        }
+      } catch (error) {
+        console.warn('⚠️ Failed to fetch QUGUSD balance:', error);
+      }
+
+      // Add QUGUSD to balances (always show, even with 0 balance)
+      balances.push({
+        symbol: 'QUGUSD',
+        name: 'Quillon USD',
+        balance: qugUsdBalance,
+        usdValue: qugUsdBalance, // 1:1 peg to USD
+        icon: 'usd',
+        color: 'from-blue-400 to-cyan-500',
+      });
+
       // Fetch USD balance from payment API - ALWAYS show USD wallet
       let usdValue = 0;
       try {
@@ -451,27 +487,8 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         color: 'from-green-400 to-emerald-500',
       });
 
-      // Fetch custom tokens from VM (stablecoin API endpoint)
-      try {
-        const response = await qnkAPI.getMultiTokenBalance();
-        if (response.success && response.data) {
-          const tokens = response.data.tokens || [];
-          const customTokenBalances: WalletBalance[] = tokens
-            .filter((token: any) => token.symbol !== 'QUG' && token.balance > 0)
-            .map((token: any) => ({
-              symbol: token.symbol,
-              name: token.name || token.symbol,
-              balance: token.balance,
-              icon: 'custom' as const,
-              color: 'from-purple-400 to-pink-500',
-            }));
-
-          balances.push(...customTokenBalances);
-          console.log('🎨 Custom tokens fetched:', customTokenBalances.length);
-        }
-      } catch (error) {
-        console.error('❌ Failed to fetch custom tokens:', error);
-      }
+      // Note: Custom tokens would be fetched here if the API supported them
+      // Currently, only QUG and QUGUSD are supported in the multi-token balance endpoint
 
       // Add placeholder for future cryptos
       balances.push(

@@ -11,3 +11,4 @@ pub mod risk;
 pub mod claude;
 pub mod ask;
 pub mod analytics;
+pub mod paas;

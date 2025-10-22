@@ -12,6 +12,8 @@
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
     "@noble/hashes": "^1.5.0",
+    "@scure/bip32": "^2.0.1",
+    "@scure/bip39": "^2.0.1",
     "@zxing/library": "^0.21.3",
     "cryptocurrency-icons": "^0.18.1",
     "framer-motion": "^11.11.17",

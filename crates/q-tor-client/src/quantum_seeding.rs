@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Type alias for quantum seeding manager
 pub type QuantumSeedingManager = QuantumEntropyPool;

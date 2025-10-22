@@ -57,17 +57,21 @@ impl ReliableBroadcast {
 
     /// Broadcast a vertex (step 1 of Bracha's protocol)
     pub async fn broadcast_vertex(&self, vertex: Vertex) -> Result<()> {
-        info!(
-            "Broadcasting vertex {} from round {}",
-            hex::encode(vertex.id),
-            vertex.round
-        );
+        info!("🚀 [BRACHA STEP 1: SEND] ==========================================");
+        info!("🚀 [BRACHA] Broadcasting vertex {}", hex::encode(&vertex.id[..8]));
+        info!("🚀 [BRACHA] Round: {}", vertex.round);
+        info!("🚀 [BRACHA] Transactions: {}", vertex.transactions.len());
+        info!("🚀 [BRACHA] This is the SEND phase - all nodes will receive and ECHO");
 
         // Send the vertex to all nodes
-        let message = BroadcastMessage::Send { vertex };
+        let message = BroadcastMessage::Send { vertex: vertex.clone() };
         self.network_tx
             .send(message)
             .map_err(|e| anyhow::anyhow!("Failed to broadcast vertex: {}", e))?;
+
+        info!("✅ [BRACHA] SEND message broadcast to all peers");
+        info!("⏳ [BRACHA] Waiting for ECHO responses from peers...");
+        info!("🚀 [BRACHA STEP 1 COMPLETE] ==========================================\n");
 
         Ok(())
     }
@@ -89,13 +93,17 @@ impl ReliableBroadcast {
     async fn handle_send(&self, vertex: Vertex) -> Result<Option<Vertex>> {
         let vertex_id = vertex.id;
 
-        debug!("Received SEND for vertex {}", hex::encode(vertex_id));
+        info!("📥 [BRACHA STEP 1: RECEIVED SEND] ==========================================");
+        info!("📥 [BRACHA] Received SEND for vertex {}", hex::encode(&vertex_id[..8]));
+        info!("📥 [BRACHA] Round: {}, Transactions: {}", vertex.round, vertex.transactions.len());
 
         // Validate vertex (basic checks)
+        info!("🔍 [BRACHA] Validating vertex structure and signatures...");
         if !self.validate_vertex(&vertex).await? {
-            warn!("Invalid vertex received: {}", hex::encode(vertex_id));
+            warn!("❌ [BRACHA] Invalid vertex received: {} - REJECTING", hex::encode(&vertex_id[..8]));
             return Ok(None);
         }
+        info!("✅ [BRACHA] Vertex validation passed");
 
         // If we haven't echoed this vertex yet, echo it
         {
@@ -103,6 +111,7 @@ impl ReliableBroadcast {
             if !echoed.contains(&vertex_id) {
                 echoed.insert(vertex_id);
 
+                info!("📢 [BRACHA STEP 2: ECHO] Broadcasting ECHO to all peers...");
                 // Send ECHO to all nodes
                 let echo_msg = BroadcastMessage::Echo {
                     vertex_id,
@@ -110,102 +119,132 @@ impl ReliableBroadcast {
                 };
                 self.network_tx.send(echo_msg)?;
 
-                debug!("Sent ECHO for vertex {}", hex::encode(vertex_id));
+                info!("✅ [BRACHA] ECHO sent for vertex {}", hex::encode(&vertex_id[..8]));
+                info!("⏳ [BRACHA] Waiting for {} ECHO votes (2f+1 threshold)...", self.threshold_2f_plus_1);
+            } else {
+                info!("ℹ️ [BRACHA] Already echoed this vertex - skipping ECHO");
             }
         }
+        info!("📥 [BRACHA STEP 1 COMPLETE] ==========================================\n");
 
         Ok(Some(vertex))
     }
 
     /// Handle ECHO message (step 2)
     async fn handle_echo(&self, vertex_id: VertexId, sender: NodeId) -> Result<Option<Vertex>> {
-        debug!(
-            "Received ECHO for vertex {} from {:?}",
-            hex::encode(vertex_id),
-            sender
-        );
+        info!("🔔 [BRACHA STEP 2: ECHO RECEIVED] ==========================================");
+        info!("🔔 [BRACHA] Received ECHO for vertex {} from node {:?}",
+            hex::encode(&vertex_id[..8]), hex::encode(&sender[..8]));
 
         // Add to echo votes
         let echo_count = {
             let mut echo_votes = self.echo_votes.write().await;
             let votes = echo_votes.entry(vertex_id).or_insert_with(HashSet::new);
             votes.insert(sender);
-            votes.len()
+            let count = votes.len();
+            info!("📊 [BRACHA] ECHO vote count: {}/{} (threshold: {})",
+                  count, self.threshold_2f_plus_1, self.threshold_2f_plus_1);
+            count
         };
 
         // If we have 2f+1 echo votes and haven't sent ready, send ready
         if echo_count >= self.threshold_2f_plus_1 {
+            info!("🎯 [BRACHA] ECHO QUORUM REACHED! ({}/{})",
+                  echo_count, self.threshold_2f_plus_1);
+
             let mut ready_sent = self.ready_sent.write().await;
             if !ready_sent.contains(&vertex_id) {
                 ready_sent.insert(vertex_id);
 
+                info!("📢 [BRACHA STEP 3: READY] Broadcasting READY to all peers...");
                 let ready_msg = BroadcastMessage::Ready {
                     vertex_id,
                     sender: self.node_id,
                 };
                 self.network_tx.send(ready_msg)?;
 
-                debug!(
-                    "Sent READY for vertex {} (echo threshold reached)",
-                    hex::encode(vertex_id)
+                info!("✅ [BRACHA] READY sent for vertex {} (echo threshold reached)",
+                    hex::encode(&vertex_id[..8])
                 );
+                info!("⏳ [BRACHA] Waiting for {} READY votes (2f+1 threshold)...", self.threshold_2f_plus_1);
+            } else {
+                info!("ℹ️ [BRACHA] READY already sent for this vertex");
             }
+        } else {
+            info!("⏳ [BRACHA] Still collecting ECHO votes... ({}/{} needed)",
+                  echo_count, self.threshold_2f_plus_1);
         }
+        info!("🔔 [BRACHA STEP 2 COMPLETE] ==========================================\n");
 
         Ok(None)
     }
 
     /// Handle READY message (step 3)
     async fn handle_ready(&self, vertex_id: VertexId, sender: NodeId) -> Result<Option<Vertex>> {
-        debug!(
-            "Received READY for vertex {} from {:?}",
-            hex::encode(vertex_id),
-            sender
-        );
+        info!("🟣 [BRACHA STEP 3: READY RECEIVED] ==========================================");
+        info!("🟣 [BRACHA] Received READY for vertex {} from node {:?}",
+            hex::encode(&vertex_id[..8]), hex::encode(&sender[..8]));
 
         // Add to ready votes
         let ready_count = {
             let mut ready_votes = self.ready_votes.write().await;
             let votes = ready_votes.entry(vertex_id).or_insert_with(HashSet::new);
             votes.insert(sender);
-            votes.len()
+            let count = votes.len();
+            info!("📊 [BRACHA] READY vote count: {}/{} (final threshold: {})",
+                  count, self.threshold_2f_plus_1, self.threshold_2f_plus_1);
+            count
         };
 
-        // If we have f+1 ready votes and haven't sent ready, send ready
+        // If we have f+1 ready votes and haven't sent ready, send ready (amplification)
         if ready_count >= self.threshold_f_plus_1 {
+            info!("⚡ [BRACHA] READY AMPLIFICATION threshold reached! ({}/{})",
+                  ready_count, self.threshold_f_plus_1);
+
             let mut ready_sent = self.ready_sent.write().await;
             if !ready_sent.contains(&vertex_id) {
                 ready_sent.insert(vertex_id);
 
+                info!("📢 [BRACHA] Broadcasting READY (amplification) to ensure Byzantine resilience...");
                 let ready_msg = BroadcastMessage::Ready {
                     vertex_id,
                     sender: self.node_id,
                 };
                 self.network_tx.send(ready_msg)?;
 
-                debug!(
-                    "Sent READY for vertex {} (ready threshold reached)",
-                    hex::encode(vertex_id)
+                info!("✅ [BRACHA] READY sent via amplification for vertex {}",
+                    hex::encode(&vertex_id[..8])
                 );
             }
         }
 
         // If we have 2f+1 ready votes and haven't delivered, deliver
         if ready_count >= self.threshold_2f_plus_1 {
+            info!("🎉🎉🎉 [BRACHA] READY QUORUM REACHED! ({}/{})",
+                  ready_count, self.threshold_2f_plus_1);
+
             let mut delivered = self.delivered.write().await;
             if !delivered.contains(&vertex_id) {
                 delivered.insert(vertex_id);
 
-                info!(
-                    "DELIVERED vertex {} (ready delivery threshold reached)",
-                    hex::encode(vertex_id)
-                );
+                info!("✅✅✅ [BRACHA STEP 4: DELIVERY] ==========================================");
+                info!("🎉 [BRACHA] VERTEX DELIVERED: {}", hex::encode(&vertex_id[..8]));
+                info!("🎉 [BRACHA] Byzantine fault tolerance achieved!");
+                info!("🎉 [BRACHA] All correct nodes will deliver this vertex");
+                info!("🎉 [BRACHA] Ready vote count: {}/{}", ready_count, self.threshold_2f_plus_1);
+                info!("✅✅✅ [BRACHA DELIVERY COMPLETE] ==========================================\n");
 
                 // TODO: Return the actual vertex from storage
                 // For now, create a placeholder
                 return Ok(Some(self.create_placeholder_vertex(vertex_id)));
+            } else {
+                info!("ℹ️ [BRACHA] Vertex already delivered - duplicate READY vote");
             }
+        } else {
+            info!("⏳ [BRACHA] Still collecting READY votes... ({}/{} needed for delivery)",
+                  ready_count, self.threshold_2f_plus_1);
         }
+        info!("🟣 [BRACHA STEP 3 COMPLETE] ==========================================\n");
 
         Ok(None)
     }

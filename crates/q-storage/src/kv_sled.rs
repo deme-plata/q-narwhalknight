@@ -121,6 +121,14 @@ impl KVStore for RocksDBKV {
         Ok(())
     }
 
+    async fn put_sync(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        let tree = self.get_tree(cf)?;
+        tree.insert(key, value).context("sled put failed")?;
+        // Sled flushes to disk automatically, so we just ensure it's written
+        tree.flush_async().await.context("sled flush failed")?;
+        Ok(())
+    }
+
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let tree = self.get_tree(cf)?;
         let result = tree.get(key).context("sled get failed")?;

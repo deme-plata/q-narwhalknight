@@ -48,7 +48,7 @@ tokio-test = "0.4"
 
 # Platform-specific dependencies
 # Hardware interfaces are Linux-only (require udev, hidapi for USB devices)
-[target.'cfg(not(target_os = "windows"))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 serialport = "4.2"
 hidapi = "2.4"
 udev = "0.7"

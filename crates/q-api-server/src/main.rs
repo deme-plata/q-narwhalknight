@@ -3,7 +3,7 @@ use axum::{
     Router,
 };
 use clap::{Arg, ArgAction, Command};
-use q_api_server::{handlers, streaming, payment_api, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats};
+use q_api_server::{handlers, streaming, payment_api, oauth2_provider, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats};
 use q_types::TxStatus;
 mod contracts_api;
 mod dex_integration_api;
@@ -23,7 +23,7 @@ use quillon_bank_api::create_quillon_bank_router;
 //     bridge::{IntegratedBitcoinBridge, PeerNetworkEvent},
 //     BitcoinBridgeConfig,
 // };
-// use q_tor_client::QTorClient; // Temporarily disabled due to arti compilation issues
+use q_tor_client::QTorClient; // ✅ Re-enabled with embedded Arti support
 use q_types::NodeId;
 use std::{collections::HashSet, sync::Arc};
 use tower::ServiceBuilder;
@@ -462,6 +462,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     */
 
+    // ========================================
+    // 🌐 LIBP2P UNIFIED NETWORK MANAGER
+    // Zero-configuration P2P networking with Gossipsub
+    // ========================================
+    info!("🌐 Initializing libp2p Unified Network Manager...");
+
+    let libp2p_manager = match q_network::UnifiedNetworkManager::new().await {
+        Ok(mut manager) => {
+            info!("✅ libp2p Network Manager initialized");
+            info!("   Local Peer ID: {}", manager.peer_id());
+            info!("   Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping");
+
+            // Subscribe to application topics
+            let topics = vec![
+                "/qnk/transactions",
+                "/qnk/consensus",
+                "/qnk/dex/orders",
+                "/qnk/contracts/state",
+            ];
+
+            for topic in &topics {
+                if let Err(e) = manager.subscribe_topic(topic) {
+                    warn!("Failed to subscribe to {}: {}", topic, e);
+                } else {
+                    info!("📢 Subscribed to topic: {}", topic);
+                }
+            }
+
+            // Set up gossipsub message forwarding
+            let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel();
+            manager.set_gossipsub_channel(gossipsub_tx);
+
+            // Start network event loop
+            let manager_arc = Arc::new(tokio::sync::Mutex::new(manager));
+            let manager_clone = manager_arc.clone();
+
+            tokio::spawn(async move {
+                info!("🔄 Starting libp2p network event loop...");
+                loop {
+                    let mut nm = manager_clone.lock().await;
+                    if let Err(e) = nm.run_once().await {
+                        error!("Network manager error: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                }
+            });
+
+            // Start gossipsub message processor
+            tokio::spawn(async move {
+                info!("📨 Starting gossipsub message processor...");
+                while let Some((topic, data)) = gossipsub_rx.recv().await {
+                    info!("📥 GOSSIPSUB: topic={}, size={} bytes", topic, data.len());
+
+                    // TODO: Route to appropriate handlers
+                    match topic.as_str() {
+                        "/qnk/transactions" => {
+                            info!("  → Transaction propagation (not yet implemented)");
+                        }
+                        "/qnk/consensus" => {
+                            info!("  → Consensus message (not yet implemented)");
+                        }
+                        "/qnk/dex/orders" => {
+                            info!("  → DEX order book update (not yet implemented)");
+                        }
+                        "/qnk/contracts/state" => {
+                            info!("  → Contract state sync (not yet implemented)");
+                        }
+                        _ => {
+                            warn!("  → Unknown topic, dropping");
+                        }
+                    }
+                }
+            });
+
+            info!("✅ libp2p network fully operational");
+            Some(manager_arc)
+        }
+        Err(e) => {
+            warn!("⚠️  libp2p Network Manager initialization failed: {}", e);
+            warn!("   Continuing without libp2p gossipsub");
+            None
+        }
+    };
+
     // Initialize application state with network components
     let state = AppState::new_with_networks(
         config.clone(),
@@ -471,6 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bep44_discovery,
         tor_client,
         None,  // production_peer_discovery is deactivated
+        libp2p_manager,  // ✅ ENABLED - libp2p gossipsub for transaction propagation
     )
     .await?;
     let mut state = state;
@@ -1385,6 +1470,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v1/mixer/status/:mixing_id",
             get(handlers::get_mixing_status),
         ) // Get mixing status by session ID or transaction hash
+
+        // ==================== Privacy-as-a-Service (PaaS) API ====================
+        // Enterprise-grade privacy infrastructure for all blockchains
+        // Revenue flows to Quillon Bank master account
+        .route(
+            "/api/v1/privacy/tor/relay",
+            post(q_api_server::privacy_service_api::tor_relay_service),
+        ) // Tor relay service
+        .route(
+            "/api/v1/privacy/mix/submit",
+            post(q_api_server::privacy_service_api::mixing_service),
+        ) // Transaction mixing service
+        .route(
+            "/api/v1/privacy/ring-signature/generate",
+            post(q_api_server::privacy_service_api::ring_signature_service),
+        ) // Ring signature generation
+        .route(
+            "/api/v1/privacy/stealth-address/generate",
+            post(q_api_server::privacy_service_api::stealth_address_service),
+        ) // Stealth address generation
+        .route(
+            "/api/v1/privacy/zk-stark/prove",
+            post(q_api_server::privacy_service_api::zk_stark_proof_service),
+        ) // ZK-STARK proof generation
+        .route(
+            "/api/v1/privacy/paas/statistics",
+            get(q_api_server::privacy_service_api::paas_statistics),
+        ) // PaaS statistics and revenue
+
+        // Mount PaaS admin router for management endpoints
+        .nest(
+            "/api/v1/privacy/paas",
+            q_api_server::paas_admin_api::create_paas_admin_router(),
+        )
+        // =========================================================================
+
         .route("/api/v1/transactions/:hash", get(handlers::get_transaction))
         .route(
             "/api/v1/transactions/recent",
@@ -1549,6 +1670,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/payment/withdraw", post(payment_api::withdraw_usd))
         .route("/api/v1/payment/convert-to-qugusd", post(payment_api::convert_usd_to_qugusd))
         .route("/api/v1/payment/transfer", post(payment_api::transfer_usd))
+        // OAuth2 Provider for Third-Party Integration - ENABLED
+        .route("/api/v1/oauth2/register", post(oauth2_provider::register_client))
+        .route("/api/v1/oauth2/authorize", get(oauth2_provider::authorize))
+        .route("/api/v1/oauth2/consent", post(oauth2_provider::handle_consent))
+        .route("/api/v1/oauth2/token", post(oauth2_provider::token))
+        .route("/api/v1/oauth2/userinfo", get(oauth2_provider::userinfo))
+        .route("/api/v1/oauth2/revoke", post(oauth2_provider::revoke))
+        .route("/api/v1/oauth2/clients/:client_id", get(oauth2_provider::get_client_info))
         // Network & Infrastructure
         .route(
             "/api/v1/tor/circuits/status",

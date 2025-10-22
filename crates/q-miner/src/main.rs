@@ -39,6 +39,10 @@ struct Args {
     /// Duration in seconds for benchmark
     #[arg(long, default_value = "30")]
     duration: u64,
+
+    /// API server URL (e.g., http://185.182.185.227:8080)
+    #[arg(short, long, default_value = "http://localhost:8080")]
+    server: String,
 }
 
 // Simplified hardware info structure
@@ -133,7 +137,8 @@ async fn main() -> Result<()> {
 
         info!("⛏️  Starting Q-NarwhalKnight mining...");
         info!("💰 Mining to wallet: {}", wallet);
-        run_mining(cpu_threads, args.intensity, args.gpu, &wallet).await?;
+        info!("🌐 Connecting to server: {}", args.server);
+        run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server).await?;
     }
 
     Ok(())
@@ -196,10 +201,11 @@ async fn run_benchmark(threads: usize, intensity: u8, duration: u64) -> Result<(
     Ok(())
 }
 
-async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &str) -> Result<()> {
+async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &str, server_url: &str) -> Result<()> {
     let hash_counter = Arc::new(AtomicU64::new(0));
     let is_running = Arc::new(AtomicBool::new(true));
     let wallet = wallet.to_string();
+    let server_url = server_url.to_string();
 
     info!("🔥 Starting {} CPU mining threads", threads);
 
@@ -208,13 +214,14 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
             let hash_counter = hash_counter.clone();
             let is_running = is_running.clone();
             let wallet = wallet.clone();
+            let server_url = server_url.clone();
 
             tokio::spawn(async move {
-                mining_thread(thread_id, hash_counter, is_running, intensity, wallet).await
+                mining_thread(thread_id, hash_counter, is_running, intensity, wallet, server_url).await
             })
         })
         .collect();
-    
+
     // Start hash rate monitor
     let monitor_counter = hash_counter.clone();
     let monitor_running = is_running.clone();
@@ -224,9 +231,10 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
 
     // Start SSE listener for real-time mining rewards
     let sse_wallet = wallet.clone();
+    let sse_server_url = server_url.clone();
     let sse_running = is_running.clone();
     let sse_handle = tokio::spawn(async move {
-        start_sse_listener(sse_wallet, sse_running).await;
+        start_sse_listener(sse_wallet, sse_server_url, sse_running).await;
     });
 
     if gpu_enabled {
@@ -285,12 +293,13 @@ async fn mining_thread(
     is_running: Arc<AtomicBool>,
     intensity: u8,
     wallet: String,
+    server_url: String,
 ) {
     info!("🔥 CPU mining thread {} started", thread_id);
 
     let mut nonce = thread_id as u64 * 1_000_000;
     let batch_size = (intensity as u64) * 10_000;
-    let api_url = "http://localhost:8080";
+    let api_url = &server_url;
 
     let client = reqwest::Client::new();
 
@@ -437,12 +446,12 @@ async fn hash_rate_monitor(
 }
 
 /// SSE listener for real-time mining rewards
-async fn start_sse_listener(wallet: String, is_running: Arc<AtomicBool>) {
+async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<AtomicBool>) {
     use eventsource_client::{self as eventsource, Client as _};
     use futures::StreamExt;
 
     // Include wallet_address parameter for filtered SSE events
-    let url = format!("http://localhost:8080/api/v1/events?wallet_address={}", wallet);
+    let url = format!("{}/api/v1/events?wallet_address={}", server_url, wallet);
 
     loop {
         if !is_running.load(Ordering::SeqCst) {

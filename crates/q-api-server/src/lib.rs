@@ -70,6 +70,16 @@ pub mod wallet_auth;  // Signature-based wallet authentication for privacy
 pub mod storage_api;  // IPFS-RocksDB decentralized storage for database backups
 pub mod database_replication_bridge;  // Bridge between IPFS replication and gossipsub
 pub mod payment_api;  // ✅ ENABLED - Stripe payment processing with async-stripe
+pub mod oauth2_provider;  // ✅ ENABLED - OAuth2 provider for third-party integrations
+pub mod privacy_service_api;  // ✅ ENABLED - Privacy-as-a-Service (PaaS) enterprise API
+pub mod paas_auth;  // ✅ ENABLED - PaaS authentication and rate limiting
+pub mod paas_api_keys;  // ✅ ENABLED - API key management with argon2id hashing
+pub mod paas_pricing;  // ✅ ENABLED - Dynamic USD pricing with oracle integration
+pub mod paas_billing;  // ✅ ENABLED - Atomic billing with pre-charge and reserve
+pub mod paas_billing_v2;  // ✅ ENABLED - Atomic billing v2 with Grok improvements
+pub mod paas_idempotency;  // ✅ ENABLED - Idempotency support for safe retries
+pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
+pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
@@ -390,6 +400,14 @@ pub struct AppState {
     // Quillon Bank - Full Quantum Banking System with CDP
     pub quillon_bank: Arc<RwLock<QuillonBankSystem>>, // ✅ ENABLED - Real banking system
 
+    // Privacy-as-a-Service (PaaS) Authentication & Rate Limiting
+    pub paas_auth_manager: Arc<paas_auth::PaaSAuthManager>, // ✅ ENABLED - Hybrid signature auth
+    pub paas_api_key_manager: Arc<paas_api_keys::PaaSApiKeyManager>, // ✅ ENABLED - API key management
+    pub paas_pricing_manager: Arc<paas_pricing::PaaSPricingManager>, // ✅ ENABLED - Dynamic USD pricing
+    pub paas_billing_manager: Arc<paas_billing::PaaSBillingManager>, // ✅ ENABLED - Atomic billing
+    pub paas_idempotency_manager: Arc<paas_idempotency::PaaSIdempotencyManager>, // ✅ ENABLED - Idempotency
+    pub paas_audit_manager: Arc<paas_audit::PaaSAuditManager>, // ✅ ENABLED - Audit logging & tracing
+
     // QUG/QUGUSD Stablecoin System - CollateralVault for over-collateralized minting
     pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
 
@@ -415,6 +433,9 @@ pub struct AppState {
 
     // Distributed VM and DEX (Horizontal Scaling)
     pub distributed_protocol: Option<Arc<q_network::DistributedProtocolManager>>,
+
+    // OAuth2 Provider for third-party integrations
+    pub oauth2_storage: Arc<RwLock<oauth2_provider::OAuth2Storage>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -454,7 +475,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "data/q-narwhal-hot".to_string()),
             enable_metrics: true,
-            sync_writes: false,
+            sync_writes: true,  // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
             cache_size_mb: 256,
             max_open_files: 1000,
         };
@@ -593,9 +614,36 @@ impl AppState {
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
 
         // Initialize CollateralVault for QUG/QUGUSD stablecoin system
-        let collateral_vault = Arc::new(RwLock::new(
-            q_vm::contracts::CollateralVault::new()
-        ));
+        // Load from persistent storage or create new if none exists
+        let collateral_vault = match storage_engine.load_collateral_vault_data().await {
+            Ok(Some(vault_bytes)) => {
+                match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
+                    Ok(persisted_vault) => {
+                        tracing::info!(
+                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}",
+                            persisted_vault.total_qug_locked,
+                            persisted_vault.total_qugusd_minted
+                        );
+                        Arc::new(RwLock::new(persisted_vault))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize CollateralVault: {}, creating new vault", e);
+                        Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("💰 No persisted CollateralVault found, creating new vault");
+                Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load CollateralVault from storage: {}, creating new vault",
+                    e
+                );
+                Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+            }
+        };
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         Ok(Self {
@@ -769,6 +817,17 @@ impl AppState {
 
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
+
+            // OAuth2 Provider - Initialize with empty storage
+            oauth2_storage: Arc::new(RwLock::new(oauth2_provider::OAuth2Storage::new())),
+
+            // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
+            paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
+            paas_api_key_manager: Arc::new(paas_api_keys::PaaSApiKeyManager::new()),
+            paas_pricing_manager: Arc::new(paas_pricing::PaaSPricingManager::new()),
+            paas_billing_manager: Arc::new(paas_billing::PaaSBillingManager::new()),
+            paas_idempotency_manager: Arc::new(paas_idempotency::PaaSIdempotencyManager::new()),
+            paas_audit_manager: Arc::new(paas_audit::PaaSAuditManager::new(10_000)), // 10k records in memory
         })
     }
 
@@ -780,6 +839,7 @@ impl AppState {
         bep44_discovery: Option<Arc<()>>, // DEACTIVATED
         tor_client: Option<Arc<QTorClient>>,
         __production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
+        libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
     ) -> anyhow::Result<Self> {
         let _wallet_store = MemoryWalletStore::new();
         let wallet_manager = WalletManager::new();
@@ -805,7 +865,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "data/q-narwhal-hot".to_string()),
             enable_metrics: true,
-            sync_writes: false,
+            sync_writes: true,  // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
             cache_size_mb: 256,
             max_open_files: 1000,
         };
@@ -839,8 +899,14 @@ impl AppState {
             }
         };
 
-        // Initialize libp2p-based zero-config peer discovery
-        let libp2p_discovery = {
+        // Use the libp2p discovery passed in from main.rs (which has topic subscriptions configured)
+        // Or fall back to creating a basic one if None was passed
+        let libp2p_discovery = if libp2p_discovery.is_some() {
+            // Use the pre-configured manager from main.rs
+            tracing::info!("✅ Using pre-configured libp2p manager from main.rs");
+            libp2p_discovery
+        } else {
+            // Fallback: create a basic discovery manager
             match q_network::UnifiedNetworkManager::new().await {
                 Ok(discovery) => {
                     tracing::info!("🚀 libp2p Zero-Knowledge Discovery initialized successfully!");
@@ -986,9 +1052,36 @@ impl AppState {
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
 
         // Initialize CollateralVault for QUG/QUGUSD stablecoin system
-        let collateral_vault = Arc::new(RwLock::new(
-            q_vm::contracts::CollateralVault::new()
-        ));
+        // Load from persistent storage or create new if none exists
+        let collateral_vault = match storage_engine.load_collateral_vault_data().await {
+            Ok(Some(vault_bytes)) => {
+                match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
+                    Ok(persisted_vault) => {
+                        tracing::info!(
+                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}",
+                            persisted_vault.total_qug_locked,
+                            persisted_vault.total_qugusd_minted
+                        );
+                        Arc::new(RwLock::new(persisted_vault))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize CollateralVault: {}, creating new vault", e);
+                        Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("💰 No persisted CollateralVault found, creating new vault");
+                Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load CollateralVault from storage: {}, creating new vault",
+                    e
+                );
+                Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
+            }
+        };
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         Ok(Self {
@@ -1151,6 +1244,17 @@ impl AppState {
 
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
+
+            // OAuth2 Provider - Initialize with empty storage
+            oauth2_storage: Arc::new(RwLock::new(oauth2_provider::OAuth2Storage::new())),
+
+            // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
+            paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
+            paas_api_key_manager: Arc::new(paas_api_keys::PaaSApiKeyManager::new()),
+            paas_pricing_manager: Arc::new(paas_pricing::PaaSPricingManager::new()),
+            paas_billing_manager: Arc::new(paas_billing::PaaSBillingManager::new()),
+            paas_idempotency_manager: Arc::new(paas_idempotency::PaaSIdempotencyManager::new()),
+            paas_audit_manager: Arc::new(paas_audit::PaaSAuditManager::new(10_000)), // 10k records in memory
         })
     }
 

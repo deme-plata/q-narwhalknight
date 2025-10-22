@@ -70,7 +70,7 @@ tokio-test = "0.4"
 proptest = { workspace = true }
 
 # Platform-specific dependencies
-# mDNS requires libudev on Linux which cannot be cross-compiled to Windows
-# Enable mDNS only on Unix-like platforms (Linux, macOS, BSD, etc.)
-[target.'cfg(not(target_os = "windows"))'.dependencies]
+# mDNS requires libudev on Linux which cannot be cross-compiled to Windows or macOS
+# Enable mDNS only on Linux platforms
+[target.'cfg(target_os = "linux")'.dependencies]
 libp2p = { workspace = true, features = ["mdns"] }

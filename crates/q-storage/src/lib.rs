@@ -576,13 +576,17 @@ impl QStorage {
         Ok(())
     }
 
-    /// Save wallet balance to persistent storage
+    /// Save wallet balance to persistent storage with SYNC to guarantee disk write
     pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u64) -> Result<()> {
         let key = format!("wallet_balance_{}", hex::encode(address));
         let value = amount.to_le_bytes();
-        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
-        debug!(
-            "💰 Saved wallet balance: {} -> {}",
+
+        // CRITICAL: Use synced write to guarantee data reaches disk (survives pkill -9)
+        // This overrides the default set_sync(false) in write_options()
+        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
+
+        info!(
+            "💰 SYNCED wallet balance to disk: {} -> {} units (survives hard kill)",
             hex::encode(address),
             amount
         );
@@ -1195,6 +1199,31 @@ impl QStorage {
         }
 
         Ok(hashes)
+    }
+
+    /// Save CollateralVault to persistent storage (generic byte storage)
+    /// Key: collateral_vault
+    pub async fn save_collateral_vault_data(&self, vault_data: &[u8]) -> Result<()> {
+        let key = b"collateral_vault";
+        self.hot_db.put(CF_MANIFEST, key, vault_data).await?;
+        debug!("💰 Saved CollateralVault data ({} bytes)", vault_data.len());
+        Ok(())
+    }
+
+    /// Load CollateralVault data from persistent storage
+    /// Returns None if no vault exists (first run)
+    pub async fn load_collateral_vault_data(&self) -> Result<Option<Vec<u8>>> {
+        let key = b"collateral_vault";
+        match self.hot_db.get(CF_MANIFEST, key).await? {
+            Some(vault_data) => {
+                info!("💰 Loaded CollateralVault data ({} bytes)", vault_data.len());
+                Ok(Some(vault_data))
+            }
+            None => {
+                debug!("💰 No persisted CollateralVault found (first run)");
+                Ok(None)
+            }
+        }
     }
 }
 

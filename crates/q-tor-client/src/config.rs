@@ -41,6 +41,12 @@ pub struct TorConfig {
 
     /// Enable Prometheus metrics collection
     pub enable_prometheus_metrics: bool,
+
+    /// Use embedded Arti client instead of external Tor daemon
+    pub use_embedded_arti: bool,
+
+    /// Cache directory for embedded Arti client
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Default for TorConfig {
@@ -58,6 +64,8 @@ impl Default for TorConfig {
             socks_proxy_addr: Some("127.0.0.1:9150".parse().unwrap()),
             bootstrap_onions: vec!["bootstrap.qnk.onion:4001".to_string()],
             enable_prometheus_metrics: true,
+            use_embedded_arti: false,
+            cache_dir: Some(PathBuf::from("/var/lib/qnk/tor_cache")),
         }
     }
 }
@@ -81,6 +89,21 @@ impl TorConfig {
             tor_only: false,
             enable_dandelion: true,
             latency_target_ms: Some(300),
+            ..Default::default()
+        }
+    }
+
+    /// Create configuration for embedded Arti mode (no external Tor daemon needed)
+    pub fn embedded_arti_mode() -> Self {
+        Self {
+            enabled: true,
+            use_embedded_arti: true,
+            tor_only: false,
+            enable_dandelion: true,
+            latency_target_ms: Some(300),
+            socks_proxy_addr: None, // Not needed with embedded Arti
+            data_dir: Some(PathBuf::from("/tmp/qnk_tor")),
+            cache_dir: Some(PathBuf::from("/tmp/qnk_tor_cache")),
             ..Default::default()
         }
     }

@@ -47,8 +47,11 @@ members = [
     "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
     "crates/q-ipfs-storage",   # IPFS-RocksDB decentralized storage
     "crates/q-aegis-ql",       # AEGIS-QL post-quantum access control
-    "gui"
-, "crates/q-resonance"]
+    "crates/q-quillon-bank",   # Quantum banking with CDP and PaaS revenue
+    "crates/q-quillon-bank-cli", # Quillon Bank CLI management interface
+    "gui",
+    "crates/q-resonance"
+, "sdk/rust"]
 
 [workspace.package]
 version = "0.1.0"
@@ -85,8 +88,8 @@ tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 hyper = "1.0"
 
 # Networking - Enhanced for real network connectivity
-# mdns removed from default features - added conditionally below for non-Windows targets
-libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "mdns", "tokio"] }
+# mdns removed from default features - will be added conditionally in q-network for Linux only
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio"] }
 reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls"] }
 
 # Real network implementations

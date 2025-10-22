@@ -18,5 +18,20 @@ windows-release/*.zip
 
 # Proprietary Quillon Bank CLI
 crates/q-quillon-bank/
+crates/q-quillon-bank-cli/
 **/quillon-bank
 **/quillon_bank
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# PaaS whitepaper builds
+PRIVACY_AS_A_SERVICE_WHITEPAPER.pdf
+PRIVACY_AS_A_SERVICE_WHITEPAPER*.pdf
+api-docs/dist/*.pdf

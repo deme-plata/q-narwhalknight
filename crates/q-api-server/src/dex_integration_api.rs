@@ -229,6 +229,7 @@ pub fn create_dex_integration_router() -> Router<Arc<AppState>> {
         // Core DEX Integration Endpoints
         .route("/info", get(get_node_info))
         .route("/supported-tokens", get(get_supported_tokens))
+        .route("/tokens", get(get_supported_tokens)) // Shorter alias for frontend compatibility
         .route("/token/:address/info", get(get_token_info))
         
         // Liquidity Pool Endpoints

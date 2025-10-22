@@ -279,16 +279,22 @@ impl UnifiedNetworkManager {
                     num_established,
                     ..
                 }) => {
+                    info!("🌐 [LIBP2P CONNECTION] ==========================================");
+                    info!("✅ [CONNECTION] Successfully connected to peer: {}", peer_id);
+                    info!("📍 [CONNECTION] Endpoint: {:?}", endpoint);
+                    info!("🔢 [CONNECTION] Number of established connections: {}", num_established);
+
                     let mut peers = self.discovered_peers.write().await;
                     peers.insert(peer_id);
-                    info!(
-                        "🔗 Connected to peer: {} (total connections: {})",
-                        peer_id, num_established
-                    );
-                    info!("📊 Total discovered peers: {}", peers.len());
+
+                    info!("📊 [NETWORK STATE] Total discovered peers: {}", peers.len());
+                    info!("🔄 [SYNC] Ready to synchronize DAG state with peer {}", peer_id);
+                    info!("📡 [PROPAGATION] Will propagate vertices/transactions to this peer");
+                    info!("🔐 [CONSENSUS] Peer will participate in Bracha's protocol voting");
+                    info!("🌐 [LIBP2P CONNECTION COMPLETE] ==========================================\n");
                 }
                 Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                    debug!("👋 Connection closed: {}", peer_id);
+                    info!("👋 [DISCONNECTION] Connection closed with peer: {}", peer_id);
                 }
                 _ => {}
             }
@@ -535,6 +541,49 @@ impl UnifiedNetworkManager {
             .publish(ident_topic, data)
             .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
         debug!("📤 Published message to gossipsub topic: {}", topic);
+        Ok(())
+    }
+
+    /// Get the local peer ID
+    pub fn peer_id(&self) -> PeerId {
+        self.local_peer_id
+    }
+
+    /// Run one iteration of the network event loop
+    /// Should be called in a loop from an async task
+    pub async fn run_once(&mut self) -> anyhow::Result<()> {
+        use futures::stream::StreamExt;
+
+        // Process one event from the swarm
+        if let Some(event) = self.swarm.next().await {
+            match event {
+                SwarmEvent::Behaviour(behaviour_event) => {
+                    self.handle_behaviour_event(behaviour_event).await?;
+                }
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    info!("📍 Listening on: {}", address);
+                }
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    endpoint,
+                    num_established,
+                    ..
+                } => {
+                    let mut peers = self.discovered_peers.write().await;
+                    peers.insert(peer_id);
+                    info!(
+                        "🔗 Connected to peer: {} (total connections: {})",
+                        peer_id, num_established
+                    );
+                    info!("📊 Total discovered peers: {}", peers.len());
+                }
+                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    debug!("👋 Connection closed: {}", peer_id);
+                }
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 }

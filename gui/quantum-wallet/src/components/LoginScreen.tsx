@@ -115,18 +115,18 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     setIsGenerating(true);
     setGenerationError(null);
     setShowQuantumGenerator(true);
-    
+
     try {
       // Show quantum generation animation
       await new Promise(resolve => setTimeout(resolve, 800));
-      
+
       // Call the actual Q-NarwhalKnight API to generate BIP39 mnemonic
       const response = await qnkAPI.generateMnemonic();
-      
+
       if (response.success && response.data) {
         // Set the actual BIP39 mnemonic from the quantum consensus node
         setSeedPhrase(response.data.mnemonic);
-        
+
         // Show additional visual feedback for successful generation
         await new Promise(resolve => setTimeout(resolve, 700));
       } else {
@@ -135,7 +135,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     } catch (error) {
       console.error('Quantum seed generation failed:', error);
       setGenerationError(error instanceof Error ? error.message : 'Unknown error');
-      
+
       // Fallback to demo seed for development
       setSeedPhrase('abandon ability able about above absent absorb abstract absurd abuse access accident');
     } finally {
