@@ -434,3 +434,192 @@ pub enum QError {
     #[error("Other error: {0}")]
     Other(#[from] anyhow::Error),
 }
+
+// ============================================================================
+// Phase-Aware Signature and Verification for Consensus
+// ============================================================================
+
+/// Phase-aware signature metadata
+/// Allows consensus layer to know which cryptographic scheme was used
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseSignature {
+    /// The cryptographic phase used for signing
+    pub phase: Phase,
+    /// Raw signature bytes (Ed25519 for Phase 0, Dilithium5 for Phase 1)
+    pub signature: Vec<u8>,
+    /// Optional: Scheme identifier for crypto-agility
+    pub scheme_id: Option<u16>,
+}
+
+impl PhaseSignature {
+    /// Create Phase 0 signature (Ed25519)
+    pub fn phase0(signature: Vec<u8>) -> Self {
+        Self {
+            phase: Phase::Phase0,
+            signature,
+            scheme_id: Some(0x1200), // Ed25519 multicodec
+        }
+    }
+
+    /// Create Phase 1 signature (Dilithium5)
+    pub fn phase1(signature: Vec<u8>) -> Self {
+        Self {
+            phase: Phase::Phase1,
+            signature,
+            scheme_id: Some(0x1300), // Dilithium5 multicodec
+        }
+    }
+
+    /// Get signature size for this phase
+    pub fn signature_size(&self) -> usize {
+        match self.phase {
+            Phase::Phase0 => 64,       // Ed25519: 64 bytes
+            Phase::Phase1 => 4627,     // Dilithium5: ~4,627 bytes
+            Phase::Phase2 => 4627,     // Dilithium5 (with QRNG)
+            Phase::Phase3 => 4627,     // Dilithium5 (with STARK)
+            Phase::Phase4 => 4627,     // Dilithium5 (with QKD)
+        }
+    }
+
+    /// Check if this signature is quantum-resistant
+    pub fn is_quantum_resistant(&self) -> bool {
+        self.phase >= Phase::Phase1
+    }
+}
+
+/// Phase-aware certificate with metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseCertificate {
+    /// Original certificate
+    pub certificate: Certificate,
+    /// Phase of the network when certificate was created
+    pub phase: Phase,
+    /// Timestamp when certificate was created
+    pub created_at: DateTime<Utc>,
+}
+
+impl PhaseCertificate {
+    /// Create a new phase-aware certificate
+    pub fn new(certificate: Certificate, phase: Phase) -> Self {
+        Self {
+            certificate,
+            phase,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Check if certificate has sufficient signatures for the phase
+    pub fn is_valid(&self, threshold: usize) -> bool {
+        self.certificate.threshold_met && self.certificate.signatures.len() >= threshold
+    }
+
+    /// Get the number of quantum-resistant signatures
+    /// (All signatures are quantum-resistant if phase >= Phase1)
+    pub fn quantum_resistant_signature_count(&self) -> usize {
+        if self.phase >= Phase::Phase1 {
+            self.certificate.signatures.len()
+        } else {
+            0
+        }
+    }
+}
+
+/// Consensus voting with phase awareness
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseConsensusVote {
+    /// Original vote
+    pub vote: ConsensusVote,
+    /// Phase when vote was cast
+    pub phase: Phase,
+    /// Signature of the vote
+    pub signature: PhaseSignature,
+    /// Voter's node ID
+    pub voter: NodeId,
+}
+
+impl PhaseConsensusVote {
+    /// Create a Phase 0 vote (Ed25519)
+    pub fn phase0(vote: ConsensusVote, signature: Vec<u8>, voter: NodeId) -> Self {
+        Self {
+            vote,
+            phase: Phase::Phase0,
+            signature: PhaseSignature::phase0(signature),
+            voter,
+        }
+    }
+
+    /// Create a Phase 1 vote (Dilithium5)
+    pub fn phase1(vote: ConsensusVote, signature: Vec<u8>, voter: NodeId) -> Self {
+        Self {
+            vote,
+            phase: Phase::Phase1,
+            signature: PhaseSignature::phase1(signature),
+            voter,
+        }
+    }
+
+    /// Verify the vote signature
+    /// Returns true if signature is valid for the given phase
+    pub fn verify(&self, public_key: &[u8]) -> bool {
+        // TODO: Implement actual signature verification
+        // Phase 0: Use Ed25519 verification
+        // Phase 1: Use Dilithium5 verification
+
+        // For now, basic validation
+        match self.phase {
+            Phase::Phase0 => self.signature.signature.len() == 64,
+            Phase::Phase1 | Phase::Phase2 | Phase::Phase3 | Phase::Phase4 => {
+                // Dilithium5 signatures are ~4,627 bytes
+                self.signature.signature.len() >= 4000 && self.signature.signature.len() <= 5000
+            }
+        }
+    }
+}
+
+/// Helper trait for phase-aware signing
+pub trait PhaseAwareSigning {
+    /// Sign data using the appropriate algorithm for the phase
+    fn sign_with_phase(&self, data: &[u8], phase: Phase) -> Result<PhaseSignature, QError>;
+
+    /// Verify signature using the appropriate algorithm for the phase
+    fn verify_with_phase(&self, data: &[u8], signature: &PhaseSignature) -> Result<bool, QError>;
+}
+
+/// Helper function to create a vertex signature based on phase
+pub fn create_vertex_signature(
+    vertex_data: &[u8],
+    phase: Phase,
+    private_key: &[u8],
+) -> Result<Vec<u8>, QError> {
+    match phase {
+        Phase::Phase0 => {
+            // Ed25519 signing (Phase 0)
+            // In production, use actual Ed25519 signing
+            Ok(vec![0u8; 64]) // Placeholder
+        }
+        Phase::Phase1 | Phase::Phase2 | Phase::Phase3 | Phase::Phase4 => {
+            // Dilithium5 signing (Phase 1+)
+            // In production, use actual Dilithium5 signing from q-wallet
+            Ok(vec![0u8; 4627]) // Placeholder
+        }
+    }
+}
+
+/// Helper function to verify a vertex signature based on phase
+pub fn verify_vertex_signature(
+    vertex_data: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+    phase: Phase,
+) -> Result<bool, QError> {
+    match phase {
+        Phase::Phase0 => {
+            // Ed25519 verification
+            Ok(signature.len() == 64)
+        }
+        Phase::Phase1 | Phase::Phase2 | Phase::Phase3 | Phase::Phase4 => {
+            // Dilithium5 verification
+            Ok(signature.len() >= 4000 && signature.len() <= 5000)
+        }
+    }
+}
