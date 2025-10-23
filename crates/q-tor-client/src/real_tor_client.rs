@@ -166,8 +166,9 @@ impl RealTorClient {
     pub async fn new(config: TorConfig) -> Result<Self> {
         info!("Creating real Tor client with Arti");
 
-        // Create Tokio runtime for Arti
-        let runtime = TokioNativeTlsRuntime::create()?;
+        // Use current Tokio runtime for Arti (avoid nested runtime creation)
+        let runtime = TokioNativeTlsRuntime::current()
+            .map_err(|e| anyhow!("Failed to get current Tokio runtime: {}", e))?;
 
         // Configure Arti client
         let arti_config = TorClientConfig::default();

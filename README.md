@@ -1,8 +1,8 @@
-# Q-NarwhalKnight v0.0.3-beta
+# Q-NarwhalKnight v0.0.7-beta
 
-🌟 **Quantum-Enhanced DAG-BFT Consensus with Post-Quantum Cryptography**
+🌟 **Quantum-Enhanced DAG-BFT Consensus with Triple-Layer Anonymity**
 
-Q-NarwhalKnight is a revolutionary blockchain consensus system that combines the efficiency of DAG-Knight consensus with Narwhal mempool and quantum-ready cryptographic primitives. This implementation provides a phased approach to quantum-resistance, starting with classical cryptography (Phase 0) and progressively upgrading to full quantum protocols (Phase 4).
+Q-NarwhalKnight is a revolutionary blockchain consensus system that combines the efficiency of DAG-Knight consensus with Narwhal mempool, quantum-ready cryptographic primitives, and production-grade Tor integration for complete network anonymity. This implementation provides a phased approach to quantum-resistance, starting with classical cryptography (Phase 0) and progressively upgrading to full quantum protocols (Phase 4).
 
 ## 🔬 Architecture Overview
 
@@ -36,17 +36,32 @@ Q-NarwhalKnight implements a four-tier quantum threat model with seamless crypto
 ### Build & Run
 ```bash
 # Clone the repository
-git clone https://gitlab.com/dagknight/q-narwhalknight.git
+git clone https://github.com/deme-plata/q-narwhalknight.git
 cd q-narwhalknight
 
-# Build the workspace
-cargo build --release
+# Build the workspace (use 10-hour timeout for quantum components)
+timeout 36000 cargo build --release
 
-# Run the API server
-cargo run --bin q-api-server
+# Run the API server with Tor anonymity
+./target/release/q-api-server
 
-# Run consensus node
-cargo run --bin q-dag-knight-node
+# Run the high-performance miner (local node)
+./target/release/q-miner \
+  --mode solo \
+  --wallet qnk<your-64-char-hex-address> \
+  --threads 4 \
+  --intensity 7
+
+# Run miner connected to remote node
+./target/release/q-miner \
+  --mode solo \
+  --wallet qnk<your-64-char-hex-address> \
+  --threads 8 \
+  --intensity 9 \
+  --server http://185.182.185.227:8080
+
+# Benchmark your hardware
+./target/release/q-miner --benchmark --threads 16 --duration 60
 ```
 
 ### Configuration
@@ -95,17 +110,28 @@ Q-NarwhalKnight/
 - **Hybrid security**: Classical + quantum-resistant dual protection
 - **VDF-based randomness**: Quantum-enhanced verifiable delay functions
 
-### 🌐 Advanced Networking
+### 🌐 Advanced Networking & Anonymity
 - **libp2p integration**: Modern P2P networking with QUIC transport
+- **Tor integration**: Embedded Arti Tor client for complete network anonymity
+- **Triple-layer anonymity**: Tor + Quantum mixing + VDF-based unlinkability
 - **Gossip protocol**: Efficient message propagation
-- **Peer discovery**: Capability-aware peer management
+- **Peer discovery**: Capability-aware peer management with .onion support
 - **Network resilience**: Byzantine-fault-tolerant networking
+- **Zero IP leakage**: All validator communications routed through Tor circuits
 
 ### 📊 Consensus Innovation
 - **DAG-Knight ordering**: Deterministic transaction ordering
 - **Quantum anchor election**: VDF-based leader selection
 - **Narwhal mempool**: High-throughput transaction batching
 - **Commit protocols**: Multiple commit paths for optimal latency
+
+### ⛏️ High-Performance Mining
+- **Multi-threaded CPU mining**: Optimized DAG-Knight PoW with VDF verification
+- **Remote mining support**: Connect to any node via `--server` parameter
+- **Real-time updates**: Server-Sent Events (SSE) for instant reward notifications
+- **Adaptive difficulty**: Dynamic adjustment based on network hashrate
+- **Quantum-resistant PoW**: VDF-enhanced mining algorithm
+- **Benchmark mode**: Performance testing and hardware optimization
 
 ## 🔬 Research & Papers
 
