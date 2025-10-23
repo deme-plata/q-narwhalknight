@@ -32,8 +32,8 @@ pub async fn metrics(State(_state): State<Arc<AppState>>) -> Result<String, Stat
 
 /// Node status endpoint
 pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let status = state.node_status.read().await.clone();
-    
+    let mut status = state.node_status.read().await.clone();
+
     // Get wallet address for balance lookup (use node_id as wallet address for now)
     let wallet_address = status.node_id;
     let balance = {
@@ -3569,6 +3569,32 @@ pub async fn submit_mining_solution(
         timestamp: chrono::Utc::now(),
     });
 
+    // ============================================================================
+    // 📡 GOSSIPSUB MINING REWARD BROADCAST
+    // Propagate mining reward to all connected peers for blockchain sync
+    // ============================================================================
+    if let Some(ref libp2p) = state.libp2p_discovery {
+        // Serialize mining transaction for network propagation
+        match postcard::to_allocvec(&mining_tx) {
+            Ok(tx_bytes) => {
+                // Spawn async task to avoid blocking the fast path
+                let libp2p_clone = libp2p.clone();
+                let miner_addr = request.miner_address.clone();
+                tokio::spawn(async move {
+                    let mut nm = libp2p_clone.lock().await;
+                    if let Err(e) = nm.publish_topic("/qnk/mining-rewards", tx_bytes) {
+                        tracing::warn!("Failed to broadcast mining reward to network: {}", e);
+                    } else {
+                        tracing::info!("📤 Mining reward for {} broadcast to network", &miner_addr[..16]);
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize mining transaction for broadcast: {}", e);
+            }
+        }
+    }
+
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
         reward: block_reward,
@@ -3862,6 +3888,20 @@ pub struct SwapRequest {
     pub amount_in: u64,        // Amount to swap (base units)
     pub min_amount_out: u64,   // Minimum expected output (slippage protection)
     pub wallet_address: String, // User's wallet address
+}
+
+/// DEX Swap Event for gossipsub synchronization across nodes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapEvent {
+    pub from_token: String,
+    pub to_token: String,
+    pub amount_in: u64,
+    pub amount_out: u64,
+    pub wallet_address: [u8; 32],
+    pub pool_id: String,
+    pub new_reserve0: u64,
+    pub new_reserve1: u64,
+    pub timestamp: i64,
 }
 
 /// Extract client IP from request headers for rate limiting
@@ -4467,6 +4507,43 @@ pub async fn execute_swap(
     }
 
     info!("✅ Swap completed: {} {} -> {} {}", request.amount_in, request.from_token, final_amount_out, request.to_token);
+
+    // ============================================================================
+    // 📡 GOSSIPSUB DEX SWAP BROADCAST
+    // Propagate swap event to all connected peers for decentralized DEX sync
+    // ============================================================================
+    if let Some(ref libp2p) = state.libp2p_discovery {
+        let swap_event = SwapEvent {
+            from_token: request.from_token.clone(),
+            to_token: request.to_token.clone(),
+            amount_in: request.amount_in,
+            amount_out: final_amount_out,
+            wallet_address: wallet_addr,
+            pool_id: pool_id_str.clone(),
+            new_reserve0,
+            new_reserve1,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+
+        match postcard::to_allocvec(&swap_event) {
+            Ok(swap_bytes) => {
+                let libp2p_clone = libp2p.clone();
+                let from_token = request.from_token.clone();
+                let to_token = request.to_token.clone();
+                tokio::spawn(async move {
+                    let mut nm = libp2p_clone.lock().await;
+                    if let Err(e) = nm.publish_topic("/qnk/dex/swaps", swap_bytes) {
+                        tracing::warn!("Failed to broadcast DEX swap to network: {}", e);
+                    } else {
+                        tracing::info!("📤 DEX swap {}->{} broadcast to network", from_token, to_token);
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize DEX swap for broadcast: {}", e);
+            }
+        }
+    }
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "from_token": request.from_token,

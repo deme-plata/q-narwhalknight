@@ -64,16 +64,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("API server port")
                 .default_value("8080"),
         )
+        .arg(
+            Arg::new("tui")
+                .long("tui")
+                .help("Enable beautiful terminal UI mode for node monitoring")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches();
 
+    // Check if TUI mode is enabled
+    let tui_mode = matches.get_flag("tui");
+
     // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "q_api_server=debug,q_network=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    if !tui_mode {
+        // Normal logging mode
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "q_api_server=debug,q_network=debug,tower_http=debug".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    } else {
+        // TUI mode - minimal logging, will be captured by TUI
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     // Load configuration
     let mut config = Config::from_env()?;
@@ -509,41 +530,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            // Start gossipsub message processor
-            tokio::spawn(async move {
-                info!("📨 Starting gossipsub message processor...");
-                while let Some((topic, data)) = gossipsub_rx.recv().await {
-                    info!("📥 GOSSIPSUB: topic={}, size={} bytes", topic, data.len());
-
-                    // TODO: Route to appropriate handlers
-                    match topic.as_str() {
-                        "/qnk/transactions" => {
-                            info!("  → Transaction propagation (not yet implemented)");
-                        }
-                        "/qnk/consensus" => {
-                            info!("  → Consensus message (not yet implemented)");
-                        }
-                        "/qnk/dex/orders" => {
-                            info!("  → DEX order book update (not yet implemented)");
-                        }
-                        "/qnk/contracts/state" => {
-                            info!("  → Contract state sync (not yet implemented)");
-                        }
-                        _ => {
-                            warn!("  → Unknown topic, dropping");
-                        }
-                    }
-                }
-            });
-
             info!("✅ libp2p network fully operational");
-            Some(manager_arc)
+            Some((manager_arc, gossipsub_rx))
         }
         Err(e) => {
             warn!("⚠️  libp2p Network Manager initialization failed: {}", e);
             warn!("   Continuing without libp2p gossipsub");
             None
         }
+    };
+
+    // Split libp2p_manager tuple into manager and gossipsub receiver
+    let (libp2p_discovery, gossipsub_rx_opt) = match libp2p_manager {
+        Some((manager, rx)) => (Some(manager), Some(rx)),
+        None => (None, None),
     };
 
     // Initialize application state with network components
@@ -555,7 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bep44_discovery,
         tor_client,
         None,  // production_peer_discovery is deactivated
-        libp2p_manager,  // ✅ ENABLED - libp2p gossipsub for transaction propagation
+        libp2p_discovery,  // ✅ ENABLED - libp2p gossipsub for transaction propagation
     )
     .await?;
     let mut state = state;
@@ -730,6 +730,128 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let app_state = Arc::new(state);
+
+    // ========================================
+    // GOSSIPSUB TRANSACTION/BLOCK SYNCHRONIZATION
+    // ========================================
+    if let Some(mut gossipsub_rx) = gossipsub_rx_opt {
+        let app_state_gossip = app_state.clone();
+        tokio::spawn(async move {
+            info!("📨 Starting gossipsub transaction/block synchronization processor...");
+            while let Some((topic, data)) = gossipsub_rx.recv().await {
+                info!("📥 GOSSIPSUB: topic={}, size={} bytes", topic, data.len());
+
+                match topic.as_str() {
+                    "/qnk/transactions" => {
+                        // Deserialize and process incoming transaction
+                        match postcard::from_bytes::<q_types::Transaction>(&data) {
+                            Ok(tx) => {
+                                let tx_hash = tx.id;
+                                info!("📥 Received transaction {} from network", hex::encode(&tx_hash[..8]));
+
+                                // Add to transaction pool (lock-free)
+                                app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
+                                app_state_gossip.tx_status.insert(tx_hash, q_types::TxStatus::InMempool);
+
+                                info!("✅ Transaction {} synced to local pool", hex::encode(&tx_hash[..8]));
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize transaction from network: {}", e);
+                            }
+                        }
+                    }
+                    "/qnk/mining-rewards" => {
+                        // Deserialize and process incoming mining reward transaction
+                        match postcard::from_bytes::<q_types::Transaction>(&data) {
+                            Ok(tx) => {
+                                let tx_hash = tx.id;
+                                let miner_addr = tx.to;
+                                let reward = tx.amount;
+
+                                info!("💎 Received mining reward from network: {} QNK to wallet {}",
+                                      reward as f64 / 100_000_000.0, hex::encode(&miner_addr[..8]));
+
+                                // Update wallet balance
+                                let mut balances = app_state_gossip.wallet_balances.write().await;
+                                let current_balance = balances.get(&miner_addr).copied().unwrap_or(0);
+                                let new_balance = current_balance + reward;
+                                balances.insert(miner_addr, new_balance);
+                                drop(balances);
+
+                                // Persist balance to disk
+                                if let Err(e) = app_state_gossip.save_wallet_balance(&miner_addr, new_balance).await {
+                                    warn!("❌ Failed to persist synced mining reward: {:?}", e);
+                                }
+
+                                // Add transaction to pool
+                                app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
+                                let block_height = app_state_gossip.node_status.read().await.current_height;
+                                app_state_gossip.tx_status.insert(tx_hash, q_types::TxStatus::Confirmed { block_height, round: 0 });
+
+                                info!("✅ Mining reward synced: {} QNK to wallet {}", reward as f64 / 100_000_000.0, hex::encode(&miner_addr[..8]));
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize mining reward from network: {}", e);
+                            }
+                        }
+                    }
+                    "/qnk/dex/swaps" => {
+                        // Deserialize and process incoming DEX swap event
+                        match postcard::from_bytes::<q_api_server::handlers::SwapEvent>(&data) {
+                            Ok(swap) => {
+                                info!("💱 Received DEX swap from network: {}->{} (pool: {})",
+                                      swap.from_token, swap.to_token, &swap.pool_id);
+
+                                // Update liquidity pool reserves
+                                let pool_data_opt = {
+                                    let mut pools = app_state_gossip.liquidity_pools.write().await;
+                                    if let Some(pool) = pools.get_mut(&swap.pool_id) {
+                                        pool.reserve0 = swap.new_reserve0;
+                                        pool.reserve1 = swap.new_reserve1;
+                                        info!("✅ DEX pool {} synced: reserves {}/{}",
+                                              swap.pool_id, swap.new_reserve0, swap.new_reserve1);
+
+                                        // Serialize pool data before dropping lock
+                                        serde_json::to_vec(&*pool).ok()
+                                    } else {
+                                        warn!("DEX swap references unknown pool: {}", swap.pool_id);
+                                        None
+                                    }
+                                };
+
+                                // Persist updated pool to storage (outside of lock)
+                                if let Some(pool_data) = pool_data_opt {
+                                    if let Err(e) = app_state_gossip.storage_engine
+                                        .save_liquidity_pool(&swap.pool_id, &pool_data).await {
+                                        warn!("Failed to persist synced liquidity pool: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize DEX swap from network: {}", e);
+                            }
+                        }
+                    }
+                    "/qnk/blocks/1.0.0" => {
+                        info!("  → Block propagation (handler not yet implemented)");
+                    }
+                    "/qnk/votes/1.0.0" => {
+                        info!("  → Vote aggregation (handler not yet implemented)");
+                    }
+                    "/qnk/ack/1.0.0" => {
+                        info!("  → Acknowledgements (handler not yet implemented)");
+                    }
+                    _ => {
+                        warn!("  → Unknown gossipsub topic: {}, dropping", topic);
+                    }
+                }
+            }
+            warn!("📨 Gossipsub processor channel closed");
+        });
+        info!("✅ Gossipsub transaction/block synchronization enabled");
+    } else {
+        warn!("⚠️  Gossipsub synchronization disabled (libp2p not available)");
+    }
 
     // ========================================
     // IPFS-ROCKSDB DECENTRALIZED STORAGE INITIALIZATION
@@ -1898,7 +2020,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tcp_buffers(4 * 1024 * 1024, 4 * 1024 * 1024)  // 4MB buffers
         .with_backlog(1024);  // 1024 pending connections
 
-    high_perf_server.run().await?;
+    if tui_mode {
+        // Run TUI mode
+        #[cfg(feature = "tui")]
+        {
+            info!("🎨 Launching TUI mode - Beautiful terminal UI enabled");
+
+            // Create TUI app with initial metrics
+            let tui_app = q_tui::App::new();
+
+            // Spawn server in background
+            tokio::spawn(async move {
+                if let Err(e) = high_perf_server.run().await {
+                    error!("Server error: {}", e);
+                }
+            });
+
+            // Run TUI in foreground
+            q_tui::run_tui(tui_app).await?;
+        }
+
+        #[cfg(not(feature = "tui"))]
+        {
+            error!("TUI mode requested but not compiled with --features tui");
+            error!("Please rebuild with: cargo build --features tui");
+            return Err("TUI feature not enabled".into());
+        }
+    } else {
+        // Run normally without TUI
+        high_perf_server.run().await?;
+    }
 
     Ok(())
 }

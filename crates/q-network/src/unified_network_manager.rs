@@ -204,9 +204,12 @@ impl UnifiedNetworkManager {
 
         // Subscribe to consensus topics
         let topics = vec![
-            IdentTopic::new("/qnk/blocks/1.0.0"),    // Block propagation
-            IdentTopic::new("/qnk/votes/1.0.0"),     // Vote aggregation
-            IdentTopic::new("/qnk/ack/1.0.0"),       // Acknowledgements
+            IdentTopic::new("/qnk/blocks/1.0.0"),       // Block propagation
+            IdentTopic::new("/qnk/transactions"),       // Transaction propagation
+            IdentTopic::new("/qnk/mining-rewards"),     // Mining reward announcements
+            IdentTopic::new("/qnk/dex/swaps"),          // DEX swap events for decentralized exchange sync
+            IdentTopic::new("/qnk/votes/1.0.0"),        // Vote aggregation
+            IdentTopic::new("/qnk/ack/1.0.0"),          // Acknowledgements
         ];
 
         for topic in &topics {
@@ -462,6 +465,11 @@ impl UnifiedNetworkManager {
     /// Get all discovered peers from ALL discovery methods
     pub async fn get_discovered_peers(&self) -> Vec<PeerId> {
         self.discovered_peers.read().await.iter().cloned().collect()
+    }
+
+    /// Get the number of discovered/connected peers
+    pub async fn get_peer_count(&self) -> usize {
+        self.discovered_peers.read().await.len()
     }
 
     /// Get discovered peer addresses for connection manager bridge (Phase 2)
