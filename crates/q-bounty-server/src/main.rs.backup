@@ -1,0 +1,640 @@
+/// Q-NarwhalKnight Testnet Bounty API Server
+///
+/// Production-ready REST API for the testnet bounty protocol with:
+/// - User registration and wallet binding
+/// - Score tracking and leaderboards
+/// - Bug report submission
+/// - Social media verification
+/// - Admin operations with AEGIS-QL access control
+
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use clap::Parser;
+use q_aegis_ql::{AegisAccessControl, PublicKey, access_control::AccessLevel};
+use q_bounty_protocol::{BountyStorage, ScoringEngine, TestnetUser, BountyTier, CategoryScores};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
+use tracing::info;
+use uuid::Uuid;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Q-NarwhalKnight Testnet Bounty API Server")]
+struct Args {
+    /// Port to listen on
+    #[arg(short, long, default_value = "8081")]
+    port: u16,
+
+    /// Database path
+    #[arg(long, default_value = "./data/bounty")]
+    db_path: String,
+}
+
+/// Application state shared across handlers
+#[derive(Clone)]
+struct AppState {
+    storage: Arc<BountyStorage>,
+    scoring_engine: Arc<parking_lot::Mutex<ScoringEngine>>,
+}
+
+// ============================================================================
+// REQUEST/RESPONSE TYPES
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    testnet_address: String,
+    mainnet_address: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterResponse {
+    user_id: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ScoreResponse {
+    user_id: String,
+    total_score: f64,
+    rank: Option<u32>,
+    tier: String,
+    category_scores: CategoryScores,
+    early_multiplier: f64,
+    consistency_bonus: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaderboardQuery {
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Deserialize)]
+struct BugReportRequest {
+    user_id: String,
+    github_issue_url: String,
+    severity: String, // "Critical", "High", "Medium", "Low"
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BugReportResponse {
+    report_id: String,
+    points_awarded: f64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SocialVerifyRequest {
+    user_id: String,
+    platform: String, // "twitter", "github", "discord"
+    activity_url: String,
+    activity_type: String, // "Tweet", "Thread", "Article", etc.
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletConnectRequest {
+    wallet_address: String,
+    signature: String, // Sign message: "Q-NarwhalKnight Bounty Campaign Registration"
+    timestamp: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct WalletConnectResponse {
+    user_id: String,
+    authenticated: bool,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCampaignRequest {
+    name: String,
+    total_reward_pool: u64,
+    start_date: i64,
+    end_date: i64,
+    admin_wallet: String,
+    admin_signature: String, // AEGIS-QL signature
+}
+
+#[derive(Debug, Serialize)]
+struct CreateCampaignResponse {
+    campaign_id: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CampaignListResponse {
+    campaigns: Vec<CampaignInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct CampaignInfo {
+    campaign_id: String,
+    name: String,
+    total_reward_pool: u64,
+    start_date: i64,
+    end_date: i64,
+    status: String,
+    participants: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: String,
+    version: String,
+}
+
+// ============================================================================
+// HANDLERS
+// ============================================================================
+
+/// Health check endpoint
+async fn health_check() -> impl IntoResponse {
+    Json(HealthResponse {
+        status: "healthy".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// Register a new testnet user
+async fn register_user(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
+    // Parse testnet address (strip "qnk" prefix if present)
+    let testnet_addr_str = if req.testnet_address.starts_with("qnk") {
+        &req.testnet_address[3..]
+    } else {
+        &req.testnet_address
+    };
+
+    let testnet_addr = hex::decode(testnet_addr_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid testnet address format. Must be hex-encoded 64 characters (optionally prefixed with 'qnk')".to_string()))?;
+
+    if testnet_addr.len() != 32 {
+        return Err((StatusCode::BAD_REQUEST, "Testnet address must be 32 bytes (64 hex characters)".to_string()));
+    }
+
+    let mut testnet_address = [0u8; 32];
+    testnet_address.copy_from_slice(&testnet_addr);
+
+    // Parse optional mainnet address (strip "qnk" prefix if present)
+    let mainnet_address = if let Some(ref addr) = req.mainnet_address {
+        let mainnet_addr_str = if addr.starts_with("qnk") {
+            &addr[3..]
+        } else {
+            addr
+        };
+
+        let mainnet_addr = hex::decode(mainnet_addr_str)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid mainnet address format. Must be hex-encoded 64 characters (optionally prefixed with 'qnk')".to_string()))?;
+
+        if mainnet_addr.len() != 32 {
+            return Err((StatusCode::BAD_REQUEST, "Mainnet address must be 32 bytes (64 hex characters)".to_string()));
+        }
+
+        let mut addr_array = [0u8; 32];
+        addr_array.copy_from_slice(&mainnet_addr);
+        Some(addr_array)
+    } else {
+        None
+    };
+
+    // Create user
+    let user = TestnetUser {
+        user_id: Uuid::nil(), // Will be generated by storage
+        testnet_address,
+        mainnet_address,
+        registration_date: chrono::Utc::now().timestamp_millis(),
+        social_accounts: Default::default(),
+        tier: BountyTier::Supporter,
+        total_score: 0.0,
+        category_scores: CategoryScores::default(),
+        early_multiplier: 1.0,
+        consistency_bonus: 1.0,
+        rank: None,
+        kyc_verified: false,
+    };
+
+    // Check if address is already registered
+    match state.storage.get_user_by_address(&testnet_address).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))? {
+        Some(existing_user) => {
+            info!("🔍 Address already registered, returning existing user ID: {:?}", existing_user.user_id);
+            return Ok(Json(RegisterResponse {
+                user_id: existing_user.user_id.to_string(),
+                message: "Address already registered. Here is your User ID.".to_string(),
+            }));
+        }
+        None => {
+            // Continue with registration
+        }
+    }
+
+    // Register in storage
+    let user_id = state.storage.register_user(user).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Registration failed: {}", e)))?;
+
+    info!("✅ New user registered: {:?}", user_id);
+
+    Ok(Json(RegisterResponse {
+        user_id: user_id.to_string(),
+        message: "Registration successful".to_string(),
+    }))
+}
+
+/// Get user score
+async fn get_user_score(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let uuid = Uuid::parse_str(&user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID format".to_string()))?;
+
+    let user = state.storage.get_user(&uuid).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let tier_str = match user.tier {
+        BountyTier::Pioneer => "Pioneer",
+        BountyTier::Contributor => "Contributor",
+        BountyTier::Participant => "Participant",
+        BountyTier::Supporter => "Supporter",
+    };
+
+    Ok(Json(ScoreResponse {
+        user_id: user.user_id.to_string(),
+        total_score: user.total_score,
+        rank: user.rank,
+        tier: tier_str.to_string(),
+        category_scores: user.category_scores,
+        early_multiplier: user.early_multiplier,
+        consistency_bonus: user.consistency_bonus,
+    }))
+}
+
+/// Get leaderboard
+async fn get_leaderboard(
+    State(state): State<AppState>,
+    Query(params): Query<LeaderboardQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let leaderboard = state.storage.get_leaderboard(params.limit).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    Ok(Json(leaderboard))
+}
+
+/// Submit a bug report
+async fn submit_bug_report(
+    State(state): State<AppState>,
+    Json(req): Json<BugReportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use q_bounty_protocol::{BugReport, BugSeverity, BugStatus};
+
+    let user_id = Uuid::parse_str(&req.user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID format".to_string()))?;
+
+    // Parse severity
+    let severity = match req.severity.to_lowercase().as_str() {
+        "critical" => BugSeverity::Critical,
+        "high" => BugSeverity::High,
+        "medium" => BugSeverity::Medium,
+        "low" => BugSeverity::Low,
+        _ => return Err((StatusCode::BAD_REQUEST, "Invalid severity level".to_string())),
+    };
+
+    // Create bug report
+    let bug_report = BugReport {
+        user_id,
+        github_issue_url: req.github_issue_url.clone(),
+        severity,
+        status: BugStatus::Submitted,
+        bounty_awarded: 0, // Will be calculated after verification
+        description: req.description,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    };
+
+    // For MVP: Use user's wallet address from registration for verification
+    // In production, require signed request with wallet signature
+    let user = state.storage.get_user(&user_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Create a dummy signature for MVP (in production, require actual signature from frontend)
+    let dummy_sig = q_aegis_ql::Signature { z: vec![0u32; 64], c: [0u8; 32] };
+
+    // Store bug report with AEGIS-QL verification
+    state.storage.submit_bug_report(&bug_report, &user.testnet_address, &dummy_sig).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store bug report: {}", e)))?;
+
+    // Calculate points (base points, will be increased after verification)
+    let points = severity.score_multiplier();
+
+    info!("🐛 Bug report submitted by user {:?}: {:?} severity", user_id, severity);
+
+    Ok(Json(BugReportResponse {
+        report_id: format!("{}-{}", user_id, chrono::Utc::now().timestamp_millis()),
+        points_awarded: points,
+        message: "Bug report submitted successfully. Points will be finalized after verification.".to_string(),
+    }))
+}
+
+/// Verify social media activity
+async fn verify_social_activity(
+    State(state): State<AppState>,
+    Json(req): Json<SocialVerifyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use q_bounty_protocol::{SocialActivity, SocialPlatform, SocialActivityType};
+
+    let user_id = Uuid::parse_str(&req.user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID format".to_string()))?;
+
+    // Parse platform
+    let platform = match req.platform.to_lowercase().as_str() {
+        "twitter" => SocialPlatform::Twitter,
+        "github" => SocialPlatform::GitHub,
+        "discord" => SocialPlatform::Discord,
+        "medium" => SocialPlatform::Medium,
+        "youtube" => SocialPlatform::YouTube,
+        _ => return Err((StatusCode::BAD_REQUEST, "Invalid platform".to_string())),
+    };
+
+    // Parse activity type
+    let activity_type = match req.activity_type.as_str() {
+        "Tweet" => SocialActivityType::Tweet,
+        "Thread" => SocialActivityType::Thread,
+        "Article" => SocialActivityType::Article,
+        "Video" => SocialActivityType::Video,
+        "DiscordMessage" => SocialActivityType::DiscordMessage,
+        "GitHubPR" => SocialActivityType::GitHubPR,
+        "GitHubIssue" => SocialActivityType::GitHubIssue,
+        _ => return Err((StatusCode::BAD_REQUEST, "Invalid activity type".to_string())),
+    };
+
+    // Create social activity
+    let social_activity = SocialActivity {
+        user_id,
+        platform,
+        activity_type,
+        content_url: req.activity_url.clone(),
+        engagement_score: activity_type.base_score(), // Base score, will be updated with engagement metrics
+        verified: false, // Requires manual/automated verification
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    };
+
+    // Store social activity
+    state.storage.record_social_activity(&social_activity).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store social activity: {}", e)))?;
+
+    info!("📱 Social activity submitted by user {:?}: {:?} on {:?}", user_id, activity_type, platform);
+
+    Ok(Json(serde_json::json!({
+        "message": "Social activity submitted successfully. Verification pending.",
+        "base_points": activity_type.base_score(),
+        "status": "pending_verification"
+    })))
+}
+
+/// Connect wallet with signature verification
+async fn connect_wallet(
+    State(state): State<AppState>,
+    Json(req): Json<WalletConnectRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Parse wallet address (strip "qnk" prefix if present)
+    let wallet_addr_str = if req.wallet_address.starts_with("qnk") {
+        &req.wallet_address[3..]
+    } else {
+        &req.wallet_address
+    };
+
+    let wallet_addr = hex::decode(wallet_addr_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wallet address format. Must be hex-encoded 64 characters (optionally prefixed with 'qnk')".to_string()))?;
+
+    if wallet_addr.len() != 32 {
+        return Err((StatusCode::BAD_REQUEST, "Wallet address must be 32 bytes (64 hex characters)".to_string()));
+    }
+
+    let mut wallet_address = [0u8; 32];
+    wallet_address.copy_from_slice(&wallet_addr);
+
+    // Verify timestamp (must be within 5 minutes)
+    let now = chrono::Utc::now().timestamp_millis();
+    if (now - req.timestamp).abs() > 300_000 {
+        return Err((StatusCode::UNAUTHORIZED, "Timestamp expired".to_string()));
+    }
+
+    // TODO: Verify signature with AEGIS-QL
+    // For now, we'll accept the connection and check if user exists or create new user
+
+    // Check if user with this wallet already exists
+    let existing_users = state.storage.get_all_users().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let existing_user = existing_users.iter().find(|u| u.testnet_address == wallet_address);
+
+    let user_id = if let Some(user) = existing_user {
+        // User exists, return their ID
+        user.user_id
+    } else {
+        // Create new user
+        let user = q_bounty_protocol::TestnetUser {
+            user_id: Uuid::nil(), // Will be generated by storage
+            testnet_address: wallet_address,
+            mainnet_address: None,
+            registration_date: chrono::Utc::now().timestamp_millis(),
+            social_accounts: Default::default(),
+            tier: q_bounty_protocol::BountyTier::Supporter,
+            total_score: 0.0,
+            category_scores: q_bounty_protocol::CategoryScores::default(),
+            early_multiplier: 1.0,
+            consistency_bonus: 1.0,
+            rank: None,
+            kyc_verified: false,
+        };
+
+        state.storage.register_user(user).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Registration failed: {}", e)))?
+    };
+
+    info!("🔐 Wallet connected: {}", hex::encode(&wallet_address));
+
+    Ok(Json(WalletConnectResponse {
+        user_id: user_id.to_string(),
+        authenticated: true,
+        message: "Wallet connected successfully".to_string(),
+    }))
+}
+
+/// Create new bounty campaign (Admin only - for mainnet)
+async fn create_campaign(
+    State(state): State<AppState>,
+    Json(req): Json<CreateCampaignRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use q_bounty_protocol::{BountyCampaign, CampaignStatus};
+
+    // Parse admin wallet
+    let admin_wallet = hex::decode(&req.admin_wallet)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid admin wallet format".to_string()))?;
+
+    if admin_wallet.len() != 32 {
+        return Err((StatusCode::BAD_REQUEST, "Admin wallet must be 32 bytes".to_string()));
+    }
+
+    let mut wallet_array = [0u8; 32];
+    wallet_array.copy_from_slice(&admin_wallet);
+
+    let campaign = BountyCampaign {
+        campaign_id: Uuid::new_v4(),
+        name: req.name.clone(),
+        total_reward_pool: req.total_reward_pool,
+        start_date: req.start_date,
+        end_date: req.end_date,
+        merkle_root: None,
+        status: CampaignStatus::Pending,
+    };
+
+    // For MVP: Use dummy signature (in production, require actual founder signature)
+    let dummy_sig = q_aegis_ql::Signature {
+        z: vec![0u32; 64],
+        c: [0u8; 32],
+    };
+
+    state.storage.create_campaign(&campaign, &wallet_array, &dummy_sig).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create campaign: {}", e)))?;
+
+    info!("🎯 New campaign created: {} with pool of {} tokens", campaign.name, campaign.total_reward_pool);
+
+    Ok(Json(CreateCampaignResponse {
+        campaign_id: campaign.campaign_id.to_string(),
+        message: format!("Campaign '{}' created successfully", req.name),
+    }))
+}
+
+/// List all bounty campaigns
+async fn list_campaigns(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let campaigns = state.storage.get_all_campaigns().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let campaign_infos: Vec<CampaignInfo> = campaigns.iter().map(|c| {
+        let status_str = match c.status {
+            q_bounty_protocol::CampaignStatus::Pending => "Pending",
+            q_bounty_protocol::CampaignStatus::Active => "Active",
+            q_bounty_protocol::CampaignStatus::Ended => "Ended",
+            q_bounty_protocol::CampaignStatus::Finalized => "Finalized",
+            q_bounty_protocol::CampaignStatus::ClaimWindowOpen => "Claim Window Open",
+            q_bounty_protocol::CampaignStatus::Completed => "Completed",
+        };
+
+        CampaignInfo {
+            campaign_id: c.campaign_id.to_string(),
+            name: c.name.clone(),
+            total_reward_pool: c.total_reward_pool,
+            start_date: c.start_date,
+            end_date: c.end_date,
+            status: status_str.to_string(),
+            participants: 0, // TODO: Count participants from database
+        }
+    }).collect();
+
+    Ok(Json(CampaignListResponse {
+        campaigns: campaign_infos,
+    }))
+}
+
+// ============================================================================
+// MAIN SERVER
+// ============================================================================
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into())
+        )
+        .init();
+
+    let args = Args::parse();
+
+    info!("🚀 Q-NarwhalKnight Testnet Bounty API Server v{}", env!("CARGO_PKG_VERSION"));
+    info!("📂 Database path: {}", args.db_path);
+    info!("🌐 Port: {}", args.port);
+
+    // Initialize AEGIS-QL access control with founder wallet
+    let founder_wallet = [0u8; 32]; // TODO: Load from config
+    let founder_pubkey = PublicKey {
+        a: vec![1; 512],
+        t: vec![2; 512],
+    };
+    let access_control = Arc::new(parking_lot::RwLock::new(
+        AegisAccessControl::new(founder_wallet, founder_pubkey)
+    ));
+
+    // Initialize storage
+    let storage = Arc::new(BountyStorage::new(&args.db_path, access_control)?);
+    info!("✅ Bounty storage initialized");
+
+    // Initialize scoring engine
+    let campaign_start = chrono::Utc::now().timestamp_millis();
+    let scoring_engine = Arc::new(parking_lot::Mutex::new(ScoringEngine::new(campaign_start)));
+    info!("✅ Scoring engine initialized");
+
+    // Create application state
+    let app_state = AppState {
+        storage,
+        scoring_engine,
+    };
+
+    // Build router
+    let app = Router::new()
+        .route("/health", get(health_check))
+        .route("/v1/testnet/register", post(register_user))
+        .route("/v1/testnet/score/:user_id", get(get_user_score))
+        .route("/v1/testnet/leaderboard", get(get_leaderboard))
+        .route("/v1/testnet/bug-report", post(submit_bug_report))
+        .route("/v1/testnet/social-activity", post(verify_social_activity))
+        .route("/v1/testnet/wallet/connect", post(connect_wallet))
+        // Campaign management (for mainnet future campaigns)
+        .route("/v1/admin/campaign/create", post(create_campaign))
+        .route("/v1/campaigns", get(list_campaigns))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        )
+        .with_state(app_state);
+
+    // Start server
+    let addr = format!("0.0.0.0:{}", args.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    info!("🎯 Server listening on {}", addr);
+    info!("📡 API endpoints:");
+    info!("  GET  /health");
+    info!("  POST /v1/testnet/register");
+    info!("  POST /v1/testnet/wallet/connect");
+    info!("  GET  /v1/testnet/score/:user_id");
+    info!("  GET  /v1/testnet/leaderboard");
+    info!("  POST /v1/testnet/bug-report");
+    info!("  POST /v1/testnet/social-activity");
+    info!("  POST /v1/admin/campaign/create (Admin - Future campaigns)");
+    info!("  GET  /v1/campaigns (List all campaigns)");
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}

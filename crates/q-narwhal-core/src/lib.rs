@@ -15,11 +15,14 @@ pub mod certificate;
 pub mod production_mempool;
 pub mod reliable_broadcast;
 pub mod tor_broadcast;
+pub mod tor_client_impl;
 pub mod vertex_store;
 
 pub use certificate::CertificateStore;
 pub use production_mempool::ProductionMempool;
 pub use reliable_broadcast::ReliableBroadcast;
+pub use tor_broadcast::{TorClient, TorStreamConnection};
+pub use tor_client_impl::{ProductionTorClient, TorClientConfig};
 pub use vertex_store::{InMemoryVertexStorage, VertexStore};
 
 // Re-export q-types for external crates

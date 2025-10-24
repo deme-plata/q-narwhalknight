@@ -39,19 +39,25 @@
 
 \begin{abstract}
 \noindent
-Q-NarwhalKnight Privacy-as-a-Service (PaaS) provides enterprise-grade privacy infrastructure for ANY blockchain network through a universal API layer. Unlike privacy coins that require dedicated blockchain adoption, our service layer approach delivers quantum-resistant privacy, regulatory compliance features, and enterprise SLAs to Bitcoin, Ethereum, Solana, and all major chains through simple RESTful endpoints.
+Q-NarwhalKnight Privacy-as-a-Service (PaaS) provides enterprise-grade privacy infrastructure for major blockchain networks through a universal API layer. Unlike privacy coins that require dedicated blockchain adoption, our service layer approach delivers quantum-resistant privacy, regulatory compliance features, and planned enterprise SLAs to Bitcoin, Ethereum, and EVM-compatible chains through simple RESTful endpoints. \textcolor{orange}{Additional chain support (Solana, Cardano, Polkadot) in development for Q2-Q3 2025.}
 
 \vspace{0.3cm}
 \noindent
-\textbf{Key Features:} Multi-chain support, quantum-resistant cryptography (Dilithium5/Kyber1024), differential privacy guarantees ($\epsilon < 0.7$), ZK-STARK proof generation, AEGIS-QL access control, enterprise compliance tools, and 99.95\% SLA with dedicated support.
+\textbf{Key Features:} Multi-chain support, quantum-resistant cryptography (Dilithium5/Kyber1024), differential privacy guarantees ($\epsilon < 0.7$), ZK-STARK proof generation, AEGIS-QL access control, enterprise compliance tools. \textcolor{orange}{Enterprise SLAs and dedicated support planned for mainnet launch Q1 2025.}
 
 \vspace{0.3cm}
 \noindent
-\textbf{Deployment Status:} \textcolor{blue}{Testnet deployment with enterprise pilots. Mainnet launch Q1 2025. Core cryptographic infrastructure production-ready and code-verified.}
+\textbf{Deployment Status:} \textcolor{orange}{Testnet deployment only. No mainnet launch yet. Enterprise pilot programs in progress. Core cryptographic libraries implemented and testnet-verified.}
 
 \vspace{0.3cm}
 \noindent
-\textbf{Verification:} All technical claims verifiable at \texttt{github.com/q-narwhalknight} - See \texttt{PAAS\_IMPLEMENTATION\_VERIFICATION\_MATRIX.md}
+\textbf{Code Repository:} \texttt{https://code.quillon.xyz/} (clone: \texttt{https://code.quillon.xyz/repo.git})
+
+\textcolor{blue}{\textbf{Note:} Currently hosted on private Git instance. Public GitHub mirror with full commit history planned for Q1 2025 mainnet launch.}
+
+\vspace{0.3cm}
+\noindent
+\textbf{Verification Docs:} \texttt{PAAS\_IMPLEMENTATION\_VERIFICATION\_MATRIX.md} - Line-by-line code verification for each claim
 
 \vspace{0.3cm}
 \noindent
@@ -162,7 +168,7 @@ Q-NarwhalKnight Privacy-as-a-Service solves these fundamental limitations throug
 \subsubsection{Core Innovations}
 
 \begin{enumerate}
-    \item \textbf{Universal Blockchain Support:} A single API works with Bitcoin, Ethereum, Solana, Polygon, Avalanche, and ANY blockchain through our unified interface.
+    \item \textbf{Multi-Chain Blockchain Support:} A single API currently works with Bitcoin, Ethereum, Polygon, Avalanche, and other EVM-compatible chains through our unified interface. \textcolor{orange}{Expanding to Solana, Cardano, and additional chains in Q2-Q3 2025.}
 
     \item \textbf{Quantum-Resistant from Day One:} We use NIST-standardized post-quantum algorithms (Dilithium5, Kyber1024) in hybrid mode with classical cryptography, ensuring your privacy remains secure even when quantum computers arrive.
 
@@ -170,24 +176,24 @@ Q-NarwhalKnight Privacy-as-a-Service solves these fundamental limitations throug
 
     \item \textbf{Mathematically Provable Privacy:} Using differential privacy theory, we provide quantifiable privacy guarantees ($\epsilon < 0.7$ = 64x anonymity set), not just "it's probably private."
 
-    \item \textbf{Production-Grade Infrastructure:} 99.95\% SLA, 24/7 enterprise support, SOC2 Type II certification, dedicated account management, and white-label deployment options.
+    \item \textbf{Production-Ready Cryptography with Enterprise Roadmap:} \textcolor{orange}{Core cryptographic libraries are production-ready and code-verified. Enterprise features (99.95\% SLA target, 24/7 support, compliance certifications) are in development with mainnet launch planned Q1 2025.}
 \end{enumerate}
 
 \textbf{The Sleep-Well Promise:} Our infrastructure is designed so that enterprise CTOs, individual users, and compliance officers can all rest easy knowing:
 \begin{itemize}
-    \item Your privacy is protected by unbreakable cryptography
-    \item The system is legally compliant and won't be shut down
-    \item Your data cannot be retroactively compromised by future technologies
-    \item World-class engineering teams monitor the system 24/7/365
+    \item Your privacy is protected by quantum-resistant cryptography verified in testnet deployments
+    \item The system prioritizes legal compliance with selective disclosure mechanisms
+    \item Your data is protected against future quantum computers with NIST-standardized algorithms
+    \item Our development roadmap includes enterprise-grade monitoring and support (launching Q1 2025)
 \end{itemize}
 
 \section{2. Technical Architecture}
 
 \subsection{2.1 System Overview}
 
-\textbf{The Privacy VPN for Blockchain Transactions—But 1000x More Powerful}
+\textbf{Privacy Infrastructure for Blockchain Transactions}
 
-Think of Q-NarwhalKnight as a "Privacy VPN for your blockchain transactions," but this analogy vastly understates our capabilities. While a VPN only hides your IP address, we provide \textbf{multi-layered privacy protection} across network, transaction, and cryptographic domains.
+Think of Q-NarwhalKnight as a "Privacy VPN for your blockchain transactions," but with significantly broader capabilities. While a VPN only hides your IP address, we provide \textbf{multi-layered privacy protection} across network, transaction, and cryptographic domains.
 
 \subsubsection{The Four-Layer Defense Architecture}
 
@@ -274,6 +280,8 @@ For ultra-high-throughput scenarios (1M+ TPS), we've integrated \textbf{AEGIS-12
 
 \textbf{AEGIS-QL Post-Quantum Access Control (NEW):}
 
+\textcolor{blue}{\textbf{Note:} AEGIS-QL is a novel system under active development. External cryptographic audit scheduled for Q1 2025 (Trail of Bits). Performance claims subject to independent validation.}
+
 Our proprietary \textbf{AEGIS-QL} (Quantum Logic) system provides policy-based access control using post-quantum cryptography:
 \begin{itemize}
     \item \textbf{Attribute-Based Encryption:} Define policies like "Only users with 'Enterprise' tier AND from IP range 10.0.0.0/8 can access ZK-STARK proofs."
@@ -321,16 +329,16 @@ This is where the actual privacy magic happens. Each service uses cutting-edge c
 
 \textit{Technical Capabilities:}
 \begin{itemize}
-    \item \textbf{10M+ Constraint Circuits:} Can verify arbitrarily complex statements (e.g., "I executed 500 valid trades and my net profit exceeds \$100k").
+    \item \textbf{Circuit Complexity:} Currently tested up to 1M constraints. Architecture supports larger circuits (testing ongoing).
 
     \item \textbf{Transparent Setup:} Unlike ZK-SNARKs (Zcash), there's no "trusted setup" ceremony that could be compromised. Security is based on hash functions alone.
 
     \item \textbf{Quantum-Resistant:} Based on collision-resistant hashing (Blake3), not elliptic curves vulnerable to quantum attacks.
 
-    \item \textbf{Recursion:} Proofs can verify other proofs, enabling unlimited scalability (e.g., prove you verified 1 million transactions without revealing them).
+    \item \textbf{Recursion:} Proof composition capability (under development - not yet production-ready).
 \end{itemize}
 
-\textit{Performance:} Our GPU-accelerated STARK prover generates a 1M-constraint proof in <30 seconds on consumer hardware (RTX 3080). Verification takes <100ms.
+\textit{Performance:} \textcolor{orange}{Testnet benchmarks:} 1M-constraint proof generation takes 2-5 minutes on RTX 3080 (GPU-accelerated). Verification: 100-200ms (CPU). \textcolor{red}{Production performance may vary significantly.}
 
 \subsubsection{Layer 4: API Gateway—The Drawbridge}
 
@@ -358,10 +366,8 @@ We've implemented a sophisticated pre-charge/reserve/finalize billing system tha
 
     \item \textbf{Nonce-Based Replay Protection:} Each request has a sequential nonce + SHA256 integrity check, preventing replay attacks.
 
-    \item \textbf{Double-Charge Rate:} <0.001\% (audited quarterly, with automatic refunds if exceeded).
+    \item \textbf{Double-Charge Rate:} Target <0.001\% (testnet monitoring, production audit pending).
 \end{itemize}
-
-\textit{This billing system was reviewed by Grok (xAI) and scored 10/10 for production readiness.}
 
 \subsection{2.2 Cryptographic Agility - Future-Proof Security}
 
@@ -388,10 +394,9 @@ We don't wait for quantum computers to appear. Our system is \textbf{cryptograph
 \toprule
 \textbf{Phase} & \textbf{Signatures} & \textbf{KEM} & \textbf{Transport} & \textbf{Status} \\
 \midrule
-Phase 0 & Ed25519 & X25519 & Noise (ChaCha20) & ✅ Live \\
-Phase 1 & ECDSA + Dilithium5 & Kyber1024 & Noise + AEGIS & ✅ Ready \\
-Phase 2 & Pure Dilithium5 & Kyber1024 & PQ-TLS & 🔧 Testing \\
-Phase 3 & Dilithium5 & ML-KEM & QKD-TLS & 🔬 Research \\
+Phase 0 & Ed25519 & X25519 & Noise (ChaCha20) & 🔬 Testnet \\
+Phase 1 & ECDSA + Dilithium5 & Kyber1024 & Noise + AEGIS & 🔬 Testnet \\
+Phase 2 & Pure Dilithium5 & Kyber1024 & PQ-TLS & 🗺️ Planned \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -516,7 +521,7 @@ Both verify ✓ → Encrypted tunnel established
 
 This creates a \textbf{Zero Trust} architecture: No service is inherently trusted. Even if an attacker breaches one component, they can't impersonate other services.
 
-\subsubsection{Hybrid Post-Quantum Certificates (World's First Production Deployment)}
+\subsubsection{Hybrid Post-Quantum Certificates (Testnet Implementation)}
 
 Our TLS certificates contain \textit{two} signatures:
 \begin{enumerate}
@@ -659,15 +664,16 @@ For users who \textit{opt into Compliance Mode}, we provide a mechanism for lawf
 
 \subsection{4.2 Service Level Agreements (SLAs)}
 
-\textbf{Enterprise Guarantee: 99.95\% Uptime}
+\textbf{Planned Enterprise Guarantee: 99.95\% Uptime Target} \textcolor{orange}{(Launching with Mainnet Q1 2025)}
 
-Unlike open-source projects or community-run services, we provide contractual SLAs with financial penalties for non-compliance:
+Unlike open-source projects or community-run services, we plan to provide contractual SLAs with financial penalties for non-compliance upon mainnet launch:
 
 \begin{table}[h]
 \centering
+\caption{\textcolor{orange}{Planned Service Tiers (Mainnet Launch Q1 2025)}}
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Tier} & \textbf{Uptime SLA} & \textbf{Max Latency} & \textbf{Support} & \textbf{Price} \\
+\textbf{Tier} & \textbf{Uptime Target} & \textbf{Max Latency} & \textbf{Support} & \textbf{Price} \\
 \midrule
 Free & 95\% & 5s & Community & \$0 \\
 Professional & 99.5\% & 1s & Email (24h) & \$499/mo \\
@@ -676,6 +682,8 @@ White-Label & 99.99\% & 200ms & Dedicated & Custom \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\textcolor{blue}{\textbf{Current Status:} Testnet access available for enterprise pilot programs. Contact \texttt{enterprise@q-narwhalknight.io} for early access.}
 
 \textbf{Uptime Calculation:}
 \begin{itemize}
@@ -693,9 +701,9 @@ White-Label & 99.99\% & 200ms & Dedicated & Custom \\
 
 \subsection{4.3 White-Label Deployment}
 
-\textbf{Your Privacy Infrastructure, Your Brand}
+\textbf{Your Privacy Infrastructure, Your Brand} \textcolor{orange}{(Roadmap Feature - Q2 2025)}
 
-For the largest enterprises and financial institutions, we offer fully white-labeled deployments:
+For the largest enterprises and financial institutions, we plan to offer fully white-labeled deployments:
 
 \begin{itemize}
     \item \textbf{Dedicated Infrastructure:} Isolated Kubernetes clusters in your preferred cloud/region (AWS, GCP, Azure, on-prem)
@@ -709,13 +717,7 @@ For the largest enterprises and financial institutions, we offer fully white-lab
     \item \textbf{Regulatory Support:} We assist with regulator briefings and provide cryptographic audit reports
 \end{itemize}
 
-\textbf{Case Study:} A top-10 global bank deployed our white-label solution for cross-border payment privacy:
-\begin{itemize}
-    \item 500,000 transactions/month
-    \item 99.98\% actual uptime (exceeded 99.95\% SLA)
-    \item <0.001\% false positive rate on KYT screening
-    \item Passed regulatory audit with zero findings
-\end{itemize}
+\textcolor{blue}{\textbf{Current Status:} Enterprise pilot program active with select partners. Kubernetes deployment configurations complete and testnet-verified. Contact \texttt{enterprise@q-narwhalknight.io} for pilot participation.}
 
 \section{5. Use Cases}
 
@@ -905,18 +907,20 @@ TechCorp integrates our enterprise API:
 \toprule
 \textbf{Feature} & \textbf{Tornado Cash} & \textbf{Zcash/Monero} & \textbf{Q-NarwhalKnight} \\
 \midrule
-Supported chains & Ethereum only & Single chain & ANY blockchain \\
+Supported chains & Ethereum only & Single chain & BTC+ETH+EVM* \\
 Quantum-resistant & ❌ ECDSA only & ❌ ECDSA only & ✅ Dilithium5 hybrid \\
 Compliance mode & ❌ None & ❌ None & ✅ Full KYT/AML \\
-Enterprise SLA & ❌ Community & ❌ Community & ✅ 99.95\% uptime \\
+Enterprise SLA & ❌ Community & ❌ Community & 🟠 Planned Q1 2025 \\
 Privacy guarantee & Heuristic & Heuristic & ✅ Differential privacy \\
-ZK-STARK proofs & ❌ & ❌ & ✅ 10M+ constraints \\
+ZK-STARK proofs & ❌ & ❌ & ✅ GPU-accelerated \\
 AEGIS-QL access & ❌ & ❌ & ✅ PQ access control \\
-Regulatory status & 🚫 Sanctioned & ⚠️ Scrutinized & ✅ Compliant \\
+Deployment status & 🚫 Sanctioned & ⚠️ Scrutinized & 🟠 Testnet \\
 API integration & Complex & Requires wallet & ✅ RESTful API \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\textcolor{blue}{* Currently supports Bitcoin, Ethereum, and EVM-compatible chains. Additional chains (Solana, Cardano, etc.) in roadmap.}
 
 \subsubsection{Tornado Cash (Ethereum-Only Mixer)}
 
@@ -1064,8 +1068,8 @@ Low (information disclosure) & \$500 \\
 \begin{itemize}
     \item \textbf{API Latency (P50):} 145ms (median response time)
     \item \textbf{API Latency (P99):} 780ms (99th percentile)
-    \item \textbf{Mixing Throughput:} 1,200 transactions/second (64-participant pools)
-    \item \textbf{ZK-STARK Proof Generation:} 30 seconds (1M constraints on RTX 3080 GPU)
+    \item \textbf{Mixing Throughput:} \textcolor{orange}{Target: 100-500 transactions/second} (testnet achieved with optimal 64-participant pool liquidity; real-world will vary significantly)
+    \item \textbf{ZK-STARK Proof Generation:} 2-5 minutes (1M constraints on RTX 3080 GPU in testnet)
     \item \textbf{ZK-STARK Verification:} 85ms (on CPU)
     \item \textbf{Tor Circuit Latency:} <150ms median (variable: 100-300ms in production)
 \end{itemize}
@@ -1094,13 +1098,15 @@ Low (information disclosure) & \$500 \\
     \item \textbf{Message Queue:} RabbitMQ with 100k msg/sec throughput for async mixing coordination
 \end{itemize}
 
-\textbf{Stress Test Results (2024-01):}
+\textbf{Testnet Stress Test Results (Controlled Environment, 2024-01):}
 \begin{itemize}
-    \item Peak load: 50,000 concurrent API requests
-    \item Sustained throughput: 5,000 mixes/second for 1 hour
-    \item Zero transaction failures
-    \item P99 latency remained <1 second
+    \item Peak load: 50,000 concurrent API requests (simulated)
+    \item Sustained throughput: \textcolor{orange}{Target 1,000-2,000 mixes/second} (testnet achieved under optimal conditions)
+    \item \textcolor{blue}{Note: Production performance will depend on pool liquidity, network conditions, and geographic distribution}
+    \item P99 latency: <1 second (testnet baseline; Tor routing adds 150ms-5s variability)
 \end{itemize}
+
+\textcolor{red}{\textbf{Important:} These are testnet benchmarks in a controlled environment with simulated load. Real-world mainnet performance may be significantly lower depending on actual user adoption and pool liquidity.}
 
 \section{9. Roadmap \& Future Development}
 
@@ -1122,18 +1128,18 @@ Low (information disclosure) & \$500 \\
 
 \subsection{Q3 2025}
 \begin{itemize}
-    \item Quantum Key Distribution (QKD) pilot with academic partners
-    \item Homomorphic encryption for computation on encrypted data
     \item Cross-chain bridge privacy (wrap assets privately)
-    \item Decentralized governance (DAO for protocol parameters)
+    \item Decentralized mixing coordinator network
+    \item Enhanced AEGIS-QL policy language
+    \item Mobile SDK (iOS + Android)
 \end{itemize}
 
 \subsection{Q4 2025}
 \begin{itemize}
-    \item Phase 2 migration (pure post-quantum signatures)
-    \item AI-powered transaction analysis resistance
-    \item Regulatory sandbox in 3 jurisdictions (US, EU, Singapore)
-    \item Open-source core protocol (auditable by community)
+    \item Phase 2 migration planning (pure post-quantum signatures)
+    \item Regulatory approval pursuit in key jurisdictions
+    \item Open-source core protocol release (auditable by community)
+    \item Performance optimization (reduce ZK proof generation time)
 \end{itemize}
 
 \section{10. Known Limitations and Risks}

@@ -623,3 +623,597 @@ pub fn verify_vertex_signature(
         }
     }
 }
+
+// ============================================================================
+// Network Configuration for Testnet/Mainnet Separation
+// ============================================================================
+
+/// Network identifier for testnet/mainnet separation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NetworkId {
+    /// Testnet (October 2025 - ongoing development)
+    Testnet,
+    /// Mainnet (Launch: December 15, 2025 00:00 UTC)
+    Mainnet,
+}
+
+impl NetworkId {
+    /// Get the string identifier for this network
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetworkId::Testnet => "testnet",
+            NetworkId::Mainnet => "mainnet",
+        }
+    }
+
+    /// Get the human-readable name for this network
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            NetworkId::Testnet => "Q-NarwhalKnight Testnet",
+            NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
+        }
+    }
+
+    /// Get the default API port for this network
+    pub fn default_api_port(&self) -> u16 {
+        match self {
+            NetworkId::Testnet => 8080,
+            NetworkId::Mainnet => 8081,
+        }
+    }
+
+    /// Get the default P2P port for this network
+    pub fn default_p2p_port(&self) -> u16 {
+        match self {
+            NetworkId::Testnet => 9001,
+            NetworkId::Mainnet => 9002,
+        }
+    }
+
+    /// Get the gossipsub topic prefix for this network
+    pub fn gossipsub_topic_prefix(&self) -> String {
+        format!("/qnk/{}", self.as_str())
+    }
+
+    /// Get the transaction gossipsub topic for this network
+    pub fn transactions_topic(&self) -> String {
+        format!("{}/transactions", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the blocks gossipsub topic for this network
+    pub fn blocks_topic(&self) -> String {
+        format!("{}/blocks", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the acknowledgments gossipsub topic for this network
+    pub fn acks_topic(&self) -> String {
+        format!("{}/ack", self.gossipsub_topic_prefix())
+    }
+}
+
+impl std::str::FromStr for NetworkId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "testnet" => Ok(NetworkId::Testnet),
+            "mainnet" => Ok(NetworkId::Mainnet),
+            _ => Err(format!("Invalid network ID: {}", s)),
+        }
+    }
+}
+
+impl Default for NetworkId {
+    fn default() -> Self {
+        NetworkId::Testnet
+    }
+}
+
+/// Network configuration with genesis hash and launch time
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// Network identifier (testnet/mainnet)
+    pub network_id: NetworkId,
+
+    /// Genesis block hash (unique per network)
+    pub genesis_hash: [u8; 32],
+
+    /// Network launch timestamp (UTC)
+    pub launch_time: DateTime<Utc>,
+
+    /// Network version string
+    pub version: String,
+
+    /// Chain ID for transaction replay protection
+    pub chain_id: u64,
+
+    /// API server port
+    pub api_port: u16,
+
+    /// P2P networking port
+    pub p2p_port: u16,
+
+    /// Bootstrap peers for this network
+    pub bootstrap_peers: Vec<String>,
+}
+
+impl NetworkConfig {
+    /// Create testnet configuration
+    pub fn testnet() -> Self {
+        Self {
+            network_id: NetworkId::Testnet,
+            genesis_hash: [
+                // Testnet genesis hash (October 2025)
+                0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
+                0x6f, 0x63, 0x74, 0x32, 0x30, 0x32, 0x35, 0x00,  // "oct2025"
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            launch_time: DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            version: "v0.0.9-beta-testnet".to_string(),
+            chain_id: 1, // Testnet chain ID
+            api_port: 8080,
+            p2p_port: 9001,
+            bootstrap_peers: vec![
+                "/ip4/185.182.185.227/tcp/9001".to_string(),
+            ],
+        }
+    }
+
+    /// Create mainnet configuration
+    pub fn mainnet() -> Self {
+        Self {
+            network_id: NetworkId::Mainnet,
+            genesis_hash: [
+                // Mainnet genesis hash (December 2025)
+                0x6d, 0x61, 0x69, 0x6e, 0x6e, 0x65, 0x74, 0x2d,  // "mainnet-"
+                0x64, 0x65, 0x63, 0x32, 0x30, 0x32, 0x35, 0x00,  // "dec2025"
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            launch_time: DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            version: "v1.0.0-mainnet".to_string(),
+            chain_id: 999, // Mainnet chain ID
+            api_port: 8081,
+            p2p_port: 9002,
+            bootstrap_peers: vec![
+                "/ip4/185.182.185.227/tcp/9002".to_string(),
+            ],
+        }
+    }
+
+    /// Get network configuration by network ID
+    pub fn from_network_id(network_id: NetworkId) -> Self {
+        match network_id {
+            NetworkId::Testnet => Self::testnet(),
+            NetworkId::Mainnet => Self::mainnet(),
+        }
+    }
+
+    /// Check if the network has launched
+    pub fn is_launched(&self) -> bool {
+        Utc::now() >= self.launch_time
+    }
+
+    /// Get time until launch (None if already launched)
+    pub fn time_until_launch(&self) -> Option<chrono::Duration> {
+        let now = Utc::now();
+        if now >= self.launch_time {
+            None
+        } else {
+            Some(self.launch_time - now)
+        }
+    }
+
+    /// Verify that a transaction belongs to this network
+    pub fn verify_transaction_network(&self, tx: &Transaction) -> bool {
+        // In the future, transactions should include chain_id
+        // For now, we accept all transactions on the same network
+        true
+    }
+
+    /// Verify that a message came from this network
+    pub fn verify_message_network(&self, genesis_hash: &[u8; 32]) -> bool {
+        genesis_hash == &self.genesis_hash
+    }
+}
+
+/// Network message wrapper with network verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkMessage<T> {
+    /// Network genesis hash for verification
+    pub genesis_hash: [u8; 32],
+
+    /// Chain ID for replay protection
+    pub chain_id: u64,
+
+    /// Message payload
+    pub payload: T,
+
+    /// Timestamp when message was created
+    pub timestamp: DateTime<Utc>,
+}
+
+impl<T> NetworkMessage<T> {
+    /// Create a new network message
+    pub fn new(config: &NetworkConfig, payload: T) -> Self {
+        Self {
+            genesis_hash: config.genesis_hash,
+            chain_id: config.chain_id,
+            payload,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Verify that this message belongs to the given network
+    pub fn verify_network(&self, config: &NetworkConfig) -> bool {
+        self.genesis_hash == config.genesis_hash && self.chain_id == config.chain_id
+    }
+}
+
+#[cfg(test)]
+mod network_separation_tests {
+    use super::*;
+
+    #[test]
+    fn test_network_id_string_conversion() {
+        // Test NetworkId to string conversion
+        assert_eq!(NetworkId::Testnet.as_str(), "testnet");
+        assert_eq!(NetworkId::Mainnet.as_str(), "mainnet");
+
+        // Test string parsing
+        assert_eq!("testnet".parse::<NetworkId>().unwrap(), NetworkId::Testnet);
+        assert_eq!("mainnet".parse::<NetworkId>().unwrap(), NetworkId::Mainnet);
+
+        // Test case-insensitive parsing (to_lowercase is used)
+        assert_eq!("TESTNET".parse::<NetworkId>().unwrap(), NetworkId::Testnet);
+        assert_eq!("Mainnet".parse::<NetworkId>().unwrap(), NetworkId::Mainnet);
+
+        // Test invalid string parsing
+        assert!("invalid".parse::<NetworkId>().is_err());
+        assert!("".parse::<NetworkId>().is_err());
+    }
+
+    #[test]
+    fn test_network_id_display() {
+        assert_eq!(NetworkId::Testnet.display_name(), "Q-NarwhalKnight Testnet");
+        assert_eq!(NetworkId::Mainnet.display_name(), "Q-NarwhalKnight Mainnet");
+    }
+
+    #[test]
+    fn test_gossipsub_topic_generation() {
+        let testnet = NetworkId::Testnet;
+        let mainnet = NetworkId::Mainnet;
+
+        // Test topic prefix generation
+        assert_eq!(testnet.gossipsub_topic_prefix(), "/qnk/testnet");
+        assert_eq!(mainnet.gossipsub_topic_prefix(), "/qnk/mainnet");
+
+        // Test transaction topics
+        assert_eq!(testnet.transactions_topic(), "/qnk/testnet/transactions");
+        assert_eq!(mainnet.transactions_topic(), "/qnk/mainnet/transactions");
+
+        // Test block topics
+        assert_eq!(testnet.blocks_topic(), "/qnk/testnet/blocks");
+        assert_eq!(mainnet.blocks_topic(), "/qnk/mainnet/blocks");
+
+        // Test ACK topics
+        assert_eq!(testnet.acks_topic(), "/qnk/testnet/ack");
+        assert_eq!(mainnet.acks_topic(), "/qnk/mainnet/ack");
+
+        // Verify topics are different between networks
+        assert_ne!(testnet.transactions_topic(), mainnet.transactions_topic());
+        assert_ne!(testnet.blocks_topic(), mainnet.blocks_topic());
+    }
+
+    #[test]
+    fn test_network_config_testnet() {
+        let config = NetworkConfig::testnet();
+
+        // Verify network ID
+        assert_eq!(config.network_id, NetworkId::Testnet);
+
+        // Verify chain ID
+        assert_eq!(config.chain_id, 1);
+
+        // Verify ports
+        assert_eq!(config.api_port, 8080);
+        assert_eq!(config.p2p_port, 9001);
+
+        // Verify version
+        assert_eq!(config.version, "v0.0.9-beta-testnet");
+
+        // Verify genesis hash starts with "testnet-"
+        assert_eq!(&config.genesis_hash[..8], b"testnet-");
+
+        // Verify launch time (October 23, 2025)
+        let expected = DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z").unwrap();
+        assert_eq!(config.launch_time, expected.with_timezone(&Utc));
+    }
+
+    #[test]
+    fn test_network_config_mainnet() {
+        let config = NetworkConfig::mainnet();
+
+        // Verify network ID
+        assert_eq!(config.network_id, NetworkId::Mainnet);
+
+        // Verify chain ID
+        assert_eq!(config.chain_id, 999);
+
+        // Verify ports
+        assert_eq!(config.api_port, 8081);
+        assert_eq!(config.p2p_port, 9002);
+
+        // Verify version
+        assert_eq!(config.version, "v1.0.0-mainnet");
+
+        // Verify genesis hash starts with "mainnet-"
+        assert_eq!(&config.genesis_hash[..8], b"mainnet-");
+
+        // Verify launch time (December 15, 2025)
+        let expected = DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z").unwrap();
+        assert_eq!(config.launch_time, expected.with_timezone(&Utc));
+    }
+
+    #[test]
+    fn test_network_config_uniqueness() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Genesis hashes must be different
+        assert_ne!(testnet.genesis_hash, mainnet.genesis_hash);
+
+        // Chain IDs must be different
+        assert_ne!(testnet.chain_id, mainnet.chain_id);
+
+        // Ports must be different
+        assert_ne!(testnet.api_port, mainnet.api_port);
+        assert_ne!(testnet.p2p_port, mainnet.p2p_port);
+
+        // Network IDs must be different
+        assert_ne!(testnet.network_id, mainnet.network_id);
+    }
+
+    #[test]
+    fn test_network_config_from_network_id() {
+        let testnet = NetworkConfig::from_network_id(NetworkId::Testnet);
+        let mainnet = NetworkConfig::from_network_id(NetworkId::Mainnet);
+
+        assert_eq!(testnet.network_id, NetworkId::Testnet);
+        assert_eq!(mainnet.network_id, NetworkId::Mainnet);
+
+        // Should match direct constructors
+        assert_eq!(testnet.genesis_hash, NetworkConfig::testnet().genesis_hash);
+        assert_eq!(mainnet.genesis_hash, NetworkConfig::mainnet().genesis_hash);
+    }
+
+    #[test]
+    fn test_genesis_hash_verification() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Same network should verify
+        assert!(testnet.verify_message_network(&testnet.genesis_hash));
+        assert!(mainnet.verify_message_network(&mainnet.genesis_hash));
+
+        // Cross-network should fail
+        assert!(!testnet.verify_message_network(&mainnet.genesis_hash));
+        assert!(!mainnet.verify_message_network(&testnet.genesis_hash));
+
+        // Random hash should fail
+        let random_hash = [0xff; 32];
+        assert!(!testnet.verify_message_network(&random_hash));
+        assert!(!mainnet.verify_message_network(&random_hash));
+    }
+
+    #[test]
+    fn test_network_message_creation() {
+        let testnet = NetworkConfig::testnet();
+        let message = NetworkMessage::new(&testnet, "test payload".to_string());
+
+        // Verify genesis hash is set correctly
+        assert_eq!(message.genesis_hash, testnet.genesis_hash);
+
+        // Verify chain ID is set correctly
+        assert_eq!(message.chain_id, testnet.chain_id);
+
+        // Verify payload
+        assert_eq!(message.payload, "test payload");
+
+        // Verify timestamp is recent (within last second)
+        let now = Utc::now();
+        let diff = now - message.timestamp;
+        assert!(diff.num_seconds() < 1);
+    }
+
+    #[test]
+    fn test_network_message_verification() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Create message for testnet
+        let testnet_msg = NetworkMessage::new(&testnet, 42u64);
+
+        // Should verify on same network
+        assert!(testnet_msg.verify_network(&testnet));
+
+        // Should fail on different network
+        assert!(!testnet_msg.verify_network(&mainnet));
+    }
+
+    #[test]
+    fn test_network_message_cross_network_rejection() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Create messages for each network
+        let testnet_msg = NetworkMessage::new(&testnet, vec![1, 2, 3]);
+        let mainnet_msg = NetworkMessage::new(&mainnet, vec![1, 2, 3]);
+
+        // Testnet message should only verify on testnet
+        assert!(testnet_msg.verify_network(&testnet));
+        assert!(!testnet_msg.verify_network(&mainnet));
+
+        // Mainnet message should only verify on mainnet
+        assert!(mainnet_msg.verify_network(&mainnet));
+        assert!(!mainnet_msg.verify_network(&testnet));
+    }
+
+    #[test]
+    fn test_network_message_with_modified_genesis_hash() {
+        let testnet = NetworkConfig::testnet();
+        let mut message = NetworkMessage::new(&testnet, "payload");
+
+        // Message should verify initially
+        assert!(message.verify_network(&testnet));
+
+        // Modify genesis hash
+        message.genesis_hash[0] ^= 0xff;
+
+        // Should now fail verification
+        assert!(!message.verify_network(&testnet));
+    }
+
+    #[test]
+    fn test_network_message_with_modified_chain_id() {
+        let testnet = NetworkConfig::testnet();
+        let mut message = NetworkMessage::new(&testnet, "payload");
+
+        // Message should verify initially
+        assert!(message.verify_network(&testnet));
+
+        // Modify chain ID
+        message.chain_id = 999;
+
+        // Should now fail verification
+        assert!(!message.verify_network(&testnet));
+    }
+
+    #[test]
+    fn test_launch_time_verification() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Testnet launch time (October 23, 2025) is in the past (relative to test date)
+        // Note: This test assumes we're running after Oct 23, 2025
+        // For now we just verify the launch times are set correctly
+        assert_eq!(
+            testnet.launch_time,
+            DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+
+        assert_eq!(
+            mainnet.launch_time,
+            DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_peers_configuration() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Verify testnet has bootstrap peers
+        assert!(!testnet.bootstrap_peers.is_empty());
+        assert_eq!(testnet.bootstrap_peers[0], "/ip4/185.182.185.227/tcp/9001");
+
+        // Verify mainnet has bootstrap peers
+        assert!(!mainnet.bootstrap_peers.is_empty());
+        assert_eq!(mainnet.bootstrap_peers[0], "/ip4/185.182.185.227/tcp/9002");
+
+        // Verify different ports for different networks
+        assert_ne!(testnet.bootstrap_peers, mainnet.bootstrap_peers);
+    }
+
+    #[test]
+    fn test_edge_case_empty_genesis_hash() {
+        let testnet = NetworkConfig::testnet();
+        let empty_hash = [0u8; 32];
+
+        // Empty hash should not match testnet
+        assert!(!testnet.verify_message_network(&empty_hash));
+    }
+
+    #[test]
+    fn test_edge_case_all_ones_genesis_hash() {
+        let testnet = NetworkConfig::testnet();
+        let ones_hash = [0xff; 32];
+
+        // All-ones hash should not match testnet
+        assert!(!testnet.verify_message_network(&ones_hash));
+    }
+
+    #[test]
+    fn test_topic_namespace_isolation() {
+        let testnet_id = NetworkId::Testnet;
+        let mainnet_id = NetworkId::Mainnet;
+
+        // Generate all topic types for both networks
+        let testnet_topics = vec![
+            testnet_id.transactions_topic(),
+            testnet_id.blocks_topic(),
+            testnet_id.acks_topic(),
+        ];
+
+        let mainnet_topics = vec![
+            mainnet_id.transactions_topic(),
+            mainnet_id.blocks_topic(),
+            mainnet_id.acks_topic(),
+        ];
+
+        // No topic should overlap between networks
+        for testnet_topic in &testnet_topics {
+            for mainnet_topic in &mainnet_topics {
+                assert_ne!(testnet_topic, mainnet_topic);
+            }
+        }
+
+        // All testnet topics should start with /qnk/testnet
+        for topic in &testnet_topics {
+            assert!(topic.starts_with("/qnk/testnet/"));
+        }
+
+        // All mainnet topics should start with /qnk/mainnet
+        for topic in &mainnet_topics {
+            assert!(topic.starts_with("/qnk/mainnet/"));
+        }
+    }
+
+    #[test]
+    fn test_chain_id_replay_protection() {
+        let testnet = NetworkConfig::testnet();
+        let mainnet = NetworkConfig::mainnet();
+
+        // Create a transaction-like payload
+        #[derive(Clone)]
+        struct MockTransaction {
+            from: String,
+            to: String,
+            amount: u64,
+        }
+
+        let tx = MockTransaction {
+            from: "alice".to_string(),
+            to: "bob".to_string(),
+            amount: 100,
+        };
+
+        // Wrap in network messages
+        let testnet_msg = NetworkMessage::new(&testnet, tx.clone());
+        let mainnet_msg = NetworkMessage::new(&mainnet, tx.clone());
+
+        // Same transaction data, but different chain IDs should prevent replay
+        assert_ne!(testnet_msg.chain_id, mainnet_msg.chain_id);
+        assert!(!testnet_msg.verify_network(&mainnet));
+        assert!(!mainnet_msg.verify_network(&testnet));
+    }
+}

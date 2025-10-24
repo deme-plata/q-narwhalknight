@@ -2,6 +2,10 @@
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
 
+[target.x86_64-pc-windows-msvc]
+linker = "/opt/orobit/shared/q-narwhalknight/.cargo/lld-link-wrapper.sh"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
 [env]
 CC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-gcc"
 CXX_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-g++"

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
+use bincode;
 
 /// 🎻 Protocol ID for resonance gossip
 pub const RESONANCE_PROTOCOL: &str = "/qnk/resonance/1.0.0";

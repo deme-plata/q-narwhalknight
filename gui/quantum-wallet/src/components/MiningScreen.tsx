@@ -63,7 +63,7 @@ export default function MiningScreen() {
                 <strong>Fixed Supply:</strong> 21,000,000 QUG total (hard cap, immutable)
               </p>
               <p>
-                <strong>Block Reward:</strong> 50 QUG initially, halves every 210,000 blocks (~4 years)
+                <strong>Block Reward:</strong> 0.5 QUG initially, halves every 210,000 blocks (~4 years)
               </p>
             </div>
           </div>
@@ -251,7 +251,7 @@ export default function MiningScreen() {
         <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-green/30 rounded-xl p-6">
           <div className="flex items-center justify-between mb-3">
             <Award className="w-6 h-6 text-quantum-green" />
-            <span className="text-2xl font-bold text-quantum-green">50 QUG</span>
+            <span className="text-2xl font-bold text-quantum-green">0.5 QUG</span>
           </div>
           <p className="text-gray-300 text-sm">Current Block Reward</p>
           <p className="text-gray-500 text-xs mt-1">Halves every 210,000 blocks</p>
@@ -269,7 +269,7 @@ export default function MiningScreen() {
         <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-purple/30 rounded-xl p-6">
           <div className="flex items-center justify-between mb-3">
             <Zap className="w-6 h-6 text-quantum-purple" />
-            <span className="text-2xl font-bold text-quantum-purple">~10m</span>
+            <span className="text-2xl font-bold text-quantum-purple">1s</span>
           </div>
           <p className="text-gray-300 text-sm">Target Block Time</p>
           <p className="text-gray-500 text-xs mt-1">After bootstrap phase</p>

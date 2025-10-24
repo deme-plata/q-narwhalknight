@@ -257,6 +257,8 @@ impl EnergyFunctional {
     fn gradient_descent_step(&mut self, learning_rate: f64) -> f64 {
         // Compute gradients in parallel
         let gradients: Vec<Complex<f64>> = (0..self.strings.len())
+            .into_iter()
+            .collect::<Vec<_>>()
             .into_par_iter()
             .map(|i| self.compute_gradient(i))
             .collect();

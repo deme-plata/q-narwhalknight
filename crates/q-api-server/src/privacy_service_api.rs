@@ -10,9 +10,10 @@
 /// Revenue Model: All PaaS fees flow to Quillon Bank master account
 
 use axum::{
-    extract::{Path, State, Json},
+    extract::{Path, State, Json, Request},
     http::StatusCode,
     response::IntoResponse,
+    Extension,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::paas_auth::AuthContext;
 use q_types::{ApiResponse, PrivacyLevel};
 
 /// PaaS pricing in QUG tokens (atomic units: 1 QUG = 100,000,000 atomic units)
@@ -155,9 +157,14 @@ pub struct TorRelayResponse {
 /// Relay transaction through Tor network
 pub async fn tor_relay_service(
     State(state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<TorRelayRequest>,
 ) -> Result<Json<ApiResponse<TorRelayResponse>>, StatusCode> {
-    info!("🧅 PaaS: Tor relay request for chain: {}", request.chain);
+    info!(
+        "🧅 PaaS: Tor relay request for chain: {} from wallet {}",
+        request.chain,
+        hex::encode(&auth_context.wallet_address[..8])
+    );
 
     // Check if Tor client is available
     let tor_client = match &state.tor_client {
@@ -187,7 +194,7 @@ pub async fn tor_relay_service(
         &state,
         cost_qug,
         PaaSService::TorRelay,
-        [0u8; 32], // TODO: Extract customer wallet address from authentication
+        auth_context.wallet_address, // Extract from authenticated context
     ).await;
 
     match credit_result {
@@ -303,9 +310,14 @@ pub struct ZkProofInfo {
 /// Submit transaction for mixing with ring signatures
 pub async fn mixing_service(
     State(state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<MixingRequest>,
 ) -> Result<Json<ApiResponse<MixingResponse>>, StatusCode> {
-    info!("🌪️  PaaS: Mixing request for chain: {}", request.chain);
+    info!(
+        "🌪️  PaaS: Mixing request for chain: {} from wallet {}",
+        request.chain,
+        hex::encode(&auth_context.wallet_address[..8])
+    );
 
     // Check if quantum mixer is available
     let quantum_mixer = match &state.quantum_mixer {
@@ -339,7 +351,7 @@ pub async fn mixing_service(
         &state,
         mixing_fee,
         PaaSService::TransactionMixing,
-        [0u8; 32], // TODO: Extract customer wallet address from authentication
+        auth_context.wallet_address, // Extract from authenticated context
     ).await;
 
     match credit_result {
@@ -476,9 +488,14 @@ pub struct VerificationData {
 /// Generate quantum-resistant ring signature
 pub async fn ring_signature_service(
     State(state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<RingSignatureRequest>,
 ) -> Result<Json<ApiResponse<RingSignatureResponse>>, StatusCode> {
-    info!("🔐 PaaS: Ring signature request for chain: {}", request.chain);
+    info!(
+        "🔐 PaaS: Ring signature request for chain: {} from wallet {}",
+        request.chain,
+        hex::encode(&auth_context.wallet_address[..8])
+    );
 
     // Validate ring size
     if request.ring_members.len() < 8 || request.ring_members.len() > 64 {
@@ -553,9 +570,14 @@ pub struct StealthAddressResponse {
 /// Generate stealth addresses (Monero-style dual-key)
 pub async fn stealth_address_service(
     State(state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<StealthAddressRequest>,
 ) -> Result<Json<ApiResponse<StealthAddressResponse>>, StatusCode> {
-    info!("👻 PaaS: Stealth address request for chain: {}", request.chain);
+    info!(
+        "👻 PaaS: Stealth address request for chain: {} from wallet {}",
+        request.chain,
+        hex::encode(&auth_context.wallet_address[..8])
+    );
 
     // Validate count
     if request.count == 0 || request.count > 100 {
@@ -625,9 +647,14 @@ pub struct ZkStarkProofResponse {
 /// Generate ZK-STARK proof (universal)
 pub async fn zk_stark_proof_service(
     State(state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<ZkStarkProofRequest>,
 ) -> Result<Json<ApiResponse<ZkStarkProofResponse>>, StatusCode> {
-    info!("🔬 PaaS: ZK-STARK proof request for statement: {}", request.statement);
+    info!(
+        "🔬 PaaS: ZK-STARK proof request for statement: {} from wallet {}",
+        request.statement,
+        hex::encode(&auth_context.wallet_address[..8])
+    );
 
     let proof_fee = pricing::ZK_STARK_PROOF_FEE;
 

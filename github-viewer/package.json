@@ -15,6 +15,7 @@
     "@types/prismjs": "^1.26.5",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "framer-motion": "^12.23.24",
     "fuse.js": "^7.1.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.545.0",

@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-green">v0.0.2-beta Released - Now with Transaction Tunneling!</span>
+          <span className="text-sm font-bold text-quantum-green">v0.0.9-beta Released - Peer Discovery Fixed!</span>
         </div>
       </motion.div>
 
@@ -89,14 +89,14 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-narwhalknight-linux-v0.0.2-beta.tar.gz"
+              href="/downloads/q-narwhalknight-linux-v0.0.9-beta.tar.gz"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
               Download Linux Package (Latest)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 15 MB (tar.gz) | Version: 0.0.2-beta
+              Size: 36 MB (tar.gz) | Version: 0.0.9-beta
             </p>
           </div>
 
@@ -104,13 +104,13 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`tar -xzf q-narwhalknight-linux-v0.0.2-beta.tar.gz
-cd q-narwhalknight-linux-v0.0.2-beta
+{`tar -xzf q-narwhalknight-linux-v0.0.9-beta.tar.gz
+cd q-narwhalknight-v0.0.9-beta/bin
 chmod +x q-api-server
 ./q-api-server --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              ✅ Includes: q-api-server binary (41MB) + comprehensive README with systemd setup
+              ✅ Includes: q-api-server binary (98MB) + README + RELEASE_NOTES + Fixed peer discovery!
             </p>
           </div>
         </motion.div>

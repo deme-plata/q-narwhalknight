@@ -43,6 +43,11 @@ pub struct PaaSAuthToken {
     /// Dilithium5 signature (4627 bytes)
     pub dilithium5_signature: Option<Vec<u8>>,
 
+    /// Dilithium5 public key (2592 bytes) - required for signature verification
+    /// For ECDSA, the public key is recovered from the signature
+    /// For Dilithium5, the public key must be provided
+    pub dilithium5_public_key: Option<Vec<u8>>,
+
     /// Message that was signed (typically: timestamp + endpoint + body_hash)
     pub signed_message: Vec<u8>,
 }
@@ -183,27 +188,64 @@ impl PaaSAuthManager {
             return Err("Invalid ECDSA signature length (expected 65 bytes)".to_string());
         }
 
-        // TODO: Implement actual ECDSA verification using secp256k1 crate
-        // For now, we'll use a simplified verification
-
         // Extract r, s, v components
         let r = &signature_bytes[0..32];
         let s = &signature_bytes[32..64];
-        let v = signature_bytes[64];
+        let recovery_id = signature_bytes[64];
 
-        // Verify recovery ID is valid
-        if v > 3 {
+        // Verify recovery ID is valid (0-3)
+        if recovery_id > 3 {
             return Err("Invalid ECDSA recovery ID".to_string());
         }
 
-        // Hash the signed message
+        // Hash the signed message (this is the message hash that was signed)
         let message_hash = Sha256::digest(&token.signed_message);
 
-        // TODO: Recover public key from signature and verify it matches wallet_address
-        // For Phase 2 development, we'll implement this properly with secp256k1 crate
+        // Create secp256k1 context
+        use secp256k1::{ecdsa::{RecoverableSignature, RecoveryId}, Message, Secp256k1};
 
-        info!("🔐 ECDSA signature verification (placeholder)");
-        Ok(true) // Placeholder: accept all signatures for development
+        let secp = Secp256k1::new();
+
+        // Parse recovery ID
+        let rec_id = RecoveryId::from_i32(recovery_id as i32)
+            .map_err(|e| format!("Invalid recovery ID: {}", e))?;
+
+        // Construct recoverable signature from r, s, and recovery ID
+        let mut sig_data = [0u8; 64];
+        sig_data[0..32].copy_from_slice(r);
+        sig_data[32..64].copy_from_slice(s);
+
+        let signature = RecoverableSignature::from_compact(&sig_data, rec_id)
+            .map_err(|e| format!("Invalid signature format: {}", e))?;
+
+        // Parse message hash
+        let message = Message::from_digest_slice(&message_hash)
+            .map_err(|e| format!("Invalid message hash: {}", e))?;
+
+        // Recover public key from signature
+        let recovered_pubkey = secp.recover_ecdsa(&message, &signature)
+            .map_err(|e| format!("Failed to recover public key: {}", e))?;
+
+        // Serialize recovered public key and hash it to get wallet address
+        let pubkey_bytes = recovered_pubkey.serialize_uncompressed();
+        let pubkey_hash = Sha256::digest(&pubkey_bytes[1..]); // Skip 0x04 prefix
+
+        // Compare with expected wallet address
+        if pubkey_hash.as_slice() != &token.wallet_address[..] {
+            warn!(
+                "🔐 ECDSA verification failed: wallet mismatch (expected: {}, recovered: {})",
+                hex::encode(&token.wallet_address[..8]),
+                hex::encode(&pubkey_hash[..8])
+            );
+            return Ok(false);
+        }
+
+        info!(
+            "✅ ECDSA signature verified successfully for wallet {}",
+            hex::encode(&token.wallet_address[..8])
+        );
+
+        Ok(true)
     }
 
     /// Verify Dilithium5 signature
@@ -213,6 +255,11 @@ impl PaaSAuthManager {
             .as_ref()
             .ok_or("Missing Dilithium5 signature")?;
 
+        let public_key_bytes = token
+            .dilithium5_public_key
+            .as_ref()
+            .ok_or("Missing Dilithium5 public key")?;
+
         // Dilithium5 signatures are 4627 bytes
         if signature_bytes.len() != 4627 {
             return Err(format!(
@@ -221,11 +268,61 @@ impl PaaSAuthManager {
             ));
         }
 
-        // TODO: Implement actual Dilithium5 verification using pqcrypto-dilithium crate
-        // This requires the public key to be included in the token or derived from wallet_address
+        // Dilithium5 public keys are 2592 bytes
+        if public_key_bytes.len() != 2592 {
+            return Err(format!(
+                "Invalid Dilithium5 public key length (expected 2592, got {})",
+                public_key_bytes.len()
+            ));
+        }
 
-        info!("🔐 Dilithium5 signature verification (placeholder)");
-        Ok(true) // Placeholder: accept all signatures for development
+        // Use pqcrypto-dilithium for verification
+        use pqcrypto_dilithium::dilithium5;
+        use pqcrypto_traits::sign::{PublicKey as _, DetachedSignature as _};
+
+        // Parse public key
+        let public_key = dilithium5::PublicKey::from_bytes(public_key_bytes)
+            .map_err(|e| format!("Invalid Dilithium5 public key: {:?}", e))?;
+
+        // Parse signature
+        let signature = dilithium5::DetachedSignature::from_bytes(signature_bytes)
+            .map_err(|e| format!("Invalid Dilithium5 signature: {:?}", e))?;
+
+        // Verify signature
+        let verification_result = dilithium5::verify_detached_signature(
+            &signature,
+            &token.signed_message,
+            &public_key
+        );
+
+        match verification_result {
+            Ok(_) => {
+                // Verify that the public key hash matches the wallet address
+                let pubkey_hash = Sha256::digest(public_key_bytes);
+
+                if pubkey_hash.as_slice() != &token.wallet_address[..] {
+                    warn!(
+                        "🔐 Dilithium5 verification failed: wallet mismatch (expected: {}, computed: {})",
+                        hex::encode(&token.wallet_address[..8]),
+                        hex::encode(&pubkey_hash[..8])
+                    );
+                    return Ok(false);
+                }
+
+                info!(
+                    "✅ Dilithium5 signature verified successfully for wallet {}",
+                    hex::encode(&token.wallet_address[..8])
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                warn!(
+                    "🔐 Dilithium5 signature verification failed: {:?}",
+                    e
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// Check rate limit for wallet address

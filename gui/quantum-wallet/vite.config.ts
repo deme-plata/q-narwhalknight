@@ -8,6 +8,14 @@ export default defineConfig({
   build: {
     outDir: './dist-final',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Force new hashes for every build
+        entryFileNames: `assets/[name]-[hash]-${Date.now()}.js`,
+        chunkFileNames: `assets/[name]-[hash]-${Date.now()}.js`,
+        assetFileNames: `assets/[name]-[hash]-${Date.now()}.[ext]`
+      }
+    }
   },
   server: {
     port: 5173,

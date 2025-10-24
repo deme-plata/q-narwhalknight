@@ -80,6 +80,7 @@ pub mod paas_billing_v2;  // ✅ ENABLED - Atomic billing v2 with Grok improveme
 pub mod paas_idempotency;  // ✅ ENABLED - Idempotency support for safe retries
 pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
 pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
+// pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
@@ -304,6 +305,35 @@ impl FaucetState {
     }
 }
 
+/// 🔒 Supply Consensus State - Post-Quantum Protected Max Supply Enforcement
+/// This structure ensures that the 21M QNK supply cap is enforced across
+/// the decentralized network using libp2p consensus and Dilithium5 signatures
+#[derive(Debug, Clone)]
+pub struct SupplyConsensusState {
+    /// Last known supply from network consensus
+    pub network_agreed_supply: u64,
+    /// Timestamp of last consensus update
+    pub last_consensus_timestamp: u64,
+    /// Number of nodes that agreed on current supply
+    pub consensus_node_count: usize,
+    /// Dilithium5 signature from validator set
+    pub validator_signature: Option<Vec<u8>>,
+    /// libp2p peer IDs that validated this supply
+    pub validating_peers: Vec<String>,
+}
+
+impl Default for SupplyConsensusState {
+    fn default() -> Self {
+        Self {
+            network_agreed_supply: 0,
+            last_consensus_timestamp: 0,
+            consensus_node_count: 0,
+            validator_signature: None,
+            validating_peers: Vec::new(),
+        }
+    }
+}
+
 /// Application state shared across handlers
 pub struct AppState {
     pub config: Config,
@@ -329,6 +359,11 @@ pub struct AppState {
 
     // Faucet system with rate limiting and abuse protection
     pub faucet_state: Arc<RwLock<FaucetState>>,
+
+    // 🔒 MAX SUPPLY ENFORCEMENT - Post-Quantum Consensus Protected
+    // Total supply tracking with Dilithium5 signature verification
+    pub total_minted_supply: Arc<RwLock<u64>>, // Total QNK minted across all wallets
+    pub supply_consensus_state: Arc<RwLock<SupplyConsensusState>>, // libp2p consensus state
 
     // Quantum Privacy Mixer State
     pub mixing_requests: Arc<RwLock<HashMap<String, PendingMixingRequest>>>, // participant_id -> request
@@ -667,6 +702,10 @@ impl AppState {
             // Faucet system with rate limiting and abuse protection
             faucet_state: Arc::new(RwLock::new(FaucetState::default())),
 
+            // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
+            total_minted_supply: Arc::new(RwLock::new(0)), // Start at 0, will load from storage
+            supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
+
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
             quantum_mixer: {
@@ -906,10 +945,11 @@ impl AppState {
             tracing::info!("✅ Using pre-configured libp2p manager from main.rs");
             libp2p_discovery
         } else {
-            // Fallback: create a basic discovery manager
-            match q_network::UnifiedNetworkManager::new().await {
+            // Fallback: create a basic discovery manager with testnet config
+            let fallback_config = q_types::NetworkConfig::testnet();
+            match q_network::UnifiedNetworkManager::new(fallback_config).await {
                 Ok(discovery) => {
-                    tracing::info!("🚀 libp2p Zero-Knowledge Discovery initialized successfully!");
+                    tracing::info!("🚀 libp2p Zero-Knowledge Discovery initialized successfully (fallback testnet)!");
                     tracing::info!("📡 Active discovery mechanisms: mDNS (local network), Identify (peer exchange), Ping (keepalive)");
                     Some(Arc::new(tokio::sync::Mutex::new(discovery)))
                 }
@@ -1102,6 +1142,18 @@ impl AppState {
             event_broadcaster,
             event_emitter,
 
+            // Faucet system
+            faucet_state: Arc::new(RwLock::new(FaucetState::default())),
+
+            // 🔒 MAX SUPPLY ENFORCEMENT - Load from storage or start at 0
+            total_minted_supply: Arc::new(RwLock::new(0)), // TODO: Load from storage
+            supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
+
+            // Quantum Privacy Mixer State
+            mixing_requests: Arc::new(RwLock::new(HashMap::new())),
+            quantum_mixer: None, // Initialized later if needed
+            zkp_prover: None, // Initialized later if needed
+
             // Network components with provided values
             bitcoin_bridge,
             dns_phantom,
@@ -1227,14 +1279,6 @@ impl AppState {
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
             orobit_ecosystem,
-
-            // Faucet Protection System
-            faucet_state: Arc::new(RwLock::new(FaucetState::new())),
-
-            // Quantum Privacy Mixer State
-            mixing_requests: Arc::new(RwLock::new(HashMap::new())),
-            quantum_mixer: None,  // Simple constructor - mixer initialized on demand
-            zkp_prover: None,     // Simple constructor - ZK proofs initialized on demand
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,

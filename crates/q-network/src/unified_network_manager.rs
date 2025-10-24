@@ -105,16 +105,24 @@ pub struct UnifiedNetworkManager {
     peer_tx: Option<mpsc::UnboundedSender<PeerInfo>>,
     /// Channel to forward gossipsub messages (for database replication, etc.)
     gossipsub_message_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
+    /// Thread-safe atomic counter for connected peers
+    connected_peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Network configuration (testnet/mainnet)
+    network_config: q_types::NetworkConfig,
 }
 
 impl UnifiedNetworkManager {
-    /// Create new network manager with ZERO configuration required
-    pub async fn new() -> anyhow::Result<Self> {
+    /// Create new network manager with network configuration
+    ///
+    /// # Arguments
+    /// * `network_config` - Network configuration (testnet/mainnet)
+    pub async fn new(network_config: q_types::NetworkConfig) -> anyhow::Result<Self> {
         // Generate or load keypair
         let keypair = Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(keypair.public());
 
         info!("🚀 Starting Q-NarwhalKnight Zero-Knowledge Discovery");
+        info!("🌐 Network: {}", network_config.network_id.display_name());
         info!("🆔 Local Peer ID: {}", local_peer_id);
 
         // Create transport (TCP + Noise + Yamux) for libp2p v0.53
@@ -147,25 +155,24 @@ impl UnifiedNetworkManager {
         let kad_store = MemoryStore::new(local_peer_id);
         let mut kademlia = Kademlia::with_config(local_peer_id, kad_store, kad_config);
 
-        // Bootstrap from environment variable or use hardcoded default
-        let bootstrap_peers_str = std::env::var("Q_BOOTSTRAP_PEERS")
-            .unwrap_or_else(|_| {
-                info!("ℹ️ Using default bootstrap peer: {}", DEFAULT_BOOTSTRAP_PEER);
-                DEFAULT_BOOTSTRAP_PEER.to_string()
-            });
-
+        // Bootstrap from network configuration
+        let bootstrap_peers = &network_config.bootstrap_peers;
         let mut bootstrap_count = 0;
-        for addr_str in bootstrap_peers_str.split(',') {
+
+        for addr_str in bootstrap_peers {
             if let Ok(addr) = addr_str.trim().parse::<Multiaddr>() {
                 // Extract peer ID from multiaddr (last component should be /p2p/<peer_id>)
                 use libp2p::multiaddr::Protocol;
                 if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                     kademlia.add_address(&peer_id, addr.clone());
-                    info!("📍 Added bootstrap peer: {} at {}", peer_id, addr);
+                    info!("📍 Added {} bootstrap peer: {} at {}",
+                          network_config.network_id.as_str(), peer_id, addr);
                     bootstrap_count += 1;
                 } else {
                     warn!("⚠️ Bootstrap multiaddr missing /p2p/ component: {}", addr);
                 }
+            } else {
+                warn!("⚠️ Invalid bootstrap multiaddr: {}", addr_str);
             }
         }
 
@@ -202,20 +209,23 @@ impl UnifiedNetworkManager {
         )
         .map_err(|e| anyhow::anyhow!("Gossipsub initialization error: {}", e))?;
 
-        // Subscribe to consensus topics
+        // Subscribe to network-specific consensus topics (testnet/mainnet separation)
+        // Each network has its own gossipsub namespace to prevent cross-network message propagation
+        let network_prefix = network_config.network_id.gossipsub_topic_prefix();
         let topics = vec![
-            IdentTopic::new("/qnk/blocks/1.0.0"),       // Block propagation
-            IdentTopic::new("/qnk/transactions"),       // Transaction propagation
-            IdentTopic::new("/qnk/mining-rewards"),     // Mining reward announcements
-            IdentTopic::new("/qnk/dex/swaps"),          // DEX swap events for decentralized exchange sync
-            IdentTopic::new("/qnk/votes/1.0.0"),        // Vote aggregation
-            IdentTopic::new("/qnk/ack/1.0.0"),          // Acknowledgements
+            IdentTopic::new(format!("{}/blocks", network_prefix)),          // Block propagation
+            IdentTopic::new(network_config.network_id.transactions_topic()), // Transaction propagation
+            IdentTopic::new(format!("{}/mining-rewards", network_prefix)),   // Mining reward announcements
+            IdentTopic::new(format!("{}/dex/swaps", network_prefix)),        // DEX swap events
+            IdentTopic::new(format!("{}/votes", network_prefix)),            // Vote aggregation
+            IdentTopic::new(network_config.network_id.acks_topic()),         // Acknowledgements
         ];
 
         for topic in &topics {
             gossipsub.subscribe(topic)
                 .map_err(|e| anyhow::anyhow!("Failed to subscribe to topic {}: {}", topic, e))?;
-            debug!("📢 Subscribed to Gossipsub topic: {}", topic);
+            info!("📢 Subscribed to {} Gossipsub topic: {}",
+                  network_config.network_id.as_str(), topic);
         }
 
         // Combine all behaviors
@@ -251,7 +261,14 @@ impl UnifiedNetworkManager {
             local_peer_id,
             peer_tx: None, // Set via set_peer_channel() after construction
             gossipsub_message_tx: None, // Set via set_gossipsub_channel() after construction
+            connected_peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            network_config,
         })
+    }
+
+    /// Get network configuration
+    pub fn network_config(&self) -> &q_types::NetworkConfig {
+        &self.network_config
     }
 
     /// Set channel for sending discovered peers to ConnectionManager (Phase 2)
@@ -337,7 +354,12 @@ impl UnifiedNetworkManager {
                         }
                     }
 
-                    self.swarm.dial(addr)?;
+                    // Attempt to dial the peer - log errors but don't propagate (keep event loop running)
+                    if let Err(e) = self.swarm.dial(addr.clone()) {
+                        warn!("⚠️ Failed to dial peer {} at {}: {}", peer_id, addr, e);
+                    } else {
+                        info!("📞 Dialing peer {} at {}...", peer_id, addr);
+                    }
                 }
             }
             #[cfg(not(target_os = "windows"))]
@@ -472,6 +494,12 @@ impl UnifiedNetworkManager {
         self.discovered_peers.read().await.len()
     }
 
+    /// Get thread-safe atomic reference to connected peer count
+    /// This can be safely cloned and shared across threads
+    pub fn get_peer_count_atomic(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.connected_peer_count.clone()
+    }
+
     /// Get discovered peer addresses for connection manager bridge (Phase 2)
     pub async fn get_discovered_peer_addresses(&self) -> Vec<PeerInfo> {
         let addresses = self.peer_addresses.read().await;
@@ -578,15 +606,30 @@ impl UnifiedNetworkManager {
                     ..
                 } => {
                     let mut peers = self.discovered_peers.write().await;
-                    peers.insert(peer_id);
+                    let is_new = peers.insert(peer_id);
+                    let peer_count = peers.len();
+                    drop(peers); // Release lock before calling atomic operations
+
+                    // Update atomic counter (thread-safe)
+                    self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
                     info!(
-                        "🔗 Connected to peer: {} (total connections: {})",
-                        peer_id, num_established
+                        "🔗 Connected to peer: {} (total connections: {}, new: {})",
+                        peer_id, num_established, is_new
                     );
-                    info!("📊 Total discovered peers: {}", peers.len());
+                    info!("📊 Total discovered peers: {} (atomic counter updated)", peer_count);
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    debug!("👋 Connection closed: {}", peer_id);
+                    // Remove peer from discovered set
+                    let mut peers = self.discovered_peers.write().await;
+                    peers.remove(&peer_id);
+                    let peer_count = peers.len();
+                    drop(peers);
+
+                    // Update atomic counter
+                    self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                    info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
                 }
                 _ => {}
             }

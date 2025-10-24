@@ -82,6 +82,8 @@ async fn main() -> Result<()> {
             signature: signature.to_bytes().to_vec(),
             timestamp: Utc::now(),
             data,
+            token_type: q_types::TokenType::QUG,
+            fee_token_type: q_types::TokenType::QUGUSD,
         };
 
         transactions.push(tx);

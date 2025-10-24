@@ -3883,8 +3883,6 @@ dependencies = [
  "lazy_static",
  "num-traits",
  "oorandom",
- "plotters",
- "rayon",
  "regex",
  "serde",
  "serde_derive",
@@ -4816,6 +4814,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "downcast"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4954,6 +4958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8",
+ "serde",
  "signature",
 ]
 
@@ -5707,7 +5712,7 @@ dependencies = [
  "hashers",
  "http 0.2.12",
  "instant",
- "jsonwebtoken",
+ "jsonwebtoken 8.3.0",
  "once_cell",
  "pin-project",
  "reqwest 0.11.27",
@@ -6705,6 +6710,18 @@ dependencies = [
  "r-efi",
  "wasip2",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "getset"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3586f256131df87204eb733da72e3d3eb4f343c639f4b7be279ac7c48baeafe"
+dependencies = [
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.107",
 ]
 
 [[package]]
@@ -8442,6 +8459,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "intel-mkl-src"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee70586cd5b3e772a8739a1bd43eaa90d4f4bf0fb2a4edc202e979937ee7f5e"
+dependencies = [
+ "anyhow",
+ "intel-mkl-tool",
+ "ocipkg",
+]
+
+[[package]]
+name = "intel-mkl-tool"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "887a16b4537d82227af54d3372971cfa5e0cde53322e60f57584056c16ada1b4"
+dependencies = [
+ "anyhow",
+ "log",
+ "walkdir",
+]
+
+[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8763,6 +8802,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem 3.0.6",
+ "ring 0.17.14",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
 name = "k12"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8941,6 +8995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f96a229d9557112e574164f8024ce703625ad9f88a90964c1780809358e53da"
 dependencies = [
  "cauchy",
+ "intel-mkl-src",
  "katexit",
  "lapack-sys",
  "num-traits",
@@ -11182,6 +11237,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
+name = "oauth2"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c38841cdd844847e3e7c8d29cef9dcfed8877f8f56f9071f77843ecf3baf937f"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "getrandom 0.2.16",
+ "http 0.2.12",
+ "rand 0.8.5",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "objc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11605,6 +11680,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr 2.7.6",
+]
+
+[[package]]
+name = "oci-spec"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdf88ddc01cc6bccbe1044adb6a29057333f523deadcb4953c011a73158cfa5e"
+dependencies = [
+ "derive_builder",
+ "getset",
+ "serde",
+ "serde_json",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ocipkg"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bb3293021f06540803301af45e7ab81693d50e89a7398a3420bdab139e7ba5e"
+dependencies = [
+ "base16ct",
+ "base64 0.22.1",
+ "chrono",
+ "directories",
+ "flate2",
+ "lazy_static",
+ "log",
+ "oci-spec",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "ureq 2.12.1",
+ "url",
+ "uuid 1.18.1",
+ "walkdir",
 ]
 
 [[package]]
@@ -12823,6 +12940,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.107",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13052,7 +13191,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "criterion 0.5.1",
@@ -13070,7 +13209,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "argon2",
@@ -13089,6 +13228,7 @@ dependencies = [
  "config",
  "core_affinity",
  "dashmap 6.1.0",
+ "dotenvy",
  "ed25519-dalek",
  "futures",
  "futures-util",
@@ -13100,6 +13240,8 @@ dependencies = [
  "num_cpus",
  "pin-project-lite",
  "postcard",
+ "pqcrypto-dilithium",
+ "pqcrypto-traits",
  "prometheus",
  "q-aegis-ql",
  "q-benchmarks",
@@ -13118,6 +13260,7 @@ dependencies = [
  "q-storage",
  "q-tor-circuit",
  "q-tor-client",
+ "q-tui",
  "q-types",
  "q-vdf",
  "q-vm",
@@ -13129,6 +13272,7 @@ dependencies = [
  "rayon",
  "rmp-serde",
  "rust_decimal",
+ "secp256k1 0.29.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13169,8 +13313,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "q-bounty-protocol"
+version = "0.0.8-beta"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode 1.3.3",
+ "blake3",
+ "chrono",
+ "dashmap 6.1.0",
+ "hex",
+ "oauth2",
+ "parking_lot 0.12.5",
+ "postcard",
+ "q-aegis-ql",
+ "q-storage",
+ "q-types",
+ "reqwest 0.12.24",
+ "rocksdb",
+ "rs_merkle",
+ "serde",
+ "serde_json",
+ "sha3 0.10.8",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid 1.18.1",
+]
+
+[[package]]
+name = "q-bounty-server"
+version = "0.0.8-beta"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "axum-extra",
+ "base64 0.21.7",
+ "chrono",
+ "clap 4.5.50",
+ "ed25519-dalek",
+ "hex",
+ "jsonwebtoken 9.3.1",
+ "parking_lot 0.12.5",
+ "q-aegis-ql",
+ "q-bounty-protocol",
+ "q-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+ "uuid 1.18.1",
+]
+
+[[package]]
 name = "q-cache"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -13252,7 +13454,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13279,7 +13481,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13303,7 +13505,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13331,7 +13533,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13418,7 +13620,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13483,7 +13685,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13613,7 +13815,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13657,7 +13859,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13694,7 +13896,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13726,7 +13928,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "backoff",
@@ -13887,7 +14089,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13916,7 +14118,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13950,7 +14152,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -13981,14 +14183,14 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
  "criterion 0.5.1",
  "cudarc 0.9.15",
- "dashmap 5.5.3",
+ "dashmap 6.1.0",
  "hex",
  "ndarray",
  "ndarray-linalg",
@@ -14094,7 +14296,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14124,7 +14326,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14152,7 +14354,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14183,7 +14385,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14203,7 +14405,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -14233,7 +14435,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "bytes",
@@ -14257,8 +14459,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "q-tui"
+version = "0.0.7"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm 0.27.0",
+ "ratatui 0.25.0",
+ "reqwest 0.11.27",
+ "ringbuf",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "q-types"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14274,7 +14493,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14306,7 +14525,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -14405,7 +14624,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "0.1.0"
+version = "0.0.8-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -14940,6 +15159,25 @@ dependencies = [
 
 [[package]]
 name = "ratatui"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5659e52e4ba6e07b2dad9f1158f578ef84a73762625ddb51536019f34d180eb"
+dependencies = [
+ "bitflags 2.10.0",
+ "cassowary",
+ "crossterm 0.27.0",
+ "indoc",
+ "itertools 0.12.1",
+ "lru",
+ "paste",
+ "stability 0.1.1",
+ "strum 0.25.0",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "ratatui"
 version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f44c9e68fd46eda15c646fbb85e1040b657a58cdc8c98db1d97a55930d991eef"
@@ -14951,7 +15189,7 @@ dependencies = [
  "itertools 0.12.1",
  "lru",
  "paste",
- "stability",
+ "stability 0.2.1",
  "strum 0.26.3",
  "unicode-segmentation",
  "unicode-truncate",
@@ -15475,6 +15713,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ringbuf"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79abed428d1fd2a128201cec72c5f6938e2da607c6f3745f769fabea399d950a"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "ripemd"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15594,7 +15841,7 @@ dependencies = [
  "risc0-binfmt",
  "risc0-zkp",
  "serde",
- "stability",
+ "stability 0.2.1",
 ]
 
 [[package]]
@@ -15650,7 +15897,7 @@ dependencies = [
  "semver 1.0.27",
  "serde",
  "sha2 0.10.9",
- "stability",
+ "stability 0.2.1",
  "tempfile",
  "tracing",
 ]
@@ -15665,7 +15912,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.16",
  "libm",
- "stability",
+ "stability 0.2.1",
 ]
 
 [[package]]
@@ -15807,6 +16054,15 @@ checksum = "b4382d3af3a4ebdae7f64ba6edd9114fff92c89808004c4943b393377a25d001"
 dependencies = [
  "downcast-rs",
  "paste",
+]
+
+[[package]]
+name = "rs_merkle"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb09b49230ba22e8c676e7b75dfe2887dea8121f18b530ae0ba519ce442d2b21"
+dependencies = [
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -17441,6 +17697,16 @@ dependencies = [
  "ssh-encoding",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "stability"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebd1b177894da2a2d9120208c3386066af06a488255caabc5de8ddca22dbc3ce"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

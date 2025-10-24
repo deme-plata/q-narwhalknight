@@ -108,7 +108,12 @@ function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0a0e27] overflow-hidden">
-      <Header repoInfo={repoInfo} onDownloadRepo={handleDownloadRepo} />
+      <Header
+        repoInfo={repoInfo}
+        fileTree={fileTree}
+        onDownloadRepo={handleDownloadRepo}
+        onFileSelect={handleFileSelect}
+      />
 
       <div className="flex-1 flex overflow-hidden">
         {/* File Tree Sidebar */}

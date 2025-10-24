@@ -7,6 +7,7 @@ use crate::vertex::ResonanceVertex;
 use crate::ResonanceError;
 use ndarray::{Array1, Array2};
 use ndarray_linalg::Eigh;
+use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 
 /// Spectral BFT analyzer

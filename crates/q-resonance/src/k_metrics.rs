@@ -5,6 +5,7 @@
 use crate::{PhaseAnalysis, PhaseTransition, PhaseRecommendation};
 use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use serde_json;
 
 /// 🎯 K-Parameter Consensus Metrics
 ///

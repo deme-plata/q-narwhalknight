@@ -34,6 +34,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load environment variables from .env file (for Stripe API keys, etc.)
+    if let Err(e) = dotenvy::dotenv() {
+        eprintln!("⚠️  Warning: Could not load .env file: {}", e);
+        eprintln!("    Continuing without .env (environment variables must be set externally)");
+    } else {
+        eprintln!("✅ Loaded environment variables from .env file");
+    }
+
     // Parse command line arguments
     let matches = Command::new("q-api-server")
         .version("0.1.0")
@@ -70,6 +78,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Enable beautiful terminal UI mode for node monitoring")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("network")
+                .long("network")
+                .value_name("NETWORK")
+                .help("Network to connect to (testnet or mainnet)")
+                .default_value("testnet"),
+        )
         .get_matches();
 
     // Check if TUI mode is enabled
@@ -99,9 +114,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = Config::from_env()?;
 
-    // Override port if provided
+    // Parse network configuration (testnet/mainnet)
+    let network_str = matches.get_one::<String>("network").map(|s| s.as_str()).unwrap_or("testnet");
+    let network_id = network_str.parse::<q_types::NetworkId>()
+        .unwrap_or_else(|e| {
+            warn!("Invalid network '{}': {}. Defaulting to testnet.", network_str, e);
+            q_types::NetworkId::Testnet
+        });
+
+    let network_config = q_types::NetworkConfig::from_network_id(network_id);
+
+    info!("🌐 ════════════════════════════════════════════════════════");
+    info!("🌐 Network: {}", network_config.network_id.display_name());
+    info!("🌐 Chain ID: {}", network_config.chain_id);
+    info!("🌐 Version: {}", network_config.version);
+    info!("🌐 Launch Time: {}", network_config.launch_time);
+    if !network_config.is_launched() {
+        if let Some(duration) = network_config.time_until_launch() {
+            info!("⏰ Time until launch: {} days", duration.num_days());
+        }
+    }
+    info!("🌐 ════════════════════════════════════════════════════════");
+
+    // Override port if provided via command line, otherwise use network default
     if let Some(port_str) = matches.get_one::<String>("port") {
         config.port = port_str.parse()?;
+    } else {
+        // Use network-specific default port
+        config.port = network_config.api_port;
+        info!("📡 Using network default port: {}", config.port);
     }
 
     // Check if we're targeting Server Beta
@@ -110,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_name = matches
         .get_one::<String>("node-id")
         .map(|s| s.clone())
-        .unwrap_or_else(|| "alpha-node-unknown".to_string());
+        .unwrap_or_else(|| format!("{}-node-unknown", network_config.network_id.as_str()));
 
     if target_beta {
         info!(
@@ -485,31 +526,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ========================================
     // 🌐 LIBP2P UNIFIED NETWORK MANAGER
-    // Zero-configuration P2P networking with Gossipsub
+    // Network-specific P2P networking with Gossipsub
     // ========================================
-    info!("🌐 Initializing libp2p Unified Network Manager...");
+    info!("🌐 Initializing libp2p Unified Network Manager for {}...", network_config.network_id.display_name());
 
-    let libp2p_manager = match q_network::UnifiedNetworkManager::new().await {
+    let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone()).await {
         Ok(mut manager) => {
-            info!("✅ libp2p Network Manager initialized");
+            info!("✅ libp2p Network Manager initialized for {}", manager.network_config().network_id.display_name());
             info!("   Local Peer ID: {}", manager.peer_id());
             info!("   Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping");
-
-            // Subscribe to application topics
-            let topics = vec![
-                "/qnk/transactions",
-                "/qnk/consensus",
-                "/qnk/dex/orders",
-                "/qnk/contracts/state",
-            ];
-
-            for topic in &topics {
-                if let Err(e) = manager.subscribe_topic(topic) {
-                    warn!("Failed to subscribe to {}: {}", topic, e);
-                } else {
-                    info!("📢 Subscribed to topic: {}", topic);
-                }
-            }
+            info!("   Network Topics: {}/transactions, {}/blocks, etc.",
+                  manager.network_config().network_id.gossipsub_topic_prefix(),
+                  manager.network_config().network_id.gossipsub_topic_prefix());
 
             // Set up gossipsub message forwarding
             let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -561,6 +589,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = state;
 
     // ========================================
+    // 📊 LIBP2P PEER COUNT - Atomic Counter for Thread-Safe Access
+    // ========================================
+    // Get atomic peer counter from libp2p manager (thread-safe!)
+    let peer_count_atomic = if let Some(ref libp2p_discovery) = state.libp2p_discovery {
+        let discovery = libp2p_discovery.lock().await;
+        Some(discovery.get_peer_count_atomic())
+    } else {
+        None
+    };
+
+    info!("📊 Peer count tracking enabled - atomic counter initialized");
+    // Note: node_status.connected_peers will be updated by reading the atomic counter
+    // 2. P2P listener (direct TCP connections)
+    // Stats loop reads from node_status.connected_peers
+
+    // ========================================
     // PHASE 1: HIGH-PERFORMANCE CONSENSUS INITIALIZATION
     // Target: 50K+ TPS (baseline without SIMD/kernel optimizations)
     // ========================================
@@ -587,10 +631,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("📦 Initializing Production Mempool...");
 
-    // Initialize ProductionMempool - skip for now due to TorClient trait requirements
-    let production_mempool: Option<Arc<q_narwhal_core::production_mempool::ProductionMempool>> = None;
-    info!("⚠️  Production Mempool initialization skipped (requires TorClient trait)");
-    info!("   Using fallback transaction pool for TPS testing");
+    // Initialize ProductionTorClient for Bracha's reliable broadcast
+    use q_narwhal_core::{ProductionTorClient, TorClientConfig};
+    use q_types::Phase;
+
+    let tor_config = TorClientConfig {
+        socks_proxy: "127.0.0.1:9050".to_string(),  // Default Tor SOCKS5 proxy
+        connection_timeout: std::time::Duration::from_secs(30),
+        max_pool_size: 100,
+        enable_connection_pooling: true,
+        connection_keep_alive: std::time::Duration::from_secs(300),
+    };
+
+    let production_tor_client: Option<Arc<dyn q_narwhal_core::TorClient>> = {
+        let client = ProductionTorClient::new(tor_config);
+        info!("✅ ProductionTorClient initialized successfully");
+        info!("   Note: Tor connection will be attempted when broadcasting");
+        let arc_client: Arc<dyn q_narwhal_core::TorClient> = Arc::new(client);
+        Some(arc_client)
+    };
+
+    // Initialize ProductionMempool with Bracha's reliable broadcast
+    let production_mempool: Option<Arc<q_narwhal_core::production_mempool::ProductionMempool>> =
+        if let Some(tor_client) = production_tor_client {
+            match q_narwhal_core::production_mempool::ProductionMempool::new(
+                mempool_config,
+                tor_client,
+                Phase::Phase1,  // Phase 1: Post-quantum cryptography
+            ).await {
+                Ok(mempool) => {
+                    info!("✅ Production Mempool initialized with Tor broadcast");
+                    info!("   Max transactions: 1M");
+                    info!("   Byzantine protection: ENABLED");
+                    info!("   Reliable broadcast: Bracha's protocol over Tor");
+                    Some(Arc::new(mempool))
+                }
+                Err(e) => {
+                    warn!("⚠️  Production Mempool initialization failed: {}", e);
+                    info!("   Using fallback transaction pool");
+                    None
+                }
+            }
+        } else {
+            info!("⚠️  Production Mempool skipped (Tor client unavailable)");
+            info!("   Using fallback transaction pool for testing");
+            None
+        };
 
     // Initialize DAG-Knight Consensus with parallel processing
     info!("⚔️  Initializing DAG-Knight Consensus...");
@@ -741,8 +827,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some((topic, data)) = gossipsub_rx.recv().await {
                 info!("📥 GOSSIPSUB: topic={}, size={} bytes", topic, data.len());
 
-                match topic.as_str() {
-                    "/qnk/transactions" => {
+                // Match topics by suffix to support both testnet and mainnet
+                // e.g., "/qnk/testnet/transactions" or "/qnk/mainnet/transactions"
+                if topic.ends_with("/transactions") {
                         // Deserialize and process incoming transaction
                         match postcard::from_bytes::<q_types::Transaction>(&data) {
                             Ok(tx) => {
@@ -759,8 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("Failed to deserialize transaction from network: {}", e);
                             }
                         }
-                    }
-                    "/qnk/mining-rewards" => {
+                } else if topic.ends_with("/mining-rewards") {
                         // Deserialize and process incoming mining reward transaction
                         match postcard::from_bytes::<q_types::Transaction>(&data) {
                             Ok(tx) => {
@@ -794,8 +880,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("Failed to deserialize mining reward from network: {}", e);
                             }
                         }
-                    }
-                    "/qnk/dex/swaps" => {
+                } else if topic.ends_with("/dex/swaps") {
                         // Deserialize and process incoming DEX swap event
                         match postcard::from_bytes::<q_api_server::handlers::SwapEvent>(&data) {
                             Ok(swap) => {
@@ -831,19 +916,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("Failed to deserialize DEX swap from network: {}", e);
                             }
                         }
-                    }
-                    "/qnk/blocks/1.0.0" => {
-                        info!("  → Block propagation (handler not yet implemented)");
-                    }
-                    "/qnk/votes/1.0.0" => {
-                        info!("  → Vote aggregation (handler not yet implemented)");
-                    }
-                    "/qnk/ack/1.0.0" => {
-                        info!("  → Acknowledgements (handler not yet implemented)");
-                    }
-                    _ => {
-                        warn!("  → Unknown gossipsub topic: {}, dropping", topic);
-                    }
+                } else if topic.contains("/blocks") {
+                    info!("  → Block propagation (handler not yet implemented)");
+                } else if topic.contains("/votes") {
+                    info!("  → Vote aggregation (handler not yet implemented)");
+                } else if topic.contains("/ack") {
+                    info!("  → Acknowledgements (handler not yet implemented)");
+                } else {
+                    warn!("  → Unknown gossipsub topic: {}, dropping", topic);
                 }
             }
             warn!("📨 Gossipsub processor channel closed");
@@ -972,38 +1052,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================
     // 🎨 START ANIMATED CONSOLE VISUALIZATION
     // ========================================
-    info!("🎨 Initializing animated consensus visualization...");
-    let visualizer = ConsoleVisualizer::new();
-    let viz_stats = visualizer.get_stats_handle();
+    // Skip console visualization if TUI mode is enabled
+    if !tui_mode {
+        info!("🎨 Initializing animated consensus visualization...");
+        let visualizer = ConsoleVisualizer::new();
+        let viz_stats = visualizer.get_stats_handle();
 
-    // Initialize stats with current state
-    update_stats(viz_stats.clone(), |stats| {
-        stats.connected_peers = 0; // Will be updated by network events
-        stats.resonance_enabled = true; // Phase 5 complete
-        stats.shadow_mode_active = false; // Can be enabled later
-    }).await;
+        // Initialize stats with current state
+        update_stats(viz_stats.clone(), |stats| {
+            stats.connected_peers = 0; // Will be updated by network events
+            stats.resonance_enabled = true; // Phase 5 complete
+            stats.shadow_mode_active = false; // Can be enabled later
+        }).await;
 
-    // Start animated visualization loop
-    let viz_clone = visualizer;
-    tokio::spawn(async move {
-        viz_clone.start_animation().await;
-    });
+        // Start animated visualization loop
+        let viz_clone = visualizer;
+        tokio::spawn(async move {
+            viz_clone.start_animation().await;
+        });
 
-    // Spawn background stats updater
-    let stats_handle_updater = viz_stats.clone();
-    let app_state_updater = app_state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        let mut last_tx_count = 0u64;
-        let mut last_block_count = 0u64;
-        let start_time = std::time::Instant::now();
+        // Spawn background stats updater
+        let stats_handle_updater = viz_stats.clone();
+        let app_state_updater = app_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut last_tx_count = 0u64;
+            let mut last_block_count = 0u64;
+            let start_time = std::time::Instant::now();
 
         loop {
             interval.tick().await;
 
-            // Get real connection count from ConnectionManager
-            let connected_peers = if let Some(ref conn_mgr) = app_state_updater.connection_manager {
-                conn_mgr.get_active_connection_count().await
+            // Read peer count from atomic counter (thread-safe, no locking needed!)
+            let connected_peers = if let Some(ref peer_count) = peer_count_atomic {
+                let count = peer_count.load(std::sync::atomic::Ordering::SeqCst);
+
+                // Update node_status with current peer count
+                {
+                    let mut status = app_state_updater.node_status.write().await;
+                    status.connected_peers = count as u32;
+                }
+
+                count
             } else {
                 0
             };
@@ -1038,7 +1128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    info!("✅ Console visualization started");
+        info!("✅ Console visualization started");
+    } else {
+        info!("🎨 Console visualization disabled - TUI mode active");
+    }
 
     // Log final startup status
     info!("🌟 ================================");
@@ -1634,6 +1727,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::get_recent_transactions),
         ) // Dashboard recent transactions
         .route("/api/v1/blocks/:height", get(handlers::get_block))
+
+        // ============================================
+        // EXPLORER API ENDPOINTS
+        // ============================================
+        .route("/api/v1/statistics/network", get(handlers::network_analytics)) // Use existing function
+        .route("/api/v1/blocks/recent", get(handlers::list_blocks)) // Use existing function
+        .route("/api/v1/contracts/recent", get(handlers::list_contracts)) // Use existing function
+        .route("/api/v1/dag/vertices/recent", get(handlers::get_dag_vertices)) // Use existing function
+        .route("/api/v1/search", get(handlers::search_transactions)) // Use existing function
+
         // Network Analytics endpoints
         .route(
             "/api/v1/network/analytics",

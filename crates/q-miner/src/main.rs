@@ -72,6 +72,11 @@ struct ApiResponse<T> {
     error: Option<String>,
 }
 
+/// Helper function to normalize server URL (remove trailing slash)
+fn normalize_server_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -383,28 +388,35 @@ async fn mining_thread(
                     "challenge_hash": hex::encode(challenge_hash)
                 });
 
-                match client.post(format!("{}/api/v1/mining/submit", api_url))
-                    .json(&solution)
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            if let Ok(result) = resp.json::<serde_json::Value>().await {
-                                if let Some(data) = result.get("data") {
-                                    if let Some(reward) = data.get("reward_qnk") {
-                                        info!("✅ Solution accepted! Earned {} QNK", reward);
+                // CRITICAL: Submit solution in background to avoid blocking mining thread
+                // The mining thread must continue immediately to maintain hash rate
+                let normalized_url = normalize_server_url(api_url);
+                let submit_url = format!("{}/api/v1/mining/submit", normalized_url);
+                let client_clone = client.clone();
+                tokio::spawn(async move {
+                    match client_clone.post(&submit_url)
+                        .json(&solution)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if resp.status().is_success() {
+                                if let Ok(result) = resp.json::<serde_json::Value>().await {
+                                    if let Some(data) = result.get("data") {
+                                        if let Some(reward) = data.get("reward_qnk") {
+                                            info!("✅ Solution accepted! Earned {} QNK", reward);
+                                        }
                                     }
                                 }
+                            } else {
+                                warn!("❌ Solution rejected: HTTP {}", resp.status());
                             }
-                        } else {
-                            warn!("❌ Solution rejected: HTTP {}", resp.status());
+                        }
+                        Err(e) => {
+                            warn!("Failed to submit solution: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to submit solution: {}", e);
-                    }
-                }
+                });
             }
 
             nonce += 1;
@@ -450,8 +462,11 @@ async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<
     use eventsource_client::{self as eventsource, Client as _};
     use futures::StreamExt;
 
+    // Normalize URL to prevent double slashes
+    let normalized_url = normalize_server_url(&server_url);
+
     // Include wallet_address parameter for filtered SSE events
-    let url = format!("{}/api/v1/events?wallet_address={}", server_url, wallet);
+    let url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
 
     loop {
         if !is_running.load(Ordering::SeqCst) {
@@ -559,7 +574,9 @@ async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<
 /// Fetch current mining challenge from API server
 async fn fetch_mining_challenge(api_url: &str) -> Result<MiningChallenge> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/mining/challenge", api_url);
+    // Normalize URL to prevent double slashes
+    let normalized_url = normalize_server_url(api_url);
+    let url = format!("{}/api/v1/mining/challenge", normalized_url);
 
     let response = client.get(&url)
         .send()

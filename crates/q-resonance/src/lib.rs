@@ -10,6 +10,10 @@
 //! - **Spectral BFT**: Byzantine detection via Laplacian eigenvalue analysis
 //! - **Harmonic Convergence**: Agreement through constructive interference
 
+// Import external crates to make them available
+use serde as _serde;
+use thiserror as _thiserror;
+
 pub mod string_state;
 pub mod energy;
 pub mod vertex;

@@ -1,14 +1,23 @@
-import { Star, GitFork, Eye, Download, ExternalLink } from 'lucide-react';
-import type { GitHubRepo } from '../types/github';
+import { Star, GitFork, Eye, Download, ExternalLink, BookOpen } from 'lucide-react';
+import { useState } from 'react';
+import type { GitHubRepo, FileTreeNode } from '../types/github';
+import { Documentation } from './Documentation';
+import { Search } from './Search';
 
 interface HeaderProps {
   repoInfo: GitHubRepo | null;
+  fileTree: FileTreeNode | null;
   onDownloadRepo: () => void;
+  onFileSelect: (path: string) => void;
 }
 
-export function Header({ repoInfo, onDownloadRepo }: HeaderProps) {
+export function Header({ repoInfo, fileTree, onDownloadRepo, onFileSelect }: HeaderProps) {
+  const [showDocs, setShowDocs] = useState(false);
+
   return (
-    <header className="h-20 bg-[#050714] border-b-2 border-cyan-500 flex items-center justify-between px-8">
+    <>
+      {showDocs && <Documentation onClose={() => setShowDocs(false)} />}
+      <header className="h-20 bg-[#050714] border-b-2 border-cyan-500 flex items-center justify-between px-8">
       {/* Left: Logo and Title */}
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-3">
@@ -52,6 +61,19 @@ export function Header({ repoInfo, onDownloadRepo }: HeaderProps) {
 
       {/* Right: Actions */}
       <div className="flex items-center gap-3">
+        <Search fileTree={fileTree} onFileSelect={onFileSelect} />
+
+        <button
+          onClick={() => setShowDocs(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-green-500/20 hover:bg-green-500/30
+                   text-green-400 rounded-lg transition-all duration-200 font-mono text-sm
+                   border border-green-500/30 hover:border-green-500/50
+                   shadow-[0_0_15px_rgba(0,255,136,0.3)] hover:shadow-[0_0_25px_rgba(0,255,136,0.5)]"
+        >
+          <BookOpen size={18} />
+          <span className="hidden xl:inline">How to Contribute</span>
+        </button>
+
         <button
           onClick={onDownloadRepo}
           className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 hover:bg-cyan-500/30
@@ -80,14 +102,15 @@ export function Header({ repoInfo, onDownloadRepo }: HeaderProps) {
           href="https://technical-deepdive.quillon.xyz"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-2 px-4 py-2 bg-green-500/20 hover:bg-green-500/30
-                   text-green-400 rounded-lg transition-all duration-200 font-mono text-sm
-                   border border-green-500/30 hover:border-green-500/50
-                   shadow-[0_0_15px_rgba(0,255,136,0.3)] hover:shadow-[0_0_25px_rgba(0,255,136,0.5)]"
+          className="flex items-center gap-2 px-4 py-2 bg-yellow-500/20 hover:bg-yellow-500/30
+                   text-yellow-400 rounded-lg transition-all duration-200 font-mono text-sm
+                   border border-yellow-500/30 hover:border-yellow-500/50
+                   shadow-[0_0_15px_rgba(255,255,0,0.3)] hover:shadow-[0_0_25px_rgba(255,255,0,0.5)]"
         >
           📊 Presentation
         </a>
       </div>
     </header>
+    </>
   );
 }

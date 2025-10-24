@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["test_tx_propagation"]
 members = [
     "crates/q-types",
     "crates/q-wallet", 
@@ -48,13 +49,16 @@ members = [
     "crates/q-ipfs-storage",   # IPFS-RocksDB decentralized storage
     "crates/q-aegis-ql",       # AEGIS-QL post-quantum access control
     "crates/q-quillon-bank",   # Quantum banking with CDP and PaaS revenue
+    "crates/q-tui",            # Beautiful terminal UI for node monitoring
     "crates/q-quillon-bank-cli", # Quillon Bank CLI management interface
+    "crates/q-bounty-protocol",  # Testnet bounty protocol with RocksDB + AEGIS-QL
+    "crates/q-bounty-server",    # Bounty API server with Axum REST endpoints
     "gui",
     "crates/q-resonance"
 , "sdk/rust"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.8-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"

@@ -26,6 +26,7 @@ libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
 q-tor-client = { path = "../q-tor-client" } # Re-enabled for consensus integration
 q-vm = { path = "../q-vm" }
 q-quantum-mixing = { path = "../q-quantum-mixing" }
+q-tui = { path = "../q-tui", optional = true }
 
 # Web framework
 axum = { workspace = true }
@@ -63,6 +64,7 @@ tracing-subscriber = { workspace = true }
 
 # Configuration
 config = { workspace = true }
+dotenvy = "0.15"  # Load .env file for environment variables (Stripe keys, etc.)
 
 # Database - using RocksDB quantum storage
 q-storage = { path = "../q-storage" }
@@ -135,6 +137,9 @@ core_affinity = "0.8"  # CPU core pinning for NUMA-aware workers
 # Parallel processing for CPU-bound work (signature verification)
 rayon = "1.8"  # Data parallelism for transaction validation
 ed25519-dalek = { workspace = true }  # Signature verification
+secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }  # ECDSA signature verification for PaaS
+pqcrypto-dilithium = { workspace = true }  # Dilithium5 post-quantum signatures for PaaS
+pqcrypto-traits = "0.3"  # PQCrypto trait definitions
 
 # Stripe payment processing integration - ✅ ENABLED (Rust 1.90.0)
 async-stripe = { version = "0.38", default-features = false, features = ["runtime-tokio-hyper-rustls"] }
@@ -146,6 +151,10 @@ rust_decimal = "1.33"  # For precise USD amount handling
 [target.'cfg(target_os = "linux")'.dependencies]
 q-kernel-io = { path = "../q-kernel-io" }
 q-benchmarks = { path = "../q-benchmarks" }
+
+[features]
+default = ["tui"]
+tui = ["q-tui"]
 
 [dev-dependencies]
 tokio-test = "0.4"

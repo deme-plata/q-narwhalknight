@@ -3,7 +3,16 @@
 
 import { generateAuthHeader, walletSession, loadWallet } from './walletAuth';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Get API base URL from localStorage (set by network selector) or use default
+const getApiBaseUrl = () => {
+  const storedBaseURL = localStorage.getItem('apiBaseURL');
+  if (storedBaseURL) {
+    return storedBaseURL + '/api';
+  }
+  return import.meta.env.VITE_API_URL || '/api';
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 // Global password prompt function - will be set by PasswordModalProvider
 let globalPasswordPrompt: (() => Promise<string>) | null = null;
@@ -968,6 +977,40 @@ class QNarwhalKnightAPI {
   async getTokenTransactions(tokenId: string): Promise<ApiResponse<any[]>> {
     console.log('📜 Fetching transactions for token:', tokenId);
     return this.request<any[]>(`/v1/transactions/token/${encodeURIComponent(tokenId)}`);
+  }
+
+  // ============================================
+  // EXPLORER API ENDPOINTS
+  // ============================================
+
+  // Get comprehensive network statistics
+  async getNetworkStatistics(): Promise<ApiResponse<any>> {
+    console.log('📊 Fetching network statistics');
+    return this.request<any>('/v1/statistics/network');
+  }
+
+  // Get recent blocks with metadata
+  async getRecentBlocks(limit = 10): Promise<ApiResponse<any[]>> {
+    console.log('🧱 Fetching recent blocks, limit:', limit);
+    return this.request<any[]>(`/v1/blocks/recent?limit=${limit}`);
+  }
+
+  // Get recent smart contract deployments
+  async getRecentContracts(limit = 10): Promise<ApiResponse<any[]>> {
+    console.log('📜 Fetching recent contracts, limit:', limit);
+    return this.request<any[]>(`/v1/contracts/recent?limit=${limit}`);
+  }
+
+  // Get recent DAG vertices
+  async getRecentVertices(limit = 10): Promise<ApiResponse<any[]>> {
+    console.log('⚛️ Fetching recent vertices, limit:', limit);
+    return this.request<any[]>(`/v1/dag/vertices/recent?limit=${limit}`);
+  }
+
+  // Universal search (blocks, transactions, wallets, contracts)
+  async universalSearch(query: string): Promise<ApiResponse<any[]>> {
+    console.log('🔍 Universal search for:', query);
+    return this.request<any[]>(`/v1/search?query=${encodeURIComponent(query)}`);
   }
 
   // Get user's deployed contracts
