@@ -35,8 +35,8 @@ Q-NarwhalKnight implements a four-tier quantum threat model with seamless crypto
 
 ### Build & Run
 ```bash
-# Clone the repository
-git clone https://gitlab.com/dagknight/q-narwhalknight.git
+# Clone the repository (hosted on our self-managed Git server)
+git clone https://code.quillon.xyz/dagknight/q-narwhalknight.git
 cd q-narwhalknight
 
 # Build the workspace
@@ -48,6 +48,8 @@ cargo run --bin q-api-server
 # Run consensus node
 cargo run --bin q-dag-knight-node
 ```
+
+> **Note:** The repository is hosted on [code.quillon.xyz](https://code.quillon.xyz/dagknight/q-narwhalknight) because the codebase exceeds the size limits of traditional public forges. Using our own Git server ensures faster cloning and reliable access to large assets.
 
 ### Configuration
 ```toml
