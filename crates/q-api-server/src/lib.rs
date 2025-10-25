@@ -149,6 +149,16 @@ pub struct LiquidityPool {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Mining submission for async queue processing
+#[derive(Debug, Clone)]
+pub struct MiningSubmission {
+    pub nonce: u64,
+    pub hash: [u8; 32],
+    pub difficulty_target: [u8; 32],
+    pub miner_address: [u8; 32],
+    pub miner_address_str: String,
+}
+
 impl Default for FaucetState {
     fn default() -> Self {
         Self {
@@ -384,6 +394,12 @@ pub struct AppState {
     // libp2p-based zero-config peer discovery (mDNS + Gossipsub)
     pub libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
 
+    // libp2p network command channel (for non-blocking P2P operations from API)
+    pub libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
+
+    // Mining submission queue (async processing to prevent server overload)
+    pub mining_submission_tx: Option<tokio::sync::mpsc::UnboundedSender<MiningSubmission>>,
+
     // BREAKTHROUGH: DNS-Phantom → Connection Integration
     pub connection_manager: Option<Arc<q_network::connection_manager::ConnectionManager>>,
 
@@ -603,23 +619,26 @@ impl AppState {
             }
         }
 
-        // Load existing transactions from storage
+        // CRITICAL FIX: Do NOT load transactions back into mempool on startup
+        // Transactions stored in RocksDB are historical/confirmed transactions
+        // They should NOT be reprocessed as that causes balance corruption
+        // Only new incoming transactions should go into the mempool
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
+
+        // Note: We still load transaction count for metrics, but don't add to mempool
         match storage_engine.load_all_transactions().await {
             Ok(persisted_transactions) => {
-                for tx in persisted_transactions {
-                    tx_pool.insert(tx.id, tx.clone());
-                    tx_status.insert(tx.id, TxStatus::InMempool);
-                }
                 tracing::info!(
-                    "💳 Loaded {} transactions from persistent storage",
-                    tx_pool.len()
+                    "💳 Found {} historical transactions in storage (not added to mempool)",
+                    persisted_transactions.len()
                 );
+                // Historical transactions are kept in storage for queries/history
+                // but are NOT added to tx_pool to prevent reprocessing
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to load transactions from storage: {}, starting with empty pool",
+                    "Failed to load historical transactions from storage: {}",
                     e
                 );
             }
@@ -760,6 +779,8 @@ impl AppState {
             network_manager: None,
             production_peer_discovery: None,
             libp2p_discovery: None,  // Disabled in test mode
+            libp2p_command_tx: None,  // Disabled in test mode
+            mining_submission_tx: None,  // Disabled in test mode
             connection_manager: None,
             dag_sync_manager: None,  // Will be initialized with PeerRegistry
 
@@ -879,6 +900,7 @@ impl AppState {
         tor_client: Option<Arc<QTorClient>>,
         __production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
         libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
+        libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
     ) -> anyhow::Result<Self> {
         let _wallet_store = MemoryWalletStore::new();
         let wallet_manager = WalletManager::new();
@@ -1046,23 +1068,26 @@ impl AppState {
             }
         }
 
-        // Load existing transactions from storage
+        // CRITICAL FIX: Do NOT load transactions back into mempool on startup
+        // Transactions stored in RocksDB are historical/confirmed transactions
+        // They should NOT be reprocessed as that causes balance corruption
+        // Only new incoming transactions should go into the mempool
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
+
+        // Note: We still load transaction count for metrics, but don't add to mempool
         match storage_engine.load_all_transactions().await {
             Ok(persisted_transactions) => {
-                for tx in persisted_transactions {
-                    tx_pool.insert(tx.id, tx.clone());
-                    tx_status.insert(tx.id, TxStatus::InMempool);
-                }
                 tracing::info!(
-                    "💳 Loaded {} transactions from persistent storage",
-                    tx_pool.len()
+                    "💳 Found {} historical transactions in storage (not added to mempool)",
+                    persisted_transactions.len()
                 );
+                // Historical transactions are kept in storage for queries/history
+                // but are NOT added to tx_pool to prevent reprocessing
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to load transactions from storage: {}, starting with empty pool",
+                    "Failed to load historical transactions from storage: {}",
                     e
                 );
             }
@@ -1164,6 +1189,12 @@ impl AppState {
 
             // libp2p-based zero-config peer discovery
             libp2p_discovery,
+
+            // libp2p network command channel
+            libp2p_command_tx,
+
+            // Mining submission async queue
+            mining_submission_tx: None,  // Will be initialized in main.rs
 
             // BREAKTHROUGH: DNS-Phantom → Connection Integration
             connection_manager: {
