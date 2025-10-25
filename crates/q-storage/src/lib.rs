@@ -659,7 +659,7 @@ impl QStorage {
         Ok(balances)
     }
 
-    /// Save multiple wallet balances atomically
+    /// Save multiple wallet balances atomically with SYNC to guarantee disk write
     pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u64>) -> Result<()> {
         let mut batch_ops = Vec::new();
 
@@ -669,9 +669,10 @@ impl QStorage {
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
         }
 
+        // CRITICAL: write_batch now uses fsync to survive hard kills (fixed in kv.rs)
         self.hot_db.write_batch(batch_ops).await?;
         info!(
-            "💰 Saved {} wallet balances to persistent storage",
+            "💰 SYNCED {} wallet balances to persistent storage (survives hard kill)",
             balances.len()
         );
         Ok(())
@@ -771,7 +772,7 @@ impl QStorage {
         Ok(balances)
     }
 
-    /// Save multiple token balances atomically
+    /// Save multiple token balances atomically with SYNC to guarantee disk write
     pub async fn save_token_balances(&self, balances: &HashMap<([u8; 32], [u8; 32]), u64>) -> Result<()> {
         let mut batch_ops = Vec::new();
 
@@ -781,9 +782,10 @@ impl QStorage {
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
         }
 
+        // CRITICAL: write_batch now uses fsync to survive hard kills (fixed in kv.rs)
         self.hot_db.write_batch(batch_ops).await?;
         info!(
-            "🪙 Saved {} token balances to persistent storage",
+            "🪙 SYNCED {} token balances to persistent storage (survives hard kill)",
             balances.len()
         );
         Ok(())
@@ -838,7 +840,7 @@ impl QStorage {
         Ok(transactions)
     }
 
-    /// Save multiple transactions atomically
+    /// Save multiple transactions atomically with SYNC to guarantee disk write
     pub async fn save_transactions(&self, transactions: &[q_types::Transaction]) -> Result<()> {
         let mut batch_ops = Vec::new();
 
@@ -847,9 +849,10 @@ impl QStorage {
             batch_ops.push((CF_TRANSACTIONS, tx.id.to_vec(), tx_data));
         }
 
+        // CRITICAL: write_batch now uses fsync to survive hard kills (fixed in kv.rs)
         self.hot_db.write_batch(batch_ops).await?;
         info!(
-            "💳 Saved {} transactions to persistent storage",
+            "💳 SYNCED {} transactions to persistent storage (survives hard kill)",
             transactions.len()
         );
         Ok(())

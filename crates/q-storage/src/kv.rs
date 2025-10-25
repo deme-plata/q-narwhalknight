@@ -333,8 +333,13 @@ impl KVStore for RocksDBKV {
             write_batch.put_cf(&cf_handle, key, value);
         }
 
+        // CRITICAL FIX: Use synced write options to prevent data loss on hard kills
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true); // Force fsync() to survive hard kills (pkill -9, service restart)
+        write_opts.disable_wal(false); // Keep WAL enabled for crash recovery
+
         self.db
-            .write(write_batch)
+            .write_opt(write_batch, &write_opts)
             .context("RocksDB batch write failed")?;
 
         Ok(())
