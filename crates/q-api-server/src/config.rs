@@ -122,12 +122,19 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         use tracing::{info, warn};
 
-        // Validate block interval
-        if self.block_interval_secs < 5 {
+        // Validate block interval (Phase 2: Allow 2s for exciting visualization)
+        if self.block_interval_secs < 2 {
             anyhow::bail!(
-                "INVALID CONFIG: block_interval_secs ({}) must be >= 5 seconds (prevent spam)",
+                "INVALID CONFIG: block_interval_secs ({}) must be >= 2 seconds (Phase 2 minimum)",
                 self.block_interval_secs
             );
+        }
+
+        // Warn about fast block production for visualization
+        if self.block_interval_secs < 5 {
+            warn!("⚡ Fast block production enabled: {} second intervals (Phase 2 exciting visualization)",
+                  self.block_interval_secs);
+            warn!("⚡ This is optimized for DAG visualization - consider 5-15s for production");
         }
 
         if self.block_interval_secs > 300 {

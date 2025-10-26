@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-green">v0.0.9-beta Released - Peer Discovery Fixed!</span>
+          <span className="text-sm font-bold text-quantum-green">v0.0.27-beta Released - Time-Based Halving!</span>
         </div>
       </motion.div>
 
@@ -67,50 +67,52 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Complete Linux Package</p>
-                <p className="text-sm text-gray-400">Tarball with binary + comprehensive documentation</p>
+                <p className="text-white font-medium">Latest Standalone Binary</p>
+                <p className="text-sm text-gray-400">Single executable - ready to run immediately</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Production Ready</p>
-                <p className="text-sm text-gray-400">Optimized release build with systemd service template</p>
+                <p className="text-white font-medium">Time-Based Halving</p>
+                <p className="text-sm text-gray-400">v0.0.27-beta with performance-agnostic tokenomics</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">No Dependencies</p>
-                <p className="text-sm text-gray-400">Static linking - only requires standard Linux libs</p>
+                <p className="text-white font-medium">Auto-Connect to Network</p>
+                <p className="text-sm text-gray-400">Connects to bootstrap masternode automatically</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-narwhalknight-linux-v0.0.9-beta.tar.gz"
+              href="/downloads/q-api-server-v0.0.27-beta"
+              download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Package (Latest)
+              Download Linux Binary (v0.0.27-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 36 MB (tar.gz) | Version: 0.0.9-beta
+              Size: 104 MB | Latest version | Single executable
             </p>
           </div>
 
           {/* Installation Instructions */}
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
-            <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
+            <p className="text-sm font-mono text-gray-300 mb-2">Quick Start (Standalone Binary):</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`tar -xzf q-narwhalknight-linux-v0.0.9-beta.tar.gz
-cd q-narwhalknight-v0.0.9-beta/bin
-chmod +x q-api-server
+{`chmod +x q-api-server
 ./q-api-server --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              ✅ Includes: q-api-server binary (98MB) + README + RELEASE_NOTES + Fixed peer discovery!
+              ✅ Auto-connects to bootstrap masternode at 185.182.185.227:8081
+            </p>
+            <p className="text-xs text-quantum-purple mt-2">
+              🌐 Network discovery: mDNS (local) + Kademlia DHT (global) + Bootstrap node
             </p>
           </div>
         </motion.div>
@@ -407,49 +409,200 @@ cargo build --release --package q-api-server
         </div>
       </motion.div>
 
-      {/* CLI Configuration Guide */}
+      {/* Validator Node Setup Guide */}
       <motion.div
-        className="p-8 bg-quantum-dark/50 backdrop-blur-xl border border-quantum-cyan/20 rounded-2xl"
+        className="p-8 bg-gradient-to-br from-quantum-purple/20 to-quantum-indigo/20 backdrop-blur-xl border border-quantum-purple/30 rounded-2xl"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.6 }}
       >
-        <h2 className="text-2xl font-bold text-white mb-4">Configuration Options</h2>
+        <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <Shield className="w-7 h-7 text-quantum-purple" />
+          Validator Node Setup Guide (v0.0.27-beta)
+        </h2>
         <p className="text-gray-400 mb-6">
-          Customize your node with command-line flags or environment variables:
+          Run a validator node to participate in consensus and earn block production rewards. Each validator needs a unique configuration.
         </p>
 
-        <div className="space-y-4">
-          <div className="p-4 bg-quantum-indigo/10 rounded-xl border border-quantum-cyan/10">
-            <code className="text-quantum-cyan text-sm">--port &lt;PORT&gt;</code>
-            <p className="text-gray-400 text-sm mt-2">Set API server port (default: 8080)</p>
+        <div className="space-y-6">
+          {/* Single Node / Regular User */}
+          <div className="p-6 bg-quantum-dark/50 rounded-xl border border-quantum-cyan/30">
+            <h3 className="text-lg font-bold text-quantum-cyan mb-4">🚀 Option 1: Single Node (Regular Users)</h3>
+            <p className="text-gray-300 text-sm mb-4">
+              Perfect for mining, testing, or running a single validator. No special configuration needed.
+            </p>
+            <pre className="text-xs text-quantum-cyan overflow-x-auto p-4 bg-quantum-dark/50 rounded-lg">
+{`# Download and make executable
+chmod +x q-api-server-v0.0.27-beta
+
+# Run the node (automatic block production every 15 seconds)
+./q-api-server-v0.0.27-beta --port 8080
+
+# With custom data directory
+Q_DB_PATH=./my-node-data ./q-api-server-v0.0.27-beta --port 8080`}
+            </pre>
+            <div className="mt-3 p-3 bg-quantum-green/10 border border-quantum-green/30 rounded-lg">
+              <p className="text-quantum-green text-xs">
+                ✅ Blocks will be produced automatically every 15 seconds<br/>
+                ✅ Mining rewards will be accepted and distributed<br/>
+                ✅ Connects to network via bootstrap nodes automatically
+              </p>
+            </div>
           </div>
 
-          <div className="p-4 bg-quantum-indigo/10 rounded-xl border border-quantum-cyan/10">
-            <code className="text-quantum-cyan text-sm">Q_DB_PATH=&lt;PATH&gt;</code>
-            <p className="text-gray-400 text-sm mt-2">Database storage directory (default: ./data)</p>
+          {/* Multi-Validator Setup */}
+          <div className="p-6 bg-quantum-dark/50 rounded-xl border border-quantum-purple/30">
+            <h3 className="text-lg font-bold text-quantum-purple mb-4">⚡ Option 2: Multi-Validator Setup (Advanced)</h3>
+            <p className="text-gray-300 text-sm mb-4">
+              Run multiple validators on different servers or ports. Each validator needs a unique index to prevent competing block production.
+            </p>
+
+            <div className="space-y-4">
+              <div className="p-4 bg-quantum-indigo/10 rounded-xl border border-quantum-purple/20">
+                <p className="text-quantum-purple font-bold text-sm mb-3">Required Environment Variables:</p>
+                <div className="space-y-2 text-xs">
+                  <div className="p-2 bg-quantum-dark/50 rounded">
+                    <code className="text-quantum-cyan">Q_VALIDATOR_INDEX</code>
+                    <span className="text-gray-400"> - Unique validator ID (0, 1, 2, ...)</span>
+                  </div>
+                  <div className="p-2 bg-quantum-dark/50 rounded">
+                    <code className="text-quantum-cyan">Q_TOTAL_VALIDATORS</code>
+                    <span className="text-gray-400"> - Total number of validators in network</span>
+                  </div>
+                  <div className="p-2 bg-quantum-dark/50 rounded">
+                    <code className="text-quantum-cyan">Q_DB_PATH</code>
+                    <span className="text-gray-400"> - Unique database path per validator</span>
+                  </div>
+                  <div className="p-2 bg-quantum-dark/50 rounded">
+                    <code className="text-quantum-cyan">--node-id</code>
+                    <span className="text-gray-400"> - Unique node identifier</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 bg-quantum-dark/50 rounded-lg">
+                <p className="text-sm font-bold text-white mb-3">Example: 3-Validator Network</p>
+
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-quantum-green text-xs font-bold mb-2">Validator 0 (Primary - Produces empty blocks):</p>
+                    <pre className="text-xs text-gray-300 overflow-x-auto p-3 bg-quantum-dark/80 rounded">
+{`Q_VALIDATOR_INDEX=0 \\
+Q_TOTAL_VALIDATORS=3 \\
+Q_DB_PATH=./data-validator-0 \\
+./q-api-server-v0.0.27-beta --port 8080 --node-id validator-0`}
+                    </pre>
+                  </div>
+
+                  <div>
+                    <p className="text-quantum-purple text-xs font-bold mb-2">Validator 1 (Secondary):</p>
+                    <pre className="text-xs text-gray-300 overflow-x-auto p-3 bg-quantum-dark/80 rounded">
+{`Q_VALIDATOR_INDEX=1 \\
+Q_TOTAL_VALIDATORS=3 \\
+Q_DB_PATH=./data-validator-1 \\
+./q-api-server-v0.0.27-beta --port 8081 --node-id validator-1`}
+                    </pre>
+                  </div>
+
+                  <div>
+                    <p className="text-quantum-cyan text-xs font-bold mb-2">Validator 2 (Tertiary):</p>
+                    <pre className="text-xs text-gray-300 overflow-x-auto p-3 bg-quantum-dark/80 rounded">
+{`Q_VALIDATOR_INDEX=2 \\
+Q_TOTAL_VALIDATORS=3 \\
+Q_DB_PATH=./data-validator-2 \\
+./q-api-server-v0.0.27-beta --port 8082 --node-id validator-2`}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-lg">
+                <p className="text-quantum-yellow font-bold text-sm mb-2">⚠️ Important Notes:</p>
+                <ul className="text-gray-300 text-xs space-y-1">
+                  <li>• Only Validator 0 produces empty blocks to maintain DAG continuity</li>
+                  <li>• All validators accept mining solutions and produce blocks with transactions</li>
+                  <li>• Each validator MUST have a unique database path (Q_DB_PATH)</li>
+                  <li>• Each validator MUST have a unique port number</li>
+                  <li>• Each validator MUST have a unique node-id</li>
+                  <li>• Validator indices must be sequential: 0, 1, 2, 3, ... (no gaps)</li>
+                </ul>
+              </div>
+            </div>
           </div>
 
-          <div className="p-4 bg-quantum-indigo/10 rounded-xl border border-quantum-cyan/10">
-            <code className="text-quantum-cyan text-sm">--validator</code>
-            <p className="text-gray-400 text-sm mt-2">Enable validator mode for consensus participation</p>
+          {/* Advanced Configuration */}
+          <div className="p-6 bg-quantum-dark/50 rounded-xl border border-quantum-cyan/30">
+            <h3 className="text-lg font-bold text-quantum-cyan mb-4">⚙️ Advanced Configuration Options</h3>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="p-3 bg-quantum-indigo/10 rounded-lg border border-quantum-cyan/10">
+                <code className="text-quantum-cyan text-xs">Q_BLOCK_INTERVAL_SECS</code>
+                <p className="text-gray-400 text-xs mt-2">Block production interval in seconds (default: 15, range: 5-300)</p>
+                <pre className="text-xs text-quantum-green mt-2">
+{`Q_BLOCK_INTERVAL_SECS=30`}
+                </pre>
+              </div>
+
+              <div className="p-3 bg-quantum-indigo/10 rounded-lg border border-quantum-cyan/10">
+                <code className="text-quantum-cyan text-xs">Q_MIN_SOLUTIONS_PER_BLOCK</code>
+                <p className="text-gray-400 text-xs mt-2">Minimum mining solutions before block production (default: 1)</p>
+                <pre className="text-xs text-quantum-green mt-2">
+{`Q_MIN_SOLUTIONS_PER_BLOCK=10`}
+                </pre>
+              </div>
+
+              <div className="p-3 bg-quantum-indigo/10 rounded-lg border border-quantum-cyan/10">
+                <code className="text-quantum-cyan text-xs">Q_MAX_SOLUTIONS_PER_BLOCK</code>
+                <p className="text-gray-400 text-xs mt-2">Maximum solutions per block (default: 100, max: 1000)</p>
+                <pre className="text-xs text-quantum-green mt-2">
+{`Q_MAX_SOLUTIONS_PER_BLOCK=500`}
+                </pre>
+              </div>
+
+              <div className="p-3 bg-quantum-indigo/10 rounded-lg border border-quantum-cyan/10">
+                <code className="text-quantum-cyan text-xs">Q_ALLOW_MANUAL_TRIGGER</code>
+                <p className="text-gray-400 text-xs mt-2">Enable manual block triggering (default: false, security)</p>
+                <pre className="text-xs text-quantum-green mt-2">
+{`Q_ALLOW_MANUAL_TRIGGER=true`}
+                </pre>
+              </div>
+            </div>
           </div>
 
-          <div className="p-4 bg-quantum-indigo/10 rounded-xl border border-quantum-cyan/10">
-            <code className="text-quantum-cyan text-sm">--enable-mining</code>
-            <p className="text-gray-400 text-sm mt-2">Enable GPU mining (requires CUDA or OpenCL)</p>
-          </div>
-        </div>
+          {/* Verification Steps */}
+          <div className="p-6 bg-quantum-dark/50 rounded-xl border border-quantum-green/30">
+            <h3 className="text-lg font-bold text-quantum-green mb-4">✅ Verify Your Validator Setup</h3>
 
-        <div className="mt-6 p-4 bg-quantum-purple/10 rounded-xl border border-quantum-purple/20">
-          <p className="text-sm font-bold text-quantum-purple mb-2">Example: Full Validator Setup</p>
-          <pre className="text-xs text-gray-300 overflow-x-auto">
-{`Q_DB_PATH=./validator-data ./q-api-server-linux-x86_64 \\
-  --port 8080 \\
-  --validator \\
-  --enable-mining \\
-  --log-level info`}
-          </pre>
+            <div className="space-y-3">
+              <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                <p className="text-white text-sm font-bold mb-2">1. Check Node Status:</p>
+                <pre className="text-xs text-quantum-cyan overflow-x-auto">
+{`curl http://localhost:8080/api/v1/status | jq`}
+                </pre>
+                <p className="text-gray-400 text-xs mt-2">Should show increasing block height, peer count, and consensus status</p>
+              </div>
+
+              <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                <p className="text-white text-sm font-bold mb-2">2. Monitor Block Production:</p>
+                <pre className="text-xs text-quantum-cyan overflow-x-auto">
+{`# Watch logs for automatic block production
+tail -f /path/to/logs | grep "BLOCK PRODUCED"`}
+                </pre>
+                <p className="text-gray-400 text-xs mt-2">You should see blocks every 15 seconds (default interval)</p>
+              </div>
+
+              <div className="p-3 bg-quantum-dark/50 rounded-lg">
+                <p className="text-white text-sm font-bold mb-2">3. Test Mining Integration:</p>
+                <pre className="text-xs text-quantum-cyan overflow-x-auto">
+{`# Submit a test mining solution
+curl -X POST http://localhost:8080/api/v1/submit-solution \\
+  -H "Content-Type: application/json" \\
+  -d '{"nonce": 12345, "hash": "test..."}'`}
+                </pre>
+                <p className="text-gray-400 text-xs mt-2">Solution should be accepted and included in next block</p>
+              </div>
+            </div>
+          </div>
         </div>
       </motion.div>
     </div>

@@ -10,6 +10,7 @@ pub mod metrics;
 
 pub use app::App;
 pub use events::{Event, EventHandler};
+pub use metrics::Metrics;
 
 use anyhow::Result;
 use crossterm::{

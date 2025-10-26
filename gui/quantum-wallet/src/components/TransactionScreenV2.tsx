@@ -4,6 +4,7 @@ import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, C
 import { qnkAPI } from '../services/api';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
+import QuantumMixerVisualization from './QuantumMixerVisualization';
 
 interface TransactionScreenV2Props {
   currentBalance?: number;
@@ -39,9 +40,8 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
   const [decoyMultiplier, setDecoyMultiplier] = useState(15);
   const [showMixingDetails, setShowMixingDetails] = useState(false);
   const [mixerAvailable, setMixerAvailable] = useState<boolean | null>(null); // null = unknown, true = available, false = unavailable
-  const [, setMixingSessionId] = useState<string>('');
-  const [, setMixingProgress] = useState(0);
-  const [, setMixingStage] = useState<string>('');
+  const [mixingSessionId, setMixingSessionId] = useState<string>('');
+  const [showMixerVisualization, setShowMixerVisualization] = useState(false);
 
   // QR Code states
   const [showQRScanner, setShowQRScanner] = useState(false);
@@ -68,6 +68,37 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
     };
 
     checkMixerAvailability();
+  }, []);
+
+  // Restore ongoing mixing session on component mount
+  useEffect(() => {
+    const activeMixingSession = localStorage.getItem('activeMixingSession');
+    const mixingStartTime = localStorage.getItem('mixingStartTime');
+
+    if (activeMixingSession && mixingStartTime) {
+      const elapsedMs = Date.now() - parseInt(mixingStartTime);
+      const elapsedSeconds = Math.floor(elapsedMs / 1000);
+
+      console.log('🔄 [MIXER RESTORE] Found ongoing mixing session:', {
+        sessionId: activeMixingSession,
+        elapsedSeconds,
+        stillActive: elapsedSeconds < 30
+      });
+
+      // If less than 30 seconds have passed, restore the visualization
+      if (elapsedSeconds < 30) {
+        setMixingSessionId(activeMixingSession);
+        setShowMixerVisualization(true);
+        setEnablePrivacyMixer(true);
+
+        console.log('✅ [MIXER RESTORE] Restored mixer visualization');
+      } else {
+        // Mixing should be complete, clean up
+        localStorage.removeItem('activeMixingSession');
+        localStorage.removeItem('mixingStartTime');
+        console.log('🏁 [MIXER RESTORE] Mixing session expired, cleaning up');
+      }
+    }
   }, []);
 
   const requestFaucetTokens = async () => {
@@ -228,33 +259,22 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
         }
 
         if (result.success && result.data?.mixing_session_id) {
-          setMixingSessionId(result.data.mixing_session_id);
-          setMixingStage('Initializing quantum mixing pool...');
+          const sessionId = result.data.mixing_session_id;
+          setMixingSessionId(sessionId);
 
-          // Start monitoring mixing progress
-          const progressInterval = setInterval(async () => {
-            try {
-              const status = await qnkAPI.getMixingStatus(result.data.mixing_session_id);
-              if (status.success && status.data) {
-                setMixingProgress(status.data.progress || 0);
-                setMixingStage(status.data.stage || 'Processing...');
+          // Show the 3D visualization
+          setShowMixerVisualization(true);
 
-                if (status.data.completed) {
-                  clearInterval(progressInterval);
-                  setTransaction(prev => ({
-                    ...prev,
-                    success: true,
-                    txHash: status.data.final_transaction_hash || 'mixing_complete'
-                  }));
-                }
-              }
-            } catch (error) {
-              console.warn('Failed to get mixing status:', error);
-            }
-          }, 1000);
+          // Hide the transaction form (user can navigate away)
+          setTransaction(prev => ({
+            ...prev,
+            isProcessing: false  // Allow form to reset
+          }));
 
-          // Cleanup interval after 2 minutes max
-          setTimeout(() => clearInterval(progressInterval), 120000);
+          console.log('🌪️ [MIXER] Starting 3D visualization for session:', sessionId);
+
+          // The backend will complete mixing in 30 seconds automatically
+          // No need for polling - the QuantumMixerVisualization handles timing
         }
       } else {
         // Standard transaction
@@ -723,9 +743,10 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
       <div className="bg-quantum-green/10 border border-quantum-green/20 rounded-xl p-4 flex items-start gap-3">
         <AlertTriangle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
         <div>
-          <div className="font-medium text-quantum-green">Post-Quantum Security</div>
+          <div className="font-medium text-quantum-green">Privacy & Security</div>
           <div className="text-sm text-gray-400 mt-1">
-            This transaction is secured with Dilithium5 signatures and quantum-resistant cryptography.
+            All transactions use <strong className="text-quantum-purple">ZK-STARK proofs</strong> to hide sender, amount, and recipient details, secured with post-quantum Dilithium5 signatures.
+            The optional <strong className="text-quantum-pink">Mixer</strong> adds enhanced privacy layers including ring signatures, stealth addresses, and decoy routing for maximum anonymity.
           </div>
         </div>
       </div>
@@ -745,6 +766,37 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
         subtitle="Scan this QR code to send tokens to your wallet"
         onClose={() => setShowQRDisplay(false)}
       />
+
+      {/* Quantum Mixer 3D Visualization - Full Screen Overlay */}
+      <AnimatePresence>
+        {showMixerVisualization && mixingSessionId && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black"
+          >
+            <QuantumMixerVisualization
+              sessionId={mixingSessionId}
+              privacyLevel={privacyLevel}
+              onComplete={() => {
+                console.log('🏁 [MIXER] Visualization complete, hiding overlay');
+                setShowMixerVisualization(false);
+                setTransaction(prev => ({
+                  ...prev,
+                  success: true,
+                  txHash: mixingSessionId
+                }));
+
+                // Trigger balance refresh
+                window.dispatchEvent(new CustomEvent('balance-update', {
+                  detail: { refresh: true }
+                }));
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

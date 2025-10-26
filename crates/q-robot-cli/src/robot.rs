@@ -246,7 +246,7 @@ pub struct RobotStatus {
     pub active_abilities: Vec<String>,
     pub sensor_data: SensorData,
     pub connection_quality: f64,   // 0.0-1.0
-    #[serde(skip)]
+    #[serde(skip, default = "Instant::now")]
     pub last_heartbeat: Instant,
 }
 
@@ -898,22 +898,23 @@ impl QuantumNetworkManager {
     
     async fn establish_entanglement(&mut self, robot_id: &RobotId, quantum_state: &QuantumState) -> Result<()> {
         debug!("Establishing quantum entanglement for robot {}", robot_id);
-        
+
         // In a real implementation, this would create Bell pairs with other robots
         // For simulation, we'll add entanglement with existing robots
-        for existing_robot in self.entangled_pairs.keys() {
+        let existing_robots: Vec<_> = self.entangled_pairs.keys().cloned().collect();
+        for existing_robot in existing_robots {
             if existing_robot.0 != *robot_id && existing_robot.1 != *robot_id {
                 let pair = if robot_id.0 < existing_robot.0.0 {
                     (robot_id.clone(), existing_robot.0.clone())
                 } else {
                     (existing_robot.0.clone(), robot_id.clone())
                 };
-                
+
                 let fidelity = 0.8 + rand::random::<f64>() * 0.15; // 80-95% fidelity
                 self.entangled_pairs.insert(pair, fidelity);
             }
         }
-        
+
         Ok(())
     }
 }

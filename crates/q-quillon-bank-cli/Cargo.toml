@@ -14,6 +14,8 @@ path = "src/main.rs"
 # Workspace dependencies
 q-types = { path = "../q-types" }
 q-quillon-bank = { path = "../q-quillon-bank" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+q-zk-stark = { path = "../q-zk-stark" }
 
 # CLI framework
 clap = { workspace = true }
@@ -24,6 +26,8 @@ tokio = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }

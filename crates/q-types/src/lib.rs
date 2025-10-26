@@ -7,6 +7,17 @@ use uuid::Uuid;
 pub use ed25519_dalek::{Signature, SigningKey as SecretKey, VerifyingKey as PublicKey};
 pub use sha3::{Digest, Sha3_256};
 
+// DAG-Knight blockchain types module
+pub mod block;
+
+// Re-export block types for convenience
+pub use block::{
+    QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
+    QuantumMetadata, HypergraphCoordinates, EnergyComponents,
+    SpectralSignature, VDFProof, FinalityStatus, FinalizedBlock,
+    FinalityCertificate,
+};
+
 /// Core blockchain types for Q-NarwhalKnight Phase 0
 /// These will be extended with post-quantum primitives in Phase 1
 ///
@@ -756,8 +767,14 @@ impl NetworkConfig {
             chain_id: 1, // Testnet chain ID
             api_port: 8080,
             p2p_port: 9001,
+            // Multiple bootstrap nodes for redundancy
+            // Format: /ip4/<IP>/tcp/<P2P_PORT>/p2p/<PEER_ID>
+            // If peer ID is omitted, it will be fetched automatically from http://<IP>:18080/api/v1/peer-id
             bootstrap_peers: vec![
-                "/ip4/185.182.185.227/tcp/9001".to_string(),
+                // Primary bootstrap node (185.182.185.227)
+                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWPaQogoQVq1XoNenW93So8TC9T8CahEoMto455j4jgYmG".to_string(),
+                // Secondary bootstrap node (161.35.219.10) - automatic peer ID discovery
+                "/ip4/161.35.219.10/tcp/9001".to_string(),
             ],
         }
     }
@@ -780,8 +797,14 @@ impl NetworkConfig {
             chain_id: 999, // Mainnet chain ID
             api_port: 8081,
             p2p_port: 9002,
+            // Multiple bootstrap nodes for redundancy
+            // Format: /ip4/<IP>/tcp/<P2P_PORT>/p2p/<PEER_ID>
+            // If peer ID is omitted, it will be fetched automatically from http://<IP>:18081/api/v1/peer-id
             bootstrap_peers: vec![
+                // Primary bootstrap node (185.182.185.227) - automatic peer ID discovery
                 "/ip4/185.182.185.227/tcp/9002".to_string(),
+                // Secondary bootstrap node (161.35.219.10) - automatic peer ID discovery
+                "/ip4/161.35.219.10/tcp/9002".to_string(),
             ],
         }
     }

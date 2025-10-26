@@ -286,6 +286,19 @@ impl AegisQL {
     }
 }
 
+impl Signature {
+    /// Serialize signature to bytes for network transmission
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("Failed to serialize signature")
+    }
+
+    /// Deserialize signature from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AegisError> {
+        bincode::deserialize(bytes)
+            .map_err(|_| AegisError::InvalidSignature)
+    }
+}
+
 impl Default for AegisQL {
     fn default() -> Self {
         Self::new()

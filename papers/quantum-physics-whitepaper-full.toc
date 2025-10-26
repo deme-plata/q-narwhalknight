@@ -59,14 +59,40 @@
 \contentsline {subsection}{\numberline {7.1}Comprehensive Performance Metrics}{28}{subsection.7.1}%
 \contentsline {subsection}{\numberline {7.2}Experimental Validation}{28}{subsection.7.2}%
 \contentsline {subsubsection}{\numberline {7.2.1}NIST Randomness Test Suite Results}{28}{subsubsection.7.2.1}%
-\contentsline {section}{\numberline {8}Conclusion and Future Outlook}{29}{section.8}%
-\contentsline {subsection}{\numberline {8.1}Achievements and Impact}{29}{subsection.8.1}%
-\contentsline {subsection}{\numberline {8.2}Scientific Contributions}{29}{subsection.8.2}%
-\contentsline {subsubsection}{\numberline {8.2.1}Theoretical Contributions}{29}{subsubsection.8.2.1}%
-\contentsline {subsubsection}{\numberline {8.2.2}Practical Contributions}{29}{subsubsection.8.2.2}%
-\contentsline {subsection}{\numberline {8.3}Future Quantum Computing Integration}{30}{subsection.8.3}%
-\contentsline {subsubsection}{\numberline {8.3.1}Near-term (2025-2030)}{30}{subsubsection.8.3.1}%
-\contentsline {subsubsection}{\numberline {8.3.2}Medium-term (2030-2040)}{30}{subsubsection.8.3.2}%
-\contentsline {subsubsection}{\numberline {8.3.3}Long-term (2040+)}{30}{subsubsection.8.3.3}%
-\contentsline {subsection}{\numberline {8.4}Broader Implications}{30}{subsection.8.4}%
-\contentsline {subsection}{\numberline {8.5}Call to Action}{31}{subsection.8.5}%
+\contentsline {section}{\numberline {8}Quantum Block Structure and Data Model}{29}{section.8}%
+\contentsline {subsection}{\numberline {8.1}QBlock: Quantum-Enhanced Block Architecture}{29}{subsection.8.1}%
+\contentsline {subsubsection}{\numberline {8.1.1}Block Header Design}{29}{subsubsection.8.1.1}%
+\contentsline {subsubsection}{\numberline {8.1.2}Quantum Metadata Integration}{29}{subsubsection.8.1.2}%
+\contentsline {subsubsection}{\numberline {8.1.3}Information-Theoretic Properties}{30}{subsubsection.8.1.3}%
+\contentsline {subsection}{\numberline {8.2}VDF-Based Proof-of-Work}{30}{subsection.8.2}%
+\contentsline {subsubsection}{\numberline {8.2.1}ASIC Resistance through Sequential Computation}{31}{subsubsection.8.2.1}%
+\contentsline {subsection}{\numberline {8.3}DAG-Knight Integration}{31}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}Quantum Mixer Integration}{31}{subsection.8.4}%
+\contentsline {section}{\numberline {9}Time-Based Halving: Performance-Agnostic Tokenomics}{31}{section.9}%
+\contentsline {subsection}{\numberline {9.1}The Performance-Tokenomics Coupling Problem}{31}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Time-Based Halving Solution}{32}{subsection.9.2}%
+\contentsline {subsubsection}{\numberline {9.2.1}Core Algorithm}{32}{subsubsection.9.2.1}%
+\contentsline {subsection}{\numberline {9.3}Mathematical Properties}{33}{subsection.9.3}%
+\contentsline {subsubsection}{\numberline {9.3.1}Performance Independence Theorem}{33}{subsubsection.9.3.1}%
+\contentsline {subsubsection}{\numberline {9.3.2}Calendar Predictability Property}{33}{subsubsection.9.3.2}%
+\contentsline {subsection}{\numberline {9.4}Austrian Economics Alignment}{33}{subsection.9.4}%
+\contentsline {subsubsection}{\numberline {9.4.1}Time Preference Theory (Böhm-Bawerk)}{33}{subsubsection.9.4.1}%
+\contentsline {subsubsection}{\numberline {9.4.2}Sound Money Properties}{33}{subsubsection.9.4.2}%
+\contentsline {subsection}{\numberline {9.5}Emission Schedule}{34}{subsection.9.5}%
+\contentsline {subsection}{\numberline {9.6}Performance Scaling Implications}{34}{subsection.9.6}%
+\contentsline {subsection}{\numberline {9.7}Implementation Security}{34}{subsection.9.7}%
+\contentsline {subsubsection}{\numberline {9.7.1}Timestamp Attack Mitigation}{34}{subsubsection.9.7.1}%
+\contentsline {subsubsection}{\numberline {9.7.2}Genesis Timestamp}{34}{subsubsection.9.7.2}%
+\contentsline {subsection}{\numberline {9.8}Comparison with Existing Systems}{35}{subsection.9.8}%
+\contentsline {subsection}{\numberline {9.9}Academic Contribution}{35}{subsection.9.9}%
+\contentsline {section}{\numberline {10}Conclusion and Future Outlook}{35}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Achievements and Impact}{35}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}Scientific Contributions}{36}{subsection.10.2}%
+\contentsline {subsubsection}{\numberline {10.2.1}Theoretical Contributions}{36}{subsubsection.10.2.1}%
+\contentsline {subsubsection}{\numberline {10.2.2}Practical Contributions}{36}{subsubsection.10.2.2}%
+\contentsline {subsection}{\numberline {10.3}Future Quantum Computing Integration}{36}{subsection.10.3}%
+\contentsline {subsubsection}{\numberline {10.3.1}Near-term (2025-2030)}{36}{subsubsection.10.3.1}%
+\contentsline {subsubsection}{\numberline {10.3.2}Medium-term (2030-2040)}{36}{subsubsection.10.3.2}%
+\contentsline {subsubsection}{\numberline {10.3.3}Long-term (2040+)}{37}{subsubsection.10.3.3}%
+\contentsline {subsection}{\numberline {10.4}Broader Implications}{37}{subsection.10.4}%
+\contentsline {subsection}{\numberline {10.5}Call to Action}{37}{subsection.10.5}%

@@ -13,6 +13,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha3 = { workspace = true }
+blake3 = "1.5"
 bincode = { workspace = true }
 postcard = { workspace = true }
 anyhow = { workspace = true }

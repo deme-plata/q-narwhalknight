@@ -107,6 +107,12 @@ impl RocksDBKV {
         opts.set_level_zero_slowdown_writes_trigger(8);
         opts.set_level_zero_stop_writes_trigger(16);
 
+        // CRITICAL: WAL preservation settings for data durability
+        opts.set_wal_size_limit_mb(1024); // Allow WAL to grow to 1GB before archiving
+        opts.set_wal_ttl_seconds(0); // Never delete WAL by time
+        opts.set_wal_size_limit_mb(0); // Never delete WAL by size (let RocksDB manage based on flushes)
+        opts.set_manual_wal_flush(false); // Auto-flush WAL with set_sync(true)
+
         // Initialize quantum encryption for Phase 2+
         let qrng = if matches!(phase, Phase::Phase2 | Phase::Phase3 | Phase::Phase4) {
             info!("🌌 Initializing quantum RNG for storage encryption");
@@ -301,6 +307,10 @@ impl KVStore for RocksDBKV {
             .put_cf_opt(&cf_handle, key, value, &write_opts)
             .context("RocksDB synced put failed")?;
 
+        // REMOVED flush_cf() - immediate flush deletes WAL prematurely!
+        // WAL with fsync is sufficient for durability. RocksDB will flush memtable
+        // to SST naturally, and WAL will be preserved until flush completes.
+
         Ok(())
     }
 
@@ -341,6 +351,10 @@ impl KVStore for RocksDBKV {
         self.db
             .write_opt(write_batch, &write_opts)
             .context("RocksDB batch write failed")?;
+
+        // REMOVED flush_cf() - immediate flush deletes WAL prematurely!
+        // WAL with fsync is sufficient for durability. RocksDB will flush memtable
+        // to SST naturally, and WAL will be preserved until flush completes.
 
         Ok(())
     }

@@ -69,12 +69,14 @@ pub mod cache_aligned;
 pub mod avx512;
 pub mod benchmarks;
 pub mod parallel_ed25519;
+pub mod simd_merkle;  // Phase 3.1: SIMD-optimized Merkle tree computation
 
 // Re-export key types
 pub use batch_verification::{BatchSignatureVerifier, BatchVerificationResult};
 pub use vectorized_hashing::{SimdHasher, HashBatch};
 pub use cache_aligned::{CacheAlignedBuffer, SimdCache};
 pub use cpu_detection::{CpuFeatures, detect_cpu_features};
+pub use simd_merkle::SimdMerkleTree;  // Phase 3.1 export
 
 /// SIMD crypto engine configuration
 #[derive(Debug, Clone)]

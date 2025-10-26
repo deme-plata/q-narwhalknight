@@ -36,6 +36,25 @@ export default function MiningDashboard() {
 
     console.log('🔌 Connecting to SSE for wallet:', walletAddress);
 
+    // Fetch initial balance from persistent storage
+    const fetchInitialBalance = async () => {
+      try {
+        const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
+        if (balanceResponse.success && balanceResponse.data) {
+          const balance = balanceResponse.data.balance_qnk || 0;
+          console.log('💰 Loaded initial balance from storage:', balance);
+          setStats(prev => ({
+            ...prev,
+            currentBalance: balance,
+          }));
+        }
+      } catch (error) {
+        console.error('Failed to fetch initial balance:', error);
+      }
+    };
+
+    fetchInitialBalance();
+
     // Subscribe to mining rewards via SSE
     const eventSource = qnkAPI.subscribeToMiningRewards(
       walletAddress,

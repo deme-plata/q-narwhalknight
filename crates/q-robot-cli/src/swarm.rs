@@ -135,6 +135,62 @@ pub enum ResearchType {
     WaterQuality,
     QuantumPhenomena,
     AcousticMapping,
+    /// Advanced K-Parameter quantum research
+    KParameterInvestigation {
+        phenomena: KParameterPhenomenon,
+        measurement_precision: f64,
+        entanglement_requirement: f64,
+    },
+    /// Dark matter detection research
+    DarkMatterSensing {
+        sensitivity_threshold: f64,
+        quantum_correlation_required: bool,
+    },
+    /// Quantum gravity wave detection
+    QuantumGravityProbe {
+        frequency_range: (f64, f64),
+        coherence_time_required: std::time::Duration,
+    },
+    /// Consciousness-quantum interaction research
+    ConsciousnessQuantumCorrelation {
+        eeg_integration: bool,
+        measurement_observers: Vec<String>,
+    },
+    /// Multi-laboratory quantum verification
+    MultiLabQuantumVerification {
+        lab_locations: Vec<String>,
+        cross_validation_required: bool,
+    },
+    /// Topological quantum computing research
+    TopologicalQuantumComputing {
+        anyonic_braiding: bool,
+        error_correction_study: bool,
+    },
+}
+
+/// K-Parameter phenomena for investigation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KParameterPhenomenon {
+    /// Quantum gravity signatures at different K values
+    QuantumGravitySignature { target_k: f64 },
+    /// Dark matter-quantum entanglement correlation
+    DarkMatterEntanglementCorrelation,
+    /// Observer-dependent quantum state variations (QBism)
+    QBismAgentDependence { num_observers: usize },
+    /// Biological quantum coherence in marine life
+    BioQuantumCoherence { species_target: String },
+    /// Topological quantum states in underwater environment
+    TopologicalQuantumStates { anyonic_detection: bool },
+    /// Multiverse coherence measurements
+    MultiverseCoherenceProbe,
+    /// Quantum-classical boundary investigation
+    QuantumClassicalBoundary { decoherence_study: bool },
+    /// Room-temperature quantum coherence in microtubules
+    MicrotubuleQuantumCoherence { neural_correlation: bool },
+    /// Holographic principle validation
+    HolographicPrincipleTest { information_bound_check: bool },
+    /// Quantum resurrection signatures
+    QuantumResurrectionProbe { information_preservation: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,11 +295,12 @@ impl SwarmController {
     
     /// Execute swarm mission
     pub async fn execute_mission(&mut self, swarm_name: &str, mission: &str, area: Option<Vec<f64>>) -> Result<()> {
+        // Create mission config first, before borrowing swarm mutably
+        let mission_config = self.create_mission_config(mission, area)?;
+
         let swarm = self.swarms.get_mut(swarm_name)
             .ok_or_else(|| anyhow::anyhow!("Swarm '{}' not found", swarm_name))?;
-        
-        let mission_config = self.create_mission_config(mission, area)?;
-        
+
         swarm.start_mission(mission_config).await?;
         
         // Schedule mission monitoring

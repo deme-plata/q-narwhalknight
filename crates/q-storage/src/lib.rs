@@ -326,6 +326,120 @@ impl QStorage {
         Ok(None)
     }
 
+    // ========================================
+    // QBLOCK STORAGE METHODS (Phase 2)
+    // ========================================
+
+    /// Save QBlock to storage (simplified version for Phase 2 block production)
+    /// This is used by the BlockProducer to persist produced blocks
+    pub async fn save_qblock(&self, block: &q_types::block::QBlock) -> Result<()> {
+        let start_time = SystemTime::now();
+        let block_hash = block.calculate_hash();
+
+        info!(
+            "💾 Saving QBlock at height {} with hash {}",
+            block.header.height,
+            hex::encode(&block_hash[..8])
+        );
+
+        // Serialize block
+        let block_data = bincode::serialize(block)
+            .context("Failed to serialize QBlock")?;
+
+        // Prepare batch writes for atomic storage
+        let mut batch = Vec::new();
+
+        // Store by height: qblock:height:{height}
+        let height_key = format!("qblock:height:{}", block.header.height);
+        batch.push((CF_BLOCKS, height_key.into_bytes(), block_data.clone()));
+
+        // Store by hash: qblock:hash:{hash_hex}
+        let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
+        batch.push((CF_BLOCKS, hash_key.into_bytes(), block_data.clone()));
+
+        // Store latest height pointer: qblock:latest
+        let latest_height_bytes = block.header.height.to_be_bytes().to_vec();
+        batch.push((CF_BLOCKS, b"qblock:latest".to_vec(), latest_height_bytes));
+
+        // Commit atomically
+        self.hot_db.write_batch(batch).await
+            .context("Failed to write QBlock batch to database")?;
+
+        let latency = start_time.elapsed().unwrap_or(Duration::from_millis(0));
+
+        // Update metrics (count mining solutions as transactions)
+        self.metrics
+            .record_block_finalization(latency, block.mining_solutions.len())
+            .await;
+
+        info!(
+            "✅ Saved QBlock {} in {}ms ({} mining solutions)",
+            block.header.height,
+            latency.as_millis(),
+            block.mining_solutions.len()
+        );
+
+        Ok(())
+    }
+
+    /// Get QBlock by height
+    pub async fn get_qblock_by_height(&self, height: u64) -> Result<Option<q_types::block::QBlock>> {
+        debug!("🔍 Fetching QBlock at height {}", height);
+
+        let height_key = format!("qblock:height:{}", height);
+
+        match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await? {
+            Some(block_data) => {
+                let block: q_types::block::QBlock = bincode::deserialize(&block_data)
+                    .context("Failed to deserialize QBlock")?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get QBlock by hash
+    pub async fn get_qblock_by_hash(&self, hash: &[u8; 32]) -> Result<Option<q_types::block::QBlock>> {
+        debug!("🔍 Fetching QBlock by hash {}", hex::encode(hash));
+
+        let hash_key = format!("qblock:hash:{}", hex::encode(hash));
+
+        match self.hot_db.get(CF_BLOCKS, hash_key.as_bytes()).await? {
+            Some(block_data) => {
+                let block: q_types::block::QBlock = bincode::deserialize(&block_data)
+                    .context("Failed to deserialize QBlock")?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get latest QBlock
+    pub async fn get_latest_qblock(&self) -> Result<Option<q_types::block::QBlock>> {
+        debug!("🔍 Fetching latest QBlock");
+
+        // Get latest height
+        match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+            Some(height_bytes) => {
+                if height_bytes.len() != 8 {
+                    warn!("Invalid latest height bytes length: {}", height_bytes.len());
+                    return Ok(None);
+                }
+
+                let mut height_array = [0u8; 8];
+                height_array.copy_from_slice(&height_bytes);
+                let latest_height = u64::from_be_bytes(height_array);
+
+                // Fetch block at that height
+                self.get_qblock_by_height(latest_height).await
+            }
+            None => {
+                debug!("No latest QBlock found in storage");
+                Ok(None)
+            }
+        }
+    }
+
     /// Get storage statistics
     pub async fn get_storage_stats(&self) -> StorageStats {
         let manifest = self.manifest.read().await;

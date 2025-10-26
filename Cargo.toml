@@ -117,8 +117,9 @@ rand_chacha = "0.3"
 
 # Post-quantum cryptography (Phase 1+) - GLIBC compatible versions
 pqcrypto-dilithium = "0.5"
-pqcrypto-kyber = "0.7" 
+pqcrypto-kyber = "0.7"
 pqcrypto-falcon = "0.3"
+pqcrypto-traits = "0.3"
 dilithium = "0.1"
 
 # Database - RocksDB for quantum storage (no SQLite needed)

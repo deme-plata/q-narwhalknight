@@ -85,9 +85,14 @@ pub enum BountyInputField {
 
 impl App {
     pub fn new() -> Self {
+        Self::with_metrics(Arc::new(RwLock::new(Metrics::default())))
+    }
+
+    /// Create a new App with externally managed metrics (for live updates)
+    pub fn with_metrics(metrics: Arc<RwLock<Metrics>>) -> Self {
         Self {
             view_mode: ViewMode::Dashboard,
-            metrics: Arc::new(RwLock::new(Metrics::default())),
+            metrics,
             logs: Arc::new(RwLock::new(HeapRb::new(1000))),
             logs_paused: false,
             log_scroll: 0,

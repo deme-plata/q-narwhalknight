@@ -44,6 +44,9 @@ tower_governor = "0.3"  # Governor integration for Axum/Tower
 tokio = { workspace = true }
 futures = { workspace = true }
 
+# Lock-free data structures for Phase 2.2 optimization
+crossbeam = "0.8"  # Lock-free queues for 10x performance gain
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -65,6 +68,7 @@ tracing-subscriber = { workspace = true }
 # Configuration
 config = { workspace = true }
 dotenvy = "0.15"  # Load .env file for environment variables (Stripe keys, etc.)
+dirs = "5.0"  # Home directory detection for AEGIS-QL key loading
 
 # Database - using RocksDB quantum storage
 q-storage = { path = "../q-storage" }
@@ -125,6 +129,7 @@ dashmap = { workspace = true }
 
 # CPU detection and optimization
 num_cpus = "1.16"
+sysinfo = "0.30"  # System information for TUI metrics
 
 # Serialization for consensus payloads
 postcard = { workspace = true }

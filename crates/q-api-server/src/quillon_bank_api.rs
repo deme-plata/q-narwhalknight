@@ -19,43 +19,62 @@ use q_quillon_bank::{QuillonBankSystem, AssetType};
 use q_types::{ApiResponse, Transaction};
 use chrono::Utc;
 
-/// Create Quillon Bank API router
+/// Create Quillon Bank API router with AEGIS-QL protection for sensitive operations
 pub fn create_quillon_bank_router() -> Router<Arc<AppState>> {
+    // Public routes (read-only, no authentication required)
+    let public_routes = create_public_routes();
+
+    // Protected routes (FOUNDER-ONLY - AEGIS-QL authentication required)
+    // Note: Middleware will be applied in main.rs when state is available
+    let protected_routes = create_protected_routes();
+
+    // Merge public and protected routes
     Router::new()
-        // Status & Metrics
+        .merge(public_routes)
+        .merge(protected_routes)
+}
+
+/// Create public Quillon Bank routes (read-only, no authentication)
+pub fn create_public_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        // Status & Metrics (PUBLIC - read-only)
         .route("/stablecoin/status", get(get_stablecoin_status))
         .route("/metrics", get(get_banking_metrics))
         .route("/risk/status", get(get_risk_status))
         .route("/quantum/status", get(get_quantum_status))
-        // Stablecoin Operations
-        .route("/stablecoin/mint", post(mint_qnkusd))
-        .route("/stablecoin/burn", post(burn_qnkusd))
         .route("/stablecoin/collateral", get(get_collateral_status))
-        .route("/stablecoin/collateral/add", post(add_collateral))
-        .route("/stablecoin/collateral/rebalance", post(rebalance_collateral))
         .route("/stablecoin/peg", get(get_peg_status))
-        .route("/stablecoin/peg/adjust", post(adjust_peg))
-        // Lending Operations
         .route("/lending/applications", get(get_loan_applications))
-        .route("/lending/approve", post(approve_loan))
         .route("/lending/at-risk", get(get_loans_at_risk))
-        .route("/lending/liquidate", post(liquidate_loan))
-        // Account Management
         .route("/accounts", get(list_accounts))
         .route("/accounts/pending", get(get_pending_accounts))
-        .route("/accounts/approve", post(approve_account))
-        // Treasury Management
         .route("/treasury/reserves", get(get_reserves_status))
-        .route("/treasury/reserves/allocate", post(allocate_reserves))
         .route("/treasury/profits", get(calculate_profits))
-        .route("/treasury/profits/distribute", post(distribute_profits))
-        // Risk Management
         .route("/risk/assessment", get(risk_assessment))
         .route("/risk/liquidations/queue", get(liquidation_queue))
-        .route("/risk/liquidations/execute", post(execute_liquidations))
-        // Analytics
         .route("/analytics/daily-summary", get(daily_summary))
         .route("/analytics/customers", get(customer_analytics))
+}
+
+/// Create protected Quillon Bank routes (FOUNDER-ONLY - requires AEGIS-QL authentication)
+pub fn create_protected_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        // Stablecoin Operations (FOUNDER-ONLY)
+        .route("/stablecoin/mint", post(mint_qnkusd))
+        .route("/stablecoin/burn", post(burn_qnkusd))
+        .route("/stablecoin/collateral/add", post(add_collateral))
+        .route("/stablecoin/collateral/rebalance", post(rebalance_collateral))
+        .route("/stablecoin/peg/adjust", post(adjust_peg))
+        // Lending Operations (FOUNDER-ONLY)
+        .route("/lending/approve", post(approve_loan))
+        .route("/lending/liquidate", post(liquidate_loan))
+        // Account Management (FOUNDER-ONLY)
+        .route("/accounts/approve", post(approve_account))
+        // Treasury Management (FOUNDER-ONLY)
+        .route("/treasury/reserves/allocate", post(allocate_reserves))
+        .route("/treasury/profits/distribute", post(distribute_profits))
+        // Risk Management (FOUNDER-ONLY)
+        .route("/risk/liquidations/execute", post(execute_liquidations))
 }
 
 // ============================================================================
@@ -202,7 +221,7 @@ async fn get_quantum_status(
 // ============================================================================
 
 #[derive(Deserialize)]
-struct MintRequest {
+pub struct MintRequest {
     amount: u64,
     collateral_type: String,
     collateral_amount: f64,
@@ -212,7 +231,7 @@ struct MintRequest {
 }
 
 #[derive(Serialize)]
-struct MintResponse {
+pub struct MintResponse {
     transaction_id: String,
     amount_minted: u64,
     collateral_locked: f64,
@@ -220,7 +239,7 @@ struct MintResponse {
     finalized_in_seconds: f64,
 }
 
-async fn mint_qnkusd(
+pub async fn mint_qnkusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MintRequest>,
 ) -> Result<Json<ApiResponse<MintResponse>>, StatusCode> {
@@ -395,13 +414,13 @@ async fn mint_qnkusd(
 }
 
 #[derive(Deserialize)]
-struct BurnRequest {
+pub struct BurnRequest {
     amount: u64,
     recipient: String,
     collateral_type: String,
 }
 
-async fn burn_qnkusd(
+pub async fn burn_qnkusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<BurnRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -497,13 +516,13 @@ async fn get_collateral_status(
 }
 
 #[derive(Deserialize)]
-struct AddCollateralRequest {
+pub struct AddCollateralRequest {
     collateral_type: String,
     amount: f64,
     reason: Option<String>,
 }
 
-async fn add_collateral(
+pub async fn add_collateral(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddCollateralRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -533,7 +552,7 @@ async fn add_collateral(
     }))))
 }
 
-async fn rebalance_collateral(
+pub async fn rebalance_collateral(
     State(_state): State<Arc<AppState>>,
     Json(_request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -563,7 +582,7 @@ async fn get_peg_status(
     }))))
 }
 
-async fn adjust_peg(
+pub async fn adjust_peg(
     State(_state): State<Arc<AppState>>,
     Json(_request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -606,7 +625,7 @@ async fn get_loan_applications(State(_state): State<Arc<AppState>>) -> Result<Js
     Ok(Json(ApiResponse::success(serde_json::json!({"applications": []}))))
 }
 
-async fn approve_loan(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn approve_loan(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 
@@ -614,7 +633,7 @@ async fn get_loans_at_risk(State(_state): State<Arc<AppState>>) -> Result<Json<A
     Ok(Json(ApiResponse::success(serde_json::json!({"loans": []}))))
 }
 
-async fn liquidate_loan(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn liquidate_loan(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 
@@ -626,7 +645,7 @@ async fn get_pending_accounts(State(_state): State<Arc<AppState>>) -> Result<Jso
     Ok(Json(ApiResponse::success(serde_json::json!({"pending": []}))))
 }
 
-async fn approve_account(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn approve_account(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 
@@ -634,7 +653,7 @@ async fn get_reserves_status(State(_state): State<Arc<AppState>>) -> Result<Json
     Ok(Json(ApiResponse::success(serde_json::json!({"reserves": {}}))))
 }
 
-async fn allocate_reserves(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn allocate_reserves(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 
@@ -642,7 +661,7 @@ async fn calculate_profits(State(_state): State<Arc<AppState>>) -> Result<Json<A
     Ok(Json(ApiResponse::success(serde_json::json!({"profits": {}}))))
 }
 
-async fn distribute_profits(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn distribute_profits(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 
@@ -654,7 +673,7 @@ async fn liquidation_queue(State(_state): State<Arc<AppState>>) -> Result<Json<A
     Ok(Json(ApiResponse::success(serde_json::json!({"queue": []}))))
 }
 
-async fn execute_liquidations(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn execute_liquidations(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
 }
 

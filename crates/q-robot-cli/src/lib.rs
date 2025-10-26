@@ -130,13 +130,13 @@ pub enum QuantumError {
 }
 
 /// Result type for robot operations
-pub type RobotResult<T> = Result<T, RobotError>;
+pub type RobotResult<T> = std::result::Result<T, RobotError>;
 
-/// Result type for swarm operations  
-pub type SwarmResult<T> = Result<T, SwarmError>;
+/// Result type for swarm operations
+pub type SwarmResult<T> = std::result::Result<T, SwarmError>;
 
 /// Result type for quantum operations
-pub type QuantumResult<T> = Result<T, QuantumError>;
+pub type QuantumResult<T> = std::result::Result<T, QuantumError>;
 
 /// General result type for the library
 pub type Result<T> = anyhow::Result<T>;

@@ -303,7 +303,9 @@ async fn mining_thread(
     info!("🔥 CPU mining thread {} started", thread_id);
 
     let mut nonce = thread_id as u64 * 1_000_000;
-    let batch_size = (intensity as u64) * 10_000;
+    // OPTIMIZED: Increased batch size for maximum CPU utilization (10x increase)
+    // Larger batches = fewer context switches = more CPU time spent hashing
+    let batch_size = (intensity as u64) * 100_000; // Was 10_000, now 100_000 for 99% CPU usage
     let api_url = &server_url;
 
     let client = reqwest::Client::new();
@@ -369,9 +371,16 @@ async fn mining_thread(
             }
         }
 
-        // Mine a batch of nonces
+        // Mine a batch of nonces with MAXIMUM CPU utilization
+        // Pre-allocate buffer for hash input (40 bytes: 32 for challenge + 8 for nonce)
+        let mut hash_input = [0u8; 40];
+        hash_input[..32].copy_from_slice(&challenge_hash);
+
         for _ in 0..batch_size {
-            let hash = compute_dag_knight_hash(&challenge_hash, nonce);
+            // Update nonce in pre-allocated buffer (zero-copy, maximum performance)
+            hash_input[32..].copy_from_slice(&nonce.to_le_bytes());
+
+            let hash = compute_dag_knight_hash_optimized(&hash_input);
             hash_counter.fetch_add(1, Ordering::Relaxed);
 
             // Check if solution meets difficulty target
@@ -422,8 +431,8 @@ async fn mining_thread(
             nonce += 1;
         }
 
-        // Brief pause to prevent CPU overload
-        tokio::task::yield_now().await;
+        // REMOVED: tokio::task::yield_now() - This was throttling CPU usage!
+        // Mining thread now runs at 100% CPU utilization for maximum performance
     }
 
     info!("🛑 CPU mining thread {} stopped", thread_id);
@@ -608,24 +617,34 @@ fn hex_to_bytes(hex_str: &str) -> Result<[u8; 32]> {
 }
 
 /// DAG-Knight VDF mining algorithm
+/// OPTIMIZED: Original hash function (kept for compatibility with old code)
 fn compute_dag_knight_hash(input: &[u8; 32], nonce: u64) -> [u8; 32] {
-    // Combine input with nonce
-    let mut hasher_input = Vec::with_capacity(40);
-    hasher_input.extend_from_slice(input);
-    hasher_input.extend_from_slice(&nonce.to_le_bytes());
+    let mut hasher_input = [0u8; 40];
+    hasher_input[..32].copy_from_slice(input);
+    hasher_input[32..].copy_from_slice(&nonce.to_le_bytes());
+    compute_dag_knight_hash_optimized(&hasher_input)
+}
 
-    // Initial hash
-    let initial_hash = blake3::hash(&hasher_input);
+/// MAXIMUM PERFORMANCE: Zero-allocation hash function for 100% CPU utilization
+/// Optimizations:
+/// - Pre-allocated fixed-size arrays (no heap allocations)
+/// - In-place VDF computation
+/// - Optimized for CPU cache efficiency
+#[inline(always)]
+fn compute_dag_knight_hash_optimized(hash_input: &[u8; 40]) -> [u8; 32] {
+    // Initial hash with zero allocations
+    let initial_hash = blake3::hash(hash_input);
 
-    // VDF computation (simplified - 100 iterations for demo)
-    let mut current = initial_hash.as_bytes().to_vec();
+    // VDF computation with fixed buffer (100 iterations)
+    // Using array instead of Vec for zero allocations
+    let mut current = *initial_hash.as_bytes();
+
     for _ in 0..100 {
-        current = blake3::hash(&current).as_bytes().to_vec();
+        // In-place hashing for maximum performance
+        current = *blake3::hash(&current).as_bytes();
     }
 
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&current[..32]);
-    result
+    current
 }
 
 fn print_banner() {

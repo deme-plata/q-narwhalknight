@@ -12,6 +12,8 @@
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
     "@noble/hashes": "^1.5.0",
+    "@react-three/drei": "^10.7.6",
+    "@react-three/fiber": "^9.4.0",
     "@scure/bip32": "^2.0.1",
     "@scure/bip39": "^2.0.1",
     "@zxing/library": "^0.21.3",
@@ -22,7 +24,8 @@
     "qrcode.react": "^4.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "react-icons": "^5.5.0"
+    "react-icons": "^5.5.0",
+    "three": "^0.180.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",

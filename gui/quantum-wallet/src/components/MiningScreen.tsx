@@ -5,10 +5,14 @@ import MiningDashboard from './MiningDashboard';
 export default function MiningScreen() {
   const walletAddress = localStorage.getItem('walletAddress') || '';
 
-  const handleDownloadMiner = (platform: 'linux' | 'windows') => {
+  const handleDownloadMiner = (platform: 'linux' | 'windows' | 'linux-optimized' | 'windows-optimized') => {
     // Link to download the miner binary
-    if (platform === 'windows') {
+    if (platform === 'windows-optimized') {
+      window.open('/downloads/q-narwhalknight-miner-v1.1.0-windows-x64.zip', '_blank');
+    } else if (platform === 'windows') {
       window.open('/downloads/q-miner-windows-x64.exe', '_blank');
+    } else if (platform === 'linux-optimized') {
+      window.open('/downloads/q-narwhalknight-miner-v1.1.0-linux-x86_64.tar.gz', '_blank');
     } else {
       window.open('/downloads/q-miner-linux-x64', '_blank');
     }
@@ -116,31 +120,113 @@ export default function MiningScreen() {
             </div>
           </div>
 
+          {/* NEW OPTIMIZED LINUX MINER - Highlighted */}
+          <div className="mb-6 p-6 bg-gradient-to-r from-quantum-green/20 to-quantum-cyan/20 border-2 border-quantum-green/50 rounded-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <Zap className="w-6 h-6 text-quantum-green" />
+              <div>
+                <h3 className="text-xl font-bold text-white">
+                  🔥 NEW: Optimized Linux Miner v1.1.0
+                </h3>
+                <p className="text-sm text-quantum-green">+15% Hash Rate • 99% CPU Utilization • Zero-Allocation VDF</p>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-3 gap-4 mb-4">
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-green font-bold text-sm">⚡ 166 KH/s</p>
+                <p className="text-gray-400 text-xs">vs 144 KH/s (v1.0)</p>
+              </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-green font-bold text-sm">99% CPU</p>
+                <p className="text-gray-400 text-xs">Maximum performance</p>
+              </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-green font-bold text-sm">10x Batches</p>
+                <p className="text-gray-400 text-xs">Fewer context switches</p>
+              </div>
+            </div>
+
+            <motion.button
+              onClick={() => handleDownloadMiner('linux-optimized')}
+              className="w-full bg-gradient-to-r from-quantum-green to-quantum-cyan hover:from-quantum-green/80 hover:to-quantum-cyan/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3 shadow-lg shadow-quantum-green/30"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Download className="w-5 h-5" />
+              <span>Download Optimized Linux Package (v1.1.0)</span>
+            </motion.button>
+            <p className="text-center text-sm text-gray-400 mt-2">
+              Size: 3.6 MB tar.gz • Complete package with README & start script
+            </p>
+          </div>
+
+          {/* NEW OPTIMIZED WINDOWS MINER - Highlighted */}
+          <div className="mb-6 p-6 bg-gradient-to-r from-quantum-purple/20 to-quantum-pink/20 border-2 border-quantum-purple/50 rounded-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <Zap className="w-6 h-6 text-quantum-purple" />
+              <div>
+                <h3 className="text-xl font-bold text-white">
+                  🔥 NEW: Optimized Windows Miner v1.1.0
+                </h3>
+                <p className="text-sm text-quantum-purple">+15% Hash Rate • 99% CPU Utilization • Easy PowerShell Script</p>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-3 gap-4 mb-4">
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-purple font-bold text-sm">⚡ 166 KH/s</p>
+                <p className="text-gray-400 text-xs">vs 144 KH/s (v1.0)</p>
+              </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-purple font-bold text-sm">2.8 MB ZIP</p>
+                <p className="text-gray-400 text-xs">Complete package</p>
+              </div>
+              <div className="bg-quantum-dark/50 rounded-lg p-3">
+                <p className="text-quantum-purple font-bold text-sm">Auto-detect</p>
+                <p className="text-gray-400 text-xs">CPU cores & features</p>
+              </div>
+            </div>
+
+            <motion.button
+              onClick={() => handleDownloadMiner('windows-optimized')}
+              className="w-full bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3 shadow-lg shadow-quantum-purple/30"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <Download className="w-5 h-5" />
+              <span>Download Optimized Windows Package (v1.1.0)</span>
+            </motion.button>
+            <p className="text-center text-sm text-gray-400 mt-2">
+              Size: 2.8 MB zip • Includes q-miner.exe + PowerShell script + README
+            </p>
+          </div>
+
           <div className="grid md:grid-cols-2 gap-4">
             <motion.button
               onClick={() => handleDownloadMiner('linux')}
-              className="bg-gradient-to-r from-quantum-cyan to-quantum-blue hover:from-quantum-cyan/80 hover:to-quantum-blue/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
+              className="bg-gradient-to-r from-quantum-cyan/70 to-quantum-blue/70 hover:from-quantum-cyan/60 hover:to-quantum-blue/60 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2 opacity-75"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
               <div className="flex items-center gap-3">
                 <Download className="w-5 h-5" />
-                <span>Linux x86_64</span>
+                <span>Linux x86_64 (Legacy)</span>
               </div>
-              <span className="text-xs text-quantum-cyan/70">13 MB • CPU Mining</span>
+              <span className="text-xs text-quantum-cyan/70">13 MB • CPU Mining • v1.0</span>
             </motion.button>
 
             <motion.button
               onClick={() => handleDownloadMiner('windows')}
-              className="bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2"
+              className="bg-gradient-to-r from-quantum-purple/70 to-quantum-pink/70 hover:from-quantum-purple/60 hover:to-quantum-pink/60 text-white font-bold py-4 px-6 rounded-xl transition-all flex flex-col items-center justify-center gap-2 opacity-75"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
               <div className="flex items-center gap-3">
                 <Download className="w-5 h-5" />
-                <span>Windows x64</span>
+                <span>Windows x64 (Legacy)</span>
               </div>
-              <span className="text-xs text-quantum-purple/70">22 MB • CPU Mining</span>
+              <span className="text-xs text-quantum-purple/70">22 MB • CPU Mining • v1.0</span>
             </motion.button>
 
             <motion.button
@@ -188,12 +274,26 @@ export default function MiningScreen() {
           <div>
             <p className="text-gray-300 mb-2">1. Download the miner for your platform:</p>
             <div className="space-y-2">
+              <div className="bg-gradient-to-r from-quantum-green/20 to-quantum-cyan/10 border border-quantum-green/30 rounded-lg p-3">
+                <p className="text-quantum-green text-sm font-bold mb-1">🚀 Linux (Optimized v1.1.0 - RECOMMENDED):</p>
+                <code className="font-mono text-xs text-gray-300 block mb-1">tar -xzf q-narwhalknight-miner-v1.1.0-linux-x86_64.tar.gz</code>
+                <code className="font-mono text-xs text-gray-300 block mb-1">cd linux</code>
+                <code className="font-mono text-xs text-gray-300">./start-mining.sh {walletAddress || 'YOUR_WALLET_ADDRESS'}</code>
+                <p className="text-xs text-quantum-green mt-2">✨ Includes easy start script with auto-configuration!</p>
+              </div>
+              <div className="bg-gradient-to-r from-quantum-purple/20 to-quantum-pink/10 border border-quantum-purple/30 rounded-lg p-3">
+                <p className="text-quantum-purple text-sm font-bold mb-1">🚀 Windows (Optimized v1.1.0 - RECOMMENDED):</p>
+                <code className="font-mono text-xs text-gray-300 block mb-1">Expand-Archive q-narwhalknight-miner-v1.1.0-windows-x64.zip</code>
+                <code className="font-mono text-xs text-gray-300 block mb-1">cd windows</code>
+                <code className="font-mono text-xs text-gray-300">.\start-mining.ps1 {walletAddress || 'YOUR_WALLET_ADDRESS'}</code>
+                <p className="text-xs text-quantum-purple mt-2">✨ PowerShell script with auto-detection!</p>
+              </div>
               <div className="bg-quantum-dark/50 rounded-lg p-3">
-                <p className="text-quantum-cyan text-sm mb-1">🐧 Linux:</p>
+                <p className="text-quantum-cyan text-sm mb-1">🐧 Linux (Legacy):</p>
                 <code className="font-mono text-xs text-gray-300">chmod +x q-miner-linux-x64 && mv q-miner-linux-x64 q-miner</code>
               </div>
               <div className="bg-quantum-dark/50 rounded-lg p-3">
-                <p className="text-quantum-purple text-sm mb-1">🪟 Windows:</p>
+                <p className="text-gray-400 text-sm mb-1">🪟 Windows (Legacy):</p>
                 <code className="font-mono text-xs text-gray-300">Rename q-miner-windows-x64.exe to q-miner.exe</code>
               </div>
               <div className="bg-quantum-dark/50 rounded-lg p-3">
@@ -232,10 +332,12 @@ export default function MiningScreen() {
           <div className="bg-quantum-purple/10 border border-quantum-purple/30 rounded-lg p-4">
             <p className="text-quantum-purple font-bold mb-2">💡 Pro Tips:</p>
             <ul className="text-gray-300 text-sm space-y-1">
-              <li>• Use <code className="text-quantum-cyan">--threads</code> equal to your CPU core count for best performance</li>
+              <li>• <strong className="text-quantum-green">v1.1.0 optimized miner</strong> delivers 15% higher hash rates with zero-allocation VDF</li>
+              <li>• Use <code className="text-quantum-cyan">--intensity 10</code> for maximum 99% CPU utilization</li>
+              <li>• The easy start script auto-detects your CPU cores and capabilities (AVX2, etc.)</li>
               <li>• Monitor hash rate in real-time - miner shows statistics every 5 seconds</li>
               <li>• Mining rewards appear instantly in your wallet balance (SSE real-time updates)</li>
-              <li>• After block 100, difficulty increases 256x - join a mining pool for consistent rewards</li>
+              <li>• Close other applications when mining at intensity 10 for best performance</li>
             </ul>
           </div>
         </div>

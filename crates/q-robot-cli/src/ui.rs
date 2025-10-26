@@ -219,13 +219,13 @@ impl TerminalUI {
                 _ = update_interval.tick() => {
                     self.update_data().await?;
                 }
-                _ = async {
+                result = async {
                     if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                         if let Ok(event) = event::read() {
                             match event {
                                 Event::Key(key) => {
                                     match key.code {
-                                        KeyCode::Char('q') => return Ok(()),
+                                        KeyCode::Char('q') => return Ok::<bool, anyhow::Error>(true),
                                         KeyCode::Char('h') | KeyCode::F(1) => {
                                             self.app_state.show_help = !self.app_state.show_help;
                                         }
@@ -254,7 +254,12 @@ impl TerminalUI {
                             }
                         }
                     }
-                } => {}
+                    Ok::<bool, anyhow::Error>(false)
+                } => {
+                    if result? {
+                        break Ok(());
+                    }
+                }
             }
             
             // Draw UI
@@ -521,17 +526,18 @@ impl TerminalUI {
             Row::new(vec!["D", "0.45", "0.12", "0.78", "1.00"]),
         ];
         
-        let entanglement_table = Table::new(entanglement_data)
+        let entanglement_table = Table::new(
+                entanglement_data,
+                &[
+                    Constraint::Length(8),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
+                ]
+            )
             .block(Block::default().title("Entanglement Matrix").borders(Borders::ALL))
-            .widths(&[
-                Constraint::Length(8),
-                Constraint::Length(6),
-                Constraint::Length(6), 
-                Constraint::Length(6),
-                Constraint::Length(6),
-            ])
-            .style(Style::default().fg(Color::White))
-            .header_style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(Color::White));
         
         frame.render_widget(entanglement_table, top_chunks[1]);
         
@@ -592,16 +598,17 @@ impl TerminalUI {
             Row::new(vec!["Quantum Field", "0.87", "arb", "✓ Stable"]),
         ];
         
-        let sensor_table = Table::new(sensor_data)
+        let sensor_table = Table::new(
+                sensor_data,
+                &[
+                    Constraint::Length(12),
+                    Constraint::Length(8),
+                    Constraint::Length(6),
+                    Constraint::Length(10),
+                ]
+            )
             .block(Block::default().title("Sensor Readings").borders(Borders::ALL))
-            .widths(&[
-                Constraint::Length(12),
-                Constraint::Length(8),
-                Constraint::Length(6),
-                Constraint::Length(10),
-            ])
-            .style(Style::default().fg(Color::White))
-            .header_style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(Color::White));
         
         frame.render_widget(sensor_table, chunks[1]);
     }
@@ -644,16 +651,17 @@ impl TerminalUI {
             Row::new(vec!["Turbidity", "2.8 NTU", "<4.0 NTU", "✓ Clear"]),
         ];
         
-        let quality_table = Table::new(water_quality)
+        let quality_table = Table::new(
+                water_quality,
+                &[
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                ]
+            )
             .block(Block::default().title("Water Quality Assessment").borders(Borders::ALL))
-            .widths(&[
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(12),
-                Constraint::Length(10),
-            ])
-            .style(Style::default().fg(Color::White))
-            .header_style(Style::default().fg(Color::Cyan));
+            .style(Style::default().fg(Color::White));
         
         frame.render_widget(quality_table, chunks[1]);
     }

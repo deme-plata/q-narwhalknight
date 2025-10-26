@@ -1,10 +1,11 @@
 import { useState, useEffect, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, ArrowUpRight } from 'lucide-react';
-import { qnkAPI, type NodeStatus } from '../services/api';
+import { qnkAPI, type NodeStatus, debounce } from '../services/api';
 import TransactionDetailsModal from './TransactionDetailsModal';
 import QRCodeModal from './QRCodeModal';
 import StripeCheckout from './StripeCheckout';
+import DAGKnightVisualization from './DAGKnightVisualization';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
 interface Transaction {
@@ -22,9 +23,10 @@ interface WalletBalance {
   name: string;
   balance: number;
   usdValue?: number;
-  icon: 'qug' | 'usd' | 'btc' | 'eth' | 'sol' | 'custom';
+  icon: 'qug' | 'usd' | 'btc' | 'eth' | 'sol' | 'zec' | 'iron' | 'custom';
   color: string;
   comingSoon?: boolean;
+  shieldedOnly?: boolean; // For privacy coins like Zcash
 }
 
 interface DashboardProps {
@@ -301,7 +303,9 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
     let mounted = true;
     let eventSource: EventSource | null = null;
 
-    const fetchNodeStatus = async () => {
+    // Create debounced versions of fetch functions to prevent request storms
+    // These will delay execution by 1.5s after the last call
+    const fetchNodeStatusCore = async () => {
       console.log('Fetching node status...');
       if (!mounted) return;
 
@@ -493,6 +497,24 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
       // Add placeholder for future cryptos
       balances.push(
         {
+          symbol: 'ZEC',
+          name: 'Zcash (Shielded)',
+          balance: 0,
+          icon: 'zec',
+          color: 'from-yellow-400 to-amber-600',
+          comingSoon: true,
+          shieldedOnly: true,
+        },
+        {
+          symbol: 'IRON',
+          name: 'Iron Fish',
+          balance: 0,
+          icon: 'iron',
+          color: 'from-slate-400 to-zinc-600',
+          comingSoon: true,
+          shieldedOnly: true,
+        },
+        {
           symbol: 'BTC',
           name: 'Bitcoin',
           balance: 0,
@@ -521,7 +543,7 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
       setWalletBalances(balances);
     };
 
-    const fetchRecentTransactions = async () => {
+    const fetchRecentTransactionsCore = async () => {
       console.log('📋 [fetchRecentTransactions] START - Fetching recent transactions...');
       console.log('📋 [fetchRecentTransactions] Mounted status:', mounted);
       console.log('📋 [fetchRecentTransactions] Current wallet:', localStorage.getItem('walletAddress'));
@@ -712,14 +734,29 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
       }
     };
 
+    // ============================================
+    // DEBOUNCED WRAPPERS - CRITICAL FIX FOR ERR_INSUFFICIENT_RESOURCES
+    // ============================================
+    // SSE events were triggering fetchNodeStatus and fetchRecentTransactions
+    // hundreds of times per second, exhausting browser network resources.
+    // Debouncing delays execution until 200ms after the last call, preventing request storms
+    // while keeping the UI responsive.
+
+    const fetchNodeStatus = debounce(fetchNodeStatusCore, 200);
+    const fetchRecentTransactions = debounce(fetchRecentTransactionsCore, 200);
+
+    console.log('✅ [DEBOUNCE PROTECTION] Fetch functions debounced with 200ms delay');
+    // ============================================
+
     const loadData = async () => {
       console.log('🚀 [loadData] START - Loading dashboard data...');
       setLoading(true);
       try {
         console.log('🚀 [loadData] Step 1: Generating wallet address...');
         await generateWalletAddress();
-        console.log('🚀 [loadData] Step 2: Calling fetchNodeStatus and fetchRecentTransactions in parallel...');
-        await Promise.all([fetchNodeStatus(), fetchRecentTransactions()]);
+        console.log('🚀 [loadData] Step 2: Calling fetchNodeStatus and fetchRecentTransactions (DIRECT - bypass debounce)...');
+        // For initial load, call core functions directly to bypass debounce
+        await Promise.all([fetchNodeStatusCore(), fetchRecentTransactionsCore()]);
         console.log('🚀 [loadData] Step 3: Both API calls completed');
         console.log('🚀 [loadData] Step 4: Fetching wallet balances...');
         await fetchWalletBalances();
@@ -1237,6 +1274,24 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         // Add placeholders
         balances.push(
           {
+            symbol: 'ZEC',
+            name: 'Zcash (Shielded)',
+            balance: 0,
+            icon: 'zec',
+            color: 'from-yellow-400 to-amber-600',
+            comingSoon: true,
+            shieldedOnly: true,
+          },
+          {
+            symbol: 'IRON',
+            name: 'Iron Fish',
+            balance: 0,
+            icon: 'iron',
+            color: 'from-slate-400 to-zinc-600',
+            comingSoon: true,
+            shieldedOnly: true,
+          },
+          {
             symbol: 'BTC',
             name: 'Bitcoin',
             balance: 0,
@@ -1644,6 +1699,14 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
                       Coming Soon
                     </div>
                   )}
+                  {wallet.shieldedOnly && (
+                    <div className="absolute bottom-2 right-2 px-2 py-1 rounded-lg text-xs font-bold bg-gradient-to-r from-green-500/30 to-emerald-500/30 border border-green-400/30 text-green-300 flex items-center gap-1">
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M8 1l-6 2v5c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V3l-6-2z"/>
+                      </svg>
+                      Shielded
+                    </div>
+                  )}
 
                   <div className="flex items-start justify-between mb-3">
                     <div className={`p-2 rounded-lg bg-gradient-to-br ${wallet.color}`}>
@@ -1698,6 +1761,42 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
                               </linearGradient>
                             </defs>
                             <path d="M4.5 17.5l2.5-2.5h14l-2.5 2.5H4.5zM4.5 11.5L7 9h14l-2.5 2.5H4.5zM7 6.5L4.5 9h14L21 6.5H7z" fill="url(#solGradient)"/>
+                          </svg>
+                        </div>
+                      )}
+                      {wallet.icon === 'zec' && (
+                        <div className="relative w-5 h-5">
+                          {/* Zcash shielded logo with privacy focus */}
+                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <defs>
+                              <linearGradient id="zecGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stopColor="#F4B728" />
+                                <stop offset="100%" stopColor="#D4AF37" />
+                              </linearGradient>
+                            </defs>
+                            <circle cx="12" cy="12" r="10" fill="url(#zecGradient)"/>
+                            {/* Shield symbol for privacy */}
+                            <path d="M12 3L6 6v5c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V6l-6-3z" fill="white" opacity="0.9"/>
+                            <path d="M15 9l-5 5h3l-5 5 5-5h-3l5-5z" fill="url(#zecGradient)" opacity="0.8"/>
+                          </svg>
+                        </div>
+                      )}
+                      {wallet.icon === 'iron' && (
+                        <div className="relative w-5 h-5">
+                          {/* Iron Fish logo with metallic/privacy theme */}
+                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <defs>
+                              <linearGradient id="ironGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stopColor="#64748b" />
+                                <stop offset="50%" stopColor="#94a3b8" />
+                                <stop offset="100%" stopColor="#475569" />
+                              </linearGradient>
+                            </defs>
+                            {/* Fish shape with metallic gradient */}
+                            <path d="M12 3c-4 0-7 2-9 5 2 3 5 5 9 5s7-2 9-5c-2-3-5-5-9-5z" fill="url(#ironGradient)"/>
+                            <circle cx="12" cy="8" r="2" fill="white" opacity="0.8"/>
+                            <path d="M12 13v8l-3-2 3-1-3-1.5z" fill="url(#ironGradient)" opacity="0.7"/>
+                            <path d="M12 13v8l3-2-3-1 3-1.5z" fill="url(#ironGradient)" opacity="0.7"/>
                           </svg>
                         </div>
                       )}
@@ -1801,6 +1900,16 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
             </motion.div>
           )}
         </div>
+      </motion.div>
+
+      {/* DAG-Knight Consensus Visualization */}
+      <motion.div
+        className="mb-8"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+      >
+        <DAGKnightVisualization currentHeight={nodeStatus?.current_height || 0} />
       </motion.div>
 
       <div className="grid grid-cols-1 gap-8">

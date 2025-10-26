@@ -34,6 +34,22 @@ interface NetworkStats {
   postQuantumReady: number;
 }
 
+interface NetworkSupply {
+  maxSupply: number;
+  maxSupplyFormatted: string;
+  totalMined: number;
+  totalMinedFormatted: string;
+  remainingSupply: number;
+  remainingSupplyFormatted: string;
+  circulatingPercentage: number;
+  circulatingPercentageFormatted: string;
+  networkHashrate: number;
+  networkHashrateFormatted: string;
+  blockReward: number;
+  blockRewardFormatted: string;
+  connectedMiners: number;
+}
+
 // StatCardProps interface removed - no longer needed
 
 interface ActivityItem {
@@ -552,12 +568,48 @@ export default function ExplorerScreen() {
     realTimeLatency: 0
   });
 
+  const [networkSupply, setNetworkSupply] = useState<NetworkSupply>({
+    maxSupply: 21000000,
+    maxSupplyFormatted: '21,000,000 QNK',
+    totalMined: 0,
+    totalMinedFormatted: '0.0000 QNK',
+    remainingSupply: 21000000,
+    remainingSupplyFormatted: '21,000,000.0000 QNK',
+    circulatingPercentage: 0,
+    circulatingPercentageFormatted: '0.000000%',
+    networkHashrate: 0,
+    networkHashrateFormatted: '0 H/s',
+    blockReward: 0.5,
+    blockRewardFormatted: '0.5 QNK',
+    connectedMiners: 0
+  });
+
   useEffect(() => {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
     const fetchAllData = async () => {
       try {
         // Fetch node status for real network metrics
         const nodeStatus = await qnkAPI.getNodeStatus();
+
+        // Fetch network supply statistics
+        const supplyResponse = await qnkAPI.getNetworkSupply();
+        if (supplyResponse.success && supplyResponse.data) {
+          setNetworkSupply({
+            maxSupply: supplyResponse.data.max_supply,
+            maxSupplyFormatted: supplyResponse.data.max_supply_formatted,
+            totalMined: supplyResponse.data.total_mined,
+            totalMinedFormatted: supplyResponse.data.total_mined_formatted,
+            remainingSupply: supplyResponse.data.remaining_supply,
+            remainingSupplyFormatted: supplyResponse.data.remaining_supply_formatted,
+            circulatingPercentage: supplyResponse.data.circulating_percentage,
+            circulatingPercentageFormatted: supplyResponse.data.circulating_percentage_formatted,
+            networkHashrate: supplyResponse.data.network_hashrate,
+            networkHashrateFormatted: supplyResponse.data.network_hashrate_formatted,
+            blockReward: supplyResponse.data.block_reward,
+            blockRewardFormatted: supplyResponse.data.block_reward_formatted,
+            connectedMiners: supplyResponse.data.connected_miners
+          });
+        }
 
         // Update network stats with ONLY real data from API
         setNetworkStats({
@@ -804,7 +856,7 @@ export default function ExplorerScreen() {
         </div>
         
         {/* Quick Stats Preview */}
-        <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="mt-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-lg border border-quantum-purple/20 p-4 text-center">
             <div className="text-2xl font-bold text-quantum-cyan">{networkStats.currentHeight}</div>
             <div className="text-sm text-gray-400">Current Height</div>
@@ -820,6 +872,19 @@ export default function ExplorerScreen() {
           <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-lg border border-quantum-purple/20 p-4 text-center">
             <div className="text-2xl font-bold text-yellow-500">{(networkStats.networkHealth * 100).toFixed(0)}%</div>
             <div className="text-sm text-gray-400">Health</div>
+          </div>
+          {/* NEW: Network Supply Statistics */}
+          <div className="bg-gradient-to-br from-blue-500/10 to-cyan-500/10 backdrop-blur-xl rounded-lg border border-cyan-400/30 p-4 text-center">
+            <div className="text-xl font-bold text-cyan-300">{networkSupply.maxSupplyFormatted}</div>
+            <div className="text-sm text-gray-400">Max Supply</div>
+          </div>
+          <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 backdrop-blur-xl rounded-lg border border-green-400/30 p-4 text-center">
+            <div className="text-xl font-bold text-green-300">{networkSupply.totalMinedFormatted}</div>
+            <div className="text-sm text-gray-400">Mined Coins</div>
+          </div>
+          <div className="bg-gradient-to-br from-orange-500/10 to-yellow-500/10 backdrop-blur-xl rounded-lg border border-yellow-400/30 p-4 text-center">
+            <div className="text-xl font-bold text-yellow-300">{networkSupply.networkHashrateFormatted}</div>
+            <div className="text-sm text-gray-400">Network Hashrate</div>
           </div>
         </div>
       </motion.section>

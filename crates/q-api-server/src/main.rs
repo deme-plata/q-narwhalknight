@@ -944,8 +944,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(submission) = mining_rx.recv().await {
                 let start = std::time::Instant::now();
 
-                // Calculate mining reward
-                let block_reward = 50_000_000; // 0.5 QNK per block
+                // Calculate mining reward based on TIME (works at any BPS: 0.067 → 100,000!)
+                let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                let block_reward = q_api_server::handlers::calculate_block_reward_time_based(
+                    q_api_server::handlers::GENESIS_TIMESTAMP,
+                    current_timestamp,
+                );
 
                 // Update wallet balance
                 let mut balances = app_state_mining.wallet_balances.write().await;
@@ -1015,13 +1019,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pool_id: None,
                     };
 
-                    let mut producer = app_state_mining.block_producer.write().await;
-                    producer.queue_solution(solution);
+                    // PHASE 2: Queue solution to parallel producer pool (round-robin distribution)
+                    app_state_mining.block_producer_pool.queue_solution(solution).await;
 
-                    // Check if we should produce a block
-                    if producer.should_produce_block() {
-                        if let Some(new_block) = producer.produce_block().await {
-                            info!("🎉 NEW BLOCK PRODUCED: Height {}, Hash {}, Solutions {}",
+                    // PHASE 2: Check if any producer should produce a block
+                    if app_state_mining.block_producer_pool.should_produce().await {
+                        // PHASE 2: Produce blocks from all ready producers (returns Vec<(producer_id, QBlock)>)
+                        let new_blocks = app_state_mining.block_producer_pool.produce_blocks().await;
+
+                        for (producer_id, new_block) in new_blocks {
+                            info!("🎉 PARALLEL BLOCK PRODUCED: Producer #{} created Height {}, Hash {}, Solutions {}",
+                                producer_id,
                                 new_block.header.height,
                                 hex::encode(&new_block.calculate_hash()[..8]),
                                 new_block.mining_solutions.len()
@@ -1035,7 +1043,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Broadcast NewBlock event via SSE with enhanced data
                             let block_hash = new_block.calculate_hash();
-                            let block_reward = new_block.mining_solutions.len() as f64 * 50.0; // Calculate block reward
+                            let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                            let block_reward = new_block.mining_solutions.len() as u64 * reward_per_solution;
                             let tx_count = new_block.transactions.len();
 
                             let _ = app_state_mining.event_broadcaster.broadcast(
@@ -1048,8 +1057,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     dag_round: new_block.header.height, // DAG round number (single validator mode)
                                     miner_count: new_block.mining_solutions.len(), // Number of miners who contributed
                                     tx_count,
-                                    block_reward,
-                                    producer_id: 0, // Single producer mode
+                                    block_reward: block_reward as f64,
+                                    producer_id, // PHASE 2: Use actual producer ID from parallel pool
                                     timestamp: chrono::Utc::now(),
                                 }
                             );
@@ -1061,8 +1070,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // PHASE 3: Submit block to DAG-Knight consensus
                             {
+                                // PHASE 2: Get a producer from the pool for vertex conversion (stateless utility methods)
+                                // We use the first producer since these are stateless conversion functions
+                                let producer_ref = app_state_mining.block_producer_pool.get_producer(0).await;
+
                                 // Convert QBlock to DAG Vertex
-                                let dag_vertex = match producer.qblock_to_vertex(&new_block) {
+                                let dag_vertex = match producer_ref.qblock_to_vertex(&new_block) {
                                     Ok(v) => v,
                                     Err(e) => {
                                         error!("❌ Failed to convert block {} to vertex: {}", new_block.header.height, e);
@@ -1071,7 +1084,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
 
                                 // Convert DAG-Knight vertex to storage vertex
-                                let storage_vertex = producer.dag_vertex_to_storage_vertex(&dag_vertex, &new_block);
+                                let storage_vertex = producer_ref.dag_vertex_to_storage_vertex(&dag_vertex, &new_block);
 
                                 // Store vertex in consensus vertex store
                                 let consensus = app_state_mining.consensus.read().await;
@@ -1177,17 +1190,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 interval.tick().await;
 
-                // Check if block production conditions are met
-                let should_produce = {
-                    let producer = app_state_block_producer.block_producer.read().await;
-                    producer.should_produce_block()
-                };
+                // PHASE 2: Check if any producer in pool should produce blocks
+                if app_state_block_producer.block_producer_pool.should_produce().await {
+                    // PHASE 2: Produce blocks from all ready producers (returns Vec<(producer_id, QBlock)>)
+                    let new_blocks = app_state_block_producer.block_producer_pool.produce_blocks().await;
 
-                if should_produce {
-                    let mut producer = app_state_block_producer.block_producer.write().await;
-
-                    if let Some(new_block) = producer.produce_block().await {
-                        info!("⏰ TIME-BASED BLOCK PRODUCED: Height {}, Hash {}, Solutions {}",
+                    for (producer_id, new_block) in new_blocks {
+                        info!("⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #{}: Height {}, Hash {}, Solutions {}",
+                            producer_id,
                             new_block.header.height,
                             hex::encode(&new_block.calculate_hash()[..8]),
                             new_block.mining_solutions.len()
@@ -1199,10 +1209,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             status.current_height = new_block.header.height;
                         }
 
-                        // Broadcast block event via SSE with enhanced data
+                        // Broadcast block event via SSE with actual producer_id
                         let block_hash = new_block.calculate_hash();
                         let solutions_count = new_block.mining_solutions.len();
-                        let block_reward = solutions_count as f64 * 50.0;
+                        let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                        let block_reward = solutions_count as u64 * reward_per_solution;
                         let tx_count = new_block.transactions.len();
 
                         let _ = app_state_block_producer.event_broadcaster.broadcast(
@@ -1215,8 +1226,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 dag_round: new_block.header.height,
                                 miner_count: solutions_count,
                                 tx_count,
-                                block_reward,
-                                producer_id: 0, // Single producer mode
+                                block_reward: block_reward as f64,
+                                producer_id, // PHASE 2: Use actual producer ID for lane assignment
                                 timestamp: chrono::Utc::now(),
                             }
                         );
@@ -1228,10 +1239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // PHASE 3: Submit block to DAG-Knight consensus
                         {
-                            drop(producer); // Release producer lock before consensus operations
-
-                            // Get producer again for vertex conversion
-                            let producer = app_state_block_producer.block_producer.read().await;
+                            // PHASE 2: Get a producer from pool for vertex conversion (stateless utility methods)
+                            let producer = app_state_block_producer.block_producer_pool.get_producer(0).await;
 
                             // Convert QBlock to DAG Vertex
                             let dag_vertex = match producer.qblock_to_vertex(&new_block) {
@@ -1461,8 +1470,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // PHASE 3: Submit incoming block to consensus
                             {
-                                // Convert QBlock to DAG Vertex
-                                let producer = app_state_gossip.block_producer.read().await;
+                                // PHASE 2: Get a producer from pool for vertex conversion (stateless utility methods)
+                                let producer = app_state_gossip.block_producer_pool.get_producer(0).await;
                                 let dag_vertex = match producer.qblock_to_vertex(&block) {
                                     Ok(v) => v,
                                     Err(e) => {
@@ -2277,6 +2286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Chain endpoints
         .route("/api/v1/status", get(handlers::node_status))
         .route("/api/v1/node/status", get(handlers::node_status)) // Dashboard compatibility alias
+        .route("/api/v1/network/supply", get(handlers::network_supply)) // Network supply statistics (max supply, mined coins, hashrate)
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
         .route("/api/v1/transactions", post(handlers::submit_transaction))
         .route(
@@ -2702,7 +2712,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::spawn(async move {
                     info!("🌉 Starting libp2p → ConnectionManager bridge receiver...");
                     while let Some(peer_info) = peer_rx.recv().await {
-                        info!("🌉 Bridging peer {} to ConnectionManager", peer_info.node_id);
+                        info!("🌉 Bridging peer {} ({:?}) to ConnectionManager",
+                              peer_info.node_id, peer_info.server_role);
                         connection_mgr_bridge.add_discovered_peer(peer_info).await;
                     }
                     warn!("🌉 libp2p → ConnectionManager bridge channel closed");

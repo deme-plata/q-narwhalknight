@@ -14,6 +14,87 @@ const getApiBaseUrl = () => {
 
 const API_BASE_URL = getApiBaseUrl();
 
+// ============================================
+// REQUEST THROTTLING & DEBOUNCING UTILITIES
+// ============================================
+
+/**
+ * Throttle function - Limits function execution to once per interval
+ * Prevents API request storms by enforcing minimum time between calls
+ */
+function throttle<T extends (...args: any[]) => any>(
+  func: T,
+  limitMs: number
+): (...args: Parameters<T>) => ReturnType<T> | undefined {
+  let inThrottle = false;
+  let lastResult: ReturnType<T> | undefined;
+
+  return function(this: any, ...args: Parameters<T>): ReturnType<T> | undefined {
+    if (!inThrottle) {
+      inThrottle = true;
+      lastResult = func.apply(this, args);
+      setTimeout(() => (inThrottle = false), limitMs);
+      return lastResult;
+    }
+    console.log(`⏱️ [THROTTLE] Request throttled, minimum ${limitMs}ms between calls`);
+    return lastResult;
+  };
+}
+
+/**
+ * Debounce function - Delays function execution until after wait time has elapsed
+ * since the last time it was invoked. Prevents rapid-fire requests.
+ */
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  waitMs: number
+): (...args: Parameters<T>) => void {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+
+  return function(this: any, ...args: Parameters<T>): void {
+    const later = () => {
+      timeout = null;
+      func.apply(this, args);
+    };
+
+    if (timeout) {
+      console.log(`⏱️ [DEBOUNCE] Request debounced, waiting ${waitMs}ms...`);
+      clearTimeout(timeout);
+    }
+    timeout = setTimeout(later, waitMs);
+  };
+}
+
+/**
+ * Request rate limiter - Tracks concurrent requests and enforces limits
+ */
+class RequestRateLimiter {
+  private activeRequests = 0;
+  private readonly maxConcurrent: number;
+
+  constructor(maxConcurrent = 5) {
+    this.maxConcurrent = maxConcurrent;
+  }
+
+  async acquire(): Promise<void> {
+    while (this.activeRequests >= this.maxConcurrent) {
+      console.log(`⏸️ [RATE LIMIT] Max concurrent requests reached (${this.maxConcurrent}), waiting...`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    this.activeRequests++;
+  }
+
+  release(): void {
+    this.activeRequests--;
+  }
+
+  getActiveCount(): number {
+    return this.activeRequests;
+  }
+}
+
+const rateLimiter = new RequestRateLimiter(10); // Max 10 concurrent requests (balanced for performance)
+
 // Global password prompt function - will be set by PasswordModalProvider
 let globalPasswordPrompt: (() => Promise<string>) | null = null;
 
@@ -66,6 +147,25 @@ export interface NodeStatus {
   };
 }
 
+export interface NetworkSupply {
+  max_supply: number;
+  max_supply_formatted: string;
+  total_mined: number;
+  total_mined_formatted: string;
+  total_mined_base_units: number;
+  remaining_supply: number;
+  remaining_supply_formatted: string;
+  circulating_percentage: number;
+  circulating_percentage_formatted: string;
+  network_hashrate: number;
+  network_hashrate_formatted: string;
+  block_reward: number;
+  block_reward_formatted: string;
+  current_height: number;
+  connected_miners: number;
+  timestamp: string;
+}
+
 export interface WalletData {
   id: string;
   address: number[];
@@ -86,70 +186,101 @@ class QNarwhalKnightAPI {
   private async request<T>(endpoint: string, options?: RequestInit, retries = 3): Promise<ApiResponse<T>> {
     const url = `${this.baseURL}${endpoint}`;
 
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const response = await fetch(url, {
-          ...options,
-          headers: {
-            'Content-Type': 'application/json',
-            ...options?.headers,
-          },
-        });
+    // Acquire rate limit token before making request
+    await rateLimiter.acquire();
 
-        // Handle rate limiting with exponential backoff (DISABLED - no rate limiting)
-        if (response.status === 429) {
-          // Rate limiting is disabled on backend - this should never happen
-          console.warn(`⚠️ Unexpected 429 response (rate limiting is disabled on backend)`);
-          throw new Error('Unexpected rate limit response. Please contact support.');
-        }
-
-        if (!response.ok) {
-          // Try to get error details from response body (backend sends JSON ApiResponse)
-          let errorMessage = `HTTP error! status: ${response.status}`;
-          try {
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-              const errorBody = await response.json();
-              if (errorBody && errorBody.error) {
-                errorMessage = errorBody.error;
-              } else if (errorBody && errorBody.message) {
-                errorMessage = errorBody.message;
-              } else {
-                errorMessage = JSON.stringify(errorBody);
-              }
-            } else {
-              const errorText = await response.text();
-              if (errorText) {
-                errorMessage = errorText;
-              }
-            }
-          } catch (e) {
-            console.warn('Failed to parse error response:', e);
+    try {
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          // Exponential backoff: 100ms, 300ms, 900ms
+          if (attempt > 0) {
+            const backoffMs = Math.min(100 * Math.pow(3, attempt - 1), 1000);
+            console.log(`⏳ [RETRY ${attempt}/${retries}] Waiting ${backoffMs}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
           }
-          throw new Error(errorMessage);
-        }
 
-        return await response.json();
-      } catch (error) {
-        if (attempt === retries) {
-          console.error('API request failed after retries:', error);
-          return {
-            success: false,
-            data: null,
-            error: error instanceof Error ? error.message : 'Unknown error',
-            timestamp: new Date().toISOString(),
-          };
+          console.log(`🌐 [API REQUEST] ${options?.method || 'GET'} ${endpoint} (attempt ${attempt + 1}/${retries + 1})`);
+
+          const response = await fetch(url, {
+            ...options,
+            headers: {
+              'Content-Type': 'application/json',
+              ...options?.headers,
+            },
+          });
+
+          // Handle rate limiting with exponential backoff (DISABLED - no rate limiting)
+          if (response.status === 429) {
+            // Rate limiting is disabled on backend - this should never happen
+            console.warn(`⚠️ Unexpected 429 response (rate limiting is disabled on backend)`);
+            throw new Error('Unexpected rate limit response. Please contact support.');
+          }
+
+          if (!response.ok) {
+            // Try to get error details from response body (backend sends JSON ApiResponse)
+            let errorMessage = `HTTP error! status: ${response.status}`;
+            try {
+              const contentType = response.headers.get('content-type');
+              if (contentType && contentType.includes('application/json')) {
+                const errorBody = await response.json();
+                if (errorBody && errorBody.error) {
+                  errorMessage = errorBody.error;
+                } else if (errorBody && errorBody.message) {
+                  errorMessage = errorBody.message;
+                } else {
+                  errorMessage = JSON.stringify(errorBody);
+                }
+              } else {
+                const errorText = await response.text();
+                if (errorText) {
+                  errorMessage = errorText;
+                }
+              }
+            } catch (e) {
+              console.warn('Failed to parse error response:', e);
+            }
+            throw new Error(errorMessage);
+          }
+
+          const result = await response.json();
+          console.log(`✅ [API SUCCESS] ${options?.method || 'GET'} ${endpoint}`);
+          return result;
+        } catch (error) {
+          // Check for browser resource exhaustion
+          const isResourceError = error instanceof TypeError &&
+            (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'));
+
+          if (isResourceError) {
+            console.error(`⚠️ [RESOURCE EXHAUSTION] Browser network resources exhausted. Backing off...`);
+            // Force a longer backoff for resource errors
+            const longBackoffMs = Math.min(2000 * Math.pow(2, attempt), 10000);
+            await new Promise(resolve => setTimeout(resolve, longBackoffMs));
+          }
+
+          if (attempt === retries) {
+            console.error(`❌ [API FAILED] ${options?.method || 'GET'} ${endpoint} after ${retries + 1} attempts:`, error);
+            return {
+              success: false,
+              data: null,
+              error: error instanceof Error ? error.message : 'Unknown error',
+              timestamp: new Date().toISOString(),
+            };
+          }
         }
       }
-    }
 
-    // Should never reach here, but TypeScript needs it
-    return {
-      success: false,
-      data: null,
-      error: 'Maximum retries exceeded',
-      timestamp: new Date().toISOString(),
-    };
+      // Should never reach here, but TypeScript needs it
+      return {
+        success: false,
+        data: null,
+        error: 'Maximum retries exceeded',
+        timestamp: new Date().toISOString(),
+      };
+    } finally {
+      // Always release rate limit token
+      rateLimiter.release();
+      console.log(`📊 [RATE LIMITER] Active requests: ${rateLimiter.getActiveCount()}/10`);
+    }
   }
 
   /**
@@ -334,6 +465,11 @@ class QNarwhalKnightAPI {
   // Get node status
   async getNodeStatus(): Promise<ApiResponse<NodeStatus>> {
     return this.request<NodeStatus>('/v1/node/status');
+  }
+
+  // Get network supply statistics (max supply, mined coins, hashrate)
+  async getNetworkSupply(): Promise<ApiResponse<NetworkSupply>> {
+    return this.request<NetworkSupply>('/v1/network/supply');
   }
 
   // Create a new wallet (or import with mnemonic)
@@ -638,25 +774,39 @@ class QNarwhalKnightAPI {
     password?: string;
   }): Promise<ApiResponse<any>> {
     try {
-      // Get wallet address from session (same source as balance display)
-      const session = walletSession.getSession();
-      let walletAddress = '';
+      // Get wallet address from localStorage (most reliable source)
+      let walletAddress = localStorage.getItem('walletAddress') || '';
 
-      if (session && session.address) {
-        // Convert address bytes to hex string
-        const addressArray = Array.prototype.slice.call(session.address);
-        walletAddress = addressArray
-          .map((b: number) => b.toString(16).padStart(2, '0'))
-          .join('');
-      } else {
-        // Fallback to localStorage if no session
-        walletAddress = localStorage.getItem('walletAddress') || '';
+      // Strip "qnk" prefix if present - backend expects 64-char hex
+      if (walletAddress.startsWith('qnk')) {
+        walletAddress = walletAddress.substring(3);
       }
 
-      // Add 'from' field to request (can be empty, backend will use node default)
+      // Validate we have a wallet address
+      if (!walletAddress || walletAddress.length !== 64) {
+        console.error('❌ [MIXER] Invalid or missing wallet address:', {
+          raw: localStorage.getItem('walletAddress'),
+          processed: walletAddress,
+          length: walletAddress.length
+        });
+        return {
+          success: false,
+          data: null,
+          error: `Invalid wallet address format. Expected 64-char hex, got: ${walletAddress.length} chars. Please refresh the page.`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      console.log('✅ [MIXER] Sending private transaction with wallet address:', {
+        from: walletAddress.substring(0, 8) + '...',
+        to: request.to.substring(0, 8) + '...',
+        amount: request.amount
+      });
+
+      // CRITICAL: Add 'from' field to request - backend uses this for balance check
       const requestWithFrom = {
         ...request,
-        from: walletAddress || undefined  // If empty, backend uses node's address
+        from: walletAddress  // Always include - never undefined
       };
 
       const response = await fetch(`${this.baseURL}/v1/mixer/send`, {
@@ -1186,3 +1336,43 @@ export const qnkAPI = new QNarwhalKnightAPI();
 
 // Export for custom configurations
 export { QNarwhalKnightAPI };
+
+// Export throttling utilities for use in components
+export { throttle, debounce };
+
+// ============================================
+// THROTTLED API METHODS FOR POLLING PROTECTION
+// ============================================
+
+/**
+ * Throttled wrapper for frequently called API methods
+ * Prevents excessive polling by limiting calls to once per interval
+ */
+export class ThrottledAPI {
+  // Throttle node status to max once per 500ms (still allows fast updates)
+  static getNodeStatus = throttle(() => qnkAPI.getNodeStatus(), 500);
+
+  // Throttle transaction fetching to max once per 800ms
+  static getRecentTransactions = throttle((limit?: number) => qnkAPI.getRecentTransactions(limit), 800);
+
+  // Throttle balance fetching to max once per 500ms
+  static getWalletBalance = throttle((address?: string) => qnkAPI.getWalletBalance(address), 500);
+
+  // Throttle multi-token balance to max once per 500ms
+  static getMultiTokenBalance = throttle(() => qnkAPI.getMultiTokenBalance(), 500);
+}
+
+/**
+ * Debounced API wrapper for user-triggered actions
+ * Delays execution until user stops triggering the action
+ */
+export class DebouncedAPI {
+  // Debounce search with 500ms delay
+  static universalSearch = debounce((query: string) => qnkAPI.universalSearch(query), 500);
+
+  // Debounce token price history with 1s delay
+  static getTokenPriceHistory = debounce(
+    (tokenId: string, timeframe: string) => qnkAPI.getTokenPriceHistory(tokenId, timeframe),
+    1000
+  );
+}

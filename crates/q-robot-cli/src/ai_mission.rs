@@ -70,12 +70,12 @@ impl QuantumMissionAI {
             &objective,
             &constraints,
         ).await?;
-        
+
         // Predict mission success probability
         let success_probability = self.predictive_models.predict_mission_success(&mission_plan).await?;
-        
+
         info!("Mission plan generated with {:.1}% predicted success rate", success_probability * 100.0);
-        
+
         Ok(mission_plan)
     }
     
@@ -223,6 +223,41 @@ impl QuantumMissionAI {
             MissionType::Rescue { search_area, .. } => search_area / 5000.0,
             MissionType::Monitoring { duration, .. } => duration.as_hours() / 24.0,
             MissionType::Restoration { area_coverage, .. } => area_coverage / 1000.0,
+            // Advanced quantum research missions - high complexity
+            MissionType::KParameterResearch { measurement_precision, required_coherence_time, multi_lab_coordination, .. } => {
+                let base_complexity = 1.0 / measurement_precision; // Higher precision = higher complexity
+                let coherence_factor = required_coherence_time.as_hours() / 1.0; // Longer coherence = more complex
+                let coordination_factor = if *multi_lab_coordination { 2.0 } else { 1.0 };
+                (base_complexity * coherence_factor * coordination_factor).min(10.0)
+            },
+            MissionType::QuantumGravityDetection { target_significance, measurement_duration, .. } => {
+                // 8.7 sigma is extremely complex
+                let significance_complexity = target_significance / 3.0; // 3 sigma baseline
+                let duration_factor = measurement_duration.as_hours() / 24.0;
+                (significance_complexity * duration_factor).min(10.0)
+            },
+            MissionType::DarkMatterCorrelationStudy { entanglement_pairs, cross_validation_sites, .. } => {
+                let pair_complexity = *entanglement_pairs as f64 / 10.0;
+                let site_complexity = cross_validation_sites.len() as f64;
+                (pair_complexity * site_complexity).min(10.0)
+            },
+            MissionType::QBismExperiment { num_observer_agents, measurement_contexts, .. } => {
+                let observer_factor = *num_observer_agents as f64 / 5.0;
+                let context_factor = measurement_contexts.len() as f64 / 10.0;
+                (observer_factor * context_factor * 2.0).min(10.0) // QBism is inherently complex
+            },
+            MissionType::BioQuantumCoherence { target_species, coherence_frequency_hz, .. } => {
+                let species_factor = target_species.len() as f64;
+                let frequency_factor = coherence_frequency_hz / 40.0; // 40Hz neural oscillations baseline
+                (species_factor * frequency_factor).min(10.0)
+            },
+            MissionType::ConsciousnessQuantumResearch { eeg_measurement_required, thought_control_validation, quantum_measurement_influence, .. } => {
+                let mut complexity = 2.0; // Base consciousness research complexity
+                if *eeg_measurement_required { complexity += 1.5; }
+                if *thought_control_validation { complexity += 2.0; }
+                if *quantum_measurement_influence { complexity += 2.5; } // Most complex aspect
+                complexity.min(10.0)
+            },
         }
     }
     
@@ -763,6 +798,44 @@ pub enum MissionType {
     Rescue { search_area: f64, urgency: f64 },
     Monitoring { duration: Duration, thresholds: HashMap<String, f64> },
     Restoration { area_coverage: f64, restoration_type: String },
+    /// K-Parameter quantum frontiers research
+    KParameterResearch {
+        phenomenon: String,
+        target_k_value: f64,
+        measurement_precision: f64,
+        required_coherence_time: Duration,
+        multi_lab_coordination: bool,
+    },
+    /// Quantum gravity detection mission
+    QuantumGravityDetection {
+        target_significance: f64, // sigma value (e.g., 8.7)
+        measurement_duration: Duration,
+        underground_lab_simulation: bool,
+    },
+    /// Dark matter quantum correlation study
+    DarkMatterCorrelationStudy {
+        interaction_threshold: f64,
+        entanglement_pairs: usize,
+        cross_validation_sites: Vec<String>,
+    },
+    /// QBism agent-dependent measurement experiment
+    QBismExperiment {
+        num_observer_agents: usize,
+        measurement_contexts: Vec<String>,
+        statistical_significance_target: f64,
+    },
+    /// Biological quantum coherence investigation
+    BioQuantumCoherence {
+        target_species: Vec<String>,
+        coherence_frequency_hz: f64,
+        neural_correlation_required: bool,
+    },
+    /// Consciousness-quantum correlation research
+    ConsciousnessQuantumResearch {
+        eeg_measurement_required: bool,
+        thought_control_validation: bool,
+        quantum_measurement_influence: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -811,6 +884,36 @@ pub enum SwarmRole {
     Monitor,
     Coordinator,
     Specialist { specialty: String },
+    /// K-Parameter measurement specialist
+    KParameterProbe {
+        target_k_value: f64,
+        measurement_precision: f64,
+    },
+    /// Quantum gravity detector
+    QuantumGravityDetector {
+        sensitivity_level: f64,
+    },
+    /// Dark matter-quantum correlation sensor
+    DarkMatterSensor {
+        entanglement_correlation: bool,
+    },
+    /// QBism observer agent
+    QBismObserver {
+        observer_id: String,
+        measurement_context: String,
+    },
+    /// Biological quantum coherence detector
+    BioQuantumProbe {
+        target_frequency_hz: f64,
+    },
+    /// Consciousness-quantum correlation analyzer
+    ConsciousnessQuantumAnalyzer {
+        eeg_integration_active: bool,
+    },
+    /// Multi-lab coordination relay
+    LabCoordinationRelay {
+        connected_labs: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

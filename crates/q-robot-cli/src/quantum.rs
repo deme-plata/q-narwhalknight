@@ -246,7 +246,7 @@ pub struct QuantumStateMonitor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeasurementRecord {
-    #[serde(skip)]
+    #[serde(skip, default = "Instant::now")]
     pub timestamp: Instant,
     pub observable: String,
     pub result: f64,

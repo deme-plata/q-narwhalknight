@@ -91,6 +91,72 @@ impl From<gossipsub::Event> for QNarwhalEvent {
     }
 }
 
+/// Commands that can be sent to the network manager
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Dial a peer at the given multiaddr
+    DialPeer {
+        multiaddr: Multiaddr,
+        response_tx: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    },
+    /// Set the peer discovery channel (for ConnectionManager bridge)
+    SetPeerChannel {
+        tx: mpsc::UnboundedSender<crate::connection_manager::PeerInfo>,
+    },
+    /// Set the gossipsub message channel (for message propagation)
+    SetGossipsubChannel {
+        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+    },
+}
+
+/// Response from /api/v1/peer-id endpoint
+#[derive(Deserialize)]
+struct PeerIdResponse {
+    success: bool,
+    data: Option<PeerIdData>,
+}
+
+#[derive(Deserialize)]
+struct PeerIdData {
+    peer_id: String,
+}
+
+/// Fetch peer ID from bootstrap node HTTP endpoint
+///
+/// # Arguments
+/// * `ip` - IP address of bootstrap node
+/// * `http_port` - HTTP API port (default: 18080)
+///
+/// # Returns
+/// * `Ok(peer_id)` if successfully fetched
+/// * `Err` if HTTP request failed or invalid response
+async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<String> {
+    let url = format!("http://{}:{}/api/v1/peer-id", ip, http_port);
+
+    info!("🔍 Fetching dynamic peer ID from {}", url);
+
+    // Use reqwest with timeout
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+
+    let response: PeerIdResponse = client
+        .get(&url)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    if response.success {
+        if let Some(data) = response.data {
+            info!("✅ Successfully fetched peer ID: {}", data.peer_id);
+            return Ok(data.peer_id);
+        }
+    }
+
+    Err(anyhow::anyhow!("Failed to fetch peer ID from HTTP endpoint"))
+}
+
 /// Simplified Network Manager - Zero-Knowledge Discovery System
 pub struct UnifiedNetworkManager {
     /// libp2p swarm handling all protocols
@@ -102,13 +168,17 @@ pub struct UnifiedNetworkManager {
     /// Local peer ID
     local_peer_id: PeerId,
     /// Channel to send discovered peers to ConnectionManager (Phase 2 bridge)
-    peer_tx: Option<mpsc::UnboundedSender<PeerInfo>>,
+    peer_tx: Option<mpsc::UnboundedSender<crate::connection_manager::PeerInfo>>,
     /// Channel to forward gossipsub messages (for database replication, etc.)
     gossipsub_message_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
     /// Thread-safe atomic counter for connected peers
     connected_peer_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Network configuration (testnet/mainnet)
     network_config: q_types::NetworkConfig,
+    /// Channel to receive network commands (e.g., dial peer)
+    command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
+    /// Channel sender for commands (cloned and shared with API)
+    command_tx: mpsc::UnboundedSender<NetworkCommand>,
 }
 
 impl UnifiedNetworkManager {
@@ -155,21 +225,71 @@ impl UnifiedNetworkManager {
         let kad_store = MemoryStore::new(local_peer_id);
         let mut kademlia = Kademlia::with_config(local_peer_id, kad_store, kad_config);
 
-        // Bootstrap from network configuration
+        // Bootstrap from network configuration with automatic peer ID discovery
         let bootstrap_peers = &network_config.bootstrap_peers;
         let mut bootstrap_count = 0;
 
         for addr_str in bootstrap_peers {
-            if let Ok(addr) = addr_str.trim().parse::<Multiaddr>() {
+            if let Ok(mut addr) = addr_str.trim().parse::<Multiaddr>() {
                 // Extract peer ID from multiaddr (last component should be /p2p/<peer_id>)
                 use libp2p::multiaddr::Protocol;
-                if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
-                    kademlia.add_address(&peer_id, addr.clone());
-                    info!("📍 Added {} bootstrap peer: {} at {}",
-                          network_config.network_id.as_str(), peer_id, addr);
-                    bootstrap_count += 1;
+
+                // Check if multiaddr has /p2p/ component
+                let has_peer_id = addr.iter().any(|p| matches!(p, Protocol::P2p(_)));
+
+                if has_peer_id {
+                    // Multiaddr already has peer ID - use directly
+                    if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                        kademlia.add_address(&peer_id, addr.clone());
+                        info!("📍 Added {} bootstrap peer: {} at {}",
+                              network_config.network_id.as_str(), peer_id, addr);
+                        bootstrap_count += 1;
+                    }
                 } else {
+                    // Missing /p2p/ component - try automatic discovery
                     warn!("⚠️ Bootstrap multiaddr missing /p2p/ component: {}", addr);
+
+                    // Extract IP and P2P port from multiaddr
+                    let mut ip: Option<String> = None;
+                    let mut p2p_port: Option<u16> = None;
+
+                    for protocol in addr.iter() {
+                        match protocol {
+                            Protocol::Ip4(addr_v4) => ip = Some(addr_v4.to_string()),
+                            Protocol::Ip6(addr_v6) => ip = Some(addr_v6.to_string()),
+                            Protocol::Tcp(port) => p2p_port = Some(port),
+                            _ => {}
+                        }
+                    }
+
+                    if let (Some(bootstrap_ip), Some(_)) = (ip, p2p_port) {
+                        info!("🔄 Attempting automatic peer ID discovery for {}", bootstrap_ip);
+
+                        // Try to fetch peer ID from HTTP endpoint (port 18080 by default)
+                        match fetch_peer_id_from_http(&bootstrap_ip, 18080).await {
+                            Ok(peer_id_str) => {
+                                // Parse peer ID and append to multiaddr
+                                match peer_id_str.parse::<PeerId>() {
+                                    Ok(peer_id) => {
+                                        addr.push(Protocol::P2p(peer_id));
+                                        kademlia.add_address(&peer_id, addr.clone());
+                                        info!("✅ Added {} bootstrap peer with dynamic peer ID: {} at {}",
+                                              network_config.network_id.as_str(), peer_id, addr);
+                                        bootstrap_count += 1;
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ Failed to parse fetched peer ID: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Failed to fetch peer ID via HTTP: {}", e);
+                                warn!("   Skipping bootstrap peer (no fallback peer ID available)");
+                            }
+                        }
+                    } else {
+                        warn!("⚠️ Could not extract IP/port from multiaddr: {}", addr);
+                    }
                 }
             } else {
                 warn!("⚠️ Invalid bootstrap multiaddr: {}", addr_str);
@@ -254,6 +374,9 @@ impl UnifiedNetworkManager {
         info!("  • Ping (connection keepalive)");
         info!("  • Gossipsub (consensus messaging, {} topics)", topics.len());
 
+        // Create command channel for API operations
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+
         Ok(Self {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
@@ -263,6 +386,8 @@ impl UnifiedNetworkManager {
             gossipsub_message_tx: None, // Set via set_gossipsub_channel() after construction
             connected_peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             network_config,
+            command_rx,
+            command_tx,
         })
     }
 
@@ -272,7 +397,7 @@ impl UnifiedNetworkManager {
     }
 
     /// Set channel for sending discovered peers to ConnectionManager (Phase 2)
-    pub fn set_peer_channel(&mut self, tx: mpsc::UnboundedSender<PeerInfo>) {
+    pub fn set_peer_channel(&mut self, tx: mpsc::UnboundedSender<crate::connection_manager::PeerInfo>) {
         self.peer_tx = Some(tx);
         info!("🌉 libp2p → ConnectionManager bridge channel established");
     }
@@ -283,22 +408,53 @@ impl UnifiedNetworkManager {
         info!("🌉 Gossipsub message forwarding channel established");
     }
 
+    /// Get a cloned command sender for API operations
+    ///
+    /// This allows the API to send commands to the network manager's event loop
+    /// without holding a lock on the network manager itself.
+    pub fn get_command_sender(&self) -> mpsc::UnboundedSender<NetworkCommand> {
+        self.command_tx.clone()
+    }
+
     /// Main event loop - processes all discovery events
     pub async fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            match self.swarm.next().await {
-                Some(SwarmEvent::Behaviour(event)) => {
-                    self.handle_behaviour_event(event).await?;
+            tokio::select! {
+                // Process network commands from API
+                Some(command) = self.command_rx.recv() => {
+                    match command {
+                        NetworkCommand::DialPeer { multiaddr, response_tx } => {
+                            debug!("📞 Processing dial command for {}", multiaddr);
+                            let result = self.swarm.dial(multiaddr.clone())
+                                .map_err(|e| format!("Failed to dial {}: {}", multiaddr, e));
+                            let _ = response_tx.send(result);
+                        }
+                        NetworkCommand::SetPeerChannel { tx } => {
+                            self.peer_tx = Some(tx);
+                            info!("✅ Peer channel set for libp2p → ConnectionManager bridge");
+                            info!("🌉 P2P peer discovery propagation ENABLED");
+                        }
+                        NetworkCommand::SetGossipsubChannel { tx } => {
+                            self.gossipsub_message_tx = Some(tx);
+                            info!("✅ Gossipsub channel set for message propagation");
+                            info!("🌉 P2P mining reward/transaction propagation ENABLED");
+                        }
+                    }
                 }
-                Some(SwarmEvent::NewListenAddr { address, .. }) => {
-                    info!("📍 Listening on: {}", address);
-                }
-                Some(SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    endpoint,
-                    num_established,
-                    ..
-                }) => {
+                // Process swarm events
+                event = self.swarm.select_next_some() => match event {
+                    SwarmEvent::Behaviour(behaviour_event) => {
+                        self.handle_behaviour_event(behaviour_event).await?;
+                    }
+                    SwarmEvent::NewListenAddr { address, .. } => {
+                        info!("📍 Listening on: {}", address);
+                    }
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id,
+                        endpoint,
+                        num_established,
+                        ..
+                    } => {
                     info!("🌐 [LIBP2P CONNECTION] ==========================================");
                     info!("✅ [CONNECTION] Successfully connected to peer: {}", peer_id);
                     info!("📍 [CONNECTION] Endpoint: {:?}", endpoint);
@@ -306,17 +462,32 @@ impl UnifiedNetworkManager {
 
                     let mut peers = self.discovered_peers.write().await;
                     peers.insert(peer_id);
+                    let peer_count = peers.len();
+                    drop(peers); // Release lock before atomic operations
 
-                    info!("📊 [NETWORK STATE] Total discovered peers: {}", peers.len());
-                    info!("🔄 [SYNC] Ready to synchronize DAG state with peer {}", peer_id);
-                    info!("📡 [PROPAGATION] Will propagate vertices/transactions to this peer");
-                    info!("🔐 [CONSENSUS] Peer will participate in Bracha's protocol voting");
-                    info!("🌐 [LIBP2P CONNECTION COMPLETE] ==========================================\n");
+                    // Update atomic counter for API endpoint (thread-safe)
+                    self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                        info!("📊 [NETWORK STATE] Total discovered peers: {} (atomic counter updated)", peer_count);
+                        info!("🔄 [SYNC] Ready to synchronize DAG state with peer {}", peer_id);
+                        info!("📡 [PROPAGATION] Will propagate vertices/transactions to this peer");
+                        info!("🔐 [CONSENSUS] Peer will participate in Bracha's protocol voting");
+                        info!("🌐 [LIBP2P CONNECTION COMPLETE] ==========================================\n");
+                    }
+                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        // Remove peer from discovered set
+                        let mut peers = self.discovered_peers.write().await;
+                        peers.remove(&peer_id);
+                        let peer_count = peers.len();
+                        drop(peers);
+
+                        // Update atomic counter
+                        self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                        info!("👋 [DISCONNECTION] Connection closed with peer: {} (remaining peers: {})", peer_id, peer_count);
+                    }
+                    _ => {}
                 }
-                Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                    info!("👋 [DISCONNECTION] Connection closed with peer: {}", peer_id);
-                }
-                _ => {}
             }
         }
     }
@@ -583,6 +754,28 @@ impl UnifiedNetworkManager {
     /// Get the local peer ID
     pub fn peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Get listen addresses
+    pub fn get_listen_addrs(&self) -> Vec<Multiaddr> {
+        self.swarm.listeners().cloned().collect()
+    }
+
+    /// Manually dial a peer by multiaddr
+    ///
+    /// # Arguments
+    /// * `multiaddr` - The multiaddr to dial (e.g., "/ip4/127.0.0.1/tcp/33305/p2p/12D3Koo...")
+    ///
+    /// # Returns
+    /// * `Ok(())` if dial was initiated successfully
+    /// * `Err` if dial failed
+    pub fn dial_peer(&mut self, multiaddr: Multiaddr) -> anyhow::Result<()> {
+        info!("📞 Manually dialing peer at {}", multiaddr);
+
+        self.swarm.dial(multiaddr.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to dial peer {}: {}", multiaddr, e))?;
+
+        Ok(())
     }
 
     /// Run one iteration of the network event loop

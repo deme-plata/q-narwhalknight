@@ -50,6 +50,7 @@ use q_vm::contracts::{ContractRegistry, OrobitSmartContractEcosystem};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::info;
 use uuid::Uuid;
 
 pub mod config;
@@ -80,11 +81,13 @@ pub mod paas_billing_v2;  // ✅ ENABLED - Atomic billing v2 with Grok improveme
 pub mod paas_idempotency;  // ✅ ENABLED - Idempotency support for safe retries
 pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
 pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
+pub mod aegis_auth_middleware;  // ✅ ENABLED - AEGIS-QL post-quantum authentication for founder operations
 // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
 pub mod parallel_workers; // 16x parallel worker pool for high TPS
+pub mod block_producer;  // 🏗️ Block producer - aggregates mining solutions into QBlocks
 
 pub use config::Config;
 pub use console_viz::{ConsoleVisualizer, ConsensusStats, update_stats};
@@ -157,6 +160,7 @@ pub struct MiningSubmission {
     pub difficulty_target: [u8; 32],
     pub miner_address: [u8; 32],
     pub miner_address_str: String,
+    pub hash_rate: f64, // Hash rate in KH/s
 }
 
 impl Default for FaucetState {
@@ -427,6 +431,12 @@ pub struct AppState {
     pub reliable_broadcast: Option<Arc<ReliableBroadcast>>,
     pub quantum_vdf: Option<Arc<QuantumVDF>>,
 
+    // PHASE 2: Parallel Block Production - Multiple producers for concurrent block creation
+    pub block_producer_pool: Arc<crate::block_producer::ParallelBlockProducerPool>,
+
+    // PHASE 3: DAG-Knight Consensus - Byzantine Fault-Tolerant Block Ordering
+    pub consensus: Arc<RwLock<DAGKnightConsensus>>,
+
     // Quillon Resonance Consensus - K-Parameter Phase Analysis
     pub k_parameter_analyzer: Option<Arc<KParameterAnalyzer>>,
     pub resonance_coordinator: Option<Arc<ResonanceCoordinator>>,
@@ -450,6 +460,9 @@ pub struct AppState {
 
     // Quillon Bank - Full Quantum Banking System with CDP
     pub quillon_bank: Arc<RwLock<QuillonBankSystem>>, // ✅ ENABLED - Real banking system
+
+    // AEGIS-QL Post-Quantum Authentication for Founder Operations
+    pub aegis_auth_state: Arc<RwLock<aegis_auth_middleware::AegisAuthState>>, // ✅ ENABLED - Founder wallet verification
 
     // Privacy-as-a-Service (PaaS) Authentication & Rate Limiting
     pub paas_auth_manager: Arc<paas_auth::PaaSAuthManager>, // ✅ ENABLED - Hybrid signature auth
@@ -500,7 +513,64 @@ unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
 
 impl AppState {
+    /// Load founder's AEGIS-QL public key from file or environment
+    fn load_founder_aegis_public_key() -> anyhow::Result<q_aegis_ql::PublicKey> {
+        use std::path::PathBuf;
+        use anyhow::Context;
+
+        // Try environment variable first
+        if let Ok(key_path_env) = std::env::var("QUILLON_FOUNDER_AEGIS_PUBKEY") {
+            let key_path = PathBuf::from(key_path_env);
+            return Self::load_aegis_key_from_file(&key_path);
+        }
+
+        // Fall back to default location
+        let default_path = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+            .join(".quillon")
+            .join("keys")
+            .join("founder-aegis.pub");
+
+        if default_path.exists() {
+            return Self::load_aegis_key_from_file(&default_path);
+        }
+
+        // Last resort: use embedded development key (INSECURE - for testing only!)
+        tracing::warn!("⚠️  SECURITY WARNING: Using embedded development AEGIS key!");
+        tracing::warn!("   For production, set QUILLON_FOUNDER_AEGIS_PUBKEY environment variable");
+
+        // Generate a deterministic key for development (NOT SECURE)
+        let mut aegis = q_aegis_ql::AegisQL::new();
+        let (public_key, _secret_key) = aegis.generate_keypair()
+            .map_err(|e| anyhow::anyhow!("Failed to generate development key: {:?}", e))?;
+
+        Ok(public_key)
+    }
+
+    /// Load AEGIS-QL public key from file
+    fn load_aegis_key_from_file(path: &std::path::Path) -> anyhow::Result<q_aegis_ql::PublicKey> {
+        use anyhow::Context;
+
+        let key_bytes = std::fs::read(path)
+            .with_context(|| format!("Failed to read AEGIS public key from {}", path.display()))?;
+
+        let public_key: q_aegis_ql::PublicKey = bincode::deserialize(&key_bytes)
+            .context("Failed to deserialize AEGIS public key")?;
+
+        tracing::info!("✅ Loaded founder AEGIS-QL public key from {}", path.display());
+
+        Ok(public_key)
+    }
+
     pub async fn new(config: Config) -> anyhow::Result<Self> {
+        // Extract config values before using config (v0.0.22-beta Quick Win #4)
+        let is_validator = config.is_validator;
+        let block_interval_secs = config.block_interval_secs;
+        let max_solutions_per_block = config.max_solutions_per_block;
+        let min_solutions_per_block = config.min_solutions_per_block;
+        let validator_index = config.validator_index;
+        let total_validators = config.total_validators;
+
         let _wallet_store = MemoryWalletStore::new();
         let wallet_manager = WalletManager::new();
         let node_id = [0u8; 32]; // Default node ID
@@ -511,7 +581,7 @@ impl AppState {
             current_height: 0,
             connected_peers: 0,
             tx_pool_size: 0,
-            is_validator: config.is_validator,
+            is_validator,
             uptime: std::time::Duration::from_secs(0),
         };
 
@@ -666,6 +736,31 @@ impl AppState {
         quillon_bank_system.initialize().await?;
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
+
+        // Initialize AEGIS-QL Authentication for Founder Operations
+        let aegis_auth_state = {
+            tracing::info!("🔐 Initializing AEGIS-QL post-quantum authentication...");
+
+            // Load founder AEGIS-QL public key from environment or file
+            let founder_public_key = Self::load_founder_aegis_public_key()?;
+
+            let auth_state = aegis_auth_middleware::AegisAuthState::new(founder_public_key);
+
+            // Verify founder wallet matches expected constant
+            let expected_wallet = hex::decode(aegis_auth_middleware::FOUNDER_WALLET)
+                .expect("Invalid founder wallet hex constant");
+            let mut expected_bytes = [0u8; 32];
+            expected_bytes.copy_from_slice(&expected_wallet);
+
+            if auth_state.founder_wallet == expected_bytes {
+                tracing::info!("✅ Founder wallet verified: qnk{}", aegis_auth_middleware::FOUNDER_WALLET);
+            } else {
+                tracing::warn!("⚠️  Founder wallet mismatch - check AEGIS key configuration");
+            }
+
+            tracing::info!("✅ AEGIS-QL authentication initialized (post-quantum secure)");
+            Arc::new(RwLock::new(auth_state))
+        };
 
         // Initialize CollateralVault for QUG/QUGUSD stablecoin system
         // Load from persistent storage or create new if none exists
@@ -828,6 +923,48 @@ impl AppState {
             reliable_broadcast: None,
             quantum_vdf: None,
 
+            // PHASE 2: Parallel Block Producer Pool - 8 concurrent producers for exciting visualization
+            block_producer_pool: {
+                // Create base config for all producers
+                let base_config = crate::block_producer::BlockProducerConfig {
+                    block_interval_secs, // v0.0.22-beta: from extracted config (2s for fast visualization)
+                    max_solutions_per_block, // v0.0.22-beta: from extracted config
+                    min_solutions_per_block, // v0.0.22-beta: from extracted config
+                    node_id,
+                    is_validator,
+                    validator_index: 0, // Will be overridden by pool for each producer
+                    total_validators: 8, // Phase 2: 8 parallel producers
+                };
+
+                // Create pool with 8 parallel producers for true parallelism
+                let num_producers = 8; // Phase 2: 8-way parallelism for exciting multi-lane visualization
+
+                // CRITICAL FIX: Load blockchain state from storage to prevent data loss on restart
+                let pool = crate::block_producer::ParallelBlockProducerPool::new_with_storage(
+                    num_producers,
+                    base_config,
+                    &storage_engine, // Pass storage Arc to load blockchain state
+                ).await?;
+
+                info!("🚀 Phase 2: Parallel Block Production initialized with {} producers (LOADED FROM STORAGE)", num_producers);
+                info!("⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!");
+
+                Arc::new(pool)
+            },
+
+            // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
+            consensus: {
+                let consensus = DAGKnightConsensus::new(
+                    node_id,
+                    1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
+                ).await?;
+
+                info!("🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
+                    1, 3);
+
+                Arc::new(RwLock::new(consensus))
+            },
+
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,
             resonance_coordinator: None,
@@ -872,6 +1009,9 @@ impl AppState {
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
 
+            // AEGIS-QL Post-Quantum Authentication for Founder Operations
+            aegis_auth_state,
+
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,
 
@@ -902,6 +1042,14 @@ impl AppState {
         libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
         libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
     ) -> anyhow::Result<Self> {
+        // Extract config values before using config (v0.0.22-beta Quick Win #4)
+        let is_validator = config.is_validator;
+        let block_interval_secs = config.block_interval_secs;
+        let max_solutions_per_block = config.max_solutions_per_block;
+        let min_solutions_per_block = config.min_solutions_per_block;
+        let validator_index = config.validator_index;
+        let total_validators = config.total_validators;
+
         let _wallet_store = MemoryWalletStore::new();
         let wallet_manager = WalletManager::new();
 
@@ -911,7 +1059,7 @@ impl AppState {
             current_height: 0,
             connected_peers: 0,
             tx_pool_size: 0,
-            is_validator: config.is_validator,
+            is_validator,
             uptime: std::time::Duration::from_secs(0),
         };
 
@@ -1116,6 +1264,31 @@ impl AppState {
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
 
+        // Initialize AEGIS-QL Authentication for Founder Operations
+        let aegis_auth_state = {
+            tracing::info!("🔐 Initializing AEGIS-QL post-quantum authentication...");
+
+            // Load founder AEGIS-QL public key from environment or file
+            let founder_public_key = Self::load_founder_aegis_public_key()?;
+
+            let auth_state = aegis_auth_middleware::AegisAuthState::new(founder_public_key);
+
+            // Verify founder wallet matches expected constant
+            let expected_wallet = hex::decode(aegis_auth_middleware::FOUNDER_WALLET)
+                .expect("Invalid founder wallet hex constant");
+            let mut expected_bytes = [0u8; 32];
+            expected_bytes.copy_from_slice(&expected_wallet);
+
+            if auth_state.founder_wallet == expected_bytes {
+                tracing::info!("✅ Founder wallet verified: qnk{}", aegis_auth_middleware::FOUNDER_WALLET);
+            } else {
+                tracing::warn!("⚠️  Founder wallet mismatch - check AEGIS key configuration");
+            }
+
+            tracing::info!("✅ AEGIS-QL authentication initialized (post-quantum secure)");
+            Arc::new(RwLock::new(auth_state))
+        };
+
         // Initialize CollateralVault for QUG/QUGUSD stablecoin system
         // Load from persistent storage or create new if none exists
         let collateral_vault = match storage_engine.load_collateral_vault_data().await {
@@ -1270,6 +1443,48 @@ impl AppState {
             reliable_broadcast: None,
             quantum_vdf: None,
 
+            // PHASE 2: Parallel Block Producer Pool - 8 concurrent producers for exciting visualization
+            block_producer_pool: {
+                // Create base config for all producers
+                let base_config = crate::block_producer::BlockProducerConfig {
+                    block_interval_secs, // v0.0.22-beta: from extracted config (2s for fast visualization)
+                    max_solutions_per_block, // v0.0.22-beta: from extracted config
+                    min_solutions_per_block, // v0.0.22-beta: from extracted config
+                    node_id,
+                    is_validator,
+                    validator_index: 0, // Will be overridden by pool for each producer
+                    total_validators: 8, // Phase 2: 8 parallel producers
+                };
+
+                // Create pool with 8 parallel producers for true parallelism
+                let num_producers = 8; // Phase 2: 8-way parallelism for exciting multi-lane visualization
+
+                // CRITICAL FIX: Load blockchain state from storage to prevent data loss on restart
+                let pool = crate::block_producer::ParallelBlockProducerPool::new_with_storage(
+                    num_producers,
+                    base_config,
+                    &storage_engine, // Pass storage Arc to load blockchain state
+                ).await?;
+
+                info!("🚀 Phase 2: Parallel Block Production initialized with {} producers (LOADED FROM STORAGE)", num_producers);
+                info!("⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!");
+
+                Arc::new(pool)
+            },
+
+            // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
+            consensus: {
+                let consensus = DAGKnightConsensus::new(
+                    node_id,
+                    1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
+                ).await?;
+
+                info!("🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
+                    1, 3);
+
+                Arc::new(RwLock::new(consensus))
+            },
+
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,
             resonance_coordinator: None,
@@ -1313,6 +1528,9 @@ impl AppState {
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
+
+            // AEGIS-QL Post-Quantum Authentication for Founder Operations
+            aegis_auth_state,
 
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,

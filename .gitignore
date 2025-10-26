@@ -35,3 +35,21 @@ crates/q-quillon-bank-cli/
 PRIVACY_AS_A_SERVICE_WHITEPAPER.pdf
 PRIVACY_AS_A_SERVICE_WHITEPAPER*.pdf
 api-docs/dist/*.pdf
+
+##############################################################################
+# Documentation - Session Notes & Temporary Files
+##############################################################################
+docs/session-notes/
+*SESSION*.md
+*PROGRESS*.md
+*COMPLETE*.md
+docs/technical/*FIX*.md
+docs/technical/*BUG*.md
+*.tmp.md
+*.draft.md
+
+# Keep important docs
+!README.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+!CLAUDE.md

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use libp2p::{
+    futures::StreamExt,
     gossipsub::{self, MessageAuthenticity, ValidationMode},
     identity::Keypair,
     multiaddr::Protocol,
@@ -8,6 +9,7 @@ use libp2p::{
 };
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_kyber::kyber1024;
+use pqcrypto_traits::sign::SignedMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -71,9 +73,10 @@ impl ConsensusNode {
     pub async fn next_event(&self) -> ConsensusEvent {
         // Simulate events
         tokio::time::sleep(Duration::from_secs(5)).await;
-        ConsensusEvent::BlockFinalized {
+        ConsensusEvent::ConsensusStateUpdate {
             round: 1,
-            block_hash: vec![1, 2, 3, 4],
+            finalized_blocks: 1,
+            pending_transactions: 0,
         }
     }
 }
@@ -257,7 +260,7 @@ impl ConsensusIntegration {
                 use sha3::{Digest, Sha3_256};
                 let mut hasher = Sha3_256::new();
                 hasher.update(&message.data);
-                hasher.finalize().to_vec()
+                gossipsub::MessageId::from(hasher.finalize().to_vec())
             })
             .build()
             .context("Failed to build gossipsub config")?;
@@ -265,7 +268,7 @@ impl ConsensusIntegration {
         let gossipsub = gossipsub::Behaviour::new(
             MessageAuthenticity::Signed(local_key.clone()),
             gossipsub_config,
-        ).context("Failed to create gossipsub behaviour")?;
+        ).map_err(|e| anyhow::anyhow!("Failed to create gossipsub behaviour: {}", e))?;
         
         // Configure Kademlia for peer discovery
         let mut kademlia_config = libp2p::kad::Config::default();
@@ -288,12 +291,16 @@ impl ConsensusIntegration {
             identify,
         };
         
-        // Create swarm
-        let mut swarm = Swarm::with_tokio_executor(
-            libp2p::Transport::boxed(libp2p::tcp::tokio::Transport::default()),
-            behaviour,
-            peer_id,
-        );
+        // Create swarm with SwarmBuilder API
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )?
+            .with_behaviour(|_| behaviour)?
+            .build();
         
         // Listen on all interfaces
         let listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()
@@ -434,15 +441,14 @@ impl ConsensusIntegration {
         // Add bootstrap peers to Kademlia
         for addr in bootstrap_peers {
             if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
-                if let Ok(peer_id) = PeerId::from_multihash(peer_id) {
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                    
-                    // Attempt to dial peer
-                    if let Err(e) = self.swarm.dial(addr.clone()) {
-                        warn!("Failed to dial bootstrap peer {}: {}", addr, e);
-                    } else {
-                        debug!("Dialing bootstrap peer: {}", addr);
-                    }
+                // peer_id is already a PeerId from Protocol::P2p
+                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+
+                // Attempt to dial peer
+                if let Err(e) = self.swarm.dial(addr.clone()) {
+                    warn!("Failed to dial bootstrap peer {}: {}", addr, e);
+                } else {
+                    debug!("Dialing bootstrap peer: {}", addr);
                 }
             }
         }
@@ -534,7 +540,8 @@ impl ConsensusIntegration {
                 debug!("Kademlia routing updated for peer: {}", peer);
                 
                 if let Some(peer_info) = self.known_peers.get_mut(&peer) {
-                    peer_info.addresses = addresses.into_iter().collect();
+                    // Addresses is not an iterator, convert to vec
+                    peer_info.addresses = addresses.iter().cloned().collect();
                     peer_info.last_seen = Instant::now();
                 }
             }
@@ -550,7 +557,7 @@ impl ConsensusIntegration {
                     
                     // Parse capabilities from agent version or protocols
                     peer_info.capabilities = info.protocols.into_iter()
-                        .filter(|proto| proto.starts_with("/q-robot/"))
+                        .filter(|proto| proto.as_ref().starts_with("/q-robot/"))
                         .map(|proto| proto.to_string())
                         .collect();
                 }
@@ -563,54 +570,25 @@ impl ConsensusIntegration {
     
     async fn handle_consensus_event(&mut self, event: ConsensusEvent) -> Result<()> {
         match event {
-            ConsensusEvent::BlockFinalized { round, block_hash } => {
-                debug!("Block finalized in round {}: {:?}", round, block_hash);
-                
+            ConsensusEvent::RobotDataConfirmed { robot_id, data_hash, consensus_round } => {
+                debug!("Robot data confirmed for {}: {:?} in round {}", robot_id, data_hash, consensus_round);
+                self.last_consensus_round = consensus_round;
+            }
+            ConsensusEvent::SwarmCoordinationUpdate { swarm_id, new_formation, participants } => {
+                debug!("Swarm coordination update for {}: formation={}, participants={:?}", swarm_id, new_formation, participants);
+            }
+            ConsensusEvent::EnvironmentalAlert { alert_id, alert_type, affected_robots } => {
+                warn!("Environmental alert {}: type={}, affected robots={:?}", alert_id, alert_type, affected_robots);
+            }
+            ConsensusEvent::ConsensusStateUpdate { round, finalized_blocks, pending_transactions } => {
+                debug!("Consensus state update round {}: finalized={}, pending={}", round, finalized_blocks, pending_transactions);
                 self.last_consensus_round = round;
-                
-                let event = ConsensusEvent::ConsensusStateUpdate {
-                    round,
-                    finalized_blocks: round,
-                    pending_transactions: 0, // Would be retrieved from consensus
-                };
-                
-                if let Err(e) = self.consensus_events_channel.send(event).await {
-                    warn!("Failed to send consensus state update: {}", e);
-                }
             }
-            ConsensusEvent::MessageAccepted { message_hash } => {
-                debug!("Consensus message accepted: {:?}", message_hash);
-                
-                // Check if this was robot data and notify accordingly
-                if let Some((robot_id, _)) = self.find_robot_data_by_hash(&message_hash) {
-                    let event = ConsensusEvent::RobotDataConfirmed {
-                        robot_id,
-                        data_hash: message_hash,
-                        consensus_round: self.last_consensus_round,
-                    };
-                    
-                    if let Err(e) = self.consensus_events_channel.send(event).await {
-                        warn!("Failed to send robot data confirmed event: {}", e);
-                    }
-                }
+            ConsensusEvent::PeerDiscovered { peer_id, addresses, capabilities } => {
+                info!("Peer discovered {}: {:?}, capabilities: {:?}", peer_id, addresses, capabilities);
             }
-            ConsensusEvent::RobotDataConfirmed { robot_id, data_hash } => {
-                debug!("Robot data confirmed for {}: {:?}", robot_id, data_hash);
-            }
-            ConsensusEvent::SwarmCoordinationUpdate { swarm_id, status } => {
-                debug!("Swarm coordination update for {}: {}", swarm_id, status);
-            }
-            ConsensusEvent::EnvironmentalAlert { alert_type, location } => {
-                warn!("Environmental alert {}: {:?}", alert_type, location);
-            }
-            ConsensusEvent::ConsensusStateUpdate { round, state } => {
-                debug!("Consensus state update round {}: {}", round, state);
-            }
-            ConsensusEvent::PeerDiscovered { peer_id, endpoint } => {
-                info!("Peer discovered {}: {}", peer_id, endpoint);
-            }
-            ConsensusEvent::PeerLost { peer_id } => {
-                warn!("Peer lost: {}", peer_id);
+            ConsensusEvent::PeerLost { peer_id, last_seen } => {
+                warn!("Peer lost: {}, last seen: {:?}", peer_id, last_seen);
             }
         }
         
@@ -709,9 +687,9 @@ impl ConsensusIntegration {
         
         // Sign with Dilithium5
         let signature = dilithium5::sign(&message, &self.post_quantum_keys.dilithium_keypair.1);
-        
+
         let mut signed_data = data.clone();
-        signed_data.signature = signature.to_vec();
+        signed_data.signature = signature.as_bytes().to_vec();
         
         Ok(signed_data)
     }

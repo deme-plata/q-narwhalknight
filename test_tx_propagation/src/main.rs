@@ -175,7 +175,9 @@ async fn check_balance(
     node: &str,
     wallet: &TestWallet,
 ) -> Result<f64> {
-    let path = format!("/api/v1/wallets/{}", wallet.address_string());
+    // Use hex address without "qnk" prefix
+    let hex_address = hex::encode(wallet.address);
+    let path = format!("/api/v1/wallets/{}/balance", hex_address);
     let timestamp = Utc::now().timestamp();
 
     // Sign the authentication challenge
@@ -203,7 +205,8 @@ async fn check_balance(
             .unwrap_or(0.0);
         Ok(balance)
     } else {
-        Ok(0.0)
+        let error = body["error"].as_str().unwrap_or("unknown error");
+        anyhow::bail!("Balance check failed: {}", error);
     }
 }
 
@@ -243,21 +246,21 @@ async fn main() -> Result<()> {
     // Wait for balance to settle
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // STEP 3: Send transaction from wallet1 to wallet2 VIA NODE 4
+    // STEP 3: Send transaction from wallet1 to wallet2 VIA NODE 1
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("STEP 3: Sending Authenticated Transaction to NODE 4");
+    println!("STEP 3: Sending Authenticated Transaction to NODE 1");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    println!("📤 Submitting transaction to Node 4 (port 9666)...");
+    println!("📤 Submitting transaction to Node 1 (port 8080)...");
     let tx_hash = send_transaction(
         &client,
-        NODE4,  // Send to Node 4 instead of Node 1
+        NODE1,  // Send to Node 1 (only running node)
         &wallet1,
         &wallet2.address_string(),
         2.0,
     ).await?;
 
-    println!("✅ Transaction submitted to Node 4");
+    println!("✅ Transaction submitted to Node 1");
     println!("   Transaction Hash: {}", tx_hash);
 
     println!();
