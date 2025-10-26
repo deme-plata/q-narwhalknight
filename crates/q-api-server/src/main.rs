@@ -3,8 +3,8 @@ use axum::{
     Router,
 };
 use clap::{Arg, ArgAction, Command};
-use q_api_server::{handlers, streaming, payment_api, oauth2_provider, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats};
-use q_types::TxStatus;
+use q_api_server::{handlers, streaming, payment_api, oauth2_provider, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats, aegis_auth_middleware};
+use q_types::{TxStatus, TxHash};
 mod contracts_api;
 mod dex_integration_api;
 mod liquidity_api;
@@ -17,7 +17,7 @@ use contracts_api::create_contracts_router;
 use dex_integration_api::create_dex_integration_router;
 use liquidity_api::create_liquidity_router;
 use cdp_simple::create_cdp_router;
-use quillon_bank_api::create_quillon_bank_router;
+use quillon_bank_api::{create_quillon_bank_router, create_public_routes, create_protected_routes};
 // DEACTIVATED: use q_bep44_discovery::{Bep44DiscoveryConfig, DiscoveryEngine};
 // DEACTIVATED: use q_bitcoin_bridge::{
 //     bridge::{IntegratedBitcoinBridge, PeerNetworkEvent},
@@ -29,8 +29,94 @@ use std::{collections::HashSet, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tower_http::services::ServeDir;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Update TUI metrics from AppState
+#[cfg(feature = "tui")]
+async fn update_tui_metrics(
+    tui_metrics: &std::sync::Arc<std::sync::RwLock<q_tui::Metrics>>,
+    app_state: &Arc<AppState>,
+    start_time: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Collect all data first (with awaits), before acquiring write lock
+    let uptime_secs = start_time.elapsed().as_secs();
+
+    // Get node status
+    let (peer_count, block_height) = {
+        let node_status = app_state.node_status.read().await;
+        (node_status.connected_peers as usize, node_status.current_height)
+    };
+
+    // Get transaction pool size
+    let tx_pool_size = app_state.tx_pool.len();
+
+    // Get DAG metrics
+    let (dag_size_mb, vertex_count, anchor_count) = {
+        let blocks = app_state.blocks.read().await;
+        let dag_size = blocks.len() as f64 * 0.1; // Rough estimate: 0.1 MB per block
+        let vertices = blocks.values().map(|txs| txs.len() as u64).sum();
+        let anchors = blocks.len() as u64;
+        (dag_size, vertices, anchors)
+    };
+
+    // Get system metrics (non-async)
+    #[cfg(target_os = "linux")]
+    let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = {
+        use sysinfo::{System, Disks};
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        let cpu = sys.global_cpu_info().cpu_usage();
+        let ram_used = sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+        let ram_tot = sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+
+        let disks = Disks::new_with_refreshed_list();
+        let (disk_used, disk_tot) = if let Some(disk) = disks.iter().next() {
+            let total = disk.total_space() as f64 / (1024.0 * 1024.0 * 1024.0);
+            let available = disk.available_space() as f64 / (1024.0 * 1024.0 * 1024.0);
+            (total - available, total)
+        } else {
+            (0.0, 500.0)
+        };
+
+        (cpu, ram_used, ram_tot, disk_used, disk_tot)
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = (0.0, 0.0, 8.0, 0.0, 500.0);
+
+    // Now acquire write lock and update metrics (no awaits here!)
+    {
+        let mut metrics = tui_metrics.write().unwrap();
+
+        metrics.uptime_secs = uptime_secs;
+        metrics.peer_count = peer_count;
+        metrics.block_height = block_height;
+        metrics.current_tps = tx_pool_size;
+        metrics.dag_size_mb = dag_size_mb;
+        metrics.vertex_count = vertex_count;
+        metrics.anchor_count = anchor_count;
+        metrics.cpu_usage_percent = cpu_usage;
+        metrics.ram_usage_gb = ram_usage;
+        metrics.ram_total_gb = ram_total;
+        metrics.disk_usage_gb = disk_usage;
+        metrics.disk_total_gb = disk_total;
+        metrics.latency_p50_ms = 50; // Placeholder
+        metrics.latency_p99_ms = 150; // Placeholder
+        metrics.tor_circuits = 0; // TODO
+        metrics.mining_enabled = false;
+        metrics.hashrate = 0.0;
+        metrics.blocks_mined = 0;
+        metrics.bytes_received = 0; // TODO
+        metrics.bytes_sent = 0; // TODO
+        metrics.inbound_peers = 0; // TODO
+        metrics.outbound_peers = 0; // TODO
+        metrics.last_block_secs = 0; // TODO
+    } // Lock dropped here
+
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -113,6 +199,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load configuration
     let mut config = Config::from_env()?;
+
+    // v0.0.22-beta Quick Win #2: Validate configuration on startup
+    if let Err(e) = config.validate() {
+        error!("❌ Configuration validation failed: {}", e);
+        error!("❌ Please fix your configuration and try again");
+        std::process::exit(1);
+    }
 
     // Parse network configuration (testnet/mainnet)
     let network_str = matches.get_one::<String>("network").map(|s| s.as_str()).unwrap_or("testnet");
@@ -543,23 +636,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel();
             manager.set_gossipsub_channel(gossipsub_tx);
 
+            // Get command sender BEFORE wrapping in Arc<Mutex>
+            let command_tx = manager.get_command_sender();
+
+            // Get peer count atomic BEFORE wrapping in Arc<Mutex> and spawning event loop
+            // This prevents deadlock when main tries to lock the manager later
+            let peer_count_atomic = manager.get_peer_count_atomic();
+
+            // Subscribe to database updates topic BEFORE spawning event loop
+            // This prevents deadlock when database replication tries to subscribe later
+            if let Err(e) = manager.subscribe_topic(q_ipfs_storage::DATABASE_UPDATES_TOPIC) {
+                warn!("⚠️  Failed to pre-subscribe to database updates topic: {}", e);
+            } else {
+                info!("📢 Pre-subscribed to database updates topic for replication");
+            }
+
             // Start network event loop
             let manager_arc = Arc::new(tokio::sync::Mutex::new(manager));
             let manager_clone = manager_arc.clone();
 
             tokio::spawn(async move {
                 info!("🔄 Starting libp2p network event loop...");
-                loop {
-                    let mut nm = manager_clone.lock().await;
-                    if let Err(e) = nm.run_once().await {
-                        error!("Network manager error: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    }
+                let mut nm = manager_clone.lock().await;
+                if let Err(e) = nm.run().await {
+                    error!("❌ Network manager event loop terminated: {}", e);
                 }
             });
 
             info!("✅ libp2p network fully operational");
-            Some((manager_arc, gossipsub_rx))
+            Some((manager_arc, gossipsub_rx, command_tx, peer_count_atomic))
         }
         Err(e) => {
             warn!("⚠️  libp2p Network Manager initialization failed: {}", e);
@@ -568,10 +673,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Split libp2p_manager tuple into manager and gossipsub receiver
-    let (libp2p_discovery, gossipsub_rx_opt) = match libp2p_manager {
-        Some((manager, rx)) => (Some(manager), Some(rx)),
-        None => (None, None),
+    // Split libp2p_manager tuple into manager, gossipsub receiver, command sender, and peer count
+    let (libp2p_discovery, gossipsub_rx_opt, libp2p_command_tx, peer_count_atomic) = match libp2p_manager {
+        Some((manager, rx, cmd_tx, peer_count)) => (Some(manager), Some(rx), Some(cmd_tx), Some(peer_count)),
+        None => (None, None, None, None),
     };
 
     // Initialize application state with network components
@@ -584,6 +689,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tor_client,
         None,  // production_peer_discovery is deactivated
         libp2p_discovery,  // ✅ ENABLED - libp2p gossipsub for transaction propagation
+        libp2p_command_tx,  // ✅ Command channel for non-blocking P2P operations
     )
     .await?;
     let mut state = state;
@@ -591,15 +697,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================
     // 📊 LIBP2P PEER COUNT - Atomic Counter for Thread-Safe Access
     // ========================================
-    // Get atomic peer counter from libp2p manager (thread-safe!)
-    let peer_count_atomic = if let Some(ref libp2p_discovery) = state.libp2p_discovery {
-        let discovery = libp2p_discovery.lock().await;
-        Some(discovery.get_peer_count_atomic())
-    } else {
-        None
-    };
+    // peer_count_atomic was already extracted before spawning the event loop (see above)
+    // This prevents deadlock from trying to lock the manager while it's held by the event loop
 
-    info!("📊 Peer count tracking enabled - atomic counter initialized");
+    if peer_count_atomic.is_some() {
+        info!("📊 Peer count tracking enabled - atomic counter initialized");
+    }
     // Note: node_status.connected_peers will be updated by reading the atomic counter
     // 2. P2P listener (direct TCP connections)
     // Stats loop reads from node_status.connected_peers
@@ -815,7 +918,414 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("   Using fallback: direct peer communication without sync");
     }
 
+    // ========================================
+    // MINING SUBMISSION QUEUE - ASYNC PROCESSING
+    // ========================================
+    info!("⚡ Initializing mining submission async queue...");
+    let (mining_tx, mut mining_rx) = tokio::sync::mpsc::unbounded_channel::<q_api_server::MiningSubmission>();
+    state.mining_submission_tx = Some(mining_tx);
+    info!("✅ Mining queue initialized - async processing enabled");
+    info!("   Non-blocking submission acceptance");
+    info!("   Background I/O processing");
+    info!("   Prevents server overload from mining activity");
+
     let app_state = Arc::new(state);
+
+    // ========================================
+    // MINING SUBMISSION ASYNC PROCESSOR
+    // ========================================
+    {
+        let app_state_mining = app_state.clone();
+        tokio::spawn(async move {
+            info!("⚡ Starting mining submission async processor...");
+            let mut processed_count = 0u64;
+            let mut last_log = std::time::Instant::now();
+
+            while let Some(submission) = mining_rx.recv().await {
+                let start = std::time::Instant::now();
+
+                // Calculate mining reward
+                let block_reward = 50_000_000; // 0.5 QNK per block
+
+                // Update wallet balance
+                let mut balances = app_state_mining.wallet_balances.write().await;
+                let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
+                let new_balance = current_balance + block_reward;
+                balances.insert(submission.miner_address, new_balance);
+                drop(balances);
+
+                // Persist balance to disk (this is the slow I/O operation)
+                if let Err(e) = app_state_mining.save_wallet_balance(&submission.miner_address, new_balance).await {
+                    warn!("❌ Failed to persist mining reward: {:?}", e);
+                }
+
+                // Create mining reward transaction
+                let tx_hash = blake3::hash(&format!("mining_reward_{}_{}_{}",
+                    submission.miner_address_str, submission.nonce, chrono::Utc::now().timestamp()).as_bytes()).as_bytes().to_vec();
+                let tx_hash_array: [u8; 32] = tx_hash.as_slice().try_into().unwrap();
+
+                let mining_tx = q_types::Transaction {
+                    id: tx_hash_array,
+                    from: [0u8; 32],
+                    to: submission.miner_address,
+                    amount: block_reward,
+                    fee: 0,
+                    timestamp: chrono::Utc::now(),
+                    signature: vec![],
+                    nonce: submission.nonce,
+                    data: format!("VDF Mining Reward - Nonce: {}", submission.nonce).into_bytes(),
+                    token_type: q_types::TokenType::QUG,
+                    fee_token_type: q_types::TokenType::QUGUSD,
+                };
+
+                // Add to transaction pool
+                app_state_mining.tx_pool.insert(tx_hash_array, mining_tx.clone());
+                let block_height = app_state_mining.node_status.read().await.current_height;
+                app_state_mining.tx_status.insert(tx_hash_array, q_types::TxStatus::Confirmed { block_height, round: 0 });
+
+                // Broadcast via SSE (non-blocking)
+                use q_api_server::streaming::StreamEvent;
+                let reward_qnk = block_reward as f64 / 100_000_000.0;
+                let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::MiningReward {
+                    miner_address: submission.miner_address_str.clone(),
+                    reward_qnk,
+                    nonce: submission.nonce,
+                    block_height,
+                    difficulty: "0000".to_string(),
+                    hash_rate: 0.0,
+                    timestamp: chrono::Utc::now(),
+                });
+
+                let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
+                    wallet_address: submission.miner_address_str.clone(),
+                    old_balance: current_balance as f64 / 100_000_000.0,
+                    new_balance: new_balance as f64 / 100_000_000.0,
+                    change_reason: "mining_reward".to_string(),
+                    timestamp: chrono::Utc::now(),
+                });
+
+                // 🏗️ BLOCK PRODUCTION: Queue solution to BlockProducer
+                {
+                    let solution = q_types::MiningSolution {
+                        nonce: submission.nonce,
+                        hash: submission.hash,
+                        difficulty_target: submission.difficulty_target,
+                        miner_address: submission.miner_address,
+                        timestamp: chrono::Utc::now().timestamp() as u64,
+                        pool_id: None,
+                    };
+
+                    let mut producer = app_state_mining.block_producer.write().await;
+                    producer.queue_solution(solution);
+
+                    // Check if we should produce a block
+                    if producer.should_produce_block() {
+                        if let Some(new_block) = producer.produce_block().await {
+                            info!("🎉 NEW BLOCK PRODUCED: Height {}, Hash {}, Solutions {}",
+                                new_block.header.height,
+                                hex::encode(&new_block.calculate_hash()[..8]),
+                                new_block.mining_solutions.len()
+                            );
+
+                            // Update node status with new height
+                            {
+                                let mut status = app_state_mining.node_status.write().await;
+                                status.current_height = new_block.header.height;
+                            }
+
+                            // Broadcast NewBlock event via SSE with enhanced data
+                            let block_hash = new_block.calculate_hash();
+                            let block_reward = new_block.mining_solutions.len() as f64 * 50.0; // Calculate block reward
+                            let tx_count = new_block.transactions.len();
+
+                            let _ = app_state_mining.event_broadcaster.broadcast(
+                                q_api_server::streaming::StreamEvent::NewBlock {
+                                    height: new_block.header.height,
+                                    hash: hex::encode(&block_hash),
+                                    prev_hash: hex::encode(&new_block.header.prev_block_hash),
+                                    solutions_count: new_block.mining_solutions.len(),
+                                    total_difficulty: new_block.header.height as u128, // Cumulative difficulty
+                                    dag_round: new_block.header.height, // DAG round number (single validator mode)
+                                    miner_count: new_block.mining_solutions.len(), // Number of miners who contributed
+                                    tx_count,
+                                    block_reward,
+                                    producer_id: 0, // Single producer mode
+                                    timestamp: chrono::Utc::now(),
+                                }
+                            );
+
+                            // Store block in RocksDB
+                            if let Err(e) = app_state_mining.storage_engine.save_qblock(&new_block).await {
+                                error!("❌ Failed to save block {}: {}", new_block.header.height, e);
+                            }
+
+                            // PHASE 3: Submit block to DAG-Knight consensus
+                            {
+                                // Convert QBlock to DAG Vertex
+                                let dag_vertex = match producer.qblock_to_vertex(&new_block) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error!("❌ Failed to convert block {} to vertex: {}", new_block.header.height, e);
+                                        continue;
+                                    }
+                                };
+
+                                // Convert DAG-Knight vertex to storage vertex
+                                let storage_vertex = producer.dag_vertex_to_storage_vertex(&dag_vertex, &new_block);
+
+                                // Store vertex in consensus vertex store
+                                let consensus = app_state_mining.consensus.read().await;
+                                if let Err(e) = consensus.vertex_store.store_vertex(storage_vertex).await {
+                                    error!("❌ Failed to store vertex for block {}: {}", new_block.header.height, e);
+                                } else {
+                                    // Create certificate for consensus processing
+                                    let certificate = q_types::Certificate {
+                                        vertex_id: dag_vertex.id,
+                                        round: dag_vertex.round,
+                                        signatures: std::collections::BTreeMap::new(), // Single-node: no signatures yet
+                                        threshold_met: true, // Single-node consensus
+                                    };
+
+                                    // Process through DAG-Knight consensus
+                                    match consensus.process_certificate(certificate).await {
+                                        Ok(commit_decisions) => {
+                                            if !commit_decisions.is_empty() {
+                                                for decision in commit_decisions {
+                                                    info!("🎯 BLOCK FINALIZED: Height {}, Round {}, Anchor {}",
+                                                        new_block.header.height,
+                                                        decision.round,
+                                                        hex::encode(&decision.vertex_id[..8])
+                                                    );
+
+                                                    // Broadcast BlockFinalized SSE event
+                                                    let tx_hashes: Vec<TxHash> = new_block.transactions
+                                                        .iter()
+                                                        .map(|tx| tx.id)
+                                                        .collect();
+
+                                                    let _ = app_state_mining.event_broadcaster.broadcast(
+                                                        q_api_server::streaming::StreamEvent::BlockFinalized {
+                                                            height: new_block.header.height,
+                                                            round: decision.round,
+                                                            transactions: tx_hashes,
+                                                            timestamp: chrono::Utc::now(),
+                                                        }
+                                                    );
+                                                }
+                                            } else {
+                                                debug!("Block {} submitted to consensus, pending commit decision",
+                                                    new_block.header.height);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("❌ Consensus processing failed for block {}: {}", new_block.header.height, e);
+                                        }
+                                    }
+                                }
+                                drop(consensus); // Release read lock
+                            }
+
+                            // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
+                            if let Some(ref libp2p_manager) = app_state_mining.libp2p_discovery {
+                                match postcard::to_allocvec(&new_block) {
+                                    Ok(block_bytes) => {
+                                        let libp2p_clone = libp2p_manager.clone();
+                                        let block_height = new_block.header.height;
+                                        tokio::spawn(async move {
+                                            let mut nm = libp2p_clone.lock().await;
+                                            let topic = nm.network_config().network_id.blocks_topic();
+                                            if let Err(e) = nm.publish_topic(&topic, block_bytes) {
+                                                warn!("Failed to broadcast block {} to network: {}", block_height, e);
+                                            } else {
+                                                info!("📡 Block {} broadcast to {} P2P network", block_height, nm.network_config().network_id.as_str());
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to serialize block {} for broadcast: {}", new_block.header.height, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                processed_count += 1;
+                let elapsed = start.elapsed();
+
+                // Log throughput every 10 seconds
+                if last_log.elapsed().as_secs() >= 10 {
+                    info!("⚡ Mining queue: {} submissions processed, last took {:?}",
+                          processed_count, elapsed);
+                    last_log = std::time::Instant::now();
+                }
+            }
+            warn!("⚠️  Mining submission processor stopped");
+        });
+        info!("✅ Mining submission async processor started");
+    }
+
+    // ========================================
+    // TIME-BASED BLOCK PRODUCTION LOOP
+    // ========================================
+    {
+        let app_state_block_producer = app_state.clone();
+        tokio::spawn(async move {
+            info!("⏰ Starting time-based block production loop...");
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+            loop {
+                interval.tick().await;
+
+                // Check if block production conditions are met
+                let should_produce = {
+                    let producer = app_state_block_producer.block_producer.read().await;
+                    producer.should_produce_block()
+                };
+
+                if should_produce {
+                    let mut producer = app_state_block_producer.block_producer.write().await;
+
+                    if let Some(new_block) = producer.produce_block().await {
+                        info!("⏰ TIME-BASED BLOCK PRODUCED: Height {}, Hash {}, Solutions {}",
+                            new_block.header.height,
+                            hex::encode(&new_block.calculate_hash()[..8]),
+                            new_block.mining_solutions.len()
+                        );
+
+                        // Update node status with new height
+                        {
+                            let mut status = app_state_block_producer.node_status.write().await;
+                            status.current_height = new_block.header.height;
+                        }
+
+                        // Broadcast block event via SSE with enhanced data
+                        let block_hash = new_block.calculate_hash();
+                        let solutions_count = new_block.mining_solutions.len();
+                        let block_reward = solutions_count as f64 * 50.0;
+                        let tx_count = new_block.transactions.len();
+
+                        let _ = app_state_block_producer.event_broadcaster.broadcast(
+                            q_api_server::streaming::StreamEvent::NewBlock {
+                                height: new_block.header.height,
+                                hash: hex::encode(&block_hash),
+                                prev_hash: hex::encode(&new_block.header.prev_block_hash),
+                                solutions_count,
+                                total_difficulty: new_block.header.height as u128,
+                                dag_round: new_block.header.height,
+                                miner_count: solutions_count,
+                                tx_count,
+                                block_reward,
+                                producer_id: 0, // Single producer mode
+                                timestamp: chrono::Utc::now(),
+                            }
+                        );
+
+                        // Store block in RocksDB
+                        if let Err(e) = app_state_block_producer.storage_engine.save_qblock(&new_block).await {
+                            error!("❌ Failed to save block {}: {}", new_block.header.height, e);
+                        }
+
+                        // PHASE 3: Submit block to DAG-Knight consensus
+                        {
+                            drop(producer); // Release producer lock before consensus operations
+
+                            // Get producer again for vertex conversion
+                            let producer = app_state_block_producer.block_producer.read().await;
+
+                            // Convert QBlock to DAG Vertex
+                            let dag_vertex = match producer.qblock_to_vertex(&new_block) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    error!("❌ Failed to convert block {} to vertex: {}", new_block.header.height, e);
+                                    drop(producer);
+                                    continue;
+                                }
+                            };
+
+                            // Convert DAG-Knight vertex to storage vertex
+                            let storage_vertex = producer.dag_vertex_to_storage_vertex(&dag_vertex, &new_block);
+                            drop(producer); // Release producer lock
+
+                            // Store vertex in consensus vertex store
+                            let consensus = app_state_block_producer.consensus.read().await;
+                            if let Err(e) = consensus.vertex_store.store_vertex(storage_vertex).await {
+                                error!("❌ Failed to store vertex for block {}: {}", new_block.header.height, e);
+                            } else {
+                                // Create certificate for consensus processing
+                                let certificate = q_types::Certificate {
+                                    vertex_id: dag_vertex.id,
+                                    round: dag_vertex.round,
+                                    signatures: std::collections::BTreeMap::new(), // Single-node: no signatures yet
+                                    threshold_met: true, // Single-node consensus
+                                };
+
+                                // Process through DAG-Knight consensus
+                                match consensus.process_certificate(certificate).await {
+                                    Ok(commit_decisions) => {
+                                        if !commit_decisions.is_empty() {
+                                            for decision in commit_decisions {
+                                                info!("🎯 BLOCK FINALIZED (TIME-BASED): Height {}, Round {}, Anchor {}",
+                                                    new_block.header.height,
+                                                    decision.round,
+                                                    hex::encode(&decision.vertex_id[..8])
+                                                );
+
+                                                // Broadcast BlockFinalized SSE event
+                                                let tx_hashes: Vec<TxHash> = new_block.transactions
+                                                    .iter()
+                                                    .map(|tx| tx.id)
+                                                    .collect();
+
+                                                let _ = app_state_block_producer.event_broadcaster.broadcast(
+                                                    q_api_server::streaming::StreamEvent::BlockFinalized {
+                                                        height: new_block.header.height,
+                                                        round: decision.round,
+                                                        transactions: tx_hashes,
+                                                        timestamp: chrono::Utc::now(),
+                                                    }
+                                                );
+                                            }
+                                        } else {
+                                            debug!("Block {} submitted to consensus (time-based), pending commit decision",
+                                                new_block.header.height);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Consensus processing failed for block {}: {}", new_block.header.height, e);
+                                    }
+                                }
+                            }
+                            drop(consensus); // Release consensus lock
+                        }
+
+                        // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
+                        if let Some(ref libp2p_manager) = app_state_block_producer.libp2p_discovery {
+                            match postcard::to_allocvec(&new_block) {
+                                Ok(block_bytes) => {
+                                    let libp2p_clone = libp2p_manager.clone();
+                                    let block_height = new_block.header.height;
+                                    tokio::spawn(async move {
+                                        let mut nm = libp2p_clone.lock().await;
+                                        let topic = nm.network_config().network_id.blocks_topic();
+                                        if let Err(e) = nm.publish_topic(&topic, block_bytes) {
+                                            warn!("Failed to broadcast block {} to network (time-based): {}", block_height, e);
+                                        } else {
+                                            info!("📡 Block {} broadcast to {} P2P network (time-based)", block_height, nm.network_config().network_id.as_str());
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("Failed to serialize block {} for broadcast (time-based): {}", new_block.header.height, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        info!("✅ Time-based block production loop started");
+    }
 
     // ========================================
     // GOSSIPSUB TRANSACTION/BLOCK SYNCHRONIZATION
@@ -917,7 +1427,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                 } else if topic.contains("/blocks") {
-                    info!("  → Block propagation (handler not yet implemented)");
+                    // PHASE 3 PART 3: P2P Block Propagation Handler
+                    // Deserialize and process incoming block from network
+                    match postcard::from_bytes::<q_types::block::QBlock>(&data) {
+                        Ok(block) => {
+                            let block_height = block.header.height;
+                            let block_hash = block.calculate_hash();
+                            info!("📦 Received block {} (height={}) from network",
+                                  hex::encode(&block_hash[..8]), block_height);
+
+                            // Verify block is newer than our current height
+                            let current_height = app_state_gossip.node_status.read().await.current_height;
+                            if block_height <= current_height && block_height > 0 {
+                                debug!("Skipping old block {} (current height: {})", block_height, current_height);
+                                continue;
+                            }
+
+                            // Save block to RocksDB storage
+                            if let Err(e) = app_state_gossip.storage_engine.save_qblock(&block).await {
+                                warn!("❌ Failed to save incoming block {}: {}", block_height, e);
+                                continue;
+                            }
+                            info!("✅ Stored incoming block {} to RocksDB", block_height);
+
+                            // Update node status if this block advances our height
+                            {
+                                let mut status = app_state_gossip.node_status.write().await;
+                                if block_height > status.current_height {
+                                    status.current_height = block_height;
+                                    info!("📈 Node height advanced to {}", block_height);
+                                }
+                            }
+
+                            // PHASE 3: Submit incoming block to consensus
+                            {
+                                // Convert QBlock to DAG Vertex
+                                let producer = app_state_gossip.block_producer.read().await;
+                                let dag_vertex = match producer.qblock_to_vertex(&block) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error!("❌ Failed to convert incoming block {} to vertex: {}", block_height, e);
+                                        continue;
+                                    }
+                                };
+
+                                // Convert DAG-Knight vertex to storage vertex
+                                let storage_vertex = producer.dag_vertex_to_storage_vertex(&dag_vertex, &block);
+                                drop(producer); // Release read lock
+
+                                // Store vertex in consensus vertex store
+                                let consensus = app_state_gossip.consensus.read().await;
+                                if let Err(e) = consensus.vertex_store.store_vertex(storage_vertex).await {
+                                    error!("❌ Failed to store vertex for incoming block {}: {}", block_height, e);
+                                    continue;
+                                }
+
+                                // Create certificate for consensus processing
+                                let certificate = q_types::Certificate {
+                                    vertex_id: dag_vertex.id,
+                                    round: dag_vertex.round,
+                                    signatures: std::collections::BTreeMap::new(), // Multi-node: signatures from validators
+                                    threshold_met: true, // Assume threshold met for received blocks
+                                };
+
+                                // Process through DAG-Knight consensus
+                                match consensus.process_certificate(certificate).await {
+                                    Ok(commit_decisions) => {
+                                        if !commit_decisions.is_empty() {
+                                            for decision in commit_decisions {
+                                                info!("🎯 INCOMING BLOCK FINALIZED: Height {}, Round {}, Anchor {}",
+                                                    block_height,
+                                                    decision.round,
+                                                    hex::encode(&decision.vertex_id[..8])
+                                                );
+
+                                                // Broadcast BlockFinalized SSE event
+                                                let tx_hashes: Vec<TxHash> = block.transactions
+                                                    .iter()
+                                                    .map(|tx| tx.id)
+                                                    .collect();
+
+                                                let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                    q_api_server::streaming::StreamEvent::BlockFinalized {
+                                                        height: block_height,
+                                                        round: decision.round,
+                                                        transactions: tx_hashes,
+                                                        timestamp: chrono::Utc::now(),
+                                                    }
+                                                );
+                                            }
+                                        } else {
+                                            debug!("Incoming block {} submitted to consensus, pending commit decision", block_height);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Consensus processing failed for incoming block {}: {}", block_height, e);
+                                    }
+                                }
+                                drop(consensus); // Release read lock
+                            }
+
+                            info!("✅ Block {} fully processed from network", block_height);
+                        }
+                        Err(e) => {
+                            warn!("Failed to deserialize block from network: {}", e);
+                        }
+                    }
                 } else if topic.contains("/votes") {
                     info!("  → Vote aggregation (handler not yet implemented)");
                 } else if topic.contains("/ack") {
@@ -1010,29 +1625,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let discovery_clone = libp2p_discovery.clone();
 
             // Subscribe to database updates topic
-            {
-                let mut manager = discovery_clone.lock().await;
-                if let Err(e) = manager.subscribe_topic(q_ipfs_storage::DATABASE_UPDATES_TOPIC) {
-                    warn!("⚠️  Failed to subscribe to database updates topic: {}", e);
-                } else {
-                    info!("📢 Subscribed to database updates topic: {}", q_ipfs_storage::DATABASE_UPDATES_TOPIC);
-                }
-            }
+            // NOTE: Subscription is now done BEFORE spawning the event loop (line 555)
+            // to prevent deadlock. This code is kept for reference but subscription
+            // already completed earlier.
+            info!("📢 Database updates topic subscription already active (set during initialization)");
 
             // Spawn task to forward outgoing updates to gossipsub
-            let outgoing_discovery = discovery_clone.clone();
-            tokio::spawn(async move {
-                info!("📤 Starting outgoing database update forwarder...");
-                while let Some((topic, data)) = gossipsub_rx.recv().await {
-                    let mut manager = outgoing_discovery.lock().await;
-                    if let Err(e) = manager.publish_topic(&topic, data) {
-                        tracing::error!("❌ Failed to publish database update to gossipsub: {}", e);
-                    } else {
-                        tracing::debug!("✅ Published database update to gossipsub: {}", topic);
-                    }
-                }
-                tracing::warn!("📤 Outgoing database update forwarder stopped");
-            });
+            // DISABLED: This causes deadlock by trying to lock the manager from a spawned task
+            // TODO: Implement using command channel pattern instead
+            warn!("⚠️  Outgoing database update forwarder disabled to prevent deadlock");
+            warn!("   Database replication will work for incoming updates only");
+
+            // Drop the unused gossipsub_rx to avoid warnings
+            drop(gossipsub_rx);
 
             info!("✅ Database replication integrated with gossipsub");
             info!("   Automatic synchronization: ENABLED");
@@ -1049,11 +1654,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    info!("🔍 DEBUG: Reached after database replication - continuing initialization");
+
     // ========================================
     // 🎨 START ANIMATED CONSOLE VISUALIZATION
     // ========================================
     // Skip console visualization if TUI mode is enabled
-    if !tui_mode {
+    // DISABLED: Console visualization causes blocking - skip it entirely for now
+    if false && !tui_mode {
         info!("🎨 Initializing animated consensus visualization...");
         let visualizer = ConsoleVisualizer::new();
         let viz_stats = visualizer.get_stats_handle();
@@ -1132,6 +1740,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         info!("🎨 Console visualization disabled - TUI mode active");
     }
+
+    info!("🔍 DEBUG: About to show activation banner");
 
     // Log final startup status
     info!("🌟 ================================");
@@ -1644,8 +2254,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     });
     // }
 
+    info!("🔍 DEBUG: About to build application router");
+
     // Build the application router
-    let app = Router::new()
+    let mut app = Router::new()
         // Wallet endpoints
         .route("/api/v1/wallets", get(handlers::list_wallets))
         .route("/api/v1/wallets/create", post(handlers::create_wallet))
@@ -1660,9 +2272,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/faucet", post(handlers::faucet)) // Test token faucet
         .route("/api/v1/mining/challenge", get(handlers::get_mining_challenge)) // Get current mining challenge
         .route("/api/v1/mining/submit", post(handlers::submit_mining_solution))
+        // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
+        // Added conditionally below based on config.allow_manual_trigger
         // Chain endpoints
         .route("/api/v1/status", get(handlers::node_status))
         .route("/api/v1/node/status", get(handlers::node_status)) // Dashboard compatibility alias
+        .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
         .route("/api/v1/transactions", post(handlers::submit_transaction))
         .route(
             "/api/v1/transactions/send",
@@ -1744,6 +2359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/v1/network/topology", get(handlers::network_topology))
         .route("/api/v1/network/active-peers", get(handlers::active_peers))
+        .route("/api/v1/network/peers/connect", post(handlers::connect_peer))
         .route(
             "/api/v1/network/discovery/stats",
             get(handlers::discovery_stats),
@@ -1963,8 +2579,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/stablecoin/liquidate", post(stablecoin_api::liquidate_position))
         // Simple CDP API - QUGUSD minting with QUG collateral (fallback) - DISABLED (conflicts with full Quillon Bank)
         // .nest("/api/v1/quillon-bank/stablecoin", create_cdp_router())
-        // ✅ ENABLED - Full Quillon Bank CDP system with real balance changes
-        .nest("/api/v1/quillon-bank", create_quillon_bank_router())
+        // ✅ ENABLED - Full Quillon Bank CDP system with AEGIS-QL post-quantum authentication
+        // Public routes (read-only, no authentication)
+        .nest("/api/v1/quillon-bank", create_public_routes())
+        // Protected routes (founder-only, AEGIS-QL authentication required)
+        .nest("/api/v1/quillon-bank",
+            create_protected_routes()
+                .layer(axum::middleware::from_fn_with_state(
+                    app_state.aegis_auth_state.clone(),
+                    aegis_auth_middleware::verify_founder_signature
+                ))
+        )
         // Health and metrics
         .route("/health", get(handlers::health_check))
         .route("/api/v1/health", get(handlers::health_check))
@@ -1992,8 +2617,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(CorsLayer::permissive())
                 // Increase body size limit to 50MB for large transaction batches (50K tx)
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
-        )
-        .with_state(app_state.clone());
+        );
+
+    // v0.0.22-beta Quick Win #1: Conditionally add manual trigger endpoint
+    // Only register endpoint if explicitly enabled in configuration
+    if app_state.config.allow_manual_trigger {
+        warn!("⚠️  Manual block trigger endpoint ENABLED at /api/v1/trigger-block");
+        warn!("⚠️  This should only be used for testing/development");
+        warn!("⚠️  Ensure API authentication is configured!");
+        app = app.route("/api/v1/trigger-block", post(handlers::trigger_block_production));
+    } else {
+        info!("✅ Manual block trigger endpoint DISABLED (secure by default)");
+    }
+
+    let app = app.with_state(app_state.clone());
 
     // Create separate router for IPFS storage endpoints with their own state
     let storage_router = Router::new()
@@ -2048,63 +2685,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(libp2p_discovery) = &app_state.libp2p_discovery {
         // Create channel for libp2p → ConnectionManager bridge (Phase 2)
         if let Some(connection_manager) = &app_state.connection_manager {
-            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel::<q_network::connection_manager::PeerInfo>();
 
-            // Set channel in UnifiedNetworkManager
-            {
-                let mut discovery = libp2p_discovery.lock().await;
-                discovery.set_peer_channel(peer_tx);
-            }
-
-            // Spawn receiver task to forward peers to ConnectionManager
-            let connection_mgr_bridge = connection_manager.clone();
-            tokio::spawn(async move {
-                info!("🌉 Starting libp2p → ConnectionManager bridge receiver...");
-                while let Some(peer_info) = peer_rx.recv().await {
-                    info!("🌉 Bridging peer {} to ConnectionManager", peer_info.node_id);
-                    connection_mgr_bridge.add_discovered_peer(peer_info).await;
+            // ✅ DEADLOCK FIX: Use command channel pattern (non-blocking)
+            // Send SetPeerChannel command to network manager event loop
+            if let Some(command_tx) = &app_state.libp2p_command_tx {
+                if let Err(e) = command_tx.send(q_network::NetworkCommand::SetPeerChannel { tx: peer_tx }) {
+                    error!("❌ Failed to send SetPeerChannel command: {}", e);
+                } else {
+                    info!("✅ Sent SetPeerChannel command to network manager");
+                    info!("🌉 libp2p → ConnectionManager bridge ENABLED");
                 }
-                warn!("🌉 libp2p → ConnectionManager bridge channel closed");
-            });
+
+                // Spawn receiver task to forward peers to ConnectionManager
+                let connection_mgr_bridge = connection_manager.clone();
+                tokio::spawn(async move {
+                    info!("🌉 Starting libp2p → ConnectionManager bridge receiver...");
+                    while let Some(peer_info) = peer_rx.recv().await {
+                        info!("🌉 Bridging peer {} to ConnectionManager", peer_info.node_id);
+                        connection_mgr_bridge.add_discovered_peer(peer_info).await;
+                    }
+                    warn!("🌉 libp2p → ConnectionManager bridge channel closed");
+                });
+            } else {
+                warn!("⚠️  libp2p command channel not available");
+                drop(peer_tx);
+                drop(peer_rx);
+            }
         }
 
         // Set up gossipsub message forwarding channel for database replication
         if let Some((_, incoming_tx)) = &replication_system {
-            let (gossipsub_msg_tx, mut gossipsub_msg_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (gossipsub_msg_tx, mut gossipsub_msg_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
-            // Set gossipsub channel in UnifiedNetworkManager
-            {
-                let mut discovery = libp2p_discovery.lock().await;
-                discovery.set_gossipsub_channel(gossipsub_msg_tx);
-            }
+            // ✅ DEADLOCK FIX: Use command channel pattern (non-blocking)
+            // Send SetGossipsubChannel command to network manager event loop
+            if let Some(command_tx) = &app_state.libp2p_command_tx {
+                if let Err(e) = command_tx.send(q_network::NetworkCommand::SetGossipsubChannel { tx: gossipsub_msg_tx }) {
+                    error!("❌ Failed to send SetGossipsubChannel command: {}", e);
+                } else {
+                    info!("✅ Sent SetGossipsubChannel command to network manager");
+                    info!("🌉 Gossipsub → replication bridge ENABLED");
+                }
 
-            // Spawn receiver task to forward gossipsub messages to replication bridge
-            let incoming_replication_tx = incoming_tx.clone();
-            tokio::spawn(async move {
-                info!("📥 Starting gossipsub → replication bridge receiver...");
-                while let Some((topic, data)) = gossipsub_msg_rx.recv().await {
-                    // Only forward database update messages to replication bridge
-                    if topic == q_ipfs_storage::DATABASE_UPDATES_TOPIC {
-                        tracing::debug!("📥 Forwarding database update message to replication bridge");
-                        if let Err(e) = incoming_replication_tx.send(data) {
-                            tracing::error!("❌ Failed to forward message to replication bridge: {}", e);
+                // Spawn receiver task to forward gossipsub messages to replication bridge
+                let incoming_replication_tx = incoming_tx.clone();
+                tokio::spawn(async move {
+                    info!("📥 Starting gossipsub → replication bridge receiver...");
+                    while let Some((topic, data)) = gossipsub_msg_rx.recv().await {
+                        // Only forward database update messages to replication bridge
+                        if topic == q_ipfs_storage::DATABASE_UPDATES_TOPIC {
+                            tracing::debug!("📥 Forwarding database update message to replication bridge");
+                            if let Err(e) = incoming_replication_tx.send(data) {
+                                tracing::error!("❌ Failed to forward message to replication bridge: {}", e);
+                            }
                         }
                     }
-                }
-                tracing::warn!("📥 Gossipsub → replication bridge channel closed");
-            });
+                    tracing::warn!("📥 Gossipsub → replication bridge channel closed");
+                });
+            } else {
+                warn!("⚠️  libp2p command channel not available");
+                drop(gossipsub_msg_tx);
+                drop(gossipsub_msg_rx);
+            }
         }
 
         // Spawn libp2p discovery event loop
-        let discovery_clone = libp2p_discovery.clone();
-        tokio::spawn(async move {
-            info!("🚀 Starting libp2p Zero-Knowledge Discovery event loop...");
-            let mut discovery_guard = discovery_clone.lock().await;
-            if let Err(e) = discovery_guard.run().await {
-                error!("❌ libp2p discovery event loop failed: {}", e);
-            }
-        });
+        // DEADLOCK FIX: This is DUPLICATE code - the event loop was already spawned at line 565!
+        // This code tries to lock the manager and spawn a second event loop, which will deadlock.
+        // The real event loop is already running in the background.
+        warn!("⚠️  Duplicate event loop spawn disabled (already running from line 565)");
+
+        // DISABLED:
+        // let discovery_clone = libp2p_discovery.clone();
+        // tokio::spawn(async move {
+        //     info!("🚀 Starting libp2p Zero-Knowledge Discovery event loop...");
+        //     let mut discovery_guard = discovery_clone.lock().await;
+        //     if let Err(e) = discovery_guard.run().await {
+        //         error!("❌ libp2p discovery event loop failed: {}", e);
+        //     }
+        // });
     }
+
+    info!("🔍 DEBUG: About to initialize HTTP server");
 
     // Start the HIGH-PERFORMANCE HTTP API server
     info!("🚀 Initializing High-Performance HTTP Server for 1M+ TPS");
@@ -2129,8 +2792,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             info!("🎨 Launching TUI mode - Beautiful terminal UI enabled");
 
-            // Create TUI app with initial metrics
-            let tui_app = q_tui::App::new();
+            // Create shared metrics for TUI
+            let tui_metrics = std::sync::Arc::new(std::sync::RwLock::new(q_tui::Metrics::default()));
+
+            // Create TUI app with shared metrics
+            let tui_app = q_tui::App::with_metrics(tui_metrics.clone());
+
+            // Spawn metrics updater task
+            let metrics_clone = tui_metrics.clone();
+            let app_state_clone = app_state.clone();
+            let start_time = std::time::Instant::now();
+
+            tokio::spawn(async move {
+                info!("📊 Starting TUI metrics updater task...");
+                loop {
+                    // Update metrics from app state
+                    if let Err(e) = update_tui_metrics(&metrics_clone, &app_state_clone, start_time).await {
+                        warn!("Failed to update TUI metrics: {}", e);
+                    }
+
+                    // Update every second
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            });
 
             // Spawn server in background
             tokio::spawn(async move {

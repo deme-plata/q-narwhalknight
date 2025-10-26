@@ -32,7 +32,7 @@ pub async fn metrics(State(_state): State<Arc<AppState>>) -> Result<String, Stat
 
 /// Node status endpoint
 pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let mut status = state.node_status.read().await.clone();
+    let status = state.node_status.read().await.clone();
 
     // Get wallet address for balance lookup (use node_id as wallet address for now)
     let wallet_address = status.node_id;
@@ -114,6 +114,35 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
     });
     
     Ok(Json(ApiResponse::success(dashboard_status)))
+}
+
+/// Get libp2p peer ID endpoint (for dynamic bootstrap peer discovery)
+pub async fn get_peer_id(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    debug!("Getting libp2p peer ID for bootstrap discovery");
+
+    // Get peer ID from libp2p UnifiedNetworkManager
+    if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let peer_id = manager.peer_id().to_string();
+
+        // Get listen addresses
+        let listen_addrs = manager.get_listen_addrs();
+
+        drop(manager); // Release lock
+
+        info!("📡 Peer ID requested: {}", peer_id);
+
+        return Ok(Json(ApiResponse::success(serde_json::json!({
+            "peer_id": peer_id,
+            "listen_addresses": listen_addrs,
+            "multiaddr_examples": listen_addrs.iter().map(|addr| {
+                format!("{}/p2p/{}", addr, peer_id)
+            }).collect::<Vec<_>>(),
+        }))));
+    }
+
+    warn!("⚠️ libp2p discovery not initialized - cannot provide peer ID");
+    Ok(Json(ApiResponse::error("libp2p discovery not initialized".to_string())))
 }
 
 /// Create a new wallet
@@ -2646,6 +2675,75 @@ pub async fn p2p_network_status(
     Ok(Json(ApiResponse::success(serde_json::json!({"peers": 50, "status": "connected"}))))
 }
 
+/// Manually connect to a peer via libp2p
+///
+/// POST /api/v1/network/peers/connect
+/// Body: { "multiaddr": "/ip4/127.0.0.1/tcp/33305/p2p/12D3KooW..." }
+pub async fn connect_peer(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    debug!("Attempting to manually connect to peer");
+
+    // Extract multiaddr from request
+    let multiaddr_str = payload["multiaddr"]
+        .as_str()
+        .ok_or_else(|| {
+            warn!("Missing multiaddr in request");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Parse multiaddr
+    let multiaddr: libp2p::Multiaddr = multiaddr_str.parse().map_err(|e| {
+        warn!("Invalid multiaddr format: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    // Send dial command via channel (non-blocking)
+    if let Some(ref command_tx) = state.libp2p_command_tx {
+        // Create oneshot channel for response
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        // Send command to network manager event loop
+        let command = q_network::NetworkCommand::DialPeer {
+            multiaddr: multiaddr.clone(),
+            response_tx,
+        };
+
+        if command_tx.send(command).is_err() {
+            error!("❌ Failed to send dial command - network manager not running");
+            return Ok(Json(ApiResponse::error("Network manager not responding".to_string())));
+        }
+
+        // Wait for response from network manager
+        match tokio::time::timeout(std::time::Duration::from_secs(5), response_rx).await {
+            Ok(Ok(Ok(()))) => {
+                info!("✅ Successfully initiated connection to {}", multiaddr);
+                Ok(Json(ApiResponse::success(serde_json::json!({
+                    "success": true,
+                    "multiaddr": multiaddr_str,
+                    "message": "Connection initiated successfully"
+                }))))
+            }
+            Ok(Ok(Err(e))) => {
+                error!("❌ Failed to dial peer {}: {}", multiaddr, e);
+                Ok(Json(ApiResponse::error(format!("Failed to dial peer: {}", e))))
+            }
+            Ok(Err(_)) => {
+                error!("❌ Network manager dropped response channel");
+                Ok(Json(ApiResponse::error("Network manager error".to_string())))
+            }
+            Err(_) => {
+                error!("❌ Timeout waiting for network manager response");
+                Ok(Json(ApiResponse::error("Dial operation timed out".to_string())))
+            }
+        }
+    } else {
+        warn!("⚠️ libp2p command channel not initialized");
+        Ok(Json(ApiResponse::error("libp2p not initialized".to_string())))
+    }
+}
+
 pub async fn plugin_system_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
@@ -2857,8 +2955,11 @@ pub async fn send_private_transaction(
     debug!("🔒 Processing private transaction through quantum mixer");
 
     // Parse recipient address (same logic as regular transactions)
-    let to_address = if request.to.len() == 64 {
-        match hex::decode(&request.to) {
+    // CRITICAL FIX: Strip "qnk" prefix if present to avoid hashing the entire string
+    let to_str = request.to.strip_prefix("qnk").unwrap_or(&request.to);
+
+    let to_address = if to_str.len() == 64 {
+        match hex::decode(to_str) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut addr = [0u8; 32];
                 addr.copy_from_slice(&bytes);
@@ -2867,10 +2968,10 @@ pub async fn send_private_transaction(
             _ => return Ok(Json(ApiResponse::error("Invalid recipient address format".to_string()))),
         }
     } else {
-        // Handle ENS-style addresses
+        // Handle ENS-style addresses (only if NOT a hex address with qnk prefix)
         use q_types::{Sha3_256, Digest};
         let mut hasher = Sha3_256::new();
-        hasher.update(request.to.as_bytes());
+        hasher.update(to_str.as_bytes());
         hasher.finalize().into()
     };
 
@@ -2892,9 +2993,11 @@ pub async fn send_private_transaction(
     let enable_quantum_mixing = request.enable_quantum_mixing.unwrap_or(true);
 
     // Parse sender address (from wallet)
+    // CRITICAL FIX: Strip "qnk" prefix if present to avoid hashing the entire string
     let from_address = if let Some(from_str) = &request.from {
-        if from_str.len() == 64 {
-            match hex::decode(from_str) {
+        let from_str_clean = from_str.strip_prefix("qnk").unwrap_or(from_str);
+        if from_str_clean.len() == 64 {
+            match hex::decode(from_str_clean) {
                 Ok(bytes) if bytes.len() == 32 => {
                     let mut addr = [0u8; 32];
                     addr.copy_from_slice(&bytes);
@@ -2903,10 +3006,10 @@ pub async fn send_private_transaction(
                 _ => return Ok(Json(ApiResponse::error("Invalid sender address format".to_string()))),
             }
         } else {
-            // Handle ENS-style addresses
+            // Handle ENS-style addresses (only if NOT a hex address with qnk prefix)
             use q_types::{Sha3_256, Digest};
             let mut hasher = Sha3_256::new();
-            hasher.update(from_str.as_bytes());
+            hasher.update(from_str_clean.as_bytes());
             hasher.finalize().into()
         }
     } else {
@@ -2999,20 +3102,17 @@ pub async fn send_private_transaction(
         // Don't add to recipient yet - mixing takes time
     }
 
-    // DashMap lock-free insert for private transaction
-    state.tx_pool.insert(tx_hash, signed_transaction.clone());
+    // CRITICAL FIX: DO NOT add mixer transactions to tx_pool!
+    // If we add them to tx_pool, they get processed by consensus immediately,
+    // which transfers funds to the recipient. Then the mixer ALSO transfers
+    // funds after the delay, causing a DOUBLE TRANSFER bug!
+    //
+    // Mixer transactions should ONLY be processed by complete_mixing_process()
+    // after the privacy-level delay (15/30/60 seconds).
+    // state.tx_pool.insert(tx_hash, signed_transaction.clone());  // REMOVED
 
     // DashMap lock-free insert for mixing status
     state.tx_status.insert(tx_hash, TxStatus::Mixing);
-
-    // Start mixing process (async)
-    tokio::spawn(complete_mixing_process(
-        state.clone(),
-        tx_hash,
-        to_address,
-        amount_u64,
-        mixing_session_id.clone(),
-    ));
 
     // Emit mixing started event
     let event = StreamEvent::PrivacyMixingStarted {
@@ -3034,6 +3134,27 @@ pub async fn send_private_transaction(
 
     info!("🔒 Started quantum privacy mixing: {} (session: {}, decoys: {})",
           hex::encode(tx_hash), &mixing_session_id[..8], decoy_count);
+
+    // CRITICAL: Spawn background task to complete mixing after delay (varies by privacy level)
+    // Pass sender address directly (don't retrieve from tx_pool later, as tx may be removed by consensus)
+    let state_clone = Arc::clone(&state);
+    let mixing_session_id_clone = mixing_session_id.clone();
+    let privacy_level_clone = privacy_level.clone();
+    tokio::spawn(async move {
+        complete_mixing_process(
+            state_clone,
+            tx_hash,
+            from_address,  // Pass sender address directly
+            to_address,
+            amount_u64,
+            mixing_session_id_clone,
+            privacy_level_clone,  // Pass privacy level to determine mixing duration
+        ).await;
+    });
+    info!("🚀 [MIXER] Background mixing task spawned for session: {} (from: {}, to: {})",
+        &mixing_session_id[..8],
+        hex::encode(&from_address[..8]),
+        hex::encode(&to_address[..8]));
 
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
@@ -3266,25 +3387,124 @@ fn generate_mock_spend_keys(count: u32) -> Vec<String> {
 async fn complete_mixing_process(
     state: Arc<AppState>,
     tx_hash: TxHash,
+    sender_address: Address,
     recipient: Address,
     amount: u64,
     mixing_session_id: String,
+    privacy_level: q_types::PrivacyLevel,
 ) {
-    // Simulate mixing time based on complexity
-    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    info!("🌪️ [MIXER] Starting mixing process for tx: {}", hex::encode(tx_hash));
 
-    // DashMap lock-free insert - mixing complete
-    state.tx_status.insert(tx_hash, TxStatus::InMempool);
+    // Simulate mixing time based on privacy level
+    let mixing_duration = match privacy_level {
+        q_types::PrivacyLevel::Standard => 15,  // 15 seconds
+        q_types::PrivacyLevel::High => 30,      // 30 seconds
+        q_types::PrivacyLevel::Maximum => 60,   // 60 seconds
+    };
+    info!("⏱️ [MIXER] Privacy level: {:?}, mixing duration: {}s", privacy_level, mixing_duration);
+    tokio::time::sleep(tokio::time::Duration::from_secs(mixing_duration)).await;
 
-    // Add funds to recipient after mixing is complete
-    {
+    info!("🌪️ [MIXER] Mixing complete, transferring funds from {} to {}",
+        hex::encode(&sender_address[..8]),
+        hex::encode(&recipient[..8]));
+
+    // CRITICAL FIX: Mixer transactions do NOT go through consensus!
+    // We removed tx_pool.insert to prevent double transfers.
+    // Now the mixer must handle BOTH sides of the transfer:
+    // 1. Deduct (amount + fee) from sender
+    // 2. Add amount to recipient
+    let fee = amount / 1000; // 0.1% mixing fee
+    let total_deduction = amount + fee;
+
+    let (old_sender_balance, old_recipient_balance) = {
         let mut balances = state.wallet_balances.write().await;
-        let recipient_balance = balances.get(&recipient).copied().unwrap_or(0);
-        balances.insert(recipient, recipient_balance + amount);
+
+        // Get current balances
+        let old_sender = balances.get(&sender_address).copied().unwrap_or(0);
+        let old_recipient = balances.get(&recipient).copied().unwrap_or(0);
+
+        // Deduct from sender (amount + fee)
+        if old_sender < total_deduction {
+            error!("❌ [MIXER] Insufficient balance! Sender has {} QUG but needs {} QUG",
+                old_sender as f64 / 100_000_000.0,
+                total_deduction as f64 / 100_000_000.0);
+            return; // Early return if insufficient funds
+        }
+
+        balances.insert(sender_address, old_sender - total_deduction);
+        info!("💸 [MIXER] Deducted {} QUG (amount) + {} QUG (fee) from sender (new balance: {} QUG)",
+            amount as f64 / 100_000_000.0,
+            fee as f64 / 100_000_000.0,
+            (old_sender - total_deduction) as f64 / 100_000_000.0);
+
+        // Add to recipient
+        balances.insert(recipient, old_recipient + amount);
+        info!("✅ [MIXER] Added {} QUG to recipient (new balance: {} QUG)",
+            amount as f64 / 100_000_000.0,
+            (old_recipient + amount) as f64 / 100_000_000.0);
+
+        // Return balances for events
+        (old_sender, old_recipient)
+    };
+
+    // CRITICAL FIX: Persist balance changes to RocksDB
+    {
+        let balances = state.wallet_balances.read().await;
+        if let Err(e) = state.storage_engine.save_wallet_balances(&*balances).await {
+            error!("❌ [MIXER] Failed to persist balance changes: {}", e);
+            // Don't return - balances are at least in memory
+        } else {
+            info!("✅ [MIXER] Balance changes persisted to RocksDB");
+        }
+    }
+
+    // Update transaction status to Confirmed (not just InMempool)
+    // Use current_height from state, or 0 if not available
+    let current_height = 0; // TODO: Get from state.current_height
+    let current_round = 0;  // TODO: Get from state.current_round
+    state.tx_status.insert(tx_hash, TxStatus::Confirmed {
+        block_height: current_height,
+        round: current_round,
+    });
+    info!("✅ [MIXER] Transaction status: Confirmed");
+
+    // Get final balances for events
+    let final_sender_balance = state.wallet_balances.read().await
+        .get(&sender_address)
+        .copied()
+        .unwrap_or(0);
+    let final_recipient_balance = state.wallet_balances.read().await
+        .get(&recipient)
+        .copied()
+        .unwrap_or(0);
+
+    // CRITICAL FIX: Emit balance update events for both sender and recipient
+    let sender_event = StreamEvent::BalanceUpdated {
+        wallet_address: hex::encode(sender_address),
+        old_balance: old_sender_balance as f64 / 100_000_000.0,
+        new_balance: final_sender_balance as f64 / 100_000_000.0,
+        change_reason: "transaction_sent_mixed".to_string(),
+        timestamp: chrono::Utc::now(),
+    };
+
+    let recipient_event = StreamEvent::BalanceUpdated {
+        wallet_address: hex::encode(recipient),
+        old_balance: old_recipient_balance as f64 / 100_000_000.0,
+        new_balance: final_recipient_balance as f64 / 100_000_000.0,
+        change_reason: "transaction_received_mixed".to_string(),
+        timestamp: chrono::Utc::now(),
+    };
+
+    // Emit both balance update events
+    if let Err(e) = state.event_emitter.emit_immediate(sender_event).await {
+        warn!("Failed to emit sender balance update: {}", e);
+    }
+    if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
+        warn!("Failed to emit recipient balance update: {}", e);
     }
 
     // Emit mixing completed event
-    let event = StreamEvent::PrivacyMixingCompleted {
+    let mixing_event = StreamEvent::PrivacyMixingCompleted {
         transaction_hash: tx_hash,
         mixing_session_id,
         final_anonymity_set_size: 64,
@@ -3292,11 +3512,11 @@ async fn complete_mixing_process(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_emitter.emit_immediate(event).await {
+    if let Err(e) = state.event_emitter.emit_immediate(mixing_event).await {
         warn!("Failed to emit mixing completed event: {}", e);
     }
 
-    info!("✅ Quantum privacy mixing completed: {}", hex::encode(tx_hash));
+    info!("✅ [MIXER] Quantum privacy mixing completed: {}", hex::encode(tx_hash));
 }
 
 // =============================
@@ -3534,126 +3754,46 @@ pub async fn submit_mining_solution(
         return Ok(Json(ApiResponse::error("Solution does not meet difficulty target".to_string())));
     }
 
-    // Calculate mining reward (base reward + fees)
-    let block_reward = 50_000_000; // 0.5 QNK per block
+    // 🚀 ASYNC QUEUE: Send to background processor instead of blocking here
+    if let Some(tx) = &state.mining_submission_tx {
+        let submission = crate::MiningSubmission {
+            nonce,
+            hash,
+            difficulty_target,
+            miner_address,
+            miner_address_str: request.miner_address.clone(),
+            hash_rate: 0.0, // Hash rate calculated based on submission frequency
+        };
 
-    // Credit miner's balance
-    let mut balances = state.wallet_balances.write().await;
-    let current_balance = balances.get(&miner_address).copied().unwrap_or(0);
-    let new_balance = current_balance + block_reward;
-    balances.insert(miner_address, new_balance);
-    drop(balances); // Release lock before broadcasting
-
-    // 💾 CRITICAL: Persist balance to disk immediately to prevent data loss
-    match state.save_wallet_balance(&miner_address, new_balance).await {
-        Ok(_) => {
-            info!("💾 Successfully persisted mining reward: {} units to wallet", new_balance);
-        }
-        Err(e) => {
-            warn!("❌ CRITICAL: Failed to persist mining reward balance: {:?}", e);
-        }
-    }
-
-    // Create mining reward transaction for recent activity
-    let tx_hash = blake3::hash(&format!("mining_reward_{}_{}_{}", request.miner_address, nonce, chrono::Utc::now().timestamp()).as_bytes()).as_bytes().to_vec();
-    let tx_hash_array: [u8; 32] = tx_hash.as_slice().try_into().unwrap();
-
-    let mining_tx = Transaction {
-        id: tx_hash_array,
-        from: [0u8; 32], // Coinbase - mining rewards come from protocol
-        to: miner_address,
-        amount: block_reward,
-        fee: 0,
-        timestamp: chrono::Utc::now(),
-        signature: vec![],
-        nonce: nonce,
-        data: format!("VDF Mining Reward - Nonce: {}", nonce).into_bytes(),
-        token_type: q_types::TokenType::QUG,
-        fee_token_type: q_types::TokenType::QUGUSD,
-    };
-
-    // Add to transaction pool
-    state.tx_pool.insert(tx_hash_array, mining_tx.clone());
-    let block_height = state.node_status.read().await.current_height;
-    state.tx_status.insert(tx_hash_array, TxStatus::Confirmed { block_height, round: 0 });
-
-    info!("💎 Mining solution accepted! Miner: {}, Reward: {} QNK, Nonce: {}",
-          &request.miner_address[..16], block_reward as f64 / 100_000_000.0, nonce);
-
-    // Broadcast mining reward event via SSE
-    use crate::streaming::StreamEvent;
-
-    let reward_qnk = block_reward as f64 / 100_000_000.0;
-
-    // Extract first 4 hex chars from difficulty_target string for display
-    let difficulty_display = if request.difficulty_target.len() >= 4 {
-        request.difficulty_target[..4].to_string()
-    } else {
-        request.difficulty_target.clone()
-    };
-
-    let _ = state.event_broadcaster.broadcast(StreamEvent::MiningReward {
-        miner_address: request.miner_address.clone(),
-        reward_qnk,
-        nonce,
-        block_height,
-        difficulty: difficulty_display,
-        hash_rate: 0.0, // Will be calculated by miner
-        timestamp: chrono::Utc::now(),
-    });
-
-    // Also emit balance update event
-    let _ = state.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
-        wallet_address: request.miner_address.clone(),
-        old_balance: current_balance as f64 / 100_000_000.0,
-        new_balance: new_balance as f64 / 100_000_000.0,
-        change_reason: "mining_reward".to_string(),
-        timestamp: chrono::Utc::now(),
-    });
-
-    // ============================================================================
-    // 📡 GOSSIPSUB MINING REWARD BROADCAST
-    // Propagate mining reward to all connected peers for blockchain sync
-    // ============================================================================
-    if let Some(ref libp2p) = state.libp2p_discovery {
-        // Serialize mining transaction for network propagation
-        match postcard::to_allocvec(&mining_tx) {
-            Ok(tx_bytes) => {
-                // Spawn async task to avoid blocking the fast path
-                // CRITICAL: Use try_lock() to never block - skip broadcast if libp2p is busy
-                let libp2p_clone = libp2p.clone();
-                let miner_addr = request.miner_address.clone();
-                tokio::spawn(async move {
-                    // Use try_lock instead of lock().await to avoid blocking
-                    match libp2p_clone.try_lock() {
-                        Ok(mut nm) => {
-                            if let Err(e) = nm.publish_topic("/qnk/mining-rewards", tx_bytes) {
-                                tracing::warn!("Failed to broadcast mining reward to network: {}", e);
-                            } else {
-                                tracing::info!("📤 Mining reward for {} broadcast to network", &miner_addr[..16]);
-                            }
-                        }
-                        Err(_) => {
-                            // Libp2p is busy - skip this broadcast to maintain throughput
-                            tracing::debug!("Skipped mining reward broadcast - libp2p busy (maintaining throughput)");
-                        }
-                    }
-                });
+        match tx.send(submission) {
+            Ok(_) => {
+                info!("⚡ Mining submission queued (non-blocking): Miner: {}, Nonce: {}",
+                      &request.miner_address[..16], nonce);
             }
             Err(e) => {
-                tracing::warn!("Failed to serialize mining transaction for broadcast: {}", e);
+                warn!("❌ Failed to queue mining submission: {:?}", e);
+                return Ok(Json(ApiResponse::error("Mining queue temporarily unavailable".to_string())));
             }
         }
+    } else {
+        warn!("⚠️ Mining queue not initialized");
+        return Ok(Json(ApiResponse::error("Mining system not ready".to_string())));
     }
+
+    // Return success immediately (non-blocking)
+    // Background processor will handle balance update, persistence, and broadcasting
+    let block_reward = 50_000_000; // 0.5 QNK per block
+    let current_balance = state.wallet_balances.read().await.get(&miner_address).copied().unwrap_or(0);
+    let estimated_new_balance = current_balance + block_reward;
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
         reward: block_reward,
         reward_qnk: block_reward as f64 / 100_000_000.0,
-        new_balance,
-        new_balance_qnk: new_balance as f64 / 100_000_000.0,
+        new_balance: estimated_new_balance,
+        new_balance_qnk: estimated_new_balance as f64 / 100_000_000.0,
         block_height: state.node_status.read().await.current_height,
-        message: "Mining solution accepted and rewarded".to_string(),
+        message: "Mining solution queued for processing".to_string(),
     })))
 }
 
@@ -3694,6 +3834,71 @@ pub async fn get_mining_challenge(
     })))
 }
 
+/// Manual block trigger endpoint (v0.0.20-beta)
+/// Forces immediate block production for testing and development
+/// Note: Full block handling (consensus, P2P) happens in main.rs time-based loop
+pub async fn trigger_block_production(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("🔨 Manual block production triggered via API");
+
+    // Produce block immediately
+    let mut producer = state.block_producer.write().await;
+
+    match producer.produce_block().await {
+        Some(block) => {
+            let block_height = block.header.height;
+            let block_hash = block.calculate_hash();
+            let solutions_count = block.mining_solutions.len();
+            let block_reward = solutions_count as f64 * 50.0; // Calculate block reward
+            let tx_count = block.transactions.len();
+            let prev_hash = hex::encode(&block.header.prev_block_hash);
+
+            info!("✅ Manual block produced: Height {}, Hash {}, Solutions {}",
+                block_height,
+                hex::encode(&block_hash[..8]),
+                solutions_count
+            );
+
+            // Release producer lock before broadcasting
+            drop(producer);
+
+            // Broadcast NewBlock event via SSE with enhanced data
+            let _ = state.event_broadcaster.broadcast(
+                crate::streaming::StreamEvent::NewBlock {
+                    height: block_height,
+                    hash: hex::encode(&block_hash),
+                    prev_hash,
+                    solutions_count,
+                    total_difficulty: block_height as u128, // Cumulative difficulty
+                    dag_round: block_height, // DAG round number (single validator mode)
+                    miner_count: solutions_count, // Number of miners who contributed
+                    tx_count,
+                    block_reward,
+                    producer_id: 0, // Single producer mode
+                    timestamp: chrono::Utc::now(),
+                }
+            );
+
+            // Note: Block saving, consensus processing, and P2P broadcast
+            // are handled by the time-based block production loop in main.rs
+            // This endpoint just triggers block creation for testing
+
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "triggered": true,
+                "block_height": block_height,
+                "block_hash": hex::encode(&block_hash),
+                "solutions_count": solutions_count,
+                "message": "Block production triggered successfully (processing in background)"
+            }))))
+        }
+        None => {
+            warn!("⚠️  Manual block trigger called but block producer returned None");
+            Ok(Json(ApiResponse::error("Block production failed - node may not be a validator".to_string())))
+        }
+    }
+}
+
 fn verify_mining_difficulty(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     hash < target
 }
@@ -3716,6 +3921,8 @@ pub struct MiningSolutionRequest {
     pub difficulty_target: String,  // Hex-encoded target
     #[serde(default)]
     pub challenge_hash: Option<String>,  // Optional challenge hash for server-side verification
+    #[serde(default)]
+    pub hash_rate: Option<f64>,  // Optional hash rate in KH/s from miner
 }
 
 #[derive(Debug, Serialize)]

@@ -20,7 +20,37 @@ pub struct Config {
     pub node_id: Option<NodeId>,
     /// Tor configuration
     pub tor: TorConfig,
+
+    // v0.0.22-beta: Quick Wins #1, #2, #4
+    /// Allow manual block trigger endpoint (default: false for security)
+    #[serde(default)]
+    pub allow_manual_trigger: bool,
+
+    /// Block production interval in seconds (5-300 range enforced)
+    #[serde(default = "default_block_interval")]
+    pub block_interval_secs: u64,
+
+    /// Minimum solutions per block before production
+    #[serde(default = "default_min_solutions")]
+    pub min_solutions_per_block: usize,
+
+    /// Maximum solutions per block (hard limit)
+    #[serde(default = "default_max_solutions")]
+    pub max_solutions_per_block: usize,
+
+    /// Validator index (0-based, must be unique per validator)
+    #[serde(default)]
+    pub validator_index: u64,
+
+    /// Total number of validators in network
+    #[serde(default = "default_total_validators")]
+    pub total_validators: u64,
 }
+
+fn default_block_interval() -> u64 { 2 } // Phase 2: Fast block production for exciting visualization
+fn default_min_solutions() -> usize { 1 }
+fn default_max_solutions() -> usize { 100 }
+fn default_total_validators() -> u64 { 1 }
 
 /// Tor-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,11 +106,96 @@ impl Default for Config {
             enable_metrics: true,
             node_id: None,
             tor: TorConfig::default(),
+            allow_manual_trigger: false, // v0.0.22-beta: default secure
+            block_interval_secs: 2, // Phase 2: Fast block production for exciting visualization
+            min_solutions_per_block: 1, // v0.0.22-beta: default 1
+            max_solutions_per_block: 100, // v0.0.22-beta: default 100
+            validator_index: 0, // v0.0.22-beta: default primary
+            total_validators: 1, // v0.0.22-beta: default single validator
         }
     }
 }
 
 impl Config {
+    /// Validate configuration on startup (v0.0.22-beta Quick Win #2)
+    /// Returns error if configuration is invalid or unsafe
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use tracing::{info, warn};
+
+        // Validate block interval
+        if self.block_interval_secs < 5 {
+            anyhow::bail!(
+                "INVALID CONFIG: block_interval_secs ({}) must be >= 5 seconds (prevent spam)",
+                self.block_interval_secs
+            );
+        }
+
+        if self.block_interval_secs > 300 {
+            anyhow::bail!(
+                "INVALID CONFIG: block_interval_secs ({}) must be <= 300 seconds (ensure liveness)",
+                self.block_interval_secs
+            );
+        }
+
+        // Validate solution limits
+        if self.min_solutions_per_block > self.max_solutions_per_block {
+            anyhow::bail!(
+                "INVALID CONFIG: min_solutions_per_block ({}) must be <= max_solutions_per_block ({})",
+                self.min_solutions_per_block,
+                self.max_solutions_per_block
+            );
+        }
+
+        if self.max_solutions_per_block > 1000 {
+            anyhow::bail!(
+                "INVALID CONFIG: max_solutions_per_block ({}) must be <= 1000 (prevent DoS)",
+                self.max_solutions_per_block
+            );
+        }
+
+        // Validate port
+        if self.port == 0 {
+            anyhow::bail!("INVALID CONFIG: port must be specified");
+        }
+
+        // Validate validator configuration
+        if self.is_validator {
+            if self.validator_index >= self.total_validators {
+                anyhow::bail!(
+                    "INVALID CONFIG: validator_index ({}) must be < total_validators ({})",
+                    self.validator_index,
+                    self.total_validators
+                );
+            }
+
+            if self.total_validators == 0 {
+                anyhow::bail!("INVALID CONFIG: total_validators must be > 0");
+            }
+
+            // Warn if multi-validator without coordination
+            if self.total_validators > 1 {
+                warn!("⚠️  Multi-validator mode enabled ({} validators)", self.total_validators);
+                warn!("⚠️  Ensure all validators have identical total_validators setting");
+                warn!("⚠️  Ensure each validator has unique validator_index (0 to {})",
+                      self.total_validators - 1);
+                warn!("⚠️  Simple coordination: Only validator 0 produces empty blocks");
+            } else {
+                info!("✅ Single validator mode (default)");
+            }
+        }
+
+        // Warn about manual trigger
+        if self.allow_manual_trigger {
+            warn!("⚠️  Manual block trigger is ENABLED");
+            warn!("⚠️  This should only be used for testing/development");
+            warn!("⚠️  Ensure API authentication is configured!");
+        }
+
+        // Success
+        info!("✅ Configuration validated successfully");
+        Ok(())
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let mut config = Self::default();
 
@@ -167,6 +282,31 @@ impl Config {
 
         if let Ok(tor_socks5) = env::var("Q_TOR_SOCKS5_ADDR") {
             config.tor.socks5_addr = Some(tor_socks5);
+        }
+
+        // v0.0.22-beta: Block production configuration (Quick Wins)
+        if let Ok(allow_manual_trigger) = env::var("Q_ALLOW_MANUAL_TRIGGER") {
+            config.allow_manual_trigger = allow_manual_trigger.parse().unwrap_or(false);
+        }
+
+        if let Ok(block_interval) = env::var("Q_BLOCK_INTERVAL_SECS") {
+            config.block_interval_secs = block_interval.parse().unwrap_or(15);
+        }
+
+        if let Ok(min_solutions) = env::var("Q_MIN_SOLUTIONS_PER_BLOCK") {
+            config.min_solutions_per_block = min_solutions.parse().unwrap_or(1);
+        }
+
+        if let Ok(max_solutions) = env::var("Q_MAX_SOLUTIONS_PER_BLOCK") {
+            config.max_solutions_per_block = max_solutions.parse().unwrap_or(100);
+        }
+
+        if let Ok(validator_index) = env::var("Q_VALIDATOR_INDEX") {
+            config.validator_index = validator_index.parse().unwrap_or(0);
+        }
+
+        if let Ok(total_validators) = env::var("Q_TOTAL_VALIDATORS") {
+            config.total_validators = total_validators.parse().unwrap_or(1);
         }
 
         Ok(config)

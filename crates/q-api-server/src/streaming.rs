@@ -56,6 +56,20 @@ pub enum StreamEvent {
         transactions: Vec<TxHash>,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// New block produced
+    NewBlock {
+        height: u64,
+        hash: String,
+        prev_hash: String,
+        solutions_count: usize,
+        total_difficulty: u128,
+        dag_round: u64,
+        miner_count: usize,
+        tx_count: usize,
+        block_reward: f64,
+        producer_id: usize, // Parallel producer ID for lane assignment in visualization
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
     /// Node status update
     NodeStatusUpdate {
         status: NodeStatus,
@@ -244,7 +258,7 @@ pub struct EventBroadcaster {
 
 impl EventBroadcaster {
     pub fn new() -> Self {
-        let (tx, _rx) = broadcast::channel(10000); // High-capacity buffer
+        let (tx, _rx) = broadcast::channel(100000); // CRITICAL FIX: Increased from 10k to 100k to handle high mining activity
         Self { tx }
     }
 
@@ -254,11 +268,25 @@ impl EventBroadcaster {
         event: StreamEvent,
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let subscriber_count = self.tx.receiver_count();
-        debug!(
-            "Broadcasting event: {}, subscriber count: {}",
-            event_type_name(&event),
-            subscriber_count
-        );
+
+        // CRITICAL FIX: Log important events at INFO level so they're visible
+        match &event {
+            StreamEvent::BalanceUpdated { wallet_address, old_balance, new_balance, change_reason, .. } => {
+                info!("📡 [SSE] Broadcasting BalanceUpdated: wallet={}, old={}, new={}, reason={}, subscribers={}",
+                    &wallet_address[..16], old_balance, new_balance, change_reason, subscriber_count);
+            }
+            StreamEvent::PrivacyMixingCompleted { transaction_hash, mixing_session_id, .. } => {
+                info!("📡 [SSE] Broadcasting PrivacyMixingCompleted: tx={}, session={}, subscribers={}",
+                    hex::encode(&transaction_hash[..8]), &mixing_session_id[..8], subscriber_count);
+            }
+            _ => {
+                debug!(
+                    "Broadcasting event: {}, subscriber count: {}",
+                    event_type_name(&event),
+                    subscriber_count
+                );
+            }
+        }
 
         // Only send if there are active subscribers to avoid "channel closed" errors
         if subscriber_count > 0 {
@@ -410,6 +438,7 @@ pub async fn sse_events(
             // Public events that everyone should see
             StreamEvent::NodeStatusUpdate { .. } |
             StreamEvent::BlockFinalized { .. } |
+            StreamEvent::NewBlock { .. } |
             StreamEvent::MetricsUpdate { .. } |
             StreamEvent::TokenPriceUpdate { .. } |
             StreamEvent::LiquidityPoolUpdate { .. } |
@@ -610,6 +639,7 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::VertexCreated { .. } => "vertex-created".to_string(),
         StreamEvent::CertificateGenerated { .. } => "certificate-generated".to_string(),
         StreamEvent::BlockFinalized { .. } => "block-finalized".to_string(),
+        StreamEvent::NewBlock { .. } => "new-block".to_string(),
         StreamEvent::NodeStatusUpdate { .. } => "node-status".to_string(),
         StreamEvent::PeerEvent { .. } => "peer-event".to_string(),
         StreamEvent::MetricsUpdate { .. } => "metrics-update".to_string(),
