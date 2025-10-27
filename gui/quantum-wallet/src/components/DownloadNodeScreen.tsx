@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-green">v0.0.28-beta Released - P2P Broadcasting Fixed!</span>
+          <span className="text-sm font-bold text-quantum-green">v0.0.29-beta Released - High-Performance Mining (930% Faster!)</span>
         </div>
       </motion.div>
 
@@ -74,8 +74,8 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">P2P Block Broadcasting</p>
-                <p className="text-sm text-gray-400">v0.0.28-beta with fixed gossipsub propagation</p>
+                <p className="text-white font-medium">High-Performance Mining Queue</p>
+                <p className="text-sm text-gray-400">v0.0.29-beta with 930% throughput increase + real peer count</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -89,12 +89,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v0.0.28-beta"
+              href="/downloads/q-api-server-v0.0.29-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v0.0.28-beta)
+              Download Linux Binary (v0.0.29-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
               Size: 104 MB | Latest version | Single executable
@@ -418,7 +418,7 @@ cargo build --release --package q-api-server
       >
         <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-3">
           <Shield className="w-7 h-7 text-quantum-purple" />
-          Validator Node Setup Guide (v0.0.28-beta)
+          Validator Node Setup Guide (v0.0.29-beta)
         </h2>
         <p className="text-gray-400 mb-6">
           Run a validator node to participate in consensus and earn block production rewards. Each validator needs a unique configuration.
@@ -433,13 +433,13 @@ cargo build --release --package q-api-server
             </p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto p-4 bg-quantum-dark/50 rounded-lg">
 {`# Download and make executable
-chmod +x q-api-server-v0.0.28-beta
+chmod +x q-api-server-v0.0.29-beta
 
 # Run the node (automatic block production every 15 seconds)
-./q-api-server-v0.0.28-beta --port 8080
+./q-api-server-v0.0.29-beta --port 8080
 
 # With custom data directory
-Q_DB_PATH=./my-node-data ./q-api-server-v0.0.28-beta --port 8080`}
+Q_DB_PATH=./my-node-data ./q-api-server-v0.0.29-beta --port 8080`}
             </pre>
             <div className="mt-3 p-3 bg-quantum-green/10 border border-quantum-green/30 rounded-lg">
               <p className="text-quantum-green text-xs">
@@ -490,7 +490,7 @@ Q_DB_PATH=./my-node-data ./q-api-server-v0.0.28-beta --port 8080`}
 {`Q_VALIDATOR_INDEX=0 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-0 \\
-./q-api-server-v0.0.28-beta --port 8080 --node-id validator-0`}
+./q-api-server-v0.0.29-beta --port 8080 --node-id validator-0`}
                     </pre>
                   </div>
 
@@ -500,7 +500,7 @@ Q_DB_PATH=./data-validator-0 \\
 {`Q_VALIDATOR_INDEX=1 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-1 \\
-./q-api-server-v0.0.28-beta --port 8081 --node-id validator-1`}
+./q-api-server-v0.0.29-beta --port 8081 --node-id validator-1`}
                     </pre>
                   </div>
 
@@ -510,7 +510,7 @@ Q_DB_PATH=./data-validator-1 \\
 {`Q_VALIDATOR_INDEX=2 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-2 \\
-./q-api-server-v0.0.28-beta --port 8082 --node-id validator-2`}
+./q-api-server-v0.0.29-beta --port 8082 --node-id validator-2`}
                     </pre>
                   </div>
                 </div>
