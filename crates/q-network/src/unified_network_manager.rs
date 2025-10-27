@@ -368,9 +368,22 @@ impl UnifiedNetworkManager {
         let config = Config::with_tokio_executor();
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id, config);
 
-        // Listen on all interfaces, random port
-        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-        swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
+        // Listen on configured port or random port
+        // Check for Q_P2P_PORT environment variable for fixed port (bootstrap nodes)
+        let p2p_port = std::env::var("Q_P2P_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(0); // 0 = random port (default)
+
+        if p2p_port > 0 {
+            info!("🔒 Using fixed libp2p port: {}", p2p_port);
+            swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", p2p_port).parse()?)?;
+            swarm.listen_on(format!("/ip6/::/tcp/{}", p2p_port).parse()?)?;
+        } else {
+            // Listen on all interfaces, random port
+            swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+            swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
+        }
 
         info!("✅ Zero-Knowledge Discovery initialized successfully!");
         info!("📡 Discovery mechanisms active:");

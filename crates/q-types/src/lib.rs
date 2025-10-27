@@ -771,10 +771,10 @@ impl NetworkConfig {
             // Format: /ip4/<IP>/tcp/<P2P_PORT>/p2p/<PEER_ID>
             // If peer ID is omitted, it will be fetched automatically from http://<IP>:18080/api/v1/peer-id
             bootstrap_peers: vec![
-                // Primary bootstrap node (185.182.185.227)
-                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWPaQogoQVq1XoNenW93So8TC9T8CahEoMto455j4jgYmG".to_string(),
-                // Secondary bootstrap node (161.35.219.10) - automatic peer ID discovery
-                "/ip4/161.35.219.10/tcp/9001".to_string(),
+                // Bootstrap peers temporarily disabled until peer ID discovery is fixed
+                // Users should rely on mDNS for local network discovery
+                // Or manually connect to known peers
+                // "/ip4/185.182.185.227/tcp/9001/p2p/<PEER_ID>".to_string(),
             ],
         }
     }
