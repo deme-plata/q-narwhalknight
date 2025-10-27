@@ -187,7 +187,7 @@ pub fn calculate_block_reward(block_height: u64) -> u64 {
 /// Genesis timestamp for Q-NarwhalKnight blockchain
 /// This is when the blockchain started - used for time-based halving
 /// Set to October 26, 2025, 00:00:00 UTC
-pub const GENESIS_TIMESTAMP: u64 = 1729900800; // Unix timestamp
+pub const GENESIS_TIMESTAMP: u64 = 1761436800; // Unix timestamp for Oct 26, 2025 00:00:00 UTC
 
 /// Network supply statistics endpoint - max supply, mined coins, total hashrate
 pub async fn network_supply(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -2827,7 +2827,22 @@ pub async fn robot_swarm_status(
 pub async fn p2p_network_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"peers": 50, "status": "connected"}))))
+    // Get actual peer count from libp2p
+    let peer_count = if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let count = manager.get_peer_count_atomic().load(std::sync::atomic::Ordering::Relaxed);
+        drop(manager);
+        count
+    } else {
+        0
+    };
+
+    let status = if peer_count > 0 { "connected" } else { "disconnected" };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "peers": peer_count,
+        "status": status
+    }))))
 }
 
 /// Manually connect to a peer via libp2p

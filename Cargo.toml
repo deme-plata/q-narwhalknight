@@ -58,7 +58,7 @@ members = [
 , "sdk/rust"]
 
 [workspace.package]
-version = "0.0.8-beta"
+version = "0.0.29-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"

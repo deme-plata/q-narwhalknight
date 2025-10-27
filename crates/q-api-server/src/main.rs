@@ -932,99 +932,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = Arc::new(state);
 
     // ========================================
-    // MINING SUBMISSION ASYNC PROCESSOR
+    // MINING SUBMISSION HIGH-PERFORMANCE BATCHED PROCESSOR
+    // Target: 20,000+ submissions/sec with sub-60ms finality
     // ========================================
     {
         let app_state_mining = app_state.clone();
         tokio::spawn(async move {
-            info!("⚡ Starting mining submission async processor...");
+            info!("🚀 Starting HIGH-PERFORMANCE batch processor (target: 20k+ TPS)");
             let mut processed_count = 0u64;
             let mut last_log = std::time::Instant::now();
+            let mut batch_buffer: Vec<q_api_server::MiningSubmission> = Vec::with_capacity(500);
+            let mut last_batch_process = std::time::Instant::now();
 
             while let Some(submission) = mining_rx.recv().await {
-                let start = std::time::Instant::now();
+                // Collect submissions into batch
+                batch_buffer.push(submission);
 
-                // Calculate mining reward based on TIME (works at any BPS: 0.067 → 100,000!)
-                let current_timestamp = chrono::Utc::now().timestamp() as u64;
-                let block_reward = q_api_server::handlers::calculate_block_reward_time_based(
-                    q_api_server::handlers::GENESIS_TIMESTAMP,
-                    current_timestamp,
-                );
+                // Process batch every 500 submissions OR every 20ms (whichever comes first)
+                // This gives us 25,000 submissions/sec throughput (500 * 50 batches/sec)
+                if batch_buffer.len() >= 500 || last_batch_process.elapsed().as_millis() >= 20 {
+                    let start = std::time::Instant::now();
+                    let batch_size = batch_buffer.len();
 
-                // Update wallet balance
-                let mut balances = app_state_mining.wallet_balances.write().await;
-                let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
-                let new_balance = current_balance + block_reward;
-                balances.insert(submission.miner_address, new_balance);
-                drop(balances);
+                    // PHASE 1: Bulk balance updates in memory (FAST - no I/O)
+                    let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                    let block_reward = q_api_server::handlers::calculate_block_reward_time_based(
+                        q_api_server::handlers::GENESIS_TIMESTAMP,
+                        current_timestamp,
+                    );
 
-                // Persist balance to disk (this is the slow I/O operation)
-                if let Err(e) = app_state_mining.save_wallet_balance(&submission.miner_address, new_balance).await {
-                    warn!("❌ Failed to persist mining reward: {:?}", e);
-                }
+                    let mut balances = app_state_mining.wallet_balances.write().await;
+                    let mut balance_updates = Vec::with_capacity(batch_size);
 
-                // Create mining reward transaction
-                let tx_hash = blake3::hash(&format!("mining_reward_{}_{}_{}",
-                    submission.miner_address_str, submission.nonce, chrono::Utc::now().timestamp()).as_bytes()).as_bytes().to_vec();
-                let tx_hash_array: [u8; 32] = tx_hash.as_slice().try_into().unwrap();
+                    for submission in &batch_buffer {
+                        let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
+                        let new_balance = current_balance + block_reward;
+                        balances.insert(submission.miner_address, new_balance);
+                        balance_updates.push((submission.miner_address, current_balance, new_balance, submission.miner_address_str.clone()));
+                    }
+                    drop(balances);
 
-                let mining_tx = q_types::Transaction {
-                    id: tx_hash_array,
-                    from: [0u8; 32],
-                    to: submission.miner_address,
-                    amount: block_reward,
-                    fee: 0,
-                    timestamp: chrono::Utc::now(),
-                    signature: vec![],
-                    nonce: submission.nonce,
-                    data: format!("VDF Mining Reward - Nonce: {}", submission.nonce).into_bytes(),
-                    token_type: q_types::TokenType::QUG,
-                    fee_token_type: q_types::TokenType::QUGUSD,
-                };
+                    // PHASE 2: Async disk persistence (moved OFF critical path - fire and forget)
+                    let persist_updates = balance_updates.clone();
+                    let persist_state = app_state_mining.clone();
+                    tokio::spawn(async move {
+                        for (addr, _old, new_bal, _) in persist_updates {
+                            let _ = persist_state.save_wallet_balance(&addr, new_bal).await;
+                        }
+                    });
 
-                // Add to transaction pool
-                app_state_mining.tx_pool.insert(tx_hash_array, mining_tx.clone());
-                let block_height = app_state_mining.node_status.read().await.current_height;
-                app_state_mining.tx_status.insert(tx_hash_array, q_types::TxStatus::Confirmed { block_height, round: 0 });
+                    // PHASE 3: Batch SSE events (send only summary - don't spam thousands of individual events)
+                    let block_height = app_state_mining.node_status.read().await.current_height;
+                    let reward_qnk = block_reward as f64 / 100_000_000.0;
 
-                // Broadcast via SSE (non-blocking)
-                use q_api_server::streaming::StreamEvent;
-                let reward_qnk = block_reward as f64 / 100_000_000.0;
-                let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::MiningReward {
-                    miner_address: submission.miner_address_str.clone(),
-                    reward_qnk,
-                    nonce: submission.nonce,
-                    block_height,
-                    difficulty: "0000".to_string(),
-                    hash_rate: 0.0,
-                    timestamp: chrono::Utc::now(),
-                });
+                    // Only broadcast events for a sample of wallets to avoid SSE spam (every 10th wallet)
+                    for (idx, (_, old_bal, new_bal, addr_str)) in balance_updates.iter().enumerate() {
+                        if idx % 10 == 0 {  // Sample: broadcast 1 in 10 to avoid SSE overload
+                            use q_api_server::streaming::StreamEvent;
+                            let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
+                                wallet_address: addr_str.clone(),
+                                old_balance: *old_bal as f64 / 100_000_000.0,
+                                new_balance: *new_bal as f64 / 100_000_000.0,
+                                change_reason: "mining_reward".to_string(),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                    }
 
-                let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
-                    wallet_address: submission.miner_address_str.clone(),
-                    old_balance: current_balance as f64 / 100_000_000.0,
-                    new_balance: new_balance as f64 / 100_000_000.0,
-                    change_reason: "mining_reward".to_string(),
-                    timestamp: chrono::Utc::now(),
-                });
+                    // PHASE 4: Batch queue solutions to BlockProducer
+                    for submission in &batch_buffer {
+                        let solution = q_types::MiningSolution {
+                            nonce: submission.nonce,
+                            hash: submission.hash,
+                            difficulty_target: submission.difficulty_target,
+                            miner_address: submission.miner_address,
+                            timestamp: chrono::Utc::now().timestamp() as u64,
+                            pool_id: None,
+                        };
+                        app_state_mining.block_producer_pool.queue_solution(solution).await;
+                    }
 
-                // 🏗️ BLOCK PRODUCTION: Queue solution to BlockProducer
-                {
-                    let solution = q_types::MiningSolution {
-                        nonce: submission.nonce,
-                        hash: submission.hash,
-                        difficulty_target: submission.difficulty_target,
-                        miner_address: submission.miner_address,
-                        timestamp: chrono::Utc::now().timestamp() as u64,
-                        pool_id: None,
-                    };
-
-                    // PHASE 2: Queue solution to parallel producer pool (round-robin distribution)
-                    app_state_mining.block_producer_pool.queue_solution(solution).await;
-
-                    // PHASE 2: Check if any producer should produce a block
+                    // PHASE 5: Check if we should produce blocks
                     if app_state_mining.block_producer_pool.should_produce().await {
-                        // PHASE 2: Produce blocks from all ready producers (returns Vec<(producer_id, QBlock)>)
                         let new_blocks = app_state_mining.block_producer_pool.produce_blocks().await;
 
                         for (producer_id, new_block) in new_blocks {
@@ -1139,43 +1128,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
-                            if let Some(ref libp2p_manager) = app_state_mining.libp2p_discovery {
+                            debug!("🔍 Attempting to broadcast block {} to P2P network (mining)", new_block.header.height);
+                            if let Some(ref cmd_tx) = app_state_mining.libp2p_command_tx {
+                                info!("✅ libp2p command channel available for block {} broadcast", new_block.header.height);
                                 match postcard::to_allocvec(&new_block) {
                                     Ok(block_bytes) => {
-                                        let libp2p_clone = libp2p_manager.clone();
-                                        let block_height = new_block.header.height;
-                                        tokio::spawn(async move {
-                                            let mut nm = libp2p_clone.lock().await;
-                                            let topic = nm.network_config().network_id.blocks_topic();
-                                            if let Err(e) = nm.publish_topic(&topic, block_bytes) {
-                                                warn!("Failed to broadcast block {} to network: {}", block_height, e);
-                                            } else {
-                                                info!("📡 Block {} broadcast to {} P2P network", block_height, nm.network_config().network_id.as_str());
-                                            }
-                                        });
+                                        info!("✅ Block {} serialized ({} bytes) - sending to P2P network", new_block.header.height, block_bytes.len());
+                                        // Determine network ID from environment or default to testnet
+                                        let network_id = std::env::var("Q_NETWORK")
+                                            .ok()
+                                            .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                                            .unwrap_or(q_types::NetworkId::Testnet);
+                                        let topic = network_id.blocks_topic();
+                                        let command = q_network::NetworkCommand::PublishBlock {
+                                            topic,
+                                            block_bytes,
+                                            block_height: new_block.header.height,
+                                        };
+                                        if let Err(e) = cmd_tx.send(command) {
+                                            warn!("Failed to send block {} broadcast command: {}", new_block.header.height, e);
+                                        } else {
+                                            info!("📡 Block {} broadcast command sent to P2P network", new_block.header.height);
+                                        }
                                     }
                                     Err(e) => {
                                         warn!("Failed to serialize block {} for broadcast: {}", new_block.header.height, e);
                                     }
                                 }
+                            } else {
+                                warn!("❌ libp2p command channel is None - cannot broadcast block {} (mining)", new_block.header.height);
                             }
                         }
                     }
-                }
 
-                processed_count += 1;
-                let elapsed = start.elapsed();
+                    // Clear batch and update metrics
+                    processed_count += batch_size as u64;
+                    batch_buffer.clear();
+                    last_batch_process = std::time::Instant::now();
 
-                // Log throughput every 10 seconds
-                if last_log.elapsed().as_secs() >= 10 {
-                    info!("⚡ Mining queue: {} submissions processed, last took {:?}",
-                          processed_count, elapsed);
-                    last_log = std::time::Instant::now();
+                    let batch_time = start.elapsed();
+                    let throughput = batch_size as f64 / batch_time.as_secs_f64();
+
+                    // Log throughput every 10 seconds
+                    if last_log.elapsed().as_secs() >= 10 {
+                        info!("🚀 BATCH PROCESSOR: {} submissions processed ({:.0} sub/sec), batch {} took {:?}",
+                              processed_count, throughput, batch_size, batch_time);
+                        last_log = std::time::Instant::now();
+                    }
                 }
             }
-            warn!("⚠️  Mining submission processor stopped");
+            warn!("⚠️  HIGH-PERFORMANCE batch processor stopped");
         });
-        info!("✅ Mining submission async processor started");
+        info!("✅ HIGH-PERFORMANCE batched processor started (target: sub-60ms finality)");
     }
 
     // ========================================
@@ -1309,25 +1313,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
-                        if let Some(ref libp2p_manager) = app_state_block_producer.libp2p_discovery {
+                        debug!("🔍 Attempting to broadcast block {} to P2P network (time-based)", new_block.header.height);
+                        if let Some(ref cmd_tx) = app_state_block_producer.libp2p_command_tx {
+                            info!("✅ libp2p command channel available for block {} broadcast", new_block.header.height);
                             match postcard::to_allocvec(&new_block) {
                                 Ok(block_bytes) => {
-                                    let libp2p_clone = libp2p_manager.clone();
-                                    let block_height = new_block.header.height;
-                                    tokio::spawn(async move {
-                                        let mut nm = libp2p_clone.lock().await;
-                                        let topic = nm.network_config().network_id.blocks_topic();
-                                        if let Err(e) = nm.publish_topic(&topic, block_bytes) {
-                                            warn!("Failed to broadcast block {} to network (time-based): {}", block_height, e);
-                                        } else {
-                                            info!("📡 Block {} broadcast to {} P2P network (time-based)", block_height, nm.network_config().network_id.as_str());
-                                        }
-                                    });
+                                    info!("✅ Block {} serialized ({} bytes) - sending to P2P network (time-based)", new_block.header.height, block_bytes.len());
+                                    // Determine network ID from environment or default to testnet
+                                    let network_id = std::env::var("Q_NETWORK")
+                                        .ok()
+                                        .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                                        .unwrap_or(q_types::NetworkId::Testnet);
+                                    let topic = network_id.blocks_topic();
+                                    let command = q_network::NetworkCommand::PublishBlock {
+                                        topic,
+                                        block_bytes,
+                                        block_height: new_block.header.height,
+                                    };
+                                    if let Err(e) = cmd_tx.send(command) {
+                                        warn!("Failed to send block {} broadcast command (time-based): {}", new_block.header.height, e);
+                                    } else {
+                                        info!("📡 Block {} broadcast command sent to P2P network (time-based)", new_block.header.height);
+                                    }
                                 }
                                 Err(e) => {
                                     warn!("Failed to serialize block {} for broadcast (time-based): {}", new_block.header.height, e);
                                 }
                             }
+                        } else {
+                            warn!("❌ libp2p command channel is None - cannot broadcast block {} (time-based)", new_block.header.height);
                         }
                     }
                 }

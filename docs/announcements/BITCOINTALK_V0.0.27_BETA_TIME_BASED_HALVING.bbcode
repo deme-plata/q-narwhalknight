@@ -52,7 +52,7 @@ This design assumes [b]constant block production rate[/b]. But what happens when
 
 [size=12pt][b][color=#00FF94]The Solution: Time-Based Halving[/color][/b][/size]
 
-[b][color=#FFD700]Important Update:[/color][/b] We've adjusted our emission schedule from the earlier 0.5 QQNK per block to a more sustainable time-based model starting at 0.001 QQNK base reward.
+[b][color=#FFD700]Important Update:[/color][/b] We've adjusted our emission schedule from the earlier 0.5 [size=14pt][b]QUG[/b][/size] per block to a more sustainable time-based model starting at 0.001 [size=14pt][b]QUG[/b][/size] base reward.
 
 Instead of counting blocks, we count [b]elapsed time[/b]:
 
@@ -61,7 +61,7 @@ Instead of counting blocks, we count [b]elapsed time[/b]:
     current_timestamp: u64,
 ) -> u64 {
     const SECONDS_PER_YEAR: u64 = 31_536_000;
-    const BASE_REWARD: u64 = 100_000; // 0.001 QQNK
+    const BASE_REWARD: u64 = 100_000; // 0.001 [size=14pt][b]QUG[/b][/size]
 
     let elapsed_seconds = current_timestamp - genesis_timestamp;
     let halving_count = elapsed_seconds / SECONDS_PER_YEAR;
@@ -76,8 +76,8 @@ Instead of counting blocks, we count [b]elapsed time[/b]:
 
 [b][color=#FFD700]Genesis Timestamp:[/color][/b] October 26, 2025, 00:00:00 UTC
 [b][color=#FFD700]First Halving:[/color][/b] Exactly one calendar year later
-[b][color=#FFD700]Max Supply:[/color][/b] 21,000,000 QQNK (hard cap)
-[b][color=#FFD700]Starting Reward:[/color][/b] 0.001 QQNK per block (adjusted from earlier 0.5 QQNK)
+[b][color=#FFD700]Max Supply:[/color][/b] 21,000,000 [size=14pt][b]QUG[/b][/size] (hard cap)
+[b][color=#FFD700]Starting Reward:[/color][/b] 0.001 [size=14pt][b]QUG[/b][/size] per block (adjusted from earlier 0.5 [size=14pt][b]QUG[/b][/size])
 
 [hr]
 
@@ -111,16 +111,16 @@ Halvings occur on [b]predictable calendar dates[/b], independent of blockchain p
 
 [table]
 [tr][td][b]Date[/b][/td][td][b]Per-Block Reward[/b][/td][td][b]Target Annual Emission[/b][/td][td][b]Cumulative %[/b][/td][/tr]
-[tr][td]Oct 26, 2025[/td][td]0.001000 QQNK[/td][td]~3,153,600 QQNK[/td][td]15.0%[/td][/tr]
-[tr][td]Oct 26, 2026[/td][td]0.000500 QQNK[/td][td]~1,576,800 QQNK[/td][td]22.5%[/td][/tr]
-[tr][td]Oct 26, 2027[/td][td]0.000250 QQNK[/td][td]~788,400 QQNK[/td][td]26.3%[/td][/tr]
-[tr][td]Oct 26, 2028[/td][td]0.000125 QQNK[/td][td]~394,200 QQNK[/td][td]28.1%[/td][/tr]
-[tr][td]Oct 26, 2033[/td][td]0.000008 QQNK[/td][td]~24,638 QQNK[/td][td]31.9%[/td][/tr]
-[tr][td]Oct 26, 2041[/td][td]0.000000 QQNK[/td][td]~96 QQNK[/td][td]33.2%[/td][/tr]
-[tr][td]~2089[/td][td]0 QQNK[/td][td]0 QQNK[/td][td]100%[/td][/tr]
+[tr][td]Oct 26, 2025[/td][td]0.001000 [size=14pt][b]QUG[/b][/size][/td][td]~3,153,600 [size=14pt][b]QUG[/b][/size][/td][td]15.0%[/td][/tr]
+[tr][td]Oct 26, 2026[/td][td]0.000500 [size=14pt][b]QUG[/b][/size][/td][td]~1,576,800 [size=14pt][b]QUG[/b][/size][/td][td]22.5%[/td][/tr]
+[tr][td]Oct 26, 2027[/td][td]0.000250 [size=14pt][b]QUG[/b][/size][/td][td]~788,400 [size=14pt][b]QUG[/b][/size][/td][td]26.3%[/td][/tr]
+[tr][td]Oct 26, 2028[/td][td]0.000125 [size=14pt][b]QUG[/b][/size][/td][td]~394,200 [size=14pt][b]QUG[/b][/size][/td][td]28.1%[/td][/tr]
+[tr][td]Oct 26, 2033[/td][td]0.000008 [size=14pt][b]QUG[/b][/size][/td][td]~24,638 [size=14pt][b]QUG[/b][/size][/td][td]31.9%[/td][/tr]
+[tr][td]Oct 26, 2041[/td][td]0.000000 [size=14pt][b]QUG[/b][/size][/td][td]~96 [size=14pt][b]QUG[/b][/size][/td][td]33.2%[/td][/tr]
+[tr][td]~2089[/td][td]0 [size=14pt][b]QUG[/b][/size][/td][td]0 [size=14pt][b]QUG[/b][/size][/td][td]100%[/td][/tr]
 [/table]
 
-[b]Key Insight:[/b] Annual emission remains constant (~3.15M QQNK first year) regardless of whether you produce 2 million blocks or 3 trillion blocks!
+[b]Key Insight:[/b] Annual emission remains constant (~3.15M [size=14pt][b]QUG[/b][/size] first year) regardless of whether you produce 2 million blocks or 3 trillion blocks!
 
 [hr]
 
@@ -160,10 +160,10 @@ Thus E(year) → E_target regardless of b, QED.[/code]
 
 Time-based halving implements this principle:
 [list]
-[li]💎 [b]Year 1:[/b] 0.001 QQNK/block (highest value)[/li]
-[li]💰 [b]Year 2:[/b] 0.0005 QQNK/block (halved)[/li]
-[li]💵 [b]Year 3:[/b] 0.00025 QQNK/block (halved again)[/li]
-[li]💴 [b]Year 10:[/b] 0.0000019 QQNK/block (much lower)[/li]
+[li]💎 [b]Year 1:[/b] 0.001 [size=14pt][b]QUG[/b][/size]/block (highest value)[/li]
+[li]💰 [b]Year 2:[/b] 0.0005 [size=14pt][b]QUG[/b][/size]/block (halved)[/li]
+[li]💵 [b]Year 3:[/b] 0.00025 [size=14pt][b]QUG[/b][/size]/block (halved again)[/li]
+[li]💴 [b]Year 10:[/b] 0.0000019 [size=14pt][b]QUG[/b][/size]/block (much lower)[/li]
 [/list]
 
 [b]Early adopters are rewarded![/b] Just like Bitcoin, but without performance constraints.
@@ -174,9 +174,9 @@ Time-based halving implements this principle:
 
 [table]
 [tr][td][b]Property[/b][/td][td][b]Implementation[/b][/td][td][b]Status[/b][/td][/tr]
-[tr][td][b]Scarcity[/b][/td][td]21M QQNK hard cap[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Scarcity[/b][/td][td]21M [size=14pt][b]QUG[/b][/size] hard cap[/td][td][color=#00FF94]✅[/color][/td][/tr]
 [tr][td][b]Durability[/b][/td][td]Digital + quantum-resistant[/td][td][color=#00FF94]✅[/color][/td][/tr]
-[tr][td][b]Divisibility[/b][/td][td]100M base units per QQNK[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Divisibility[/b][/td][td]100M base units per [size=14pt][b]QUG[/b][/size][/td][td][color=#00FF94]✅[/color][/td][/tr]
 [tr][td][b]Portability[/b][/td][td]Global instant transfer[/td][td][color=#00FF94]✅[/color][/td][/tr]
 [tr][td][b]Fungibility[/b][/td][td]All units identical[/td][td][color=#00FF94]✅[/color][/td][/tr]
 [tr][td][b]Recognizability[/b][/td][td]Quantum consensus signature[/td][td][color=#00FF94]✅[/color][/td][/tr]
@@ -272,7 +272,7 @@ pub fn calculate_block_reward_time_based(
     current_timestamp: u64,
 ) -> u64 {
     const SECONDS_PER_YEAR: u64 = 31_536_000; // 365 days
-    const BASE_REWARD: u64 = 100_000; // 0.001 QQNK in base units
+    const BASE_REWARD: u64 = 100_000; // 0.001 [size=14pt][b]QUG[/b][/size] in base units
 
     if current_timestamp < genesis_timestamp {
         return BASE_REWARD; // Safety fallback
@@ -293,7 +293,7 @@ pub fn calculate_block_reward_time_based(
 [b]Key Constants:[/b]
 • [b]GENESIS_TIMESTAMP:[/b] 1729900800 (Oct 26, 2025, 00:00:00 UTC)
 • [b]SECONDS_PER_YEAR:[/b] 31,536,000 (365 days)
-• [b]BASE_REWARD:[/b] 100,000 base units (0.001 QQNK)
+• [b]BASE_REWARD:[/b] 100,000 base units (0.001 [size=14pt][b]QUG[/b][/size])
 
 [hr]
 
@@ -306,9 +306,9 @@ GET /api/v1/network/supply
 
 Response:
 {
-  "block_reward": 0.001,           // Current per-block reward (QQNK)
+  "block_reward": 0.001,           // Current per-block reward ([size=14pt][b]QUG[/b][/size])
   "current_height": 12345,         // Blocks produced so far
-  "total_mined": 2500.5,          // Total QQNK mined
+  "total_mined": 2500.5,          // Total [size=14pt][b]QUG[/b][/size] mined
   "max_supply": 21000000,         // Hard cap
   "next_halving": "2026-10-26",   // Predictable date
   "time_until_halving": "287 days"
@@ -424,15 +424,15 @@ We've created comprehensive test scripts to verify time-based halving:
 # ✅ Independent of performance optimizations[/code]
 
 [b]Test 1 - Calendar Halvings:[/b]
-[code]Launch (Oct 26, 2025):     0.001 QQNK per block
-Year 2 starts (Oct 26, 2026): 0.0005 QQNK per block (HALVING!)
-Year 3 starts (Oct 26, 2027): 0.00025 QQNK per block (HALVING!)
-Year 4 starts (Oct 26, 2028): 0.000125 QQNK per block (HALVING!)[/code]
+[code]Launch (Oct 26, 2025):     0.001 [size=14pt][b]QUG[/b][/size] per block
+Year 2 starts (Oct 26, 2026): 0.0005 [size=14pt][b]QUG[/b][/size] per block (HALVING!)
+Year 3 starts (Oct 26, 2027): 0.00025 [size=14pt][b]QUG[/b][/size] per block (HALVING!)
+Year 4 starts (Oct 26, 2028): 0.000125 [size=14pt][b]QUG[/b][/size] per block (HALVING!)[/code]
 
 [b]Test 2 - Performance Independence:[/b]
-[code]At 0.067 BPS:   2.1M blocks/year × dynamic reward ≈ 3.15M QQNK
-At 100 BPS:      3.15B blocks/year × dynamic reward ≈ 3.15M QQNK
-At 100,000 BPS:  3.15T blocks/year × dynamic reward ≈ 3.15M QQNK
+[code]At 0.067 BPS:   2.1M blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
+At 100 BPS:      3.15B blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
+At 100,000 BPS:  3.15T blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
 
 Annual emission: CONSTANT regardless of BPS![/code]
 
@@ -498,7 +498,7 @@ curl http://localhost:8080/api/v1/network/supply | jq '.data.block_reward'[/code
 • [b]First Halving Countdown[/b] - 10 months until October 26, 2026 halving
 
 [b]2026 and Beyond:[/b]
-• [b]First Halving Event[/b] - October 26, 2026 (from 0.001 to 0.0005 QQNK)
+• [b]First Halving Event[/b] - October 26, 2026 (from 0.001 to 0.0005 [size=14pt][b]QUG[/b][/size])
 • [b]Phase 7 Optimization[/b] - FPGA + quantum QRNG (100,000 BPS)
 • [b]DeFi Privacy Suite[/b] - Private DEX, lending, staking
 • [b]Cross-Chain Integration[/b] - Privacy-as-a-Service for other blockchains
@@ -556,7 +556,7 @@ Special recognition for the theoretical foundations that made time-based halving
 1. Visit [url=https://quillon.xyz]quillon.xyz[/url]
 2. Create a wallet (stored locally, fully client-side)
 3. Start mining with time-based rewards
-4. Watch your QQNK balance grow with predictable halvings!
+4. Watch your [size=14pt][b]QUG[/b][/size] balance grow with predictable halvings!
 
 [b]For Developers:[/b]
 1. Clone repository: [url=https://code.quillon.xyz]code.quillon.xyz[/url]
@@ -568,7 +568,7 @@ Special recognition for the theoretical foundations that made time-based halving
 1. Download v0.0.27-beta from [url=https://code.quillon.xyz]code.quillon.xyz[/url]
 2. Extract and run: [font=courier]./q-api-server --port 8080 --tui[/font]
 3. Check current reward: [font=courier]curl localhost:8080/api/v1/network/supply[/font]
-4. Earn QQNK mining rewards with time-based halving!
+4. Earn [size=14pt][b]QUG[/b][/size] mining rewards with time-based halving!
 
 [b]For Researchers:[/b]
 1. Download academic whitepaper: [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]39-page PDF[/url]
@@ -588,7 +588,7 @@ Special recognition for the theoretical foundations that made time-based halving
 [size=10pt][color=#FFD700]"Optimize performance infinitely without worrying about tokenomics." - The Time-Based Halving Revolution[/color][/size]
 
 [b]Mainnet Launch: Mid-December 2025[/b]
-[b]Current Reward: 0.001 QQNK per block (adjusted from earlier 0.5 QQNK)[/b]
+[b]Current Reward: 0.001 [size=14pt][b]QUG[/b][/size] per block (adjusted from earlier 0.5 [size=14pt][b]QUG[/b][/size])[/b]
 
 [b]Download:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
 [b]Whitepaper:[/b] [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Mathematical Proofs (39 pages PDF)[/url]
@@ -598,4 +598,4 @@ Special recognition for the theoretical foundations that made time-based halving
 
 [size=10pt][i]This release represents a fundamental advancement in cryptocurrency design. Time-based halving solves the performance-tokenomics coupling problem that has constrained blockchain scalability for 15 years. With mathematical proofs, Austrian economics alignment, and an aggressive roadmap to 10,000 BPS by mid-December 2025 mainnet launch, Q-NarwhalKnight demonstrates what's possible when innovation meets rigorous economic theory.[/i][/size]
 
-[size=8pt]License: Apache 2.0 | Technology: Rust + Post-Quantum Cryptography | Consensus: DAG-Knight + Quantum Enhancements | Tokenomics: Time-Based Halving (World's First) | Token: QQNK (21M max supply)[/size]
+[size=8pt]License: Apache 2.0 | Technology: Rust + Post-Quantum Cryptography | Consensus: DAG-Knight + Quantum Enhancements | Tokenomics: Time-Based Halving (World's First) | Token: [size=14pt][b]QUG[/b][/size] (21M max supply)[/size]

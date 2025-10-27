@@ -10,7 +10,7 @@ use reqwest::Client;
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 
-const SERVER_URL: &str = "http://localhost:9050/api/v1/binary/batch";
+const SERVER_URL: &str = "http://localhost:8080/api/v1/binary/batch";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Transaction {

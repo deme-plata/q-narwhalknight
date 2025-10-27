@@ -107,6 +107,12 @@ pub enum NetworkCommand {
     SetGossipsubChannel {
         tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
     },
+    /// Publish a block to the gossipsub network (P2P broadcasting)
+    PublishBlock {
+        topic: String,
+        block_bytes: Vec<u8>,
+        block_height: u64,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -439,6 +445,18 @@ impl UnifiedNetworkManager {
                             info!("✅ Gossipsub channel set for message propagation");
                             info!("🌉 P2P mining reward/transaction propagation ENABLED");
                         }
+                        NetworkCommand::PublishBlock { topic, block_bytes, block_height } => {
+                            info!("📤 Publishing block {} ({} bytes) to gossipsub topic: {}", block_height, block_bytes.len(), topic);
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, block_bytes) {
+                                Ok(_) => {
+                                    info!("✅ Successfully published block {} to P2P network", block_height);
+                                }
+                                Err(e) => {
+                                    warn!("❌ Failed to publish block {} to topic {}: {}", block_height, topic, e);
+                                }
+                            }
+                        }
                     }
                 }
                 // Process swarm events
@@ -744,10 +762,11 @@ impl UnifiedNetworkManager {
     /// Publish a message to a gossipsub topic
     pub fn publish_topic(&mut self, topic: &str, data: Vec<u8>) -> anyhow::Result<()> {
         let ident_topic = IdentTopic::new(topic);
+        info!("📤 Publishing {} bytes to gossipsub topic: {}", data.len(), topic);
         self.swarm.behaviour_mut().gossipsub
             .publish(ident_topic, data)
             .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
-        debug!("📤 Published message to gossipsub topic: {}", topic);
+        info!("✅ Successfully published message to gossipsub topic: {}", topic);
         Ok(())
     }
 
