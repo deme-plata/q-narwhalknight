@@ -7,6 +7,7 @@ import DexScreen from './components/DexScreen';
 import MiningScreen from './components/MiningScreen';
 import VittuaVMScreen from './components/VittuaVMScreen';
 import DownloadNodeScreen from './components/DownloadNodeScreen';
+import AIChatScreen from './components/AIChatScreen';
 import SettingsScreen from './components/SettingsScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
@@ -14,7 +15,7 @@ import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
 import './App.css';
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -422,6 +423,7 @@ function App() {
             {currentScreen === 'explorer' && <ExplorerScreen />}
             {currentScreen === 'mining' && <MiningScreen />}
             {currentScreen === 'vm' && <VittuaVMScreen />}
+            {currentScreen === 'aichat' && <AIChatScreen />}
             {currentScreen === 'download' && <DownloadNodeScreen />}
             {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
         </main>

@@ -78,6 +78,33 @@ git config user.email "server-beta@q-narwhalknight.dev"
    - Ensure all dependencies are correctly configured
    - Test the fix thoroughly before moving on
 
+4. **CRITICAL: BINARY PATHS AND DEPLOYMENT**
+   - **API Server Binary**: `/opt/orobit/shared/q-narwhalknight/target/release/q-api-server`
+   - **Miner Binary**: `/opt/orobit/shared/q-narwhalknight/target/release/q-miner`
+   - **Service File**: `/etc/systemd/system/q-api-server.service`
+   - **Nginx Config**: `/etc/nginx/sites-available/quillon.xyz`
+   - **Frontend Source**: `gui/quantum-wallet/` (build with `npm run build`)
+   - **Frontend Deploy**: Nginx serves from `/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/`
+   - **User Downloads**: ALWAYS copy binaries to `/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/`
+   - **IMPORTANT**: The correct path is the FULL PATH starting with `/opt/orobit/`, NOT the relative path
+
+5. **NEVER DELETE USER DOWNLOAD BINARIES**
+   - When updating frontend, PRESERVE the downloads folder
+   - Users rely on downloading binaries with specific version names
+   - After building, always copy to the CORRECT location:
+     ```bash
+     # CORRECT path - use FULL PATH starting with /opt/orobit/
+     cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v0.1.1-beta
+     cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-linux-x86_64
+     cp target/release/q-miner /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-miner-linux-x64
+
+     # Verify the file exists at the nginx-served location:
+     ls -lh /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v0.1.1-beta
+
+     # Check DownloadNodeScreen.tsx for the exact filename expected by the download link
+     # The href="/downloads/q-api-server-v0.1.1-beta" must match the actual filename
+     ```
+
 #### **Testing Requirements:**
 ```bash
 # Before every commit:

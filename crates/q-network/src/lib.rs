@@ -49,9 +49,10 @@ pub use transaction_tunneling::{
     TunnelingStats, CircuitBreakerState, ConsensusMessageType,
 };
 
-// Distributed VM and DEX modules
+// Distributed VM, DEX, and AI modules
 pub mod distributed_vm;
 pub mod distributed_dex;
+pub mod distributed_ai;
 pub mod distributed_protocol;
 
 // Export distributed components
@@ -66,6 +67,9 @@ pub use distributed_dex::{
 };
 pub use distributed_protocol::{
     DistributedProtocolManager, DistributedNetworkStats,
+};
+pub use distributed_ai::{
+    DistributedAITopics, AIGossipsubMessage, AIMessagePayload, NodeCapability,
 };
 
 // Simplified network structure for compilation

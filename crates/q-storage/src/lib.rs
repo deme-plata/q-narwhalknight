@@ -50,6 +50,7 @@ pub const CF_BULLSHARK_CERT: &str = "bullshark_cert";
 pub const CF_MANIFEST: &str = "manifest";
 pub const CF_NARWHAL_PAYLOADS: &str = "narwhal_payloads";
 pub const CF_TRANSACTIONS: &str = "transactions";
+pub const CF_AI_CHATS: &str = "ai_chats";
 
 /// Storage configuration
 #[derive(Debug, Clone)]
@@ -437,6 +438,64 @@ impl QStorage {
                 debug!("No latest QBlock found in storage");
                 Ok(None)
             }
+        }
+    }
+
+    /// Get range of QBlocks for blockchain synchronization
+    /// Returns blocks from start_height (inclusive) up to limit blocks
+    ///
+    /// # Arguments
+    /// * `start_height` - Starting block height (inclusive)
+    /// * `limit` - Maximum number of blocks to return
+    ///
+    /// # Returns
+    /// Vector of QBlocks in ascending height order
+    pub async fn get_qblocks_range(&self, start_height: u64, limit: usize) -> Result<Vec<q_types::block::QBlock>> {
+        info!("🔍 Fetching QBlocks from height {} (limit: {})", start_height, limit);
+
+        let mut blocks = Vec::new();
+
+        // Get latest height to know the upper bound
+        let latest_height = match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+            Some(height_bytes) if height_bytes.len() == 8 => {
+                let mut height_array = [0u8; 8];
+                height_array.copy_from_slice(&height_bytes);
+                u64::from_be_bytes(height_array)
+            }
+            _ => {
+                debug!("No latest QBlock height found, returning empty range");
+                return Ok(blocks);
+            }
+        };
+
+        // Calculate end height (inclusive)
+        let end_height = std::cmp::min(start_height + limit as u64 - 1, latest_height);
+
+        // Fetch blocks sequentially
+        for height in start_height..=end_height {
+            match self.get_qblock_by_height(height).await? {
+                Some(block) => blocks.push(block),
+                None => {
+                    warn!("Missing block at height {} during range query", height);
+                    // Don't break - try to get as many blocks as possible
+                }
+            }
+        }
+
+        info!("✅ Retrieved {} QBlocks (heights {}-{})", blocks.len(), start_height, end_height);
+        Ok(blocks)
+    }
+
+    /// Get latest QBlock height
+    /// Returns None if no blocks exist yet
+    pub async fn get_latest_qblock_height(&self) -> Result<Option<u64>> {
+        match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+            Some(height_bytes) if height_bytes.len() == 8 => {
+                let mut height_array = [0u8; 8];
+                height_array.copy_from_slice(&height_bytes);
+                Ok(Some(u64::from_be_bytes(height_array)))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1342,6 +1401,204 @@ impl QStorage {
             }
         }
     }
+
+    // ========================================
+    // AI CHAT STORAGE METHODS
+    // ========================================
+
+    /// Create a new AI chat session
+    /// Key format: chat:{chat_id}
+    pub async fn create_chat(&self, metadata: &ChatMetadata) -> Result<()> {
+        let key = format!("chat:{}", metadata.chat_id);
+        let value = bincode::serialize(metadata)?;
+
+        self.hot_db.put(CF_AI_CHATS, key.as_bytes(), &value).await?;
+
+        // Add to user's chat list
+        self.add_chat_to_user_list(&metadata.user_id, &metadata.chat_id).await?;
+
+        // Set as latest chat for user
+        let latest_key = format!("chat:latest:{}", metadata.user_id);
+        self.hot_db.put(CF_AI_CHATS, latest_key.as_bytes(), metadata.chat_id.as_bytes()).await?;
+
+        info!("💬 Created chat {} for user {}", metadata.chat_id, metadata.user_id);
+        Ok(())
+    }
+
+    /// Save a chat message
+    /// Key format: chat:{chat_id}:msg:{index}
+    pub async fn save_chat_message(&self, chat_id: &str, message: &ChatMessage) -> Result<()> {
+        let msg_key = format!("chat:{}:msg:{}", chat_id, message.index);
+        let value = bincode::serialize(message)?;
+
+        self.hot_db.put(CF_AI_CHATS, msg_key.as_bytes(), &value).await?;
+
+        // Update chat metadata's message count and updated_at
+        let metadata_key = format!("chat:{}", chat_id);
+        if let Some(metadata_data) = self.hot_db.get(CF_AI_CHATS, metadata_key.as_bytes()).await? {
+            let mut metadata: ChatMetadata = bincode::deserialize(&metadata_data)?;
+            metadata.message_count = message.index + 1;
+            metadata.updated_at = message.timestamp;
+
+            let updated_value = bincode::serialize(&metadata)?;
+            self.hot_db.put(CF_AI_CHATS, metadata_key.as_bytes(), &updated_value).await?;
+        }
+
+        debug!("💬 Saved message {} in chat {}", message.index, chat_id);
+        Ok(())
+    }
+
+    /// Load chat messages
+    /// Returns messages in order
+    pub async fn load_chat_messages(&self, chat_id: &str) -> Result<Vec<ChatMessage>> {
+        let prefix = format!("chat:{}:msg:", chat_id);
+        let messages_data = self.hot_db.scan_prefix(CF_AI_CHATS, prefix.as_bytes()).await?;
+
+        let mut messages = Vec::new();
+        for (_, msg_data) in messages_data {
+            if let Ok(message) = bincode::deserialize::<ChatMessage>(&msg_data) {
+                messages.push(message);
+            }
+        }
+
+        // Sort by index
+        messages.sort_by_key(|m| m.index);
+
+        debug!("💬 Loaded {} messages from chat {}", messages.len(), chat_id);
+        Ok(messages)
+    }
+
+    /// List all chats for a user
+    pub async fn list_user_chats(&self, user_id: &str) -> Result<Vec<ChatMetadata>> {
+        let list_key = format!("chat:user:{}", user_id);
+        let chat_ids_data = self.hot_db.get(CF_AI_CHATS, list_key.as_bytes()).await?;
+
+        let chat_ids: Vec<String> = match chat_ids_data {
+            Some(data) => bincode::deserialize(&data)?,
+            None => Vec::new(),
+        };
+
+        let mut chats = Vec::new();
+        for chat_id in chat_ids {
+            let key = format!("chat:{}", chat_id);
+            if let Some(metadata_data) = self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+                if let Ok(metadata) = bincode::deserialize::<ChatMetadata>(&metadata_data) {
+                    chats.push(metadata);
+                }
+            }
+        }
+
+        // Sort by updated_at descending (most recent first)
+        chats.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        debug!("💬 Listed {} chats for user {}", chats.len(), user_id);
+        Ok(chats)
+    }
+
+    /// Delete a chat and all its messages
+    pub async fn delete_chat(&self, chat_id: &str, user_id: &str) -> Result<()> {
+        // Delete chat metadata
+        let metadata_key = format!("chat:{}", chat_id);
+        self.hot_db.delete(CF_AI_CHATS, metadata_key.as_bytes()).await?;
+
+        // Delete all messages
+        let msg_prefix = format!("chat:{}:msg:", chat_id);
+        let messages = self.hot_db.scan_prefix(CF_AI_CHATS, msg_prefix.as_bytes()).await?;
+        for (msg_key, _) in messages {
+            self.hot_db.delete(CF_AI_CHATS, &msg_key).await?;
+        }
+
+        // Remove from user's chat list
+        self.remove_chat_from_user_list(user_id, chat_id).await?;
+
+        info!("💬 Deleted chat {} for user {}", chat_id, user_id);
+        Ok(())
+    }
+
+    /// Rename a chat
+    pub async fn rename_chat(&self, chat_id: &str, new_title: &str) -> Result<()> {
+        let key = format!("chat:{}", chat_id);
+        if let Some(metadata_data) = self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+            let mut metadata: ChatMetadata = bincode::deserialize(&metadata_data)?;
+            metadata.title = new_title.to_string();
+
+            let updated_value = bincode::serialize(&metadata)?;
+            self.hot_db.put(CF_AI_CHATS, key.as_bytes(), &updated_value).await?;
+
+            info!("💬 Renamed chat {} to '{}'", chat_id, new_title);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Chat {} not found", chat_id))
+        }
+    }
+
+    /// Update chat settings (privacy, performance options)
+    pub async fn update_chat_settings(&self, chat_id: &str, settings: &ChatSettings) -> Result<()> {
+        let key = format!("chat:{}", chat_id);
+        if let Some(metadata_data) = self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+            let mut metadata: ChatMetadata = bincode::deserialize(&metadata_data)?;
+
+            metadata.encryption_enabled = settings.encryption_enabled;
+            metadata.zk_proofs_enabled = settings.zk_proofs_enabled;
+            metadata.distributed_enabled = settings.distributed_enabled;
+            metadata.enable_kv_cache = settings.enable_kv_cache;
+            metadata.enable_pipeline_parallel = settings.enable_pipeline_parallel;
+            metadata.enable_load_balancing = settings.enable_load_balancing;
+
+            let updated_value = bincode::serialize(&metadata)?;
+            self.hot_db.put(CF_AI_CHATS, key.as_bytes(), &updated_value).await?;
+
+            info!("💬 Updated settings for chat {}", chat_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Chat {} not found", chat_id))
+        }
+    }
+
+    /// Get chat metadata
+    pub async fn get_chat_metadata(&self, chat_id: &str) -> Result<Option<ChatMetadata>> {
+        let key = format!("chat:{}", chat_id);
+        match self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+            Some(metadata_data) => {
+                let metadata: ChatMetadata = bincode::deserialize(&metadata_data)?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Add chat to user's list (internal helper)
+    async fn add_chat_to_user_list(&self, user_id: &str, chat_id: &str) -> Result<()> {
+        let key = format!("chat:user:{}", user_id);
+
+        let mut chat_ids: Vec<String> = match self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+            Some(data) => bincode::deserialize(&data)?,
+            None => Vec::new(),
+        };
+
+        if !chat_ids.contains(&chat_id.to_string()) {
+            chat_ids.push(chat_id.to_string());
+            let value = bincode::serialize(&chat_ids)?;
+            self.hot_db.put(CF_AI_CHATS, key.as_bytes(), &value).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove chat from user's list (internal helper)
+    async fn remove_chat_from_user_list(&self, user_id: &str, chat_id: &str) -> Result<()> {
+        let key = format!("chat:user:{}", user_id);
+
+        if let Some(data) = self.hot_db.get(CF_AI_CHATS, key.as_bytes()).await? {
+            let mut chat_ids: Vec<String> = bincode::deserialize(&data)?;
+            chat_ids.retain(|id| id != chat_id);
+
+            let value = bincode::serialize(&chat_ids)?;
+            self.hot_db.put(CF_AI_CHATS, key.as_bytes(), &value).await?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Storage statistics for monitoring
@@ -1394,6 +1651,58 @@ impl StorageHealthStatus {
             Self::InconsistentState | Self::DatabaseError | Self::Offline
         )
     }
+}
+
+/// AI Chat metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMetadata {
+    pub chat_id: String,
+    pub user_id: String,
+    pub title: String,
+    pub model: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub message_count: u64,
+    pub encryption_enabled: bool,
+    pub zk_proofs_enabled: bool,
+    pub distributed_enabled: bool,
+    pub enable_kv_cache: bool,
+    pub enable_pipeline_parallel: bool,
+    pub enable_load_balancing: bool,
+}
+
+/// AI Chat message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub index: u64,
+    pub role: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub images: Option<Vec<String>>,
+    pub audio: Option<String>,
+    pub generation_stats: Option<GenerationStats>,
+}
+
+/// AI generation statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationStats {
+    pub total_tokens: usize,
+    pub latency_ms: u64,
+    pub tokens_per_second: f64,
+    pub privacy_overhead_ms: u64,
+    pub zk_proof_time_ms: u64,
+    pub distributed_nodes_used: usize,
+}
+
+/// Chat settings for updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSettings {
+    pub encryption_enabled: bool,
+    pub zk_proofs_enabled: bool,
+    pub distributed_enabled: bool,
+    pub enable_kv_cache: bool,
+    pub enable_pipeline_parallel: bool,
+    pub enable_load_balancing: bool,
 }
 
 #[cfg(test)]

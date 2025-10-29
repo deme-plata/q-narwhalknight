@@ -495,7 +495,7 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
             {selectedBlock.reward > 0 && (
               <div className="flex justify-between">
                 <span className="text-slate-400">Reward:</span>
-                <span className="text-green-400">{selectedBlock.reward.toFixed(2)} QNK</span>
+                <span className="text-green-400">{(selectedBlock.reward / 100_000_000).toFixed(8)} QNK</span>
               </div>
             )}
             {selectedBlock.miner && (

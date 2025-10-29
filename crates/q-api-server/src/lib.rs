@@ -82,6 +82,7 @@ pub mod paas_idempotency;  // ✅ ENABLED - Idempotency support for safe retries
 pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
 pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
 pub mod aegis_auth_middleware;  // ✅ ENABLED - AEGIS-QL post-quantum authentication for founder operations
+pub mod chat_api;  // ✅ ENABLED - AI chat API with privacy-first distributed inference
 // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
@@ -348,6 +349,76 @@ impl Default for SupplyConsensusState {
     }
 }
 
+/// Mining statistics tracking for real-time network hash rate calculation
+#[derive(Debug, Clone)]
+pub struct MinerStats {
+    pub address: String,
+    pub last_hashrate: f64, // KH/s
+    pub last_update: std::time::Instant,
+    pub total_solutions: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MiningStatistics {
+    pub total_solutions_submitted: u64,
+    pub total_solutions_accepted: u64,
+    pub active_miners: HashMap<String, MinerStats>,
+    pub last_cleanup: std::time::Instant,
+}
+
+impl Default for MiningStatistics {
+    fn default() -> Self {
+        Self {
+            total_solutions_submitted: 0,
+            total_solutions_accepted: 0,
+            active_miners: HashMap::new(),
+            last_cleanup: std::time::Instant::now(),
+        }
+    }
+}
+
+impl MiningStatistics {
+    /// Update miner statistics with new submission
+    pub fn update_miner(&mut self, miner_address: String, hash_rate: f64) {
+        let stats = self.active_miners.entry(miner_address.clone()).or_insert(MinerStats {
+            address: miner_address,
+            last_hashrate: 0.0,
+            last_update: std::time::Instant::now(),
+            total_solutions: 0,
+        });
+
+        stats.last_hashrate = hash_rate;
+        stats.last_update = std::time::Instant::now();
+        stats.total_solutions += 1;
+        self.total_solutions_submitted += 1;
+    }
+
+    /// Calculate total network hash rate from active miners
+    pub fn calculate_network_hashrate(&mut self) -> f64 {
+        // Clean up stale miners (no activity in last 5 minutes)
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_cleanup).as_secs() > 60 {
+            self.active_miners.retain(|_, stats| {
+                now.duration_since(stats.last_update).as_secs() < 300
+            });
+            self.last_cleanup = now;
+        }
+
+        // Sum hash rates from all active miners
+        self.active_miners.values()
+            .map(|stats| stats.last_hashrate)
+            .sum()
+    }
+
+    /// Get count of active miners
+    pub fn active_miner_count(&self) -> usize {
+        let now = std::time::Instant::now();
+        self.active_miners.values()
+            .filter(|stats| now.duration_since(stats.last_update).as_secs() < 300)
+            .count()
+    }
+}
+
 /// Application state shared across handlers
 pub struct AppState {
     pub config: Config,
@@ -379,6 +450,9 @@ pub struct AppState {
     pub total_minted_supply: Arc<RwLock<u64>>, // Total QNK minted across all wallets
     pub supply_consensus_state: Arc<RwLock<SupplyConsensusState>>, // libp2p consensus state
 
+    // ⛏️ MINING STATISTICS - Real-time network hash rate tracking
+    pub mining_statistics: Option<Arc<RwLock<MiningStatistics>>>, // Track active miners and hash rates
+
     // Quantum Privacy Mixer State
     pub mixing_requests: Arc<RwLock<HashMap<String, PendingMixingRequest>>>, // participant_id -> request
     pub quantum_mixer: Option<Arc<QuantumMixingEngine>>,
@@ -400,6 +474,12 @@ pub struct AppState {
 
     // libp2p network command channel (for non-blocking P2P operations from API)
     pub libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
+
+    // Cached libp2p peer info for fast API access (updated by event loop)
+    pub libp2p_peer_info: Arc<RwLock<(String, Vec<String>)>>, // (peer_id, listen_addresses)
+
+    // Atomic peer count for fast lock-free access
+    pub libp2p_peer_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
 
     // Mining submission queue (async processing to prevent server overload)
     pub mining_submission_tx: Option<tokio::sync::mpsc::UnboundedSender<MiningSubmission>>,
@@ -500,6 +580,12 @@ pub struct AppState {
 
     // OAuth2 Provider for third-party integrations
     pub oauth2_storage: Arc<RwLock<oauth2_provider::OAuth2Storage>>,
+
+    // AI Inference Engine - Privacy-first distributed inference with KV-cache (OLD - slow)
+    pub inference_engine: Option<Arc<tokio::sync::Mutex<q_ai_inference::distributed_cache::DistributedInferenceWithCache>>>,
+
+    // High-performance mistral.rs engine (10-100x faster, <2s first token)
+    pub mistralrs_engine: Option<Arc<q_ai_inference::MistralRsEngine>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -819,6 +905,7 @@ impl AppState {
             // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
             total_minted_supply: Arc::new(RwLock::new(0)), // Start at 0, will load from storage
             supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
+            mining_statistics: Some(Arc::new(RwLock::new(MiningStatistics::default()))),
 
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
@@ -875,6 +962,8 @@ impl AppState {
             production_peer_discovery: None,
             libp2p_discovery: None,  // Disabled in test mode
             libp2p_command_tx: None,  // Disabled in test mode
+            libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
+            libp2p_peer_count: None, // Disabled in test mode
             mining_submission_tx: None,  // Disabled in test mode
             connection_manager: None,
             dag_sync_manager: None,  // Will be initialized with PeerRegistry
@@ -1028,6 +1117,10 @@ impl AppState {
             paas_billing_manager: Arc::new(paas_billing::PaaSBillingManager::new()),
             paas_idempotency_manager: Arc::new(paas_idempotency::PaaSIdempotencyManager::new()),
             paas_audit_manager: Arc::new(paas_audit::PaaSAuditManager::new(10_000)), // 10k records in memory
+
+            // AI Inference Engine - Initialized in main.rs with auto-download
+            inference_engine: None,
+            mistralrs_engine: None,
         })
     }
 
@@ -1346,6 +1439,7 @@ impl AppState {
             // 🔒 MAX SUPPLY ENFORCEMENT - Load from storage or start at 0
             total_minted_supply: Arc::new(RwLock::new(0)), // TODO: Load from storage
             supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
+            mining_statistics: Some(Arc::new(RwLock::new(MiningStatistics::default()))),
 
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
@@ -1365,6 +1459,12 @@ impl AppState {
 
             // libp2p network command channel
             libp2p_command_tx,
+
+            // Cached libp2p peer info (will be populated after network starts)
+            libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))),
+
+            // Atomic peer count (will be populated from network manager)
+            libp2p_peer_count: None,  // Will be initialized in main.rs after network manager creation
 
             // Mining submission async queue
             mining_submission_tx: None,  // Will be initialized in main.rs
@@ -1548,6 +1648,10 @@ impl AppState {
             paas_billing_manager: Arc::new(paas_billing::PaaSBillingManager::new()),
             paas_idempotency_manager: Arc::new(paas_idempotency::PaaSIdempotencyManager::new()),
             paas_audit_manager: Arc::new(paas_audit::PaaSAuditManager::new(10_000)), // 10k records in memory
+
+            // AI Inference Engine - Initialized in main.rs with auto-download
+            inference_engine: None,
+            mistralrs_engine: None,
         })
     }
 

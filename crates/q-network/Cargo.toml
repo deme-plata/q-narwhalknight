@@ -11,10 +11,11 @@ q-types = { path = "../q-types" }
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-resonance = { path = "../q-resonance" }
+q-storage = { path = "../q-storage" }
 
 # Networking - gossipsub included from workspace
 # NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here
-libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio"] }
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response"] }
 # libp2p-quic = { workspace = true }  # Disabled to avoid conflicts
 
 # Async runtime

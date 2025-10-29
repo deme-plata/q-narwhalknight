@@ -195,33 +195,15 @@ impl BlockProducer {
     /// v0.0.20-beta: Enabled automatic time-based block production
     /// v0.0.22-beta Quick Win #4: Added simple validator coordination
     /// Phase 2.2: Estimate queue size without locks (lock-free approximation)
+    /// v0.1.5-beta FIX: Don't rely on is_empty() - always drain available solutions
     pub fn should_produce_block(&self) -> bool {
         let time_elapsed = self.last_block_time.elapsed().as_secs() >= self.config.block_interval_secs;
 
-        // Phase 2.2: Approximate queue size without locks
-        // SegQueue doesn't provide len(), so we peek to check if solutions exist
-        let has_solutions = !self.pending_solutions.is_empty();
-
-        // Immediate production if time elapsed (we'll drain what we have)
-        if time_elapsed {
-            if has_solutions {
-                return true;  // Any validator can produce if they have solutions
-            } else if self.config.is_validator {
-                // v0.0.22-beta Quick Win #4: Simple coordination for empty blocks
-                if self.config.total_validators == 1 {
-                    return true;  // Single validator - always produce
-                } else {
-                    // Multi-validator: only index 0 produces empty blocks
-                    if self.config.validator_index == 0 {
-                        debug!("📦 Validator {} producing empty block (simple coordination mode)",
-                               self.config.validator_index);
-                        return true;
-                    } else {
-                        debug!("⏭️  Skipping empty block production (not primary validator)");
-                        return false;
-                    }
-                }
-            }
+        // CRITICAL FIX: Always produce when time elapsed if we're a validator
+        // The produce_block() method will drain whatever solutions exist
+        // Don't rely on is_empty() which is unreliable with lock-free SegQueue
+        if time_elapsed && self.config.is_validator {
+            return true;  // Always produce - drain available solutions
         }
 
         false
@@ -852,8 +834,11 @@ impl ParallelBlockProducerPool {
     pub async fn queue_solution(&self, solution: MiningSolution) {
         // Round-robin distribution across all producers
         let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % self.num_producers;
+        debug!("🔄 ParallelBlockProducerPool: Distributing solution to producer #{} (nonce={})",
+            index, solution.nonce);
         let mut producer = self.producers[index].write().await;
         producer.queue_solution(solution);
+        debug!("✅ ParallelBlockProducerPool: Solution distributed to producer #{}", index);
     }
 
     /// Produce blocks from all producers that are ready

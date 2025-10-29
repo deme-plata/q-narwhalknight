@@ -35,7 +35,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 
 # Performance and benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+# criterion temporarily disabled due to font-kit fontconfig FFI issues
 rayon = "1.8"  # Parallel processing for batch operations
 
 # Logging and metrics
@@ -43,7 +43,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+# criterion temporarily disabled due to font-kit fontconfig FFI issues
 tokio-test = "0.4"
 
 [features]

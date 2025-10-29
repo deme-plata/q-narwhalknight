@@ -51,4 +51,4 @@ sled = "0.34"
 tempfile = "3.8"
 tokio-test = "0.4"
 proptest = { workspace = true }
-criterion = { workspace = true }
+# criterion temporarily disabled due to font-kit issues - benchmarks moved to separate crate

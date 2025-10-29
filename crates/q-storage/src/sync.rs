@@ -302,6 +302,172 @@ pub struct SyncRequest {
     pub max_response_size: usize,
 }
 
+/// Block sync request for QBlock synchronization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockSyncRequest {
+    /// Starting block height (inclusive)
+    pub start_height: u64,
+
+    /// Maximum number of blocks to return
+    pub limit: usize,
+
+    /// Request ID for tracking
+    pub request_id: String,
+
+    /// Requesting node ID
+    pub requester: NodeId,
+}
+
+/// Block sync response with QBlocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockSyncResponse {
+    /// Starting height of response
+    pub start_height: u64,
+
+    /// Blocks included in response
+    pub blocks: Vec<q_types::block::QBlock>,
+
+    /// Total blocks included
+    pub total_blocks: u64,
+
+    /// Latest block height on responding node
+    pub latest_height: u64,
+}
+
+// ============================================================================
+// PHASE 3: Libp2p Request-Response Protocol for Block Synchronization
+// ============================================================================
+
+/// Protocol name for block sync via libp2p request-response
+pub const BLOCK_SYNC_PROTOCOL: &str = "/qnk/block-sync/1.0.0";
+
+/// Codec for block sync request-response messages
+#[derive(Clone, Default)]
+pub struct BlockSyncCodec;
+
+#[async_trait]
+impl libp2p::request_response::Codec for BlockSyncCodec {
+    type Protocol = &'static str;
+    type Request = BlockSyncRequest;
+    type Response = BlockSyncResponse;
+
+    async fn read_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+
+        // Read length prefix (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        io.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        // Sanity check: limit request size to 1MB
+        if len > 1_000_000 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Request too large",
+            ));
+        }
+
+        // Read message data
+        let mut data = vec![0u8; len];
+        io.read_exact(&mut data).await?;
+
+        // Deserialize with bincode for efficiency
+        bincode::deserialize(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+
+        // Read length prefix (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        io.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        // Sanity check: limit response size to 100MB (for batch of blocks)
+        if len > 100_000_000 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Response too large",
+            ));
+        }
+
+        // Read message data
+        let mut data = vec![0u8; len];
+        io.read_exact(&mut data).await?;
+
+        // Deserialize with bincode for efficiency
+        bincode::deserialize(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+
+        // Serialize with bincode for efficiency
+        let data = bincode::serialize(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Write length prefix
+        let len = data.len() as u32;
+        io.write_all(&len.to_be_bytes()).await?;
+
+        // Write data
+        io.write_all(&data).await?;
+        io.flush().await?;
+
+        Ok(())
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+
+        // Serialize with bincode for efficiency
+        let data = bincode::serialize(&res)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Write length prefix
+        let len = data.len() as u32;
+        io.write_all(&len.to_be_bytes()).await?;
+
+        // Write data
+        io.write_all(&data).await?;
+        io.flush().await?;
+
+        Ok(())
+    }
+}
+
 /// Sync response message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncResponse {

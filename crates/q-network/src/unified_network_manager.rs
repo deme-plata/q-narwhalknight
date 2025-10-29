@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
 use crate::handshake::ServerRole;
+use crate::distributed_ai::DistributedAITopics;
 
 /// Default bootstrap peer for global network connectivity
 /// This is the production bootstrap node running on 185.182.185.227
@@ -48,6 +49,8 @@ pub struct QNarwhalBehaviour {
     ping: libp2p::ping::Behaviour,
     /// Gossipsub for consensus message propagation (Phase 3)
     gossipsub: gossipsub::Behaviour,
+    /// Request-response for block synchronization (Phase 3)
+    block_sync: libp2p::request_response::Behaviour<q_storage::sync::BlockSyncCodec>,
 }
 
 #[derive(Debug)]
@@ -58,6 +61,7 @@ pub enum QNarwhalEvent {
     Identify(libp2p::identify::Event),
     Ping(libp2p::ping::Event),
     Gossipsub(gossipsub::Event),
+    BlockSync(libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>),
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -88,6 +92,12 @@ impl From<libp2p::ping::Event> for QNarwhalEvent {
 impl From<gossipsub::Event> for QNarwhalEvent {
     fn from(event: gossipsub::Event) -> Self {
         QNarwhalEvent::Gossipsub(event)
+    }
+}
+
+impl From<libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>> for QNarwhalEvent {
+    fn from(event: libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>) -> Self {
+        QNarwhalEvent::BlockSync(event)
     }
 }
 
@@ -185,6 +195,10 @@ pub struct UnifiedNetworkManager {
     command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
     /// Channel sender for commands (cloned and shared with API)
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
+    /// Storage engine for block sync (Phase 3a)
+    storage: Option<Arc<q_storage::QStorage>>,
+    /// Channel to forward synced blocks for consensus validation (Phase 3b)
+    block_sync_tx: Option<mpsc::UnboundedSender<Vec<q_types::block::QBlock>>>,
 }
 
 impl UnifiedNetworkManager {
@@ -354,6 +368,29 @@ impl UnifiedNetworkManager {
                   network_config.network_id.as_str(), topic);
         }
 
+        // Subscribe to distributed AI inference topics
+        let ai_topics = DistributedAITopics::new();
+        for topic in ai_topics.all_topics() {
+            gossipsub.subscribe(&topic)
+                .map_err(|e| anyhow::anyhow!("Failed to subscribe to AI topic {}: {}", topic, e))?;
+            info!("🤖 Subscribed to AI inference topic: {}", topic);
+        }
+        info!("✅ Subscribed to {} AI inference Gossipsub topics", ai_topics.all_topics().len());
+
+        // Configure Request-Response for block synchronization (Phase 3)
+        use libp2p::request_response::{self, ProtocolSupport};
+        use q_storage::sync::{BlockSyncCodec, BLOCK_SYNC_PROTOCOL};
+
+        let block_sync_protocols = std::iter::once((BLOCK_SYNC_PROTOCOL, ProtocolSupport::Full));
+        let block_sync_config = request_response::Config::default();
+        let block_sync = request_response::Behaviour::with_codec(
+            BlockSyncCodec::default(),
+            block_sync_protocols,
+            block_sync_config,
+        );
+
+        info!("🔗 Block sync request-response protocol initialized");
+
         // Combine all behaviors
         let behaviour = QNarwhalBehaviour {
             #[cfg(not(target_os = "windows"))]
@@ -362,6 +399,7 @@ impl UnifiedNetworkManager {
             identify,
             ping,
             gossipsub,
+            block_sync,
         };
 
         // Build swarm using libp2p v0.53 API
@@ -407,6 +445,8 @@ impl UnifiedNetworkManager {
             network_config,
             command_rx,
             command_tx,
+            storage: None, // Set via set_storage() after construction
+            block_sync_tx: None, // Set via set_block_sync_channel() after construction
         })
     }
 
@@ -425,6 +465,18 @@ impl UnifiedNetworkManager {
     pub fn set_gossipsub_channel(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
         self.gossipsub_message_tx = Some(tx);
         info!("🌉 Gossipsub message forwarding channel established");
+    }
+
+    /// Set storage engine for block synchronization (Phase 3a)
+    pub fn set_storage(&mut self, storage: Arc<q_storage::QStorage>) {
+        self.storage = Some(storage);
+        info!("🗄️ Storage engine linked to network manager for block sync");
+    }
+
+    /// Set channel for forwarding synced blocks to consensus (Phase 3b)
+    pub fn set_block_sync_channel(&mut self, tx: mpsc::UnboundedSender<Vec<q_types::block::QBlock>>) {
+        self.block_sync_tx = Some(tx);
+        info!("🔗 Block sync forwarding channel established for consensus validation");
     }
 
     /// Get a cloned command sender for API operations
@@ -682,6 +734,97 @@ impl UnifiedNetworkManager {
             QNarwhalEvent::Gossipsub(event) => {
                 debug!("📢 Gossipsub event: {:?}", event);
             }
+            QNarwhalEvent::BlockSync(block_sync_event) => {
+                use libp2p::request_response::{Event, Message};
+
+                match block_sync_event {
+                    Event::Message { peer, message } => {
+                        match message {
+                            Message::Request { request_id, request, channel } => {
+                                info!("📥 [BLOCK-SYNC] Received block sync request from {}", peer);
+                                info!("   Requested: {} blocks from height {}", request.limit, request.start_height);
+
+                                // Phase 3a: Fetch real blocks from storage
+                                let response = if let Some(ref storage) = self.storage {
+                                    match storage.get_qblocks_range(request.start_height, request.limit).await {
+                                        Ok(blocks) => {
+                                            let latest_height = storage.get_latest_qblock_height().await
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(0);
+
+                                            let block_count = blocks.len() as u64;
+                                            let end_height = if !blocks.is_empty() { blocks.last().unwrap().header.height } else { request.start_height };
+
+                                            info!("✅ [BLOCK-SYNC] Fetched {} blocks from storage (heights {}-{})",
+                                                  block_count, request.start_height, end_height);
+
+                                            q_storage::sync::BlockSyncResponse {
+                                                start_height: request.start_height,
+                                                blocks,
+                                                total_blocks: block_count,
+                                                latest_height,
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("❌ [BLOCK-SYNC] Failed to fetch blocks from storage: {}", e);
+                                            q_storage::sync::BlockSyncResponse {
+                                                start_height: request.start_height,
+                                                blocks: vec![],
+                                                total_blocks: 0,
+                                                latest_height: 0,
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    warn!("⚠️ [BLOCK-SYNC] Storage not available, sending empty response");
+                                    q_storage::sync::BlockSyncResponse {
+                                        start_height: request.start_height,
+                                        blocks: vec![],
+                                        total_blocks: 0,
+                                        latest_height: 0,
+                                    }
+                                };
+
+                                if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
+                                    error!("❌ [BLOCK-SYNC] Failed to send response: {:?}", e);
+                                } else {
+                                    info!("✅ [BLOCK-SYNC] Sent response to {}", peer);
+                                }
+                            }
+                            Message::Response { request_id, response } => {
+                                info!("📨 [BLOCK-SYNC] Received block sync response: {} blocks from height {}",
+                                      response.blocks.len(), response.start_height);
+                                info!("   Latest height on peer: {}", response.latest_height);
+
+                                // Phase 3b: Forward blocks to consensus for validation
+                                if !response.blocks.is_empty() {
+                                    if let Some(ref tx) = self.block_sync_tx {
+                                        if let Err(e) = tx.send(response.blocks.clone()) {
+                                            error!("❌ [BLOCK-SYNC] Failed to forward blocks to consensus: {}", e);
+                                        } else {
+                                            info!("✅ [BLOCK-SYNC] Forwarded {} blocks to consensus for validation", response.blocks.len());
+                                        }
+                                    } else {
+                                        warn!("⚠️ [BLOCK-SYNC] Block sync channel not configured, blocks not forwarded");
+                                    }
+                                } else {
+                                    debug!("📭 [BLOCK-SYNC] No blocks in response, nothing to forward");
+                                }
+                            }
+                        }
+                    }
+                    Event::OutboundFailure { peer, request_id, error } => {
+                        warn!("⚠️ [BLOCK-SYNC] Outbound failure to {}: {:?}", peer, error);
+                    }
+                    Event::InboundFailure { peer, error, .. } => {
+                        warn!("⚠️ [BLOCK-SYNC] Inbound failure from {}: {:?}", peer, error);
+                    }
+                    Event::ResponseSent { peer, .. } => {
+                        debug!("✅ [BLOCK-SYNC] Response sent to {}", peer);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -780,6 +923,72 @@ impl UnifiedNetworkManager {
             .publish(ident_topic, data)
             .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
         info!("✅ Successfully published message to gossipsub topic: {}", topic);
+        Ok(())
+    }
+
+    /// Request blocks from a specific peer via libp2p request-response (Phase 3)
+    pub fn request_blocks_from_peer(
+        &mut self,
+        peer_id: PeerId,
+        start_height: u64,
+        limit: usize,
+    ) -> anyhow::Result<()> {
+        info!("📤 [BLOCK-SYNC] Requesting {} blocks from height {} from peer {}", limit, start_height, peer_id);
+
+        // Convert PeerId to NodeId (32-byte array)
+        let peer_id_bytes = self.local_peer_id.to_bytes();
+        let mut node_id = [0u8; 32];
+        let copy_len = peer_id_bytes.len().min(32);
+        node_id[..copy_len].copy_from_slice(&peer_id_bytes[..copy_len]);
+
+        let request = q_storage::sync::BlockSyncRequest {
+            start_height,
+            limit,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            requester: node_id,
+        };
+
+        self.swarm.behaviour_mut().block_sync.send_request(&peer_id, request);
+
+        info!("✅ [BLOCK-SYNC] Block sync request sent to {}", peer_id);
+        Ok(())
+    }
+
+    /// Auto-detect missing blocks and request from peers (Phase 3c)
+    pub async fn check_and_sync_blocks(&mut self) -> anyhow::Result<()> {
+        // Check if we have storage configured
+        let storage = match &self.storage {
+            Some(s) => s,
+            None => {
+                debug!("🔄 [AUTO-SYNC] Storage not configured, skipping auto-sync");
+                return Ok(());
+            }
+        };
+
+        // Get our local height
+        let local_height = storage.get_latest_qblock_height().await?
+            .unwrap_or(0);
+
+        // Get connected peers
+        let peer_id = {
+            let peers = self.discovered_peers.read().await;
+            if peers.is_empty() {
+                debug!("🔄 [AUTO-SYNC] No peers connected, skipping auto-sync");
+                return Ok(());
+            }
+
+            // Request blocks from the first available peer
+            // In production, this would query multiple peers for their heights
+            // and sync from the one with the highest height
+            *peers.iter().next().unwrap()
+        }; // Lock released here
+
+        // Request next batch of blocks (100 at a time for gradual sync)
+        let batch_size = 100;
+        info!("🔄 [AUTO-SYNC] Local height: {}, requesting blocks from peer {}", local_height, peer_id);
+
+        self.request_blocks_from_peer(peer_id, local_height, batch_size)?;
+
         Ok(())
     }
 

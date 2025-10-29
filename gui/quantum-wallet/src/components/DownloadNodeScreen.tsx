@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-green">v0.0.29-beta Released - High-Performance Mining (930% Faster!)</span>
+          <span className="text-sm font-bold text-quantum-green">v0.1.5-beta Released - Mining Rewards Fix + Low RAM (2GB)</span>
         </div>
       </motion.div>
 
@@ -74,30 +74,30 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">High-Performance Mining Queue</p>
-                <p className="text-sm text-gray-400">v0.0.29-beta with 930% throughput increase + real peer count</p>
+                <p className="text-white font-medium">Mining Rewards Fixed</p>
+                <p className="text-sm text-gray-400">v0.1.5-beta with critical batch processor fix - miners now properly receive rewards in blocks</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Auto-Connect to Network</p>
-                <p className="text-sm text-gray-400">Connects to bootstrap masternode automatically</p>
+                <p className="text-white font-medium">Low RAM Usage (2GB)</p>
+                <p className="text-sm text-gray-400">AI disabled by default (93% RAM reduction). Enable with Q_ENABLE_AI=1 for optional Mistral-7B chat</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v0.0.29-beta"
+              href="/downloads/q-api-server-v0.1.5-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v0.0.29-beta)
+              Download Linux Binary (v0.1.5-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 104 MB | Latest version | Single executable
+              Size: 86 MB | Mining Rewards Fixed + Low RAM (2GB)
             </p>
           </div>
 
@@ -109,10 +109,10 @@ export default function DownloadNodeScreen() {
 ./q-api-server --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              ✅ Auto-connects to bootstrap masternode at 185.182.185.227:8081
+              ✅ Automatic bootstrap: Discovers peers via HTTP API (185.182.185.227:8080)
             </p>
             <p className="text-xs text-quantum-purple mt-2">
-              🌐 Network discovery: mDNS (local) + Kademlia DHT (global) + Bootstrap node
+              🌐 Zero-config networking: Automatic libp2p peer discovery + DHT + Gossipsub
             </p>
           </div>
         </motion.div>
@@ -418,7 +418,7 @@ cargo build --release --package q-api-server
       >
         <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-3">
           <Shield className="w-7 h-7 text-quantum-purple" />
-          Validator Node Setup Guide (v0.0.29-beta)
+          Validator Node Setup Guide (v0.1.1-beta)
         </h2>
         <p className="text-gray-400 mb-6">
           Run a validator node to participate in consensus and earn block production rewards. Each validator needs a unique configuration.
@@ -433,19 +433,20 @@ cargo build --release --package q-api-server
             </p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto p-4 bg-quantum-dark/50 rounded-lg">
 {`# Download and make executable
-chmod +x q-api-server-v0.0.29-beta
+chmod +x q-api-server-v0.1.1-beta
 
 # Run the node (automatic block production every 15 seconds)
-./q-api-server-v0.0.29-beta --port 8080
+./q-api-server-v0.1.1-beta --port 8080
 
 # With custom data directory
-Q_DB_PATH=./my-node-data ./q-api-server-v0.0.29-beta --port 8080`}
+Q_DB_PATH=./my-node-data ./q-api-server-v0.1.1-beta --port 8080`}
             </pre>
             <div className="mt-3 p-3 bg-quantum-green/10 border border-quantum-green/30 rounded-lg">
               <p className="text-quantum-green text-xs">
                 ✅ Blocks will be produced automatically every 15 seconds<br/>
                 ✅ Mining rewards will be accepted and distributed<br/>
-                ✅ Connects to network via bootstrap nodes automatically
+                ✅ Connects to bootstrap node at 185.182.185.227:9001 automatically<br/>
+                ✅ Discovers other peers via Kademlia DHT + mDNS
               </p>
             </div>
           </div>
@@ -490,7 +491,7 @@ Q_DB_PATH=./my-node-data ./q-api-server-v0.0.29-beta --port 8080`}
 {`Q_VALIDATOR_INDEX=0 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-0 \\
-./q-api-server-v0.0.29-beta --port 8080 --node-id validator-0`}
+./q-api-server-v0.1.1-beta --port 8080 --node-id validator-0`}
                     </pre>
                   </div>
 
@@ -500,7 +501,7 @@ Q_DB_PATH=./data-validator-0 \\
 {`Q_VALIDATOR_INDEX=1 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-1 \\
-./q-api-server-v0.0.29-beta --port 8081 --node-id validator-1`}
+./q-api-server-v0.1.1-beta --port 8081 --node-id validator-1`}
                     </pre>
                   </div>
 
@@ -510,7 +511,7 @@ Q_DB_PATH=./data-validator-1 \\
 {`Q_VALIDATOR_INDEX=2 \\
 Q_TOTAL_VALIDATORS=3 \\
 Q_DB_PATH=./data-validator-2 \\
-./q-api-server-v0.0.29-beta --port 8082 --node-id validator-2`}
+./q-api-server-v0.1.1-beta --port 8082 --node-id validator-2`}
                     </pre>
                   </div>
                 </div>

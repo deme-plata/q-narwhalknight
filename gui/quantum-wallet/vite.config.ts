@@ -7,7 +7,7 @@ export default defineConfig({
   base: '/',
   build: {
     outDir: './dist-final',
-    emptyOutDir: true,
+    emptyOutDir: false, // IMPORTANT: Don't delete downloads folder!
     rollupOptions: {
       output: {
         // Force new hashes for every build

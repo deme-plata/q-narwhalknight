@@ -14,7 +14,7 @@ use q_types::Phase;
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 
 #[cfg(not(target_os = "windows"))]
-use crate::{CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST, CF_NARWHAL_PAYLOADS, CF_TRANSACTIONS};
+use crate::{CF_AI_CHATS, CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST, CF_NARWHAL_PAYLOADS, CF_TRANSACTIONS};
 
 /// Async KV store trait for storage abstraction
 #[async_trait]
@@ -143,6 +143,7 @@ impl RocksDBKV {
             Self::create_bullshark_cert_cf(),
             Self::create_manifest_cf(),
             Self::create_transactions_cf(),
+            Self::create_ai_chats_cf(),
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -259,6 +260,22 @@ impl RocksDBKV {
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
 
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
+    }
+
+    /// Create AI chats column family (chat:* keys -> chat data)
+    fn create_ai_chats_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression for text
+
+        // Enable prefix seek for chat-based queries
+        // Use fixed prefix length of 5 bytes for "chat:" prefix
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5));
+
+        let mut table_opts = rocksdb::BlockBasedOptions::default();
+        table_opts.set_index_type(rocksdb::BlockBasedIndexType::HashSearch);
+        opts.set_block_based_table_factory(&table_opts);
+
+        ColumnFamilyDescriptor::new(CF_AI_CHATS, opts)
     }
 
     /// Create Narwhal payloads column family (digest -> payload)

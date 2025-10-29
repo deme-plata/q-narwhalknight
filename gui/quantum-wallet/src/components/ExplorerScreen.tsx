@@ -8,7 +8,6 @@ import {
   Hash,
   Database,
   Cpu,
-  Layers,
   BarChart3,
   Atom,
   X,
@@ -628,13 +627,13 @@ export default function ExplorerScreen() {
           postQuantumReady: 0.88 // TODO: Add PQ readiness API endpoint
         });
 
-        // Fetch real recent transactions from API - NO MOCK DATA
-        const transactionsResponse = await qnkAPI.getRecentTransactions(10);
+        // Fetch anonymized transaction activity from Explorer API (ZK-STARK privacy mode)
+        const transactionsResponse = await qnkAPI.getExplorerTransactions(10);
         const recentTxs = transactionsResponse.success && transactionsResponse.data
           ? transactionsResponse.data.slice(0, 10).map((tx: any, index: number) => ({
               type: 'transaction' as const,
               id: tx.hash || tx.id || `tx_${index}`,
-              amount: tx.amount ? `${(tx.amount / 100000000).toFixed(2)} QNK` : undefined,
+              amount: tx.amount || 'Private',  // ZK-STARK: amounts hidden or shown as tx count
               time: tx.timestamp_formatted || new Date(tx.timestamp * 1000).toLocaleString(),
               status: 'confirmed'
             }))
@@ -885,146 +884,6 @@ export default function ExplorerScreen() {
           <div className="bg-gradient-to-br from-orange-500/10 to-yellow-500/10 backdrop-blur-xl rounded-lg border border-yellow-400/30 p-4 text-center">
             <div className="text-xl font-bold text-yellow-300">{networkSupply.networkHashrateFormatted}</div>
             <div className="text-sm text-gray-400">Network Hashrate</div>
-          </div>
-        </div>
-      </motion.section>
-
-
-      {/* Live Visualizations Placeholder */}
-      <motion.section
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.5 }}
-      >
-        <h2 className="text-xl font-semibold text-white mb-6">📈 Live Network Visualizations</h2>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 p-6 h-80">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-              <Layers className="w-5 h-5 text-quantum-cyan" />
-              🕸️ DAG-Knight Consensus
-            </h3>
-            <div className="relative h-60 flex items-center justify-center">
-              {/* Live DAG Network Visualization */}
-              <div className="relative w-48 h-48">
-                {/* Central node */}
-                <motion.div
-                  className="absolute top-1/2 left-1/2 w-8 h-8 bg-quantum-cyan rounded-full transform -translate-x-1/2 -translate-y-1/2 z-10"
-                  animate={{ scale: [1, 1.2, 1] }}
-                  transition={{ duration: 2, repeat: Infinity }}
-                />
-                
-                {/* Surrounding nodes */}
-                {[0, 1, 2, 3].map((index) => {
-                  const angle = (index * 90) * (Math.PI / 180);
-                  const radius = 60;
-                  const x = Math.cos(angle) * radius;
-                  const y = Math.sin(angle) * radius;
-                  
-                  return (
-                    <motion.div
-                      key={index}
-                      className="absolute w-6 h-6 bg-quantum-purple rounded-full"
-                      style={{
-                        top: '50%',
-                        left: '50%',
-                        transform: `translate(${x - 12}px, ${y - 12}px)`
-                      }}
-                      animate={{ 
-                        opacity: [0.5, 1, 0.5],
-                        scale: [0.8, 1, 0.8]
-                      }}
-                      transition={{ 
-                        duration: 1.5, 
-                        repeat: Infinity,
-                        delay: index * 0.3
-                      }}
-                    />
-                  );
-                })}
-                
-                {/* Connection lines */}
-                <svg className="absolute inset-0 w-full h-full">
-                  {[0, 1, 2, 3].map((index) => {
-                    const angle = (index * 90) * (Math.PI / 180);
-                    const radius = 60;
-                    const x = Math.cos(angle) * radius + 96; // 96 = half of 192px
-                    const y = Math.sin(angle) * radius + 96;
-                    
-                    return (
-                      <motion.line
-                        key={index}
-                        x1="96" y1="96"
-                        x2={x} y2={y}
-                        stroke="url(#gradient)"
-                        strokeWidth="1"
-                        animate={{ opacity: [0.3, 0.8, 0.3] }}
-                        transition={{ duration: 2, repeat: Infinity, delay: index * 0.2 }}
-                      />
-                    );
-                  })}
-                  <defs>
-                    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#00f5ff" />
-                      <stop offset="100%" stopColor="#8b5cf6" />
-                    </linearGradient>
-                  </defs>
-                </svg>
-              </div>
-              
-              <div className="absolute bottom-4 right-4 text-right text-xs text-gray-400">
-                <div>Vertices: {networkStats.currentRound}</div>
-                <div>Round: {networkStats.currentRound}</div>
-                <div>Active: {networkStats.activePeers} nodes</div>
-              </div>
-            </div>
-          </div>
-          
-          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 p-6 h-80">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-              <BarChart3 className="w-5 h-5 text-quantum-green" />
-              📊 Performance Metrics
-            </h3>
-            <div className="relative h-60 p-4">
-              {/* Live Performance Chart */}
-              <div className="flex items-end justify-between h-full gap-2">
-                {[65, 80, 45, 90, 70, 85, 95, 88, 92, 78, 87, 94].map((height, index) => (
-                  <motion.div
-                    key={index}
-                    className="bg-gradient-to-t from-quantum-green/60 to-quantum-cyan/60 rounded-t flex-1 min-w-0"
-                    initial={{ height: 0 }}
-                    animate={{ height: `${height}%` }}
-                    transition={{ 
-                      duration: 1.5, 
-                      delay: index * 0.1,
-                      repeat: Infinity,
-                      repeatType: 'reverse',
-                      repeatDelay: 2
-                    }}
-                  />
-                ))}
-              </div>
-              
-              {/* Chart Labels */}
-              <div className="absolute bottom-0 left-0 right-0 flex justify-between text-xs text-gray-500 px-4">
-                <span>00:00</span>
-                <span>06:00</span>
-                <span>12:00</span>
-                <span>18:00</span>
-                <span>24:00</span>
-              </div>
-              
-              {/* Live Metrics Overlay */}
-              <div className="absolute top-4 right-4 bg-quantum-dark/60 rounded-lg p-3 text-right">
-                <div className="text-quantum-green text-xl font-bold">
-                  {liveMetrics.realTimeTps.toFixed(0)}
-                </div>
-                <div className="text-xs text-gray-400">TPS</div>
-                <div className="text-quantum-cyan text-sm font-semibold mt-1">
-                  {liveMetrics.realTimeLatency.toFixed(0)}ms
-                </div>
-                <div className="text-xs text-gray-400">Latency</div>
-              </div>
-            </div>
           </div>
         </div>
       </motion.section>

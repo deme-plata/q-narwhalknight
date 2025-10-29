@@ -1,0 +1,97 @@
+[package]
+name = "q-ai-inference"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Mistral.rs - High-performance GGUF inference engine (CPU-only for now)
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", default-features = false }
+
+# Candle for tensor operations (using same revision as mistral.rs)
+candle-core = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "7511e510" }
+candle-nn = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "7511e510" }
+
+# Tokenizers for text processing (from HuggingFace)
+tokenizers = { version = "0.21.2", default-features = false, features = ["onig"] }
+either = "1.13"
+indexmap = "2.12"
+
+# CPU resource management
+rayon = "1.10"
+num_cpus = "1.16"
+
+# Iterator utilities for tokenizer
+itertools = { workspace = true }
+
+# Networking
+libp2p = { version = "0.54", features = ["gossipsub", "kad", "tcp", "noise", "yamux"] }
+
+# Async runtime
+tokio = { version = "1.45", features = ["full", "rt-multi-thread"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging and error handling
+tracing = "0.1"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# System information
+sysinfo = "0.30"
+
+# Utilities
+uuid = { version = "1.17", features = ["v4", "serde"] }
+once_cell = "1.21"
+parking_lot = "0.12"
+chrono = "0.4"
+ahash = { workspace = true }
+
+# Compression for tensor data
+flate2 = "1.0"
+
+# Q-NarwhalKnight internal crates
+q-types = { path = "../q-types" }
+q-network = { path = "../q-network" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+q-zk-stark = { path = "../q-zk-stark" }
+
+# Cryptography for privacy layer
+aes-gcm = "0.10"
+sha3 = "0.10"
+rand = "0.8"
+getrandom = "0.2"
+bincode = "1.3"
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = "0.3"
+
+[[example]]
+name = "test_real_inference"
+path = "examples/test_real_inference.rs"
+
+[[example]]
+name = "test_forward_pass"
+path = "examples/test_forward_pass.rs"
+
+[[example]]
+name = "test_full_generation"
+path = "examples/test_full_generation.rs"
+
+[features]
+default = []
+cuda = ["candle-core/cuda"]
+metal = ["candle-core/metal"]

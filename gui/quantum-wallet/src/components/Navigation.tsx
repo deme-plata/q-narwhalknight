@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
-import { Home, Send, Settings, Activity, Search, ArrowDownUp, Pickaxe, Boxes, Download } from 'lucide-react';
+import { Home, Send, Settings, Activity, Search, ArrowDownUp, Pickaxe, Boxes, Download, MessageSquare } from 'lucide-react';
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
 
 interface NavigationProps {
   currentScreen: Screen;
@@ -17,6 +17,7 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
     { id: 'explorer' as Screen, icon: Search, label: 'Explorer' },
     { id: 'mining' as Screen, icon: Pickaxe, label: 'Mining' },
     { id: 'vm' as Screen, icon: Boxes, label: 'QVM' },
+    { id: 'aichat' as Screen, icon: MessageSquare, label: 'AI Chat' },
     { id: 'download' as Screen, icon: Download, label: 'Downloads' },
     { id: 'settings' as Screen, icon: Settings, label: 'Settings' },
   ];

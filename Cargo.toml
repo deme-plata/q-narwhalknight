@@ -55,7 +55,7 @@ members = [
     "crates/q-bounty-server",    # Bounty API server with Axum REST endpoints
     "gui",
     "crates/q-resonance"
-, "sdk/rust"]
+, "sdk/rust", "crates/q-ai-inference"]
 
 [workspace.package]
 version = "0.0.29-beta"
@@ -161,7 +161,7 @@ console = "0.15"
 
 # Testing
 proptest = "1.0"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }  # Disabled plotters/font-kit
 tempfile = "3.8"
 
 # Tor integration - using SOCKS proxy approach to avoid crypto conflicts
@@ -353,5 +353,7 @@ mistralrs = { path = "mistral.rs/mistralrs" }
 mistralrs-audio = { path = "mistral.rs/mistralrs-audio" }
 mistralrs-mcp = { path = "mistral.rs/mistralrs-mcp" }
 
-# Note: Benchmarks are defined in individual crate Cargo.toml files
+# HuggingFace Hub client for model downloads
+hf-hub = { version = "0.4.2", default-features = false, features = ["ureq", "tokio", "rustls-tls"] }
 
+# Note: Benchmarks are defined in individual crate Cargo.toml files

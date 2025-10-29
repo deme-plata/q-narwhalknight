@@ -1157,6 +1157,12 @@ class QNarwhalKnightAPI {
     return this.request<any[]>(`/v1/dag/vertices/recent?limit=${limit}`);
   }
 
+  // Get recent transactions for Explorer (no auth required - all network transactions)
+  async getExplorerTransactions(limit = 10): Promise<ApiResponse<any[]>> {
+    console.log('📊 Fetching recent Explorer transactions, limit:', limit);
+    return this.request<any[]>(`/v1/transactions/explorer?limit=${limit}`);
+  }
+
   // Universal search (blocks, transactions, wallets, contracts)
   async universalSearch(query: string): Promise<ApiResponse<any[]>> {
     console.log('🔍 Universal search for:', query);

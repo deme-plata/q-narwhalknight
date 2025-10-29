@@ -222,12 +222,43 @@ impl Config {
             config.p2p_port = p2p_port.parse()?;
         }
 
+        // Bootstrap peer discovery - automatic and manual
         if let Ok(bootstrap_peers) = env::var("Q_BOOTSTRAP_PEERS") {
             config.bootstrap_peers = bootstrap_peers
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+        }
+
+        // Automatic bootstrap discovery via HTTP API
+        if config.bootstrap_peers.is_empty() {
+            use tracing::{info, warn};
+
+            // Default bootstrap URL - Q-NarwhalKnight Testnet Masternode
+            let bootstrap_url = env::var("Q_BOOTSTRAP_URL")
+                .unwrap_or_else(|_| "http://185.182.185.227:8080".to_string());
+
+            info!("🔍 Attempting automatic bootstrap discovery from {}", bootstrap_url);
+
+            match Self::fetch_bootstrap_peers(&bootstrap_url) {
+                Ok(peers) => {
+                    if !peers.is_empty() {
+                        info!("✅ Discovered {} bootstrap peer(s) automatically", peers.len());
+                        for peer in &peers {
+                            info!("   📡 {}", peer);
+                        }
+                        config.bootstrap_peers = peers;
+                    } else {
+                        warn!("⚠️  No bootstrap peers discovered from {}", bootstrap_url);
+                        warn!("⚠️  Falling back to mDNS local discovery only");
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️  Failed to fetch bootstrap peers from {}: {}", bootstrap_url, e);
+                    warn!("⚠️  Falling back to mDNS local discovery only");
+                }
+            }
         }
 
         if let Ok(database_url) = env::var("DATABASE_URL") {
@@ -317,5 +348,59 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Fetch bootstrap peers from a remote API endpoint
+    ///
+    /// This enables automatic peer discovery by querying the masternode's
+    /// /api/v1/status endpoint and extracting libp2p listen addresses.
+    ///
+    /// # Arguments
+    /// * `url` - Base URL of the bootstrap node (e.g., "http://185.182.185.227:8080")
+    ///
+    /// # Returns
+    /// * `Ok(Vec<String>)` - List of bootstrap peer multiaddrs
+    /// * `Err(anyhow::Error)` - If the request fails or response is invalid
+    fn fetch_bootstrap_peers(url: &str) -> anyhow::Result<Vec<String>> {
+        use std::time::Duration;
+
+        // Build the status endpoint URL
+        let status_url = if url.ends_with('/') {
+            format!("{}api/v1/status", url)
+        } else {
+            format!("{}/api/v1/status", url)
+        };
+
+        // Create a blocking HTTP client with timeout
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+
+        // Fetch the status endpoint
+        let response = client.get(&status_url).send()?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("HTTP error: {}", response.status());
+        }
+
+        // Parse the JSON response
+        let json: serde_json::Value = response.json()?;
+
+        // Extract libp2p listen addresses from the response
+        let addrs = json
+            .get("data")
+            .and_then(|data| data.get("libp2p"))
+            .and_then(|libp2p| libp2p.get("listen_addresses"))
+            .and_then(|addrs| addrs.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.contains("127.0.0.1") && !s.contains("::1")) // Skip localhost
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new);
+
+        Ok(addrs)
     }
 }
