@@ -88,6 +88,9 @@ pub struct NetworkMembershipProof {
     pub network_root: [u8; 32],
     /// Member's position commitment (hides actual position)
     pub position_commitment: [u8; 32],
+    /// Network ID this proof is for (prevents cross-network attacks)
+    /// Examples: "testnet-phase2", "mainnet", "devnet"
+    pub network_id: String,
     /// Proof metadata
     pub metadata: MembershipProofMetadata,
 }
@@ -198,18 +201,35 @@ impl NetworkMembershipProof {
             membership_proof,
             network_root: network_merkle_tree.root,
             position_commitment,
+            network_id: get_current_network_id(),  // Add network ID
             metadata,
         })
     }
 
     /// Verify network membership without learning network topology
     pub async fn verify_membership(&self) -> Result<bool> {
+        self.verify_membership_with_network_id(&get_current_network_id()).await
+    }
+
+    /// Verify network membership against specific network ID
+    pub async fn verify_membership_with_network_id(&self, expected_network_id: &str) -> Result<bool> {
         debug!(
-            "🔍 Verifying network membership proof for epoch: {}",
-            self.metadata.network_epoch
+            "🔍 Verifying network membership proof for epoch: {} (network: {})",
+            self.metadata.network_epoch,
+            self.network_id
         );
 
-        // Check proof freshness
+        // ✅ FIX: Issue #7 - Check network ID matches
+        if self.network_id != expected_network_id {
+            warn!(
+                "❌ Network ID mismatch! Expected: {}, Got: {}",
+                expected_network_id,
+                self.network_id
+            );
+            return Ok(false);
+        }
+
+        // ✅ FIX: Issue #6 - Check proof freshness (expiration)
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -390,6 +410,15 @@ fn get_current_network_epoch() -> u64 {
         / 300 // 5-minute epochs
 }
 
+/// Get current network ID
+///
+/// In production, this should be configured at node startup and retrieved
+/// from the consensus configuration. For now, we default to "testnet-phase2".
+fn get_current_network_id() -> String {
+    // This should be configurable via environment or config file
+    std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase2".to_string())
+}
+
 /// Classify network size into privacy-preserving ranges
 fn classify_network_size(size: usize) -> String {
     match size {
@@ -398,6 +427,24 @@ fn classify_network_size(size: usize) -> String {
         101..=1000 => "large (101-1000)".to_string(),
         _ => "very large (>1000)".to_string(),
     }
+}
+
+/// Standalone convenience function for verifying membership proofs
+///
+/// This function verifies a NetworkMembershipProof without needing to instantiate
+/// a NetworkMembershipManager. Useful for one-off verification in block request
+/// authentication and other contexts where manager state isn't needed.
+///
+/// # Arguments
+/// * `proof` - The membership proof to verify
+///
+/// # Returns
+/// * `Ok(true)` - Proof is valid
+/// * `Ok(false)` - Proof is invalid
+/// * `Err` - Verification encountered an error
+pub async fn verify_membership_proof(proof: &NetworkMembershipProof) -> Result<bool> {
+    debug!("🔍 [STANDALONE] Verifying network membership proof");
+    proof.verify_membership().await
 }
 
 #[cfg(test)]

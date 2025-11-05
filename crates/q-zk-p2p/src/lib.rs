@@ -12,7 +12,7 @@ pub mod zk_p2p_manager;
 // Re-export main types
 pub use anonymous_identity::{OnionOwnershipProof, ValidatorEligibilityProof};
 pub use connection_quality::{ConnectionQualityProof, ConsensusParticipationProof};
-pub use network_membership::NetworkMembershipProof;
+pub use network_membership::{MerkleTree, NetworkMembershipProof, verify_membership_proof};
 pub use zk_p2p_manager::{VerifiedP2pConnection, ZkP2pConfig, ZkP2pManager};
 
 use anyhow::Result;
