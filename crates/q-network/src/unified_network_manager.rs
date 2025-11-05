@@ -29,6 +29,7 @@ use tracing::{debug, error, info, warn};
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
 use crate::handshake::ServerRole;
 use crate::distributed_ai::DistributedAITopics;
+use q_types::QBlock;
 
 /// Default bootstrap peer for global network connectivity
 /// This is the production bootstrap node running on 185.182.185.227
@@ -123,6 +124,34 @@ pub enum NetworkCommand {
         block_bytes: Vec<u8>,
         block_height: u64,
     },
+    /// Publish a block request to the gossipsub network (P2P historical sync)
+    PublishBlockRequest {
+        topic: String,
+        request_bytes: Vec<u8>,
+    },
+    /// Publish a block response to the gossipsub network (P2P historical sync)
+    PublishBlockResponse {
+        topic: String,
+        response_bytes: Vec<u8>,
+        block_height: u64,
+    },
+    /// Publish a block pack to the gossipsub network (Turbo Sync)
+    PublishBlockPack {
+        topic: String,
+        pack_bytes: Vec<u8>,
+    },
+    /// Request a block pack from peers (Turbo Sync)
+    RequestBlockPack {
+        topic: String,
+        request_bytes: Vec<u8>,
+        start_height: u64,
+        end_height: u64,
+    },
+    /// Publish an AI message to the distributed AI network
+    PublishAIMessage {
+        topic: String,
+        message: crate::distributed_ai::AIGossipsubMessage,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -181,6 +210,8 @@ pub struct UnifiedNetworkManager {
     discovered_peers: Arc<RwLock<HashSet<PeerId>>>,
     /// Peer addresses discovered (for connection manager bridge)
     peer_addresses: Arc<RwLock<HashMap<PeerId, Vec<Multiaddr>>>>,
+    /// Bootstrap peers that should be automatically reconnected on disconnect (v0.6.8-beta)
+    bootstrap_peers: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
     /// Local peer ID
     local_peer_id: PeerId,
     /// Channel to send discovered peers to ConnectionManager (Phase 2 bridge)
@@ -197,6 +228,9 @@ pub struct UnifiedNetworkManager {
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
     /// Storage engine for block sync (Phase 3a)
     storage: Option<Arc<q_storage::QStorage>>,
+    /// Gossipsub message aggregation (v0.6.9-beta) - tracks messages per topic
+    /// v0.9.7-beta: Extended to track block height ranges for sync progress visibility
+    gossipsub_stats: Arc<RwLock<HashMap<String, (usize, usize, std::time::Instant, Option<u64>, Option<u64>)>>>, // (count, total_bytes, last_log_time, min_height, max_height)
     /// Channel to forward synced blocks for consensus validation (Phase 3b)
     block_sync_tx: Option<mpsc::UnboundedSender<Vec<q_types::block::QBlock>>>,
 }
@@ -248,6 +282,8 @@ impl UnifiedNetworkManager {
         // Bootstrap from network configuration with automatic peer ID discovery
         let bootstrap_peers = &network_config.bootstrap_peers;
         let mut bootstrap_count = 0;
+        // 🔧 v0.6.8-beta: Track bootstrap peers for automatic reconnection
+        let mut bootstrap_peer_map: HashMap<PeerId, Multiaddr> = HashMap::new();
 
         for addr_str in bootstrap_peers {
             if let Ok(mut addr) = addr_str.trim().parse::<Multiaddr>() {
@@ -261,6 +297,8 @@ impl UnifiedNetworkManager {
                     // Multiaddr already has peer ID - use directly
                     if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                         kademlia.add_address(&peer_id, addr.clone());
+                        // 🔧 v0.6.8-beta: Track this bootstrap peer for automatic reconnection
+                        bootstrap_peer_map.insert(peer_id, addr.clone());
                         info!("📍 Added {} bootstrap peer: {} at {}",
                               network_config.network_id.as_str(), peer_id, addr);
                         bootstrap_count += 1;
@@ -293,6 +331,8 @@ impl UnifiedNetworkManager {
                                     Ok(peer_id) => {
                                         addr.push(Protocol::P2p(peer_id));
                                         kademlia.add_address(&peer_id, addr.clone());
+                                        // 🔧 v0.6.8-beta: Track this bootstrap peer for automatic reconnection
+                                        bootstrap_peer_map.insert(peer_id, addr.clone());
                                         info!("✅ Added {} bootstrap peer with dynamic peer ID: {} at {}",
                                               network_config.network_id.as_str(), peer_id, addr);
                                         bootstrap_count += 1;
@@ -333,9 +373,12 @@ impl UnifiedNetworkManager {
         info!("🌍 Kademlia DHT initialized for clearnet discovery");
 
         // Configure Gossipsub for consensus message propagation (Phase 3)
+        // 🚀 v0.6.5-beta: Increased max_transmit_size to 10MB for large batch sync messages
+        // Batch sync with postcard serialization: ~395 bytes/block → 10MB allows ~25k blocks/batch
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_millis(100)) // Fast propagation
             .validation_mode(ValidationMode::Strict) // Validate messages
+            .max_transmit_size(10 * 1024 * 1024) // 10MB for large batches (was 65KB default)
             .message_id_fn(|message| {
                 // Use message content hash as ID for deduplication
                 MessageId::from(message.data.as_slice())
@@ -359,6 +402,9 @@ impl UnifiedNetworkManager {
             IdentTopic::new(format!("{}/dex/swaps", network_prefix)),        // DEX swap events
             IdentTopic::new(format!("{}/votes", network_prefix)),            // Vote aggregation
             IdentTopic::new(network_config.network_id.acks_topic()),         // Acknowledgements
+            IdentTopic::new(network_config.network_id.block_requests_topic()), // P2P block requests
+            IdentTopic::new(network_config.network_id.block_responses_topic()), // P2P block responses (single blocks)
+            IdentTopic::new(network_config.network_id.batch_block_responses_topic()), // P2P BATCH block responses (OPTIMIZED)
         ];
 
         for topic in &topics {
@@ -403,7 +449,13 @@ impl UnifiedNetworkManager {
         };
 
         // Build swarm using libp2p v0.53 API
-        let config = Config::with_tokio_executor();
+        // 🔧 v0.6.8-beta: Increase idle connection timeout to prevent premature disconnections
+        // Server Alpha was disconnecting from Server Beta after only 41 seconds due to
+        // default 10-second idle timeout. Increasing to 300 seconds (5 minutes) to maintain
+        // stable connections for continuous peer height announcements and turbo sync.
+        // See: SERVER_ALPHA_SYNC_DIAGNOSIS.md and V0.6.8_BETA_LOG_REDUCTION_AND_NETWORK_FIX.md
+        let config = Config::with_tokio_executor()
+            .with_idle_connection_timeout(Duration::from_secs(300)); // 5 minutes (was 10 seconds default)
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id, config);
 
         // Listen on configured port or random port
@@ -438,6 +490,7 @@ impl UnifiedNetworkManager {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             peer_addresses: Arc::new(RwLock::new(HashMap::new())),
+            bootstrap_peers: Arc::new(RwLock::new(bootstrap_peer_map)), // v0.6.8-beta: Auto-reconnection tracking
             local_peer_id,
             peer_tx: None, // Set via set_peer_channel() after construction
             gossipsub_message_tx: None, // Set via set_gossipsub_channel() after construction
@@ -446,6 +499,7 @@ impl UnifiedNetworkManager {
             command_rx,
             command_tx,
             storage: None, // Set via set_storage() after construction
+            gossipsub_stats: Arc::new(RwLock::new(HashMap::new())), // v0.6.9-beta: Gossipsub aggregation
             block_sync_tx: None, // Set via set_block_sync_channel() after construction
         })
     }
@@ -522,6 +576,79 @@ impl UnifiedNetworkManager {
                                 }
                             }
                         }
+                        NetworkCommand::PublishBlockRequest { topic, request_bytes } => {
+                            info!("📤 Publishing block request ({} bytes) to gossipsub topic: {}", request_bytes.len(), topic);
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
+                                Ok(_) => {
+                                    info!("✅ Successfully published block request to P2P network");
+                                }
+                                Err(e) => {
+                                    warn!("❌ Failed to publish block request to topic {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        NetworkCommand::PublishBlockResponse { topic, response_bytes, block_height } => {
+                            info!("📤 Publishing block response for block {} ({} bytes) to gossipsub topic: {}", block_height, response_bytes.len(), topic);
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, response_bytes) {
+                                Ok(_) => {
+                                    info!("✅ Successfully published block response for block {} to P2P network", block_height);
+                                }
+                                Err(e) => {
+                                    warn!("❌ Failed to publish block response to topic {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        NetworkCommand::PublishBlockPack { topic, pack_bytes } => {
+                            info!("🚀 [TURBO SYNC] Publishing block pack ({:.1} KB compressed) to gossipsub topic: {}",
+                                  pack_bytes.len() as f64 / 1024.0, topic);
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, pack_bytes) {
+                                Ok(_) => {
+                                    info!("✅ [TURBO SYNC] Successfully published block pack to P2P network");
+                                }
+                                Err(e) => {
+                                    warn!("❌ [TURBO SYNC] Failed to publish block pack to topic {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        NetworkCommand::RequestBlockPack { topic, request_bytes, start_height, end_height } => {
+                            info!("🚀 [TURBO SYNC] Requesting block pack {}-{} ({} bytes) from P2P network",
+                                  start_height, end_height, request_bytes.len());
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
+                                Ok(_) => {
+                                    info!("✅ [TURBO SYNC] Successfully published block pack request to P2P network");
+                                }
+                                Err(e) => {
+                                    warn!("❌ [TURBO SYNC] Failed to publish block pack request to topic {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        NetworkCommand::PublishAIMessage { topic, message } => {
+                            info!("🤖 [DISTRIBUTED AI] Publishing AI message to topic: {}", topic);
+                            info!("   Message ID: {}", message.message_id);
+                            info!("   Sender: {}", message.sender_node_id);
+
+                            // Serialize AI message to bytes
+                            match postcard::to_allocvec(&message) {
+                                Ok(message_bytes) => {
+                                    let ident_topic = IdentTopic::new(topic.as_str());
+                                    match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes.clone()) {
+                                        Ok(_) => {
+                                            info!("✅ [DISTRIBUTED AI] Successfully published AI message ({} bytes) to P2P network", message_bytes.len());
+                                        }
+                                        Err(e) => {
+                                            error!("❌ [DISTRIBUTED AI] Failed to publish AI message to topic {}: {}", topic, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("❌ [DISTRIBUTED AI] Failed to serialize AI message: {}", e);
+                                }
+                            }
+                        }
                     }
                 }
                 // Process swarm events
@@ -568,6 +695,22 @@ impl UnifiedNetworkManager {
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
 
                         info!("👋 [DISCONNECTION] Connection closed with peer: {} (remaining peers: {})", peer_id, peer_count);
+
+                        // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
+                        // Server Alpha was disconnecting from Server Beta after 41 seconds, causing turbo sync failure.
+                        // If this is a bootstrap peer, immediately attempt to reconnect.
+                        let bootstrap_peers = self.bootstrap_peers.read().await;
+                        if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
+                            warn!("🔄 [AUTO-RECONNECT] Bootstrap peer disconnected - reconnecting to {}", peer_id);
+                            let addr = multiaddr.clone();
+                            drop(bootstrap_peers); // Release lock before dial operation
+
+                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
+                            } else {
+                                info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -702,28 +845,144 @@ impl UnifiedNetworkManager {
                 message_id,
                 message,
             }) => {
-                info!(
-                    "📨 Gossipsub message received from {}: topic={}, id={:?}, size={} bytes",
-                    propagation_source,
-                    message.topic,
-                    message_id,
-                    message.data.len()
-                );
-
-                // Forward to gossipsub message channel if available
-                if let Some(ref tx) = self.gossipsub_message_tx {
-                    let topic = message.topic.to_string();
-                    let data = message.data.clone();
-
-                    if let Err(e) = tx.send((topic.clone(), data)) {
-                        warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic, e);
+                // Truncate MessageId for cleaner logs - extract first 16 bytes of hex
+                let msg_id_str = format!("{:?}", message_id);
+                // MessageId format is MessageId(hexhexhex...) so strip the prefix/suffix and truncate
+                let msg_id_short = if msg_id_str.starts_with("MessageId(") && msg_id_str.ends_with(')') {
+                    let hex_part = &msg_id_str[10..msg_id_str.len()-1]; // Remove "MessageId(" and ")"
+                    if hex_part.len() > 32 {
+                        format!("{}...", &hex_part[..32])
                     } else {
-                        debug!("✅ Forwarded gossipsub message on topic: {}", topic);
+                        hex_part.to_string()
+                    }
+                } else {
+                    msg_id_str
+                };
+
+                // 🔇 v0.6.9-beta: Aggregate gossipsub logs to prevent spam (was 775+ logs hiding progress bar)
+                // v0.9.7-beta: Enhanced to track block height ranges for sync progress visibility
+                // Only log aggregated stats every 2MB or 10 seconds per topic
+                let topic_str = message.topic.to_string();
+                let msg_size = message.data.len();
+
+                // Extract block height if this is a block message
+                let block_height = if topic_str.contains("/blocks") {
+                    postcard::from_bytes::<QBlock>(&message.data)
+                        .ok()
+                        .map(|block| block.header.height)
+                } else {
+                    None
+                };
+
+                let mut should_log = false;
+                {
+                    let mut stats = self.gossipsub_stats.write().await;
+                    let entry = stats.entry(topic_str.clone()).or_insert((0, 0, std::time::Instant::now(), None, None));
+                    entry.0 += 1; // message count
+                    entry.1 += msg_size; // total bytes
+
+                    // Track block height range if available
+                    if let Some(height) = block_height {
+                        entry.3 = Some(entry.3.map_or(height, |min| min.min(height)));
+                        entry.4 = Some(entry.4.map_or(height, |max| max.max(height)));
+                    }
+
+                    // Log if 2MB accumulated OR 10 seconds elapsed
+                    if entry.1 >= 2_000_000 || entry.2.elapsed().as_secs() >= 10 {
+                        should_log = true;
+
+                        if let (Some(min_height), Some(max_height)) = (entry.3, entry.4) {
+                            let height_range = if min_height == max_height {
+                                format!("height={}", min_height)
+                            } else {
+                                format!("heights={}-{} (Δ={})", min_height, max_height, max_height - min_height)
+                            };
+                            info!(
+                                "📨 [AGGREGATED] Received {} messages ({:.2} MB) on topic {} in last {}s | {}",
+                                entry.0,
+                                entry.1 as f64 / 1_000_000.0,
+                                topic_str,
+                                entry.2.elapsed().as_secs(),
+                                height_range
+                            );
+                        } else {
+                            info!(
+                                "📨 [AGGREGATED] Received {} messages ({:.2} MB) on topic {} in last {}s",
+                                entry.0,
+                                entry.1 as f64 / 1_000_000.0,
+                                topic_str,
+                                entry.2.elapsed().as_secs()
+                            );
+                        }
+
+                        // Reset counters
+                        entry.0 = 0;
+                        entry.1 = 0;
+                        entry.2 = std::time::Instant::now();
+                        entry.3 = None;
+                        entry.4 = None;
                     }
                 }
 
-                // Also log receipt for debugging
-                debug!("📨 Message data: {:?}", message.data);
+                // Individual message details at DEBUG level only
+                // v0.9.7-beta: Enhanced logging to show block heights and sync progress
+                if topic_str.contains("/blocks") {
+                    // Attempt to decode block information for better sync visibility
+                    match postcard::from_bytes::<QBlock>(&message.data) {
+                        Ok(block) => {
+                            info!(
+                                "📨 Gossipsub BLOCK from {}: topic={}, height={}, txs={}, size={} bytes, hash={}",
+                                propagation_source,
+                                message.topic,
+                                block.header.height,
+                                block.transactions.len(),
+                                msg_size,
+                                hex::encode(&block.calculate_hash()[..8])
+                            );
+                        }
+                        Err(_) => {
+                            debug!(
+                                "📨 Gossipsub message from {}: topic={}, id={}, size={} bytes (failed to decode block)",
+                                propagation_source,
+                                message.topic,
+                                msg_id_short,
+                                msg_size
+                            );
+                        }
+                    }
+                } else {
+                    debug!(
+                        "📨 Gossipsub message from {}: topic={}, id={}, size={} bytes",
+                        propagation_source,
+                        message.topic,
+                        msg_id_short,
+                        msg_size
+                    );
+                }
+
+                // Forward to gossipsub message channel if available
+                if let Some(ref tx) = self.gossipsub_message_tx {
+                    let data = message.data.clone();
+
+                    if let Err(e) = tx.send((topic_str.clone(), data)) {
+                        warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic_str, e);
+                    } else {
+                        // 🔇 v0.6.9-beta: Changed to DEBUG to prevent log spam
+                        // v0.9.7-beta: Enhanced with block height information
+                        if topic_str.contains("/blocks") {
+                            if let Ok(block) = postcard::from_bytes::<QBlock>(&message.data) {
+                                info!("✅ Forwarded BLOCK on topic: {} (height={}, size={} bytes)",
+                                     topic_str, block.header.height, msg_size);
+                            } else {
+                                debug!("✅ Forwarded gossipsub message on topic: {} (size={} bytes)", topic_str, msg_size);
+                            }
+                        } else {
+                            debug!("✅ Forwarded gossipsub message on topic: {} (size={} bytes)", topic_str, msg_size);
+                        }
+                    }
+                } else {
+                    warn!("⚠️ Gossipsub message received but gossipsub_message_tx is None!");
+                }
             }
             QNarwhalEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic }) => {
                 info!("📢 Peer {} subscribed to topic: {}", peer_id, topic);
@@ -1064,6 +1323,20 @@ impl UnifiedNetworkManager {
                     self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
 
                     info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
+
+                    // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
+                    let bootstrap_peers = self.bootstrap_peers.read().await;
+                    if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
+                        warn!("🔄 [AUTO-RECONNECT] Bootstrap peer disconnected - reconnecting to {}", peer_id);
+                        let addr = multiaddr.clone();
+                        drop(bootstrap_peers);
+
+                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                            error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
+                        } else {
+                            info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                        }
+                    }
                 }
                 _ => {}
             }
