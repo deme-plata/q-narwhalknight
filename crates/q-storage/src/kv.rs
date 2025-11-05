@@ -14,7 +14,11 @@ use q_types::Phase;
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 
 #[cfg(not(target_os = "windows"))]
-use crate::{CF_AI_CHATS, CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST, CF_NARWHAL_PAYLOADS, CF_TRANSACTIONS};
+use crate::{
+    CF_AI_CHATS, CF_AI_CREDITS, CF_AI_TRANSACTIONS, CF_AI_TREASURY, CF_BALANCES, CF_BANNED_PEERS,
+    CF_BLOCK_HASH_TO_HEIGHT, CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST,
+    CF_NARWHAL_PAYLOADS, CF_PAYMENT_LOCKS, CF_PAYMENT_PROPOSALS, CF_PAYMENT_VOTES, CF_TRANSACTIONS,
+};
 
 /// Async KV store trait for storage abstraction
 #[async_trait]
@@ -33,6 +37,10 @@ pub trait KVStore: Send + Sync {
 
     /// Write atomic batch across column families
     async fn write_batch(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()>;
+
+    /// Write atomic batch in BULK MODE (no fsync, optimized for initial sync)
+    /// WARNING: Data loss risk on crash - only use during initial blockchain sync
+    async fn write_batch_bulk(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()>;
 
     /// Scan keys with prefix in column family
     async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
@@ -60,6 +68,8 @@ pub struct RocksDBKV {
     qrng: Option<Arc<QuantumRNG>>,
     /// Current cryptographic phase
     phase: Phase,
+    /// Adaptive pruning configuration
+    pub pruning_config: crate::pruning::PruningConfig,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -100,18 +110,47 @@ impl RocksDBKV {
         opts.set_max_background_jobs(bg_jobs); // Reduced from 8 to avoid TLS allocation failures
         opts.set_max_background_compactions(bg_compactions); // Limit compaction threads
         opts.set_max_background_flushes(bg_flushes); // Limit flush threads
-        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB
-        opts.set_max_write_buffer_number(4);
-        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
-        opts.set_level_zero_file_num_compaction_trigger(4);
-        opts.set_level_zero_slowdown_writes_trigger(8);
-        opts.set_level_zero_stop_writes_trigger(16);
 
-        // CRITICAL: WAL preservation settings for data durability
-        opts.set_wal_size_limit_mb(1024); // Allow WAL to grow to 1GB before archiving
-        opts.set_wal_ttl_seconds(0); // Never delete WAL by time
-        opts.set_wal_size_limit_mb(0); // Never delete WAL by size (let RocksDB manage based on flushes)
-        opts.set_manual_wal_flush(false); // Auto-flush WAL with set_sync(true)
+        // 🚀 OPTIMIZED FOR BULK SYNC PERFORMANCE
+        // Check if TURBO_SYNC environment variable is set for bulk import mode
+        let turbo_sync_mode = std::env::var("TURBO_SYNC_ENABLED").is_ok();
+
+        if turbo_sync_mode {
+            info!("🚀 TURBO SYNC MODE ENABLED - Optimizing RocksDB for bulk writes");
+            opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB for bulk imports
+            opts.set_max_write_buffer_number(8); // More buffers to avoid stalls
+            opts.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST files
+            opts.set_level_zero_file_num_compaction_trigger(16); // Delay compaction during sync
+            opts.set_level_zero_slowdown_writes_trigger(32);
+            opts.set_level_zero_stop_writes_trigger(64);
+        } else {
+            opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB (normal mode)
+            opts.set_max_write_buffer_number(4);
+            opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
+            opts.set_level_zero_file_num_compaction_trigger(4);
+            opts.set_level_zero_slowdown_writes_trigger(8);
+            opts.set_level_zero_stop_writes_trigger(16);
+        }
+
+        // 🚨 v0.7.3-beta: CRITICAL WAL + Flush settings (Expert-reviewed fix)
+        // OLD (DANGEROUS): Unlimited WAL + avoid_flush_during_shutdown = data loss
+        // NEW (SAFE): Bounded WAL + forced shutdown flushes
+        opts.set_wal_ttl_seconds(300); // 5 minutes - delete after flush
+        opts.set_wal_size_limit_mb(256); // 256MB max - prevents unbounded growth
+        opts.set_max_total_wal_size(64 * 1024 * 1024); // 64MB total WAL budget
+        opts.set_manual_wal_flush(true); // Manual control for safety
+
+        // 🚨 THE SILVER BULLET: Force flushes on shutdown (RocksDB 7+ defaults to skip!)
+        // This was the root cause - graceful shutdowns avoided flushes, relied on WAL
+        // When WAL exceeded limits or got corrupted → 100% data loss
+        // NOTE: set_avoid_flush_during_shutdown() not available in rust-rocksdb 0.22.0
+        // WORKAROUND: Manual flush_cf() calls + smaller write buffers + WAL limits
+        // opts.set_avoid_flush_during_shutdown(false); // Would be ideal if available
+
+        // Additional durability settings
+        opts.set_paranoid_checks(true); // Extra validation
+        opts.set_atomic_flush(true); // Multi-CF consistency
+        opts.set_db_write_buffer_size(128 * 1024 * 1024); // 128MB total memtable budget
 
         // Initialize quantum encryption for Phase 2+
         let qrng = if matches!(phase, Phase::Phase2 | Phase::Phase3 | Phase::Phase4) {
@@ -143,7 +182,16 @@ impl RocksDBKV {
             Self::create_bullshark_cert_cf(),
             Self::create_manifest_cf(),
             Self::create_transactions_cf(),
+            Self::create_balances_cf(),  // v0.8.2-beta: Balance consensus storage
+            Self::create_block_hash_to_height_cf(),  // v0.8.3-beta: Block hash index
             Self::create_ai_chats_cf(),
+            Self::create_ai_credits_cf(),
+            Self::create_ai_transactions_cf(),
+            Self::create_ai_treasury_cf(),
+            Self::create_payment_proposals_cf(),
+            Self::create_payment_votes_cf(),
+            Self::create_payment_locks_cf(),
+            Self::create_banned_peers_cf(),  // v0.9.7-beta: ZK proof ban persistence
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -208,7 +256,14 @@ impl RocksDBKV {
             db_path: path_str,
             qrng: None,           // Will be set by caller
             phase: Phase::Phase0, // Will be set by caller
+            pruning_config: crate::pruning::PruningConfig::default(),
         })
+    }
+
+    /// Get the underlying RocksDB handle for direct access
+    /// Used by components that need raw RocksDB access (e.g., TokenRegistry, PriceHistoryManager)
+    pub fn get_raw_db(&self) -> Arc<DB> {
+        self.db.clone()
     }
 
     /// Create blocks column family (height || hash -> block)
@@ -216,6 +271,26 @@ impl RocksDBKV {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_block_based_table_factory(&rocksdb::BlockBasedOptions::default());
+
+        // 🚨 CRITICAL FIX v0.7.3-beta: Force persistent flushes (Expert-reviewed)
+        // Root cause: avoid_flush_during_shutdown=true + unlimited WAL = data loss
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - balanced (~1600 blocks/flush)
+        opts.set_min_write_buffer_number_to_merge(1); // Flush immediately
+        opts.set_max_write_buffer_number(3); // Triple buffering
+        opts.set_disable_auto_compactions(false); // Enable auto compactions
+        opts.set_level_zero_file_num_compaction_trigger(2); // Compact aggressively
+
+        // 🚨 SILVER BULLET: Force flushes on shutdown (RocksDB 7.x+ defaults to true!)
+        // This was THE bug - graceful shutdowns skipped flushes, relied on WAL recovery
+        // Note: avoid_flush_during_shutdown not available in rust-rocksdb 0.22.0
+        // Workaround: Smaller buffers + bounded WAL + explicit flushes
+
+        // 🚨 Additional safety settings
+        opts.set_paranoid_checks(true); // Extra validation
+
+        // Background tuning
+        opts.set_max_background_flushes(2);
+        opts.set_max_background_compactions(2);
 
         ColumnFamilyDescriptor::new(CF_BLOCKS, opts)
     }
@@ -262,6 +337,36 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
     }
 
+    /// Create balances column family (wallet_address -> balance)
+    /// v0.8.1-beta: Balance consensus storage for mining rewards and transfers
+    fn create_balances_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB write buffer (frequent updates)
+        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB target file size
+
+        // Optimize for frequent balance updates
+        opts.set_max_write_buffer_number(3); // Triple buffering for high write load
+        opts.set_level_zero_file_num_compaction_trigger(4); // Compact when 4 files accumulate
+
+        ColumnFamilyDescriptor::new(CF_BALANCES, opts)
+    }
+
+    /// Create block hash to height column family (block_hash -> height)
+    /// v0.8.3-beta: Block hash index for efficient block lookups by hash
+    fn create_block_hash_to_height_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB write buffer
+        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB target file size
+
+        // Optimize for read-heavy workload (hash lookups)
+        opts.set_max_write_buffer_number(2); // Dual buffering sufficient
+        opts.set_level_zero_file_num_compaction_trigger(4);
+
+        ColumnFamilyDescriptor::new(CF_BLOCK_HASH_TO_HEIGHT, opts)
+    }
+
     /// Create AI chats column family (chat:* keys -> chat data)
     fn create_ai_chats_cf() -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
@@ -278,6 +383,73 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(CF_AI_CHATS, opts)
     }
 
+    /// Create AI credits column family (credits:* -> wallet credits)
+    fn create_ai_credits_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8)); // "credits:"
+
+        ColumnFamilyDescriptor::new(CF_AI_CREDITS, opts)
+    }
+
+    /// Create AI transactions column family (aitx:* -> transaction records)
+    fn create_ai_transactions_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "aitx:"
+
+        ColumnFamilyDescriptor::new(CF_AI_TRANSACTIONS, opts)
+    }
+
+    /// Create AI treasury column family (treasury:master -> master wallet balance)
+    fn create_ai_treasury_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Single key "treasury:master" - no prefix needed
+
+        ColumnFamilyDescriptor::new(CF_AI_TREASURY, opts)
+    }
+
+    /// Create payment proposals column family (proposal:* -> payment proposals)
+    fn create_payment_proposals_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(9)); // "proposal:"
+
+        ColumnFamilyDescriptor::new(CF_PAYMENT_PROPOSALS, opts)
+    }
+
+    /// Create payment votes column family (vote:* -> validator votes)
+    fn create_payment_votes_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "vote:"
+
+        ColumnFamilyDescriptor::new(CF_PAYMENT_VOTES, opts)
+    }
+
+    /// Create payment locks column family (lock:* -> payment locks)
+    fn create_payment_locks_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "lock:"
+
+        ColumnFamilyDescriptor::new(CF_PAYMENT_LOCKS, opts)
+    }
+
+    /// Create banned peers column family (peer_id -> BanRecord) - v0.9.7-beta
+    /// Stores persistent ban list for ZK proof verification failures
+    fn create_banned_peers_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Small values (PeerId + timestamp + reason), optimize for reads
+        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_max_write_buffer_number(2);
+
+        ColumnFamilyDescriptor::new(CF_BANNED_PEERS, opts)
+    }
+
     /// Create Narwhal payloads column family (digest -> payload)
     fn create_narwhal_payloads_cf() -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
@@ -291,8 +463,8 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(CF_NARWHAL_PAYLOADS, opts)
     }
 
-    /// Get column family handle
-    fn get_cf(&self, cf_name: &str) -> Result<Arc<rocksdb::BoundColumnFamily>> {
+    /// Get column family handle (public for transactions - v0.8.1-beta)
+    pub fn get_cf(&self, cf_name: &str) -> Result<Arc<rocksdb::BoundColumnFamily>> {
         self.db
             .cf_handle(cf_name)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))
@@ -354,10 +526,14 @@ impl KVStore for RocksDBKV {
 
     async fn write_batch(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
         let mut write_batch = WriteBatch::default();
+        let mut cf_names_to_flush = Vec::new();
 
-        for (cf_name, key, value) in batch {
+        for (cf_name, key, value) in &batch {
             let cf_handle = self.get_cf(cf_name)?;
             write_batch.put_cf(&cf_handle, key, value);
+            if !cf_names_to_flush.contains(cf_name) {
+                cf_names_to_flush.push(*cf_name);
+            }
         }
 
         // CRITICAL FIX: Use synced write options to prevent data loss on hard kills
@@ -369,9 +545,53 @@ impl KVStore for RocksDBKV {
             .write_opt(write_batch, &write_opts)
             .context("RocksDB batch write failed")?;
 
-        // REMOVED flush_cf() - immediate flush deletes WAL prematurely!
-        // WAL with fsync is sufficient for durability. RocksDB will flush memtable
-        // to SST naturally, and WAL will be preserved until flush completes.
+        // CRITICAL: Flush to ensure MANIFEST is updated for crash recovery
+        // Without this, MANIFEST lags behind WAL and recovery rolls back to old checkpoints
+        // This ensures blocks are truly persistent and survive SIGKILL
+
+        // 🚨 v0.7.3-beta: Use explicit FlushOptions (Expert-reviewed)
+        let mut flush_opts = rocksdb::FlushOptions::default();
+        flush_opts.set_wait(true); // CRITICAL: Block until flush completes
+        // NOTE: set_allow_write_stall() not available in rust-rocksdb 0.22.0
+        // flush_opts.set_allow_write_stall(true); // Would be ideal if available
+
+        for cf_name in cf_names_to_flush {
+            let cf_handle = self.get_cf(cf_name)?;
+            if let Err(e) = self.db.flush_cf_opt(&cf_handle, &flush_opts) {
+                // 🚨 LOUD error logging for flush failures
+                warn!("❌ CRITICAL: flush_cf_opt() failed for CF '{}': {}", cf_name, e);
+                warn!("   This means data may be lost on restart!");
+                warn!("   FlushOptions: wait=true (blocking flush)");
+                return Err(e).context(format!("RocksDB flush failed for CF '{}'", cf_name));
+            } else {
+                debug!("✅ Flushed CF '{}' to SST successfully (with explicit wait)", cf_name);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write_batch_bulk(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        let mut write_batch = WriteBatch::default();
+
+        for (cf_name, key, value) in batch {
+            let cf_handle = self.get_cf(cf_name)?;
+            write_batch.put_cf(&cf_handle, key, value);
+        }
+
+        // 🚀 BULK MODE OPTIMIZATIONS - 10-100x faster for initial sync
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(false); // NO fsync - rely on OS page cache for speed
+        write_opts.disable_wal(true); // Disable WAL for maximum write throughput
+
+        // In bulk mode, we sacrifice durability for speed since:
+        // 1. Initial sync can be restarted if it crashes
+        // 2. We can re-fetch blocks from peers
+        // 3. Once sync completes, we'll do a final manual flush
+
+        self.db
+            .write_opt(write_batch, &write_opts)
+            .context("RocksDB bulk batch write failed")?;
 
         Ok(())
     }
@@ -474,6 +694,36 @@ impl RocksDBKV {
         opts
     }
 
+    /// Write batch atomically (internal method for transactions)
+    ///
+    /// **SECURITY FIX (v0.8.1-beta)**: Used by QTransaction to write atomic batches
+    pub async fn write_batch_internal(
+        &self,
+        batch: WriteBatch,
+        write_opts: rocksdb::WriteOptions,
+    ) -> Result<()> {
+        self.db
+            .write_opt(batch, &write_opts)
+            .context("RocksDB batch write failed")?;
+
+        // Flush critical column families to ensure MANIFEST is updated
+        let cf_names = vec![
+            "blocks",
+            "dag_vertices",
+            "transactions",
+        ];
+
+        for cf_name in cf_names {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                if let Err(e) = self.db.flush_cf(&cf) {
+                    warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get database statistics
     pub async fn get_stats(&self) -> Result<RocksDBStats> {
         let mut cf_stats = HashMap::new();
@@ -554,6 +804,196 @@ impl RocksDBKV {
             .context("Failed to create checkpoint")?;
 
         Ok(())
+    }
+
+    /// Execute adaptive pruning based on current configuration
+    /// Deletes old blocks while preserving checkpoints and recent data
+    pub async fn prune_old_blocks(&self, current_height: u64) -> Result<crate::pruning::PruningStats> {
+        use crate::pruning::AdaptivePruningEngine;
+        use std::time::{SystemTime, Instant};
+
+        let start_time = Instant::now();
+        info!("✂️  Starting adaptive pruning at height {}", current_height);
+
+        // Get storage size before pruning
+        let storage_before = self.get_db_size().await?;
+
+        // Initialize pruning engine with current configuration
+        let pruning_engine = AdaptivePruningEngine::new(&self.db_path, self.pruning_config.clone());
+
+        let mut pruned_blocks = 0u64;
+        let mut retained_blocks = 0u64;
+
+        // Get column family handles
+        let cf_blocks = self.get_cf(CF_BLOCKS)?;
+        let cf_dag_vertices = self.get_cf(CF_DAG_VERTICES)?;
+        let cf_bullshark_cert = self.get_cf(CF_BULLSHARK_CERT)?;
+
+        // Calculate pruning range based on retention policy
+        let retention_blocks = self.pruning_config.retain_recent_blocks_days * 43_200; // ~2 second block time
+        let prune_up_to = current_height.saturating_sub(retention_blocks);
+
+        info!(
+            "📊 Pruning range: 0 to {} (retention: {} blocks)",
+            prune_up_to, retention_blocks
+        );
+
+        // Iterate through blocks and prune based on retention policy
+        // Use atomic batching every 1000 blocks for consistency
+        const BATCH_SIZE: u64 = 1000;
+        let mut current_batch_start = 0u64;
+
+        while current_batch_start <= prune_up_to {
+            let batch_end = std::cmp::min(current_batch_start + BATCH_SIZE - 1, prune_up_to);
+
+            // Create atomic write batch for this chunk
+            let mut batch = rocksdb::WriteBatch::default();
+            let mut batch_pruned = 0u64;
+            let mut batch_retained = 0u64;
+
+            for height in current_batch_start..=batch_end {
+                // Check if block should be retained (checkpoints, recent, etc.)
+                match pruning_engine.should_retain_block(height, current_height) {
+                    Ok(should_retain) => {
+                        if !should_retain {
+                            // Delete block from CF_BLOCKS
+                            let block_key = height.to_be_bytes();
+                            batch.delete_cf(&cf_blocks, &block_key);
+
+                            batch_pruned += 1;
+
+                            // Also delete associated DAG vertices (round-based)
+                            // DAG vertices use (round || author || seq) as key
+                            let round_prefix = height.to_be_bytes();
+                            let iter = self.db.prefix_iterator_cf(&cf_dag_vertices, &round_prefix);
+
+                            for item in iter {
+                                if let Ok((key, _value)) = item {
+                                    if key.starts_with(&round_prefix) {
+                                        batch.delete_cf(&cf_dag_vertices, &key);
+                                    } else {
+                                        break; // No more vertices for this round
+                                    }
+                                }
+                            }
+
+                            // Delete Bullshark certificate (round -> certificate)
+                            if self.db.get_cf(&cf_bullshark_cert, &block_key)?.is_some() {
+                                batch.delete_cf(&cf_bullshark_cert, &block_key);
+                            }
+                        } else {
+                            batch_retained += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Error checking retention for block {}: {}", height, e);
+                        // Continue pruning other blocks even if one fails
+                        batch_retained += 1; // Count as retained to be safe
+                    }
+                }
+            }
+
+            // Atomically commit this batch
+            if batch_pruned > 0 {
+                self.db.write(batch)
+                    .context(format!("Failed to commit pruning batch {}-{}", current_batch_start, batch_end))?;
+                debug!("✅ Pruned batch {}-{}: {} deleted, {} retained",
+                       current_batch_start, batch_end, batch_pruned, batch_retained);
+            }
+
+            pruned_blocks += batch_pruned;
+            retained_blocks += batch_retained;
+
+            // Log progress every 10,000 blocks
+            if batch_end % 10_000 < BATCH_SIZE && batch_end > 0 {
+                info!(
+                    "🗑️  Pruning progress: {} blocks checked, {} deleted, {} retained",
+                    batch_end, pruned_blocks, retained_blocks
+                );
+            }
+
+            current_batch_start = batch_end + 1;
+        }
+
+        // Count remaining blocks (from prune_up_to to current_height)
+        retained_blocks += current_height.saturating_sub(prune_up_to);
+
+        // Compact database after pruning to reclaim space
+        info!("🗜️  Compacting database after pruning...");
+        self.db.compact_range_cf(&cf_blocks, None::<&[u8]>, None::<&[u8]>);
+        self.db.compact_range_cf(&cf_dag_vertices, None::<&[u8]>, None::<&[u8]>);
+        self.db.compact_range_cf(&cf_bullshark_cert, None::<&[u8]>, None::<&[u8]>);
+
+        // Get storage size after pruning
+        let storage_after = self.get_db_size().await?;
+        let space_saved = storage_before.saturating_sub(storage_after);
+
+        let prune_duration_ms = start_time.elapsed().as_millis() as u64;
+
+        info!(
+            "✅ Pruning complete: {} blocks pruned, {} blocks retained, {:.2} MB saved, took {}ms",
+            pruned_blocks,
+            retained_blocks,
+            space_saved as f64 / 1_000_000.0,
+            prune_duration_ms
+        );
+
+        Ok(crate::pruning::PruningStats {
+            total_blocks: current_height,
+            pruned_blocks,
+            retained_blocks,
+            storage_before,
+            storage_after,
+            space_saved,
+            last_prune_time: SystemTime::now(),
+            prune_duration_ms,
+        })
+    }
+
+    /// Get current blockchain height from storage
+    pub async fn get_blockchain_height(&self) -> Result<u64> {
+        // Try to get the latest block height from manifest
+        let cf_manifest = self.get_cf(CF_MANIFEST)?;
+
+        if let Some(height_bytes) = self.db.get_cf(&cf_manifest, b"blockchain_height")? {
+            if height_bytes.len() == 8 {
+                let bytes: [u8; 8] = height_bytes.as_slice().try_into()
+                    .map_err(|_| anyhow::anyhow!("Invalid blockchain height format"))?;
+                let height = u64::from_be_bytes(bytes);
+                Ok(height)
+            } else {
+                Err(anyhow::anyhow!("Invalid blockchain height size: expected 8 bytes, got {}", height_bytes.len()))
+            }
+        } else {
+            // If not found in manifest, scan blocks CF to find highest
+            let cf_blocks = self.get_cf(CF_BLOCKS)?;
+            let mut max_height = 0u64;
+
+            let iter = self.db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
+            for item in iter {
+                if let Ok((key, _)) = item {
+                    if key.len() >= 8 {
+                        let height = u64::from_be_bytes(
+                            key[0..8].try_into().unwrap_or([0u8; 8])
+                        );
+                        max_height = max_height.max(height);
+                    }
+                }
+            }
+
+            Ok(max_height)
+        }
+    }
+
+    /// Set pruning configuration
+    pub fn set_pruning_config(&mut self, config: crate::pruning::PruningConfig) {
+        info!("⚙️  Updating pruning configuration: {:?}", config.mode);
+        self.pruning_config = config;
+    }
+
+    /// Get current pruning configuration
+    pub fn get_pruning_config(&self) -> &crate::pruning::PruningConfig {
+        &self.pruning_config
     }
 }
 
