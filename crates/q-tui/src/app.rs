@@ -23,13 +23,13 @@ pub struct LogEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
 }
 
 impl LogLevel {
@@ -41,6 +41,10 @@ impl LogLevel {
             LogLevel::Warn => "WARN ",
             LogLevel::Error => "ERROR",
         }
+    }
+
+    pub fn should_display(&self, filter: LogLevel) -> bool {
+        *self >= filter
     }
 }
 
@@ -60,6 +64,9 @@ pub struct App {
 
     /// Log scroll offset
     pub log_scroll: usize,
+
+    /// Log level filter (defaults to Info)
+    pub log_filter: LogLevel,
 
     /// Menu selection
     pub menu_selection: usize,
@@ -96,6 +103,7 @@ impl App {
             logs: Arc::new(RwLock::new(HeapRb::new(1000))),
             logs_paused: false,
             log_scroll: 0,
+            log_filter: LogLevel::Info, // Default: filter out Debug and Trace
             menu_selection: 0,
             tps_history: Arc::new(RwLock::new(HeapRb::new(60))),
             should_quit: false,
@@ -106,8 +114,13 @@ impl App {
         }
     }
 
-    /// Add a log entry
+    /// Add a log entry (with level filtering)
     pub fn add_log(&mut self, level: LogLevel, target: String, message: String) {
+        // Filter out logs below the current filter level
+        if !level.should_display(self.log_filter) {
+            return;
+        }
+
         if let Ok(mut logs) = self.logs.write() {
             logs.push_overwrite(LogEntry {
                 timestamp: Utc::now(),

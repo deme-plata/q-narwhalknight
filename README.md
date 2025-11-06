@@ -1,6 +1,6 @@
-# Q-NarwhalKnight v0.0.7-beta
+# Q-NarwhalKnight v0.2.0-beta
 
-🌟 **Quantum-Enhanced DAG-BFT Consensus with Triple-Layer Anonymity**
+🌟 **Quantum-Enhanced DAG-BFT Consensus with Distributed AI & Triple-Layer Anonymity**
 
 Q-NarwhalKnight is a revolutionary blockchain consensus system that combines the efficiency of DAG-Knight consensus with Narwhal mempool, quantum-ready cryptographic primitives, and production-grade Tor integration for complete network anonymity. This implementation provides a phased approach to quantum-resistance, starting with classical cryptography (Phase 0) and progressively upgrading to full quantum protocols (Phase 4).
 
@@ -132,6 +132,32 @@ Q-NarwhalKnight/
 - **Adaptive difficulty**: Dynamic adjustment based on network hashrate
 - **Quantum-resistant PoW**: VDF-enhanced mining algorithm
 - **Benchmark mode**: Performance testing and hardware optimization
+
+### 💰 **Transparent Development Fee** (v0.2.0-beta)
+
+Q-NarwhalKnight implements a **1% development fee** on all mining rewards to ensure sustainable, long-term project development.
+
+**Reward Split:**
+- **99%** → Miner (you)
+- **1%** → Development Fund (founder wallet)
+
+**Example:** If block reward is 2.0 QNK, you receive **1.98 QNK** and **0.02 QNK** funds development.
+
+**What This Funds:**
+- Core protocol development and bug fixes
+- Post-quantum cryptography research (Phases 2-4)
+- Network infrastructure and bootstrap nodes
+- Security audits and penetration testing
+- Academic publications and peer review
+- Community support and documentation
+
+**Transparency:**
+- **Founder Wallet**: `qnk8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f1a2b3c4d5e6f7a8b9c0d1e2f3a`
+- **Full Documentation**: See [`DEVELOPMENT_FEE_TRANSPARENCY.md`](./DEVELOPMENT_FEE_TRANSPARENCY.md)
+- **Open Source**: All fee logic is visible in the source code
+- **On-Chain Verification**: Founder wallet balance is publicly auditable
+
+**Security:** The network uses AEGIS-QL post-quantum authentication to ensure only authorized miners can participate, preventing unauthorized forks that bypass the development fee.
 
 ## 🔬 Research & Papers
 

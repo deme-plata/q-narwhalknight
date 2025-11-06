@@ -12,6 +12,7 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-resonance = { path = "../q-resonance" }
 q-storage = { path = "../q-storage" }
+q-zk-stark = { path = "../q-zk-stark" }
 
 # Networking - gossipsub included from workspace
 # NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here
@@ -68,6 +69,14 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 crossbeam = { workspace = true }
+
+# System info for hardware capability detection
+sysinfo = "0.30"
+num_cpus = "1.16"
+
+# Compression for tensor forwarding
+zstd = "0.13"
+bincode = "1.3"
 
 [dev-dependencies]
 tokio-test = "0.4"

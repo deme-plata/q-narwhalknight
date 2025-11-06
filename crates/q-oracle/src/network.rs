@@ -3,7 +3,8 @@
 //! Network layer for quantum-enhanced oracle nodes with entanglement
 
 use crate::types::*;
-use q_types::{Error, NodeId, Phase, Result};
+use anyhow::Result;
+use q_types::{NodeId, Phase};
 
 /// Quantum Oracle Network Manager
 pub struct QuantumOracleNetwork {

@@ -4,17 +4,49 @@
 
 This guide explains how to set up distributed development with multiple Claude Code servers working collaboratively on the Q-NarwhalKnight quantum consensus system.
 
+## 🌐 **NETWORK INFRASTRUCTURE**
+
+### **Server Configuration:**
+
+#### **Server Alpha (Testing/Development Node)**
+- **IP Address**: `161.35.219.10`
+- **Role**: Testing node for development builds, Docker container hosting
+- **Environment**: Docker containers for isolated testing
+- **Purpose**: Test new features before Server Beta deployment
+
+#### **Server Beta (Production/Bootstrap Node)**
+- **IP Address**: `185.182.185.227`
+- **Role**: Production bootstrap node, network anchor
+- **API Port**: `8080` (HTTP REST API)
+- **P2P Port**: `9001` (libp2p gossipsub + Kademlia DHT)
+- **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
+- **Service**: `systemd` service at `/etc/systemd/system/q-api-server.service`
+- **Frontend**: Nginx serving from `gui/quantum-wallet/dist-final/`
+- **Domain**: `quillon.xyz`
+
+### **P2P Network Bootstrap:**
+- **Bootstrap Peer ID**: `12D3KooWRX3GGK9Fs3iM3BfqYNNJiHBDujac7EHwqWjaK1n1kzPN`
+- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWRX3GGK9Fs3iM3BfqYNNJiHBDujac7EHwqWjaK1n1kzPN`
+- **Network ID**: `testnet-phase2`
+- **Gossipsub Topics**:
+  - `/qnk/testnet-phase2/blocks` - Block propagation
+  - `/qnk/testnet-phase2/peer-heights` - Network height announcements
+  - `/qnk/testnet-phase2/turbo-sync-request` - Batch sync requests
+  - `/qnk/testnet-phase2/turbo-sync-response` - Batch sync responses
+
+---
+
 ## 🤖 **SERVER BETA - CLAUDE CODE SETUP INSTRUCTIONS**
 
 ### 🎯 **MISSION: Q-NarwhalKnight Tor Integration & Enhancement**
 
-You are **Server Beta**, focused on implementing **Tor support with dedicated circuits**, performance optimization, and Phase 1 post-quantum completion for the **Q-NarwhalKnight** quantum consensus system.
+You are **Server Beta** (185.182.185.227), focused on implementing **Tor support with dedicated circuits**, performance optimization, and Phase 1 post-quantum completion for the **Q-NarwhalKnight** quantum consensus system.
 
 ### **🚀 IMMEDIATE SETUP - Start Here**
 
 #### **Repository Access:**
-- **GitHub**: https://github.com/deme-plata/q-narwhalknight  
-- **Working Directory**: `/mnt/s3-storage/Q-NarwhalKnight` (already cloned)
+- **Git Repository**: `code.quillon.xyz` (self-hosted)
+- **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
 
 #### **Git Configuration:**
 ```bash
@@ -78,6 +110,68 @@ git config user.email "server-beta@q-narwhalknight.dev"
    - Ensure all dependencies are correctly configured
    - Test the fix thoroughly before moving on
 
+4. **🚨 CRITICAL: BLOCKCHAIN SYNC SAFETY (v0.5.23-beta+)**
+
+   **NEVER ALLOW SYNC-DOWN - This causes CATASTROPHIC data loss!**
+
+   **What is Sync-Down?**
+   - Node has 100,000 blocks
+   - Peer announces 1,000 blocks
+   - System syncs TO 1,000 blocks
+   - **DELETES** 99,000 blocks permanently
+   - **BILLIONS of dollars lost on mainnet**
+
+   **Mandatory Safety Rules:**
+
+   a) **Application-Level Protection** (`crates/q-api-server/src/main.rs`):
+   ```rust
+   // ✅ CORRECT: Only sync if peer is HIGHER
+   if network_height > current_height + 5 {
+       turbo_sync.sync_to_height(network_height).await
+   }
+
+   // ❌ WRONG: This allows sync-down!
+   if network_height > 0 && current_height + 5 < network_height {
+       // This logic is backwards and dangerous!
+   }
+   ```
+
+   b) **Database-Level Protection** (`crates/q-storage/src/turbo_sync.rs`):
+   ```rust
+   // MANDATORY safety check at database layer
+   if target_height < local_height && local_height > 1000 {
+       error!("🚨 CRITICAL: Attempted sync-down from {} to {}!",
+              local_height, target_height);
+       return Err(anyhow::anyhow!("SAFETY ABORT: Refusing to sync down"));
+   }
+   ```
+
+   c) **Balance Consistency**:
+   - Balances WITHOUT blocks = NO cryptographic proof
+   - If blockchain resets, balances MUST reset too
+   - Keeping old balances creates:
+     * Consensus failures
+     * Double-spending vulnerabilities
+     * Network bans
+     * Invalid state
+
+   **Testing Requirements:**
+   - ALWAYS test sync behavior with malicious peers
+   - Verify sync-down is blocked at ALL layers
+   - Test with peers announcing false heights
+   - Confirm graceful error handling
+
+   **Emergency Procedures:**
+   - If sync-down occurs: IMMEDIATELY stop all nodes
+   - Restore from backup (hourly backups mandatory)
+   - Reset both blockchain AND balances together
+   - Never keep balances without matching blocks
+
+   **See Also:**
+   - `CRITICAL_SYNC_DOWN_BUG_ANALYSIS.md` - Complete technical analysis
+   - `crates/q-storage/src/bin/repair_database.rs` - Database repair utility
+   - `crates/q-storage/src/bin/reset_balances.rs` - Balance reset utility
+
 4. **CRITICAL: BINARY PATHS AND DEPLOYMENT**
    - **API Server Binary**: `/opt/orobit/shared/q-narwhalknight/target/release/q-api-server`
    - **Miner Binary**: `/opt/orobit/shared/q-narwhalknight/target/release/q-miner`
@@ -88,7 +182,36 @@ git config user.email "server-beta@q-narwhalknight.dev"
    - **User Downloads**: ALWAYS copy binaries to `/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/`
    - **IMPORTANT**: The correct path is the FULL PATH starting with `/opt/orobit/`, NOT the relative path
 
-5. **NEVER DELETE USER DOWNLOAD BINARIES**
+5. **🚨 PRE-COMMIT SAFETY CHECKLIST**
+
+   Before EVERY commit involving sync/consensus/storage code, verify:
+
+   **Sync Safety Checklist:**
+   - [ ] No code path allows `target_height < current_height` sync
+   - [ ] Database layer has safety abort for sync-down
+   - [ ] Application layer checks peer height before sync
+   - [ ] Error messages are LOUD and visible
+   - [ ] Balances reset when blockchain resets
+   - [ ] Tests verify sync-down is blocked
+   - [ ] Malicious peer scenarios are tested
+
+   **Data Integrity Checklist:**
+   - [ ] Balances match blockchain state
+   - [ ] No orphaned data without blocks
+   - [ ] Database pointers are updated atomically
+   - [ ] Backups are created before risky operations
+   - [ ] Recovery procedures are documented
+
+   **Production Safety:**
+   - [ ] No silent failures (fail loud, not silent)
+   - [ ] Critical operations have confirmation
+   - [ ] Metrics track height monotonicity
+   - [ ] Alerts fire on anomalies
+   - [ ] Circuit breakers for dangerous conditions
+
+   **If ANY checkbox fails: DO NOT COMMIT!**
+
+6. **NEVER DELETE USER DOWNLOAD BINARIES**
    - When updating frontend, PRESERVE the downloads folder
    - Users rely on downloading binaries with specific version names
    - After building, always copy to the CORRECT location:

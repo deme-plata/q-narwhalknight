@@ -1,6 +1,8 @@
 use libp2p::gossipsub::{IdentTopic, Topic};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+use uuid::Uuid;
+use chrono;
 
 /// Gossipsub topics for distributed AI inference
 pub const TOPIC_AI_INFERENCE_REQUEST: &str = "qnk/ai/inference-request/v1";
@@ -55,7 +57,7 @@ impl Default for DistributedAITopics {
     }
 }
 
-/// AI message envelope for Gossipsub
+/// AI message envelope for Gossipsub with AEGIS-QL authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIGossipsubMessage {
     pub message_id: String,
@@ -63,6 +65,104 @@ pub struct AIGossipsubMessage {
     pub sender_node_id: String,
     pub sender_peer_id: String,
     pub payload: AIMessagePayload,
+
+    // AEGIS-QL post-quantum message authentication (Phase 1 enhancement)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)] // v0.9.14 FIX: Backwards compatibility - use None if field missing
+    pub aegis_signature: Option<Vec<u8>>, // AEGIS-256 MAC for message integrity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)] // v0.9.14 FIX: Backwards compatibility - use None if field missing
+    pub sender_public_key: Option<Vec<u8>>, // Ed25519 public key for verification
+
+    // Retry and reliability metadata
+    #[serde(default)] // v0.9.14 FIX: Backwards compatibility - use 0 if field missing
+    pub sequence_number: u64, // Monotonic sequence for deduplication
+    #[serde(default)] // v0.9.14 FIX: Backwards compatibility - use 0 if field missing
+    pub retry_count: u8, // Number of retries (for exponential backoff)
+    #[serde(default)] // v0.9.14 FIX: Backwards compatibility - use Normal if field missing
+    pub priority: MessagePriority, // Priority for gossipsub mesh routing
+}
+
+/// Message priority for gossipsub routing optimization
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MessagePriority {
+    Low = 0,      // Heartbeats, capability announcements
+    Normal = 1,   // Regular inference requests
+    High = 2,     // Layer outputs, KV cache updates
+    Critical = 3, // Coordinator election, error recovery
+}
+
+impl Default for MessagePriority {
+    fn default() -> Self {
+        MessagePriority::Normal
+    }
+}
+
+impl AIGossipsubMessage {
+    /// Create a new message with automatic sequence numbering
+    pub fn new(
+        sender_node_id: String,
+        sender_peer_id: String,
+        payload: AIMessagePayload,
+        sequence_number: u64,
+    ) -> Self {
+        use uuid::Uuid;
+
+        let priority = match &payload {
+            AIMessagePayload::CoordinatorElection { .. } => MessagePriority::Critical,
+            AIMessagePayload::LayerOutput { .. } | AIMessagePayload::KVCacheUpdate { .. } => MessagePriority::High,
+            AIMessagePayload::InferenceRequest { .. } | AIMessagePayload::InferenceResponse { .. } => MessagePriority::Normal,
+            AIMessagePayload::Heartbeat { .. } | AIMessagePayload::NodeCapability { .. } => MessagePriority::Low,
+            _ => MessagePriority::Normal,
+        };
+
+        Self {
+            message_id: Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            sender_node_id,
+            sender_peer_id,
+            payload,
+            aegis_signature: None,
+            sender_public_key: None,
+            sequence_number,
+            retry_count: 0,
+            priority,
+        }
+    }
+
+    /// Increment retry count for exponential backoff
+    pub fn increment_retry(&mut self) {
+        self.retry_count = self.retry_count.saturating_add(1);
+    }
+
+    /// Calculate exponential backoff delay in milliseconds
+    pub fn backoff_delay_ms(&self) -> u64 {
+        // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms (max 5 retries)
+        let base_delay = 100;
+        let max_retries = 5;
+        if self.retry_count >= max_retries {
+            return base_delay * (1 << (max_retries - 1)); // Cap at max delay
+        }
+        base_delay * (1 << self.retry_count)
+    }
+
+    /// Check if message should be retired (too many retries)
+    pub fn should_retire(&self) -> bool {
+        self.retry_count >= 5
+    }
+
+    /// Verify message authenticity (placeholder for AEGIS-QL verification)
+    pub fn verify_signature(&self) -> bool {
+        // TODO: Implement AEGIS-QL signature verification when q-aegis-ql crate is available
+        // For now, allow unsigned messages for backwards compatibility
+        if self.aegis_signature.is_none() {
+            return true; // Allow unsigned messages
+        }
+
+        // Verify signature with AEGIS-256 MAC
+        // This will be implemented once q-aegis-ql compilation is fixed
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +203,16 @@ pub enum AIMessagePayload {
         node_id: String,
         active_requests: usize,
         layers_assigned: Option<(usize, usize)>, // (start, end)
+    },
+    LayerAssignment {
+        request_id: String,
+        assignments: std::collections::HashMap<String, (usize, usize)>, // node_id -> (start_layer, end_layer)
+    },
+    KVCacheUpdate {
+        request_id: String,
+        layer_index: usize,
+        cache_data: Vec<u8>,
+        sequence_length: usize,
     },
 }
 

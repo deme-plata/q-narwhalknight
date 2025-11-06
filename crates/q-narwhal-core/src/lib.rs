@@ -16,6 +16,7 @@ pub mod production_mempool;
 pub mod reliable_broadcast;
 pub mod tor_broadcast;
 pub mod tor_client_impl;
+pub mod validator_set;
 pub mod vertex_store;
 
 pub use certificate::CertificateStore;
@@ -23,6 +24,7 @@ pub use production_mempool::ProductionMempool;
 pub use reliable_broadcast::ReliableBroadcast;
 pub use tor_broadcast::{TorClient, TorStreamConnection};
 pub use tor_client_impl::{ProductionTorClient, TorClientConfig};
+pub use validator_set::{ValidatorInfo, ValidatorSet};
 pub use vertex_store::{InMemoryVertexStorage, VertexStore};
 
 // Re-export q-types for external crates
@@ -53,16 +55,52 @@ impl NarwhalCore {
 
     /// Create new NarwhalCore with specific phase
     pub fn new_with_phase(node_id: NodeId, phase: Phase) -> Self {
+        // Create a default test validator set (4 validators) for Phase 0
+        // In production, this should be loaded from configuration
+        let validator_set = Self::create_default_validator_set();
+
         Self {
             node_id,
             vertex_store: VertexStore::new_in_memory(),
-            certificate_store: CertificateStore::new(),
+            certificate_store: CertificateStore::new(validator_set),
             reliable_broadcast: ReliableBroadcast::new(node_id),
             current_round: RwLock::new(0),
             lattice_vrf: None, // Will be initialized async
             quantum_rng: None, // Will be initialized async
             phase,
         }
+    }
+
+    /// Create default validator set for testing/Phase 0
+    /// In production, load from configuration file
+    fn create_default_validator_set() -> ValidatorSet {
+        use crate::validator_set::ValidatorInfo;
+        use ed25519_dalek::SigningKey;
+        use rand::{rngs::OsRng, RngCore};
+
+        let mut validators = Vec::new();
+        for _ in 0..4 {
+            let mut secret_bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut secret_bytes);
+            let signing_key = SigningKey::from_bytes(&secret_bytes);
+            let public_key = signing_key.verifying_key();
+
+            // NodeId = hash of public key
+            let node_id = {
+                use sha3::{Digest, Sha3_256};
+                let mut hasher = Sha3_256::new();
+                hasher.update(public_key.as_bytes());
+                hasher.finalize().into()
+            };
+
+            validators.push(ValidatorInfo {
+                node_id,
+                public_key,
+                stake: 1,
+                active: true,
+            });
+        }
+        ValidatorSet::new(validators).unwrap()
     }
 
     /// Initialize Phase 2+ quantum enhancements
@@ -303,6 +341,9 @@ mod tests {
             nonce: 1,
             signature: vec![],
             timestamp: chrono::Utc::now(),
+            token_type: q_types::TokenType::QUG,
+            fee_token_type: q_types::TokenType::QUG,
+            data: vec![],
         };
 
         let vertex = narwhal.create_vertex(vec![tx], vec![]).await.unwrap();

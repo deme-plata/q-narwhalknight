@@ -239,6 +239,74 @@ impl Default for QuantumOracleMetrics {
     }
 }
 
+/// Quantum Oracle configuration with physics-inspired parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumOracleConfig {
+    /// Maximum number of oracle nodes in quantum superposition
+    pub max_oracle_nodes: u64,
+    /// Quantum coherence threshold for data validation
+    pub coherence_threshold: f64,
+    /// Wave function collapse timeout (milliseconds)
+    pub wave_collapse_timeout_ms: u64,
+    /// Heisenberg uncertainty factor for price aggregation
+    pub uncertainty_factor: f64,
+    /// Quantum entanglement correlation strength
+    pub entanglement_strength: f64,
+    /// AI neural network depth (quantum layers)
+    pub quantum_neural_depth: u32,
+    /// Schrödinger equation time step for price evolution
+    pub schrodinger_time_step: f64,
+    /// Planck constant scaling for micro-fluctuations
+    pub planck_scaling: f64,
+    /// Speed of light constraint for data propagation (m/s)
+    pub light_speed_constraint: f64,
+    /// Quantum tunneling probability for outlier detection
+    pub tunneling_probability: f64,
+    /// Post-quantum security level
+    pub security_level: u8,
+    /// Privacy settings
+    pub privacy_config: QuantumPrivacyConfig,
+    /// Network performance targets
+    pub performance_targets: PerformanceTargets,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceTargets {
+    /// Target throughput (TPS)
+    pub target_tps: u64,
+    /// Maximum latency (milliseconds)
+    pub max_latency_ms: u64,
+    /// Minimum accuracy percentage
+    pub min_accuracy_pct: f64,
+    /// Maximum cost per query (ORB)
+    pub max_cost_per_query: BigDecimal,
+}
+
+impl Default for QuantumOracleConfig {
+    fn default() -> Self {
+        Self {
+            max_oracle_nodes: 1000,
+            coherence_threshold: 0.95,
+            wave_collapse_timeout_ms: 500,
+            uncertainty_factor: 0.01618,    // Golden ratio uncertainty
+            entanglement_strength: 0.707,   // √2/2 quantum correlation
+            quantum_neural_depth: 12,       // Deep quantum network
+            schrodinger_time_step: 0.001,   // 1ms quantum evolution
+            planck_scaling: 6.62607015e-34, // Planck's constant
+            light_speed_constraint: 299792458.0, // c in m/s
+            tunneling_probability: 0.001,   // 0.1% quantum tunneling
+            security_level: 5,              // Maximum post-quantum security
+            privacy_config: QuantumPrivacyConfig::default(),
+            performance_targets: PerformanceTargets {
+                target_tps: 927000, // 927k TPS target
+                max_latency_ms: 1,  // Sub-millisecond latency
+                min_accuracy_pct: 99.99,
+                max_cost_per_query: "0.1".parse().unwrap(), // 0.1 ORB per query
+            },
+        }
+    }
+}
+
 /// Quantum privacy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantumPrivacyConfig {

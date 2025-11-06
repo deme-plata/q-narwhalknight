@@ -16,9 +16,9 @@ export default function DownloadNodeScreen() {
         <p className="text-xl text-gray-300 max-w-3xl mx-auto">
           Join the quantum consensus network. Run your own validator node with Phase 1 post-quantum cryptography.
         </p>
-        <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/50 rounded-full">
-          <span className="w-2 h-2 bg-quantum-green rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-green">v0.1.5-beta Released - Mining Rewards Fix + Low RAM (2GB)</span>
+        <div className="inline-flex items-center gap-2 px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-full">
+          <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+          <span className="text-sm font-bold text-red-400">v0.9.1-beta CRITICAL - Pruning Bug Fixed + Phase 4</span>
         </div>
       </motion.div>
 
@@ -72,33 +72,42 @@ export default function DownloadNodeScreen() {
               </div>
             </div>
             <div className="flex items-start gap-3">
-              <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
+              <CheckCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Mining Rewards Fixed</p>
-                <p className="text-sm text-gray-400">v0.1.5-beta with critical batch processor fix - miners now properly receive rewards in blocks</p>
+                <p className="text-white font-medium">CRITICAL: Pruning Bug Fixed - Blocks Never Deleted</p>
+                <p className="text-sm text-gray-400">v0.9.1-beta fixes Adaptive Pruning bug that deleted blocks every hour + Height monotonicity protection</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Low RAM Usage (2GB)</p>
-                <p className="text-sm text-gray-400">AI disabled by default (93% RAM reduction). Enable with Q_ENABLE_AI=1 for optional Mistral-7B chat</p>
+                <p className="text-white font-medium">Phase 4 Network - Clean Start for Everyone</p>
+                <p className="text-sm text-gray-400">Network reset with pruning disabled by default + enhanced security guarantees</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v0.1.5-beta"
+              href="/downloads/q-api-server-v0.9.1-beta"
               download="q-api-server"
-              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
+              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-red-500 to-orange-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-red-500/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v0.1.5-beta)
+              Download Linux Binary (v0.9.1-beta) - PRUNING BUG FIXED
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 86 MB | Mining Rewards Fixed + Low RAM (2GB)
+              Size: 112 MB | CRITICAL - Fixes Adaptive Pruning Block Deletion
             </p>
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+              <p className="text-red-400 text-xs font-bold mb-1">🚨 CRITICAL UPDATE - PRUNING BUG FIXED</p>
+              <p className="text-gray-300 text-xs">
+                v0.9.1-beta fixes the catastrophic Adaptive Pruning bug that was deleting all blocks every hour.
+                Blocks are now NEVER deleted (pruning disabled by default). Height monotonicity protection prevents
+                height regression. Network reset to Phase 4 for clean start. All testnet nodes must upgrade immediately.
+                Your old blocks were being intentionally deleted by pruning - this is now fixed permanently.
+              </p>
+            </div>
           </div>
 
           {/* Installation Instructions */}

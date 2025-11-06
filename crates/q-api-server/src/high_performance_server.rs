@@ -109,13 +109,44 @@ impl HighPerformanceServer {
         info!("🌟 High-Performance Server READY - accepting connections...");
         info!("   HTTP/2 will be negotiated automatically per connection");
 
-        // Use Axum's optimized serve function
+        // Create shutdown signal handler for both SIGTERM (systemd) and CTRL+C
+        let shutdown_signal = async {
+            let ctrl_c = async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to install CTRL+C signal handler");
+            };
+
+            #[cfg(unix)]
+            let terminate = async {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM signal handler")
+                    .recv()
+                    .await;
+            };
+
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<()>();
+
+            tokio::select! {
+                _ = ctrl_c => {
+                    info!("🛑 Received CTRL+C signal - initiating graceful shutdown");
+                },
+                _ = terminate => {
+                    info!("🛑 Received SIGTERM signal - initiating graceful shutdown");
+                },
+            }
+        };
+
+        // Use Axum's optimized serve function with graceful shutdown
         axum::serve(
             listener,
             self.app.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal)
         .await?;
 
+        info!("✅ Server shutdown completed");
         Ok(())
     }
 }

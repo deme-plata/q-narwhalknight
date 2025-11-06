@@ -11,6 +11,7 @@
 
 pub mod air;
 pub mod batch_prover;
+pub mod blockchain_state_circuit;
 pub mod gpu;
 pub mod performance;
 pub mod polynomials;
@@ -21,6 +22,7 @@ pub mod wallet_privacy_stark;
 // Re-export main types for convenience
 pub use air::{AirConstraints, ExecutionTrace};
 pub use batch_prover::{BatchConfig, BatchProvingStats, BatchStarkProof, BatchStarkProver};
+pub use blockchain_state_circuit::{BlockPossessionCircuit, BlockchainStateProof, ProofMetadata};
 pub use gpu::{FriProofGpu, GpuProvingMetrics, GpuStarkProver, StarkProofGpu};
 pub use performance::{PerformanceTargets, StarkPerformanceBenchmark};
 pub use stark_prover::{StarkProof, StarkProver};

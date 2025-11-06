@@ -20,7 +20,7 @@ use crossbeam::queue::SegQueue;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;  // Still need RwLock for SharedBlockProducer wrapper
-use tracing::{info, warn, debug};
+use tracing::{debug, error, info, warn};
 
 /// Block production configuration
 #[derive(Debug, Clone)]
@@ -147,6 +147,7 @@ impl BlockProducer {
 
     /// Load blockchain state from storage on startup
     /// CRITICAL FIX: Restore blockchain state to prevent data loss on restart
+    /// v0.9.17-beta FIX: Use get_highest_contiguous_block() as single source of truth
     pub async fn load_from_storage(
         &mut self,
         storage: &Arc<q_storage::QStorage>,
@@ -154,9 +155,22 @@ impl BlockProducer {
         info!("📂 Loading blockchain state from storage for producer (validator_index={})...",
             self.config.validator_index);
 
-        // Load latest block from storage
-        match storage.get_latest_qblock().await? {
+        // ✅ v0.9.17-beta FIX: Use get_highest_contiguous_block() as single source of truth
+        // This method is used by crash recovery, TurboSync, and peer height sync
+        // It NEVER fails to return the correct height even if block data is missing
+        let highest_height = storage.get_highest_contiguous_block().await?;
+
+        if highest_height == 0 {
+            info!("📝 No existing blockchain state found - starting from genesis");
+            return Ok(());
+        }
+
+        info!("🔍 Found highest block at height {} in storage", highest_height);
+
+        // Try to load full block metadata if possible
+        match storage.get_qblock_by_height(highest_height).await? {
             Some(latest_block) => {
+                // Full metadata available
                 self.current_height = latest_block.header.height;
                 self.latest_block_hash = latest_block.calculate_hash();
                 self.total_difficulty = latest_block.header.total_difficulty;
@@ -169,7 +183,15 @@ impl BlockProducer {
                 info!("   DAG round: {}", self.dag_round);
             }
             None => {
-                info!("📝 No existing blockchain state found - starting from genesis");
+                // Block metadata missing or corrupt - use height-only mode
+                warn!("⚠️  Block #{} exists but cannot load metadata - using height-only mode", highest_height);
+
+                self.current_height = highest_height;
+                self.latest_block_hash = [0u8; 32]; // Placeholder
+                self.total_difficulty = 0;
+                self.dag_round = highest_height;
+
+                warn!("✅ Loaded height {} from storage (metadata unavailable)", highest_height);
             }
         }
 
@@ -266,12 +288,23 @@ impl BlockProducer {
         };
 
         // Generate quantum metadata
-        let quantum_metadata = self.generate_quantum_metadata(&solutions, block_difficulty);
+        let quantum_metadata = match self.generate_quantum_metadata(&solutions, block_difficulty) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                error!("🚨 Failed to generate quantum metadata: {}", e);
+                return None;
+            }
+        };
+
+        // Create coinbase transactions (block rewards + dev fee)
+        let coinbase_transactions = Self::create_coinbase_transactions(&solutions);
 
         // Create block
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
+                phase: 2, // Phase 2 testnet
+                network_id: "testnet-phase4".to_string(), // v0.9.4-beta: Phase 4 network
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -281,12 +314,14 @@ impl BlockProducer {
                 vdf_proof,
                 anchor_validator: None, // TODO: Anchor election
                 proposer: self.config.node_id,
+                producer_id: self.config.validator_index as u8, // v0.8.11-beta: Lane ID for parallel production
                 total_difficulty: self.total_difficulty,
             },
             mining_solutions: solutions.clone(),
             dag_parents: vec![], // TODO: Get from DAG-Knight
             quantum_metadata,
-            transactions: vec![],
+            transactions: coinbase_transactions,
+            balance_updates: vec![], // v0.9.0-beta: Balance consensus (empty for now, full implementation later)
             size_bytes: 0, // Will be calculated
         };
 
@@ -309,8 +344,107 @@ impl BlockProducer {
         Some(block)
     }
 
+    /// Create coinbase transactions for block rewards + development fee
+    ///
+    /// CONSENSUS RULE: Every block must include:
+    /// - 99% of mining rewards → individual miners
+    /// - 1% development fee → founder wallet (efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723)
+    ///
+    /// This ensures dev fees are blockchain-enforced and visible to all nodes.
+    /// Blocks without proper dev fee transactions are rejected by consensus.
+    fn create_coinbase_transactions(solutions: &[MiningSolution]) -> Vec<Transaction> {
+        use chrono::Utc;
+        use sha2::{Sha256, Digest};
+
+        const BLOCK_REWARD: u64 = 1_000_000; // 0.001 QNK per solution (with 9 decimals)
+        const DEV_FEE_PERCENT: f64 = 0.01; // 1%
+        const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+
+        let mut transactions = Vec::new();
+
+        if solutions.is_empty() {
+            return transactions; // No rewards for empty blocks
+        }
+
+        // Calculate rewards
+        let total_reward = BLOCK_REWARD * solutions.len() as u64;
+        let dev_fee_amount = (total_reward as f64 * DEV_FEE_PERCENT) as u64;
+        let miner_reward_per_solution = ((total_reward - dev_fee_amount) / solutions.len() as u64);
+
+        // Decode founder wallet
+        let founder_wallet_bytes = hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
+        let mut founder_wallet = [0u8; 32];
+        founder_wallet.copy_from_slice(&founder_wallet_bytes);
+
+        // Zero address for coinbase "from" (newly minted coins)
+        let coinbase_from = [0u8; 32];
+
+        let timestamp = Utc::now();
+
+        // Transaction 1: Development fee (1%)
+        let dev_fee_tx_id = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"DEV_FEE");
+            hasher.update(&dev_fee_amount.to_le_bytes());
+            hasher.update(&founder_wallet);
+            hasher.update(&timestamp.timestamp().to_le_bytes());
+            let hash = hasher.finalize();
+            let mut tx_id = [0u8; 32];
+            tx_id.copy_from_slice(&hash);
+            tx_id
+        };
+
+        transactions.push(Transaction {
+            id: dev_fee_tx_id,
+            from: coinbase_from,
+            to: founder_wallet,
+            amount: dev_fee_amount,
+            fee: 0,
+            nonce: 0,
+            signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
+            timestamp,
+            data: b"Development fee (1%) for sustainable quantum consensus research".to_vec(),
+            token_type: TokenType::QUG,
+            fee_token_type: TokenType::QUGUSD,
+        });
+
+        // Transaction 2-N: Miner rewards (99% split among all miners)
+        for (idx, solution) in solutions.iter().enumerate() {
+            let miner_tx_id = {
+                let mut hasher = Sha256::new();
+                hasher.update(b"MINER_REWARD");
+                hasher.update(&solution.nonce.to_le_bytes());
+                hasher.update(&solution.miner_address);
+                hasher.update(&(idx as u64).to_le_bytes());
+                let hash = hasher.finalize();
+                let mut tx_id = [0u8; 32];
+                tx_id.copy_from_slice(&hash);
+                tx_id
+            };
+
+            transactions.push(Transaction {
+                id: miner_tx_id,
+                from: coinbase_from,
+                to: solution.miner_address,
+                amount: miner_reward_per_solution,
+                fee: 0,
+                nonce: idx as u64,
+                signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
+                timestamp,
+                data: format!("Mining reward for solution #{}", solution.nonce).into_bytes(),
+                token_type: TokenType::QUG,
+                fee_token_type: TokenType::QUGUSD,
+            });
+        }
+
+        info!("💰 Created {} coinbase transactions: {} dev fee, {} miner rewards",
+              transactions.len(), dev_fee_amount, miner_reward_per_solution);
+
+        transactions
+    }
+
     /// Generate quantum metadata for block
-    fn generate_quantum_metadata(&self, solutions: &[MiningSolution], difficulty: u128) -> QuantumMetadata {
+    fn generate_quantum_metadata(&self, solutions: &[MiningSolution], difficulty: u128) -> Result<QuantumMetadata, String> {
         // Calculate quantum entropy from VDF
         let quantum_entropy = self.calculate_quantum_entropy(solutions);
 
@@ -326,12 +460,15 @@ impl BlockProducer {
         let k_parameter = self.calculate_k_parameter(difficulty, quantum_entropy);
 
         // Calculate energy components (simplified)
+        let temporal_energy = self.last_block_time.elapsed().as_secs_f64();
+        let potential_energy = difficulty as f64;
+
         let energy_components = EnergyComponents {
             coupling: 0.0, // TODO: Calculate from validator phase alignment
-            potential: difficulty as f64,
+            potential: Self::sanitize_f64(potential_energy)?,
             ordering: self.current_height as f64,
             fault_tolerance: 0.0, // TODO: Byzantine detection
-            temporal: self.last_block_time.elapsed().as_secs_f64(),
+            temporal: Self::sanitize_f64(temporal_energy)?,
             finality: 0.0, // TODO: Calculate from DAG depth
         };
 
@@ -342,15 +479,27 @@ impl BlockProducer {
                      energy_components.temporal +
                      energy_components.finality;
 
-        QuantumMetadata {
+        Ok(QuantumMetadata {
             vertex_coordinates,
-            k_parameter,
-            energy,
+            k_parameter: Self::sanitize_f64(k_parameter)?,
+            energy: Self::sanitize_f64(energy)?,
             energy_components,
             spectral_signatures: vec![], // TODO: Collect validator signatures
-            wavefunction_phase: quantum_entropy * std::f64::consts::PI,
-            entropy_variance: quantum_entropy * 0.1,
+            wavefunction_phase: Self::sanitize_f64(quantum_entropy * std::f64::consts::PI)?,
+            entropy_variance: Self::sanitize_f64(quantum_entropy * 0.1)?,
             byzantine_scores: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Ensure f64 values are valid (not NaN or Infinity) for P2P serialization
+    /// v0.6.0-beta: Now returns Result to fail loud instead of silently converting to 0.0
+    fn sanitize_f64(value: f64) -> Result<f64, String> {
+        if value.is_nan() {
+            Err(format!("🚨 CRITICAL: NaN value detected in quantum metadata - this indicates a calculation bug!"))
+        } else if value.is_infinite() {
+            Err(format!("🚨 CRITICAL: Infinite value detected in quantum metadata - this indicates a calculation bug!"))
+        } else {
+            Ok(value)
         }
     }
 
@@ -375,7 +524,12 @@ impl BlockProducer {
         // Simplified K-parameter calculation
         // K = 2π √(ΔH · Δs · ℏ) / τ
 
-        let energy_variance = (difficulty as f64).log10();
+        // 🔒 v0.5.25-beta P2P GOSSIPSUB FIX: Prevent -Infinity from log10(0)
+        let energy_variance = if difficulty > 0 {
+            (difficulty as f64).log10()
+        } else {
+            0.0
+        };
         let entropy_variance = entropy * 0.1;
         let planck_constant = 1.0; // Normalized
         let round_duration = self.last_block_time.elapsed().as_secs_f64().max(1.0);
@@ -645,6 +799,7 @@ mod tests {
             miner_address: [1u8; 32],
             timestamp: 1234567890,
             pool_id: None,
+            hash_rate_hs: 10000, // 10 KH/s test hashrate
         };
 
         producer.queue_solution(solution);
@@ -677,6 +832,7 @@ mod tests {
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
+                hash_rate_hs: 15000 + (i * 1000),
             };
             producer.queue_solution(solution);
         }
@@ -694,6 +850,7 @@ mod tests {
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
+                hash_rate_hs: 15000 + (i * 1000),
             };
             producer.queue_solution(solution);
         }
@@ -717,6 +874,7 @@ mod tests {
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
+                hash_rate_hs: 20000 + (i * 1000),
             };
             producer.queue_solution(solution);
         }
@@ -883,5 +1041,84 @@ impl ParallelBlockProducerPool {
     /// Get a read-locked reference to a specific producer (for utility methods)
     pub async fn get_producer(&self, index: usize) -> tokio::sync::RwLockReadGuard<'_, BlockProducer> {
         self.producers[index % self.num_producers].read().await
+    }
+
+    /// Synchronize all producers' blockchain state from storage after sync events
+    ///
+    /// **v0.9.7-beta CRITICAL FIX**: After turbo sync or HTTP sync completes,
+    /// all parallel producers must update their internal height state to match
+    /// the new blockchain state. Without this, producers continue creating blocks
+    /// at stale heights, causing catastrophic height regression errors.
+    ///
+    /// # Arguments
+    /// * `storage` - Storage instance to load latest blockchain state from
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After turbo sync completes:
+    /// app_state.block_producer_pool.sync_from_storage(&storage).await?;
+    /// ```
+    pub async fn sync_from_storage(&self, storage: &Arc<q_storage::QStorage>) -> anyhow::Result<()> {
+        info!("🔄 [PRODUCER SYNC] Synchronizing all {} producers with blockchain state...", self.num_producers);
+
+        // ✅ v0.9.12-beta FIX: Use get_highest_contiguous_block() as authoritative source
+        // This is the same method used by crash recovery and peer height announcements.
+        // It cannot fail to return the correct height even if block data is missing or corrupt.
+        let highest_height = storage.get_highest_contiguous_block().await?;
+
+        if highest_height == 0 {
+            info!("📝 [PRODUCER SYNC] No blocks in storage yet - producers at genesis");
+            return Ok(());
+        }
+
+        info!("🔍 [PRODUCER SYNC] Found highest block at height {} in storage", highest_height);
+
+        // Try to load the actual block for full metadata
+        match storage.get_qblock_by_height(highest_height).await? {
+            Some(latest_block) => {
+                // Full sync with all metadata
+                let new_height = latest_block.header.height;
+                let new_hash = latest_block.calculate_hash();
+                let new_difficulty = latest_block.header.total_difficulty;
+                let new_dag_round = latest_block.header.dag_round;
+
+                info!("   Latest block metadata: height={}, hash={}",
+                    new_height, hex::encode(&new_hash[..8]));
+
+                // Update all producers atomically
+                for (i, producer_arc) in self.producers.iter().enumerate() {
+                    let mut producer = producer_arc.write().await;
+                    producer.set_latest_block(new_height, new_hash, new_difficulty);
+                    producer.dag_round = new_dag_round;
+
+                    debug!("   ✅ Producer #{} synchronized: height={}", i, new_height);
+                }
+
+                info!("✅ [PRODUCER SYNC] All producers synchronized to height {} (full metadata)", new_height);
+            }
+            None => {
+                // Block data missing or corrupt - use height-only sync
+                warn!("⚠️  [PRODUCER SYNC] Block #{} exists but cannot load data - using height-only sync", highest_height);
+
+                // ✅ v0.9.12-beta CRITICAL FIX: Sync producers to height even without block data
+                // This prevents height regression when blocks can't be deserialized.
+                // Producers will create the next block with placeholder metadata, which will be
+                // corrected when the next valid block arrives from the network.
+                let zero_hash = [0u8; 32];  // Placeholder hash
+                let zero_difficulty = 0u128;  // Will be updated when next block arrives
+
+                for (i, producer_arc) in self.producers.iter().enumerate() {
+                    let mut producer = producer_arc.write().await;
+                    producer.set_latest_block(highest_height, zero_hash, zero_difficulty);
+                    producer.dag_round = highest_height;  // Use height as DAG round
+
+                    debug!("   ⚠️  Producer #{} synchronized to height {} (height-only)", i, highest_height);
+                }
+
+                info!("✅ [PRODUCER SYNC] All producers synchronized to height {} (height-only mode)", highest_height);
+            }
+        }
+
+        Ok(())
     }
 }

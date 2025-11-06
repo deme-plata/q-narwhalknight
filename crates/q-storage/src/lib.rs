@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 extern crate hex;
 extern crate blake3;
 
+pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 pub mod balance_consensus;
 pub mod kv;
 pub mod manifest;
@@ -46,6 +47,10 @@ pub use kv::{KVStore, RocksDBKV};
 pub use kv::KVStore;
 #[cfg(target_os = "windows")]
 pub use kv_sled::RocksDBKV;
+pub use aegis_sync::{
+    SignedBlockPack, SyncAffirmationCertificate, PeerTrustRegistry, PeerTrustMetrics,
+    compute_merkle_root, verify_timestamp,
+};
 pub use balance_consensus::{
     BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, BalanceUpdate,
     ChangeReason, ConsensusStats, GENESIS_TIMESTAMP, DEV_FEE_PERCENT, FOUNDER_WALLET,
@@ -76,10 +81,13 @@ pub const CF_AI_CHATS: &str = "ai_chats";
 pub const CF_AI_CREDITS: &str = "ai_credits";
 pub const CF_AI_TRANSACTIONS: &str = "ai_transactions";
 pub const CF_AI_TREASURY: &str = "ai_treasury";
+pub const CF_AI_ATTACHMENTS: &str = "ai_attachments";  // v0.9.9-beta: AI chat attachment support
 pub const CF_PAYMENT_PROPOSALS: &str = "payment_proposals";
 pub const CF_PAYMENT_VOTES: &str = "payment_votes";
 pub const CF_PAYMENT_LOCKS: &str = "payment_locks";
 pub const CF_BANNED_PEERS: &str = "banned_peers";  // v0.9.7-beta: ZK proof ban persistence
+pub const CF_SYNC_CERTIFICATES: &str = "sync_certificates";  // v0.9.14-beta: AEGIS-QL sync affirmation
+pub const CF_PEER_TRUST: &str = "peer_trust";  // v0.9.14-beta: AEGIS-QL peer trust metrics
 
 /// Storage configuration
 #[derive(Debug, Clone)]
@@ -117,6 +125,27 @@ pub struct QStorage {
 
 /// Type alias for compatibility with API server
 pub type StorageEngine = QStorage;
+
+// ============================================================================
+// AI Chat Attachment Metadata - v0.9.9-beta
+// ============================================================================
+
+/// AttachmentMetadata struct for AI chat attachments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMetadata {
+    pub id: String,
+    pub chat_id: String,
+    pub user_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub file_size: i64,
+    pub storage_path: String,
+    pub thumbnail_path: Option<String>,
+    pub extracted_text: Option<String>,
+    pub vision_base64: Option<String>,
+    pub upload_timestamp: i64,
+    pub processed: bool,
+}
 
 impl QStorage {
     /// Create new storage engine with configuration
@@ -674,28 +703,62 @@ impl QStorage {
     pub async fn get_highest_contiguous_block(&self) -> Result<u64> {
         // ✅ v0.5.19-beta FIX: Handle legacy databases without qblock:latest pointer
         // If qblock:latest doesn't exist, scan backwards from a large number to find highest block
-        let mut latest = self.get_latest_qblock_height().await?.unwrap_or(0);
+
+        // 🔍 v0.9.16-beta: ENHANCED DEBUGGING for height reset diagnosis
+        warn!("🔍🔍🔍 [HEIGHT DEBUG] Starting get_highest_contiguous_block()");
+
+        let latest_result = self.get_latest_qblock_height().await?;
+        let mut latest = latest_result.unwrap_or(0);
+
+        warn!("🔍 [HEIGHT DEBUG] qblock:latest pointer returned: {:?} (unwrapped to: {})",
+              latest_result, latest);
 
         if latest == 0 {
             // qblock:latest pointer missing (old database) - scan for highest block
-            info!("🔍 qblock:latest pointer missing, scanning for highest block...");
+            warn!("🚨 [HEIGHT DEBUG] qblock:latest pointer is ZERO - scanning for highest block...");
 
-            // IMPROVED: Check some common heights first for faster discovery
-            let probe_heights = vec![150_000, 145_000, 140_000, 100_000, 50_000, 10_000, 1_000, 100, 10, 1];
+            // ✅ v0.9.9-beta FIX: Comprehensive probe heights covering ALL realistic ranges
+            // This fixes the catastrophic height reset bug where restart would return height=0
+            // despite having 2000+ blocks in database because probes missed the actual range.
+            let probe_heights = vec![
+                // Very high ranges (future-proofing)
+                1_000_000, 500_000, 250_000,
+                // High ranges (mainnet potential)
+                150_000, 100_000, 75_000, 50_000,
+                // Medium ranges (CRITICAL - where testnet actually is!)
+                25_000, 10_000, 5_000, 3_000, 2_000, 1_500, 1_000,
+                // Low ranges (early testnet)
+                500, 250, 100, 50, 10, 5, 1
+            ];
 
             for &probe_height in &probe_heights {
-                info!("🔍 Probing height {}...", probe_height);
-                if let Ok(Some(_)) = self.get_qblock_by_height(probe_height).await {
-                    // Found a block! Use this as starting point for binary search
-                    latest = probe_height + 50_000; // Add buffer for binary search
-                    info!("✅ Found block at height {}, will binary search up to {}", probe_height, latest);
-                    break;
+                warn!("🔍 [HEIGHT DEBUG] Probing height {}...", probe_height);
+                match self.get_qblock_by_height(probe_height).await {
+                    Ok(Some(block)) => {
+                        // Found a block! Use this as starting point for binary search
+                        // Add buffer proportional to found height for efficient binary search
+                        let buffer = std::cmp::max(probe_height / 2, 10_000);
+                        latest = probe_height + buffer;
+
+                        warn!("✅ [HEIGHT DEBUG] Found block at height {} (hash: {}), will binary search up to {}",
+                              probe_height,
+                              hex::encode(&block.calculate_hash()[..8]),
+                              latest);
+                        break;
+                    }
+                    Ok(None) => {
+                        warn!("🔍 [HEIGHT DEBUG] No block at height {}", probe_height);
+                    }
+                    Err(e) => {
+                        warn!("❌ [HEIGHT DEBUG] Error probing height {}: {}", probe_height, e);
+                    }
                 }
             }
 
             if latest == 0 {
-                // No blocks found even at low heights
-                info!("❌ No blocks found in database");
+                // No blocks found even at low heights - truly empty database
+                warn!("🚨🚨🚨 [HEIGHT DEBUG] NO BLOCKS FOUND after comprehensive scan!");
+                warn!("🚨 [HEIGHT DEBUG] Database appears empty despite existing data!");
                 return Ok(0);
             }
         }
@@ -740,13 +803,15 @@ impl QStorage {
             }
         }
 
-        info!(
-            "✅ Highest contiguous block: {} (scanned up to: {}, gap: {}, iterations: {})",
+        warn!(
+            "✅✅✅ [HEIGHT DEBUG] Highest contiguous block: {} (scanned up to: {}, gap: {}, iterations: {})",
             verified,
             latest,
             latest.saturating_sub(verified),
             iterations
         );
+
+        warn!("🔍 [HEIGHT DEBUG] FINAL RESULT: Returning height {}", verified);
 
         Ok(verified)
     }
@@ -1594,6 +1659,94 @@ impl QStorage {
         self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
         debug!("🗑️ Deleted liquidity pool: {}", pool_id);
         Ok(())
+    }
+
+    // ============================================================================
+    // AI Chat Attachment Storage - v0.9.9-beta
+    // ============================================================================
+
+    /// Save attachment metadata
+    pub async fn save_attachment(
+        &self,
+        attachment_id: &str,
+        chat_id: &str,
+        user_id: &str,
+        filename: &str,
+        mime_type: &str,
+        file_size: i64,
+        storage_path: &str,
+    ) -> Result<()> {
+        let metadata = AttachmentMetadata {
+            id: attachment_id.to_string(),
+            chat_id: chat_id.to_string(),
+            user_id: user_id.to_string(),
+            filename: filename.to_string(),
+            mime_type: mime_type.to_string(),
+            file_size,
+            storage_path: storage_path.to_string(),
+            thumbnail_path: None,
+            extracted_text: None,
+            vision_base64: None,
+            upload_timestamp: chrono::Utc::now().timestamp(),
+            processed: false,
+        };
+
+        let key = format!("attachment:{}", attachment_id);
+        let value = serde_json::to_vec(&metadata)?;
+        self.hot_db.put(CF_AI_ATTACHMENTS, key.as_bytes(), &value).await?;
+
+        debug!("📎 Saved attachment metadata: {} ({} bytes, {})", filename, file_size, mime_type);
+        Ok(())
+    }
+
+    /// Update attachment after processing
+    pub async fn update_attachment_processed(
+        &self,
+        attachment_id: &str,
+        thumbnail_path: Option<&str>,
+        extracted_text: Option<&str>,
+        vision_base64: Option<&str>,
+    ) -> Result<()> {
+        let key = format!("attachment:{}", attachment_id);
+        let data = self.hot_db.get(CF_AI_ATTACHMENTS, key.as_bytes()).await?;
+
+        if let Some(data) = data {
+            let mut metadata: AttachmentMetadata = serde_json::from_slice(&data)?;
+
+            if let Some(path) = thumbnail_path {
+                metadata.thumbnail_path = Some(path.to_string());
+            }
+            if let Some(text) = extracted_text {
+                metadata.extracted_text = Some(text.to_string());
+            }
+            if let Some(b64) = vision_base64 {
+                metadata.vision_base64 = Some(b64.to_string());
+            }
+            metadata.processed = true;
+
+            let value = serde_json::to_vec(&metadata)?;
+            self.hot_db.put(CF_AI_ATTACHMENTS, key.as_bytes(), &value).await?;
+
+            debug!("✅ Updated attachment processing status: {}", attachment_id);
+        }
+
+        Ok(())
+    }
+
+    /// Get attachments for a chat
+    pub async fn get_chat_attachments(&self, chat_id: &str) -> Result<Vec<AttachmentMetadata>> {
+        let prefix = format!("chat:{}:attachments:", chat_id);
+        let attachments_data = self.hot_db.scan_prefix(CF_AI_ATTACHMENTS, prefix.as_bytes()).await?;
+
+        let mut attachments = Vec::new();
+        for (_key, value) in attachments_data {
+            if let Ok(attachment) = serde_json::from_slice::<AttachmentMetadata>(&value) {
+                attachments.push(attachment);
+            }
+        }
+
+        debug!("📎 Loaded {} attachments for chat: {}", attachments.len(), chat_id);
+        Ok(attachments)
     }
 
     // ============================================================================

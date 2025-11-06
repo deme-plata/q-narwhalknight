@@ -7,6 +7,7 @@ use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -99,10 +100,10 @@ pub struct QuantumTradingParameters {
 impl Default for QuantumTradingParameters {
     fn default() -> Self {
         Self {
-            planck_financial: BigDecimal::from(6.62607015e-34), // Scaled for volatility
-            golden_ratio: BigDecimal::from(1.618033988749895),
-            euler_constant: BigDecimal::from(2.718281828459045),
-            pi_constant: BigDecimal::from(3.141592653589793),
+            planck_financial: "0.00000000000000000000000000000000066260701".parse().unwrap(), // Scaled for volatility
+            golden_ratio: "1.618033988749895".parse().unwrap(),
+            euler_constant: "2.718281828459045".parse().unwrap(),
+            pi_constant: "3.141592653589793".parse().unwrap(),
             uncertainty_principle: 0.1618, // Golden ratio percentage
             collapse_threshold: 0.05,      // 5% price movement
             entanglement_strength: 0.707,  // √2/2
@@ -280,8 +281,9 @@ impl QuantumTradingEngine {
         let base_price = request
             .price
             .clone()
-            .unwrap_or_else(|| BigDecimal::from(1.618));
-        let uncertainty = &base_price * BigDecimal::from(uncertainty_factor);
+            .unwrap_or_else(|| "1.618".parse().unwrap());
+        use std::str::FromStr;
+        let uncertainty = &base_price * BigDecimal::from_str(&uncertainty_factor.to_string())?;
 
         // Apply quantum price discovery using golden ratio
         let quantum_price =
@@ -365,7 +367,7 @@ impl QuantumTradingEngine {
 
         // Apply entanglement correlation
         let entanglement_adjustment =
-            &quantum_price * BigDecimal::from(entanglement) / BigDecimal::from(1000);
+            &quantum_price * BigDecimal::from_str(&entanglement.to_string())? / BigDecimal::from(1000);
 
         // Final collapsed price
         let collapsed_price = quantum_price + golden_adjustment + entanglement_adjustment;
@@ -382,11 +384,12 @@ impl QuantumTradingEngine {
         let trade_value = amount * price;
 
         // Quantum-optimized fee rate (reduced due to efficiency gains)
-        let quantum_fee_rate = BigDecimal::from(0.001); // 0.1% vs standard 0.3%
+        let quantum_fee_rate: BigDecimal = "0.001".parse().unwrap(); // 0.1% vs standard 0.3%
         let base_fees = &trade_value * &quantum_fee_rate;
 
         // Apply golden ratio optimization
-        let optimized_fees = &base_fees / BigDecimal::from(1.618);
+        let golden_ratio: BigDecimal = "1.618".parse().unwrap();
+        let optimized_fees = &base_fees / golden_ratio;
 
         Ok(optimized_fees)
     }
@@ -556,7 +559,7 @@ mod tests {
             pair_id: "ORB/ORBUSD".to_string(),
             side: TradeSide::Buy,
             amount: BigDecimal::from(100),
-            price: Some(BigDecimal::from(1.618)),
+            price: Some("1.618".parse().unwrap()),
             order_type: OrderType::Market,
             privacy_level: QuantumPrivacyTier::Basic,
             zk_proof_required: false,
@@ -567,7 +570,7 @@ mod tests {
         };
 
         let quantum_price = engine.apply_uncertainty_principle(&request).await.unwrap();
-        assert!(quantum_price > BigDecimal::from(1.618));
+        assert!(quantum_price > "1.618".parse().unwrap());
     }
 
     #[tokio::test]
@@ -597,7 +600,7 @@ mod tests {
             trader_id: "test_trader".to_string(),
             pair_id: "ORB/ORBUSD".to_string(),
             side: TradeSide::Buy,
-            price: BigDecimal::from(1.618),
+            price: "1.618".parse().unwrap(),
             amount: BigDecimal::from(100),
             order_type: OrderType::Limit,
             privacy_level: QuantumPrivacyTier::Enhanced,

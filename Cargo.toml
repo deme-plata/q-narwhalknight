@@ -58,7 +58,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference"]
 
 [workspace.package]
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
@@ -189,7 +189,7 @@ num-integer = "0.1"
 bulletproofs = "4.0"
 
 # Additional dependencies for testing
-zeroize = "1.5"
+zeroize = { version = "1.5", features = ["derive"] }  # v0.9.14 FIX: Enable derive macros for q-aegis-ql
 pin-project = "1.1"
 rustls = "0.23"
 idna = "0.4"

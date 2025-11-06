@@ -10,6 +10,8 @@ license = "MIT OR Apache-2.0"
 q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-network = { path = "../q-network" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+q-precision = { path = "../q-precision" }
 
 # Cryptography
 sha3 = "0.10"

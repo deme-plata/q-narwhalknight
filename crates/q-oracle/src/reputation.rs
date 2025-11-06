@@ -3,7 +3,7 @@
 //! Reputation scoring with quantum mechanics principles
 
 use crate::types::*;
-use q_types::{Error, Result};
+use anyhow::Result;
 
 /// Quantum Reputation System
 pub struct QuantumReputationSystem;

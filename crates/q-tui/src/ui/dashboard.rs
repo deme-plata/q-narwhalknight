@@ -9,22 +9,56 @@ use ratatui::{
 };
 
 pub fn render(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let metrics = app.metrics.read().unwrap();
+
+    // Dynamic layout based on sync state
+    let constraints = if metrics.is_syncing {
+        vec![
+            Constraint::Length(3),   // Header
+            Constraint::Length(4),   // Sync Progress Bar
+            Constraint::Length(9),   // Metrics cards
+            Constraint::Length(7),   // TPS Chart or AI Metrics
+            Constraint::Min(6),      // Logs (smaller when syncing)
+            Constraint::Length(3),   // Footer
+        ]
+    } else {
+        vec![
             Constraint::Length(3),   // Header
             Constraint::Length(9),   // Metrics cards
-            Constraint::Length(7),   // TPS Chart
+            Constraint::Length(7),   // TPS Chart or AI Metrics
             Constraint::Min(8),      // Logs
             Constraint::Length(3),   // Footer
-        ])
+        ]
+    };
+    drop(metrics); // Release lock
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(f.size());
 
-    render_header(f, chunks[0], app);
-    render_metrics_grid(f, chunks[1], app);
-    render_tps_chart(f, chunks[2], app);
-    render_recent_logs(f, chunks[3], app);
-    render_footer(f, chunks[4], app);
+    let metrics = app.metrics.read().unwrap();
+    let mut idx = 0;
+
+    render_header(f, chunks[idx], app);
+    idx += 1;
+
+    if metrics.is_syncing {
+        render_sync_progress(f, chunks[idx], app);
+        idx += 1;
+    }
+    drop(metrics);
+
+    render_metrics_grid(f, chunks[idx], app);
+    idx += 1;
+
+    render_tps_or_ai_metrics(f, chunks[idx], app);
+    idx += 1;
+
+    render_recent_logs(f, chunks[idx], app);
+    idx += 1;
+
+    render_footer(f, chunks[idx], app);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -226,6 +260,105 @@ fn render_recent_logs(f: &mut Frame, area: Rect, app: &App) {
         );
 
     f.render_widget(logs_list, area);
+}
+
+fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    let progress = metrics.sync_progress_percent.clamp(0.0, 100.0);
+    let bar_width = (area.width as f32 * progress / 100.0) as u16;
+
+    let eta_str = if metrics.sync_speed_blocks_per_sec > 0.0 {
+        let blocks_remaining = metrics.sync_target_height.saturating_sub(metrics.sync_current_height) as f32;
+        let secs_remaining = blocks_remaining / metrics.sync_speed_blocks_per_sec;
+        let mins = (secs_remaining / 60.0) as u32;
+        if mins > 60 {
+            format!("ETA: {}h {}m", mins / 60, mins % 60)
+        } else {
+            format!("ETA: {}m", mins)
+        }
+    } else {
+        "Calculating...".to_string()
+    };
+
+    let sync_text = vec![
+        Line::from(vec![
+            Span::raw("Syncing: "),
+            Span::styled(
+                format!("{}/{} ", metrics.sync_current_height, metrics.sync_target_height),
+                Style::default().fg(Color::Cyan)
+            ),
+            Span::raw(format!("({:.1}%) │ Speed: {:.1} blocks/s │ {}",
+                progress, metrics.sync_speed_blocks_per_sec, eta_str)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "█".repeat(bar_width as usize),
+                Style::default().fg(Color::Green)
+            ),
+            Span::styled(
+                "░".repeat((area.width.saturating_sub(bar_width + 2)) as usize),
+                Style::default().fg(Color::DarkGray)
+            ),
+        ]),
+    ];
+
+    let sync_widget = Paragraph::new(sync_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("⏳ Blockchain Sync")
+                .style(Style::default().fg(Color::Yellow))
+        );
+
+    f.render_widget(sync_widget, area);
+}
+
+fn render_tps_or_ai_metrics(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    if metrics.ai_enabled {
+        drop(metrics);
+        render_ai_metrics(f, area, app);
+    } else {
+        drop(metrics);
+        render_tps_chart(f, area, app);
+    }
+}
+
+fn render_ai_metrics(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    let ai_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("AI Nodes:       "),
+            Span::styled(
+                format!("{}", metrics.ai_nodes_available),
+                Style::default().fg(if metrics.ai_nodes_available > 0 { Color::Green } else { Color::Red })
+            ),
+        ])),
+        ListItem::new(format!("Total Requests:  {}", metrics.ai_total_requests)),
+        ListItem::new(format!("Nodes Used:      {}", metrics.ai_nodes_participated)),
+        ListItem::new(format!("Avg Nodes/Req:   {:.1}", metrics.ai_avg_nodes_per_request)),
+        ListItem::new(format!("Layers Processed: {}", metrics.ai_layers_processed)),
+        ListItem::new(Line::from(vec![
+            Span::raw("Active Requests: "),
+            Span::styled(
+                format!("{}", metrics.ai_active_requests),
+                Style::default().fg(if metrics.ai_active_requests > 0 { Color::Yellow } else { Color::Green })
+            ),
+        ])),
+    ];
+
+    let ai_widget = List::new(ai_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("🤖 Distributed AI Metrics")
+                .style(Style::default().fg(Color::Magenta))
+        );
+
+    f.render_widget(ai_widget, area);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, _app: &App) {

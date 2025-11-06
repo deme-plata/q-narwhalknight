@@ -520,7 +520,7 @@ class QNarwhalKnightAPI {
   }
 
   // Send a transaction
-  async sendTransaction(from: string, to: string, amount: number, memo?: string): Promise<ApiResponse<any>> {
+  async sendTransaction(from: string, to: string, amount: number, memo?: string, tokenType?: string): Promise<ApiResponse<any>> {
     // Use stored wallet address if none provided for 'from'
     const fromAddress = from || localStorage.getItem('walletAddress') || '';
 
@@ -680,12 +680,15 @@ class QNarwhalKnightAPI {
         to: to,
         amount: fixedAmount,
         memo: memo,
+        token_type: tokenType || 'QUG', // Default to QUG if not specified
       };
 
       // Only include mnemonic if we had to decrypt it
       if (mnemonic) {
         requestBody.mnemonic = mnemonic;
       }
+
+      console.log('📤 Sending transaction with token_type:', requestBody.token_type);
 
       return this.request<any>('/v1/transactions/send', {
         method: 'POST',
@@ -1316,6 +1319,84 @@ class QNarwhalKnightAPI {
 
     return eventSource;
   }
+
+  // ============================================
+  // ADDRESS BOOK API - ZK-STARK/SNARK VERIFIED
+  // ============================================
+
+  /**
+   * Get all saved addresses from address book
+   */
+  async getAddressBook(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook');
+  }
+
+  /**
+   * Save a new address to address book with optional ZK proof
+   */
+  async saveAddress(addressData: any): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook', {
+      method: 'POST',
+      body: JSON.stringify(addressData)
+    });
+  }
+
+  /**
+   * Update an existing address in address book
+   */
+  async updateAddress(addressId: string, addressData: any): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/addressbook/${addressId}`, {
+      method: 'PUT',
+      body: JSON.stringify(addressData)
+    });
+  }
+
+  /**
+   * Delete an address from address book
+   */
+  async deleteAddress(addressId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/addressbook/${addressId}`, {
+      method: 'DELETE'
+    });
+  }
+
+  /**
+   * Generate ZK-STARK or ZK-SNARK proof for address verification
+   * @param address - Wallet address to verify
+   * @param proofType - 'stark' or 'snark'
+   */
+  async generateAddressProof(address: string, proofType: 'stark' | 'snark' = 'stark'): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook/proof', {
+      method: 'POST',
+      body: JSON.stringify({ address, proof_type: proofType })
+    });
+  }
+
+  /**
+   * Verify a ZK proof for an address
+   */
+  async verifyAddressProof(address: string, proof: any): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook/verify', {
+      method: 'POST',
+      body: JSON.stringify({ address, proof })
+    });
+  }
+
+  /**
+   * Get address book sync status via gossipsub
+   */
+  async getAddressBookSyncStatus(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook/sync/status');
+  }
+
+  /**
+   * Force sync address book via gossipsub P2P network
+   */
+  async syncAddressBookGossipsub(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/addressbook/sync', {
+      method: 'POST'
+    });
+  }
 }
 
 // Mining reward event interfaces
@@ -1346,7 +1427,6 @@ export { QNarwhalKnightAPI };
 // Export throttling utilities for use in components
 export { throttle, debounce };
 
-// ============================================
 // THROTTLED API METHODS FOR POLLING PROTECTION
 // ============================================
 

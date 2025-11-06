@@ -686,3 +686,314 @@ pub async fn transfer_usd(
         }
     }
 }
+
+// ============================================================================
+// AI Payment Consensus System Endpoints
+// ============================================================================
+
+use axum::extract::Query;
+
+/// Query parameters for wallet endpoints
+#[derive(Debug, Deserialize)]
+pub struct WalletQueryParams {
+    pub wallet_address: String,
+}
+
+/// AI wallet balance response (QUG/QUGUSD balances for AI inference payments)
+#[derive(Debug, Serialize)]
+pub struct AIWalletBalanceResponse {
+    pub success: bool,
+    pub data: Option<AIWalletBalanceData>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AIWalletBalanceData {
+    pub wallet_address: String,
+    pub balance_qnk: u64,  // QUG balance (changed from QNK ticker)
+    pub balance_qnk_usd: f64,
+    pub balance_qugusd: u64,
+    pub tokens_generated_lifetime: u64,
+    pub updated_at: u64,
+}
+
+/// AI usage statistics response
+#[derive(Debug, Serialize)]
+pub struct AIUsageStatsResponse {
+    pub success: bool,
+    pub data: Option<AIUsageStatsData>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AIUsageStatsData {
+    pub wallet_address: String,
+    pub total_spent_qnk: u64,
+    pub total_spent_usd: f64,
+    pub total_requests: u64,
+    pub total_tokens_generated: u64,
+    pub average_cost_per_request_qnk: u64,
+    pub average_tokens_per_request: u32,
+    pub first_request_at: Option<u64>,
+    pub last_request_at: Option<u64>,
+}
+
+/// AI pricing information response
+#[derive(Debug, Serialize)]
+pub struct AIPricingResponse {
+    pub success: bool,
+    pub data: Option<AIPricingData>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AIPricingData {
+    pub cost_per_token_qnk: u64,
+    pub cost_per_token_usd: f64,
+    pub estimated_cost_512_tokens_qnk: u64,
+    pub estimated_cost_512_tokens_usd: f64,
+    pub qnk_to_usd_rate: f64,
+    pub updated_at: u64,
+}
+
+/// Treasury statistics response (admin only)
+#[derive(Debug, Serialize)]
+pub struct TreasuryStatsResponse {
+    pub success: bool,
+    pub data: Option<TreasuryStatsData>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreasuryStatsData {
+    pub wallet_address: String,
+    pub total_revenue_qnk: u64,
+    pub total_revenue_usd: f64,
+    pub total_requests_served: u64,
+    pub total_tokens_generated: u64,
+    pub average_cost_per_request_qnk: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// GET /api/wallet/balance?wallet_address=xxx
+/// Returns AI wallet balance with QUG and QUGUSD amounts for inference payments
+pub async fn get_ai_wallet_balance(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WalletQueryParams>,
+) -> Result<Json<AIWalletBalanceResponse>, StatusCode> {
+    info!("📊 GET /api/wallet/balance - wallet: {}", params.wallet_address);
+
+    // Try to get credits from storage
+    match state.storage_engine.get_wallet_credits(&params.wallet_address).await {
+        Ok(Some(credits)) => {
+            // Calculate USD value (assuming $0.005 per QUG for now)
+            let qnk_to_usd = 0.005;
+            let balance_usd = (credits.balance_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
+
+            let data = AIWalletBalanceData {
+                wallet_address: params.wallet_address.clone(),
+                balance_qnk: credits.balance_qnk,
+                balance_qnk_usd: balance_usd,
+                balance_qugusd: credits.balance_qugusd,
+                tokens_generated_lifetime: credits.total_tokens_generated,
+                updated_at: credits.updated_at,
+            };
+
+            Ok(Json(AIWalletBalanceResponse {
+                success: true,
+                data: Some(data),
+                error: None,
+            }))
+        }
+        Ok(None) => {
+            // Wallet not found - return zero balance
+            let data = AIWalletBalanceData {
+                wallet_address: params.wallet_address.clone(),
+                balance_qnk: 0,
+                balance_qnk_usd: 0.0,
+                balance_qugusd: 0,
+                tokens_generated_lifetime: 0,
+                updated_at: chrono::Utc::now().timestamp() as u64,
+            };
+
+            Ok(Json(AIWalletBalanceResponse {
+                success: true,
+                data: Some(data),
+                error: None,
+            }))
+        }
+        Err(e) => {
+            error!("❌ Failed to fetch AI wallet balance: {}", e);
+            Ok(Json(AIWalletBalanceResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Database error: {}", e)),
+            }))
+        }
+    }
+}
+
+/// GET /api/wallet/usage?wallet_address=xxx
+/// Returns AI usage statistics for a wallet
+pub async fn get_ai_wallet_usage(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WalletQueryParams>,
+) -> Result<Json<AIUsageStatsResponse>, StatusCode> {
+    info!("📊 GET /api/wallet/usage - wallet: {}", params.wallet_address);
+
+    // Try to get credits from storage
+    match state.storage_engine.get_wallet_credits(&params.wallet_address).await {
+        Ok(Some(credits)) => {
+            // Calculate USD value
+            let qnk_to_usd = 0.005;
+            let spent_usd = (credits.total_spent_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
+
+            // Calculate averages (avoid division by zero)
+            let avg_cost = if credits.total_tokens_generated > 0 {
+                credits.total_spent_qnk / credits.total_tokens_generated
+            } else {
+                0
+            };
+
+            // For simplicity, assume 1 request = 100 tokens on average
+            let estimated_requests = if credits.total_tokens_generated > 0 {
+                credits.total_tokens_generated / 100
+            } else {
+                0
+            };
+            let avg_tokens = if estimated_requests > 0 {
+                (credits.total_tokens_generated / estimated_requests) as u32
+            } else {
+                0
+            };
+
+            let data = AIUsageStatsData {
+                wallet_address: params.wallet_address.clone(),
+                total_spent_qnk: credits.total_spent_qnk,
+                total_spent_usd: spent_usd,
+                total_requests: estimated_requests,
+                total_tokens_generated: credits.total_tokens_generated,
+                average_cost_per_request_qnk: avg_cost * 100, // Per 100 tokens
+                average_tokens_per_request: avg_tokens,
+                first_request_at: Some(credits.created_at),
+                last_request_at: Some(credits.updated_at),
+            };
+
+            Ok(Json(AIUsageStatsResponse {
+                success: true,
+                data: Some(data),
+                error: None,
+            }))
+        }
+        Ok(None) => {
+            // Wallet not found - return zero usage
+            let data = AIUsageStatsData {
+                wallet_address: params.wallet_address.clone(),
+                total_spent_qnk: 0,
+                total_spent_usd: 0.0,
+                total_requests: 0,
+                total_tokens_generated: 0,
+                average_cost_per_request_qnk: 0,
+                average_tokens_per_request: 0,
+                first_request_at: None,
+                last_request_at: None,
+            };
+
+            Ok(Json(AIUsageStatsResponse {
+                success: true,
+                data: Some(data),
+                error: None,
+            }))
+        }
+        Err(e) => {
+            error!("❌ Failed to fetch AI usage stats: {}", e);
+            Ok(Json(AIUsageStatsResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Database error: {}", e)),
+            }))
+        }
+    }
+}
+
+/// GET /api/pricing
+/// Returns current AI pricing information
+pub async fn get_ai_pricing_info(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<AIPricingResponse>, StatusCode> {
+    info!("📊 GET /api/pricing");
+
+    // Current pricing: 100 QUG per token (100 base units)
+    let cost_per_token_qnk = 100u64;
+    let qnk_to_usd = 0.005;
+    let cost_per_token_usd = (cost_per_token_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
+
+    // Estimate for 512 tokens
+    let estimated_512_qnk = cost_per_token_qnk * 512;
+    let estimated_512_usd = (estimated_512_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
+
+    let data = AIPricingData {
+        cost_per_token_qnk,
+        cost_per_token_usd,
+        estimated_cost_512_tokens_qnk: estimated_512_qnk,
+        estimated_cost_512_tokens_usd: estimated_512_usd,
+        qnk_to_usd_rate: qnk_to_usd,
+        updated_at: chrono::Utc::now().timestamp() as u64,
+    };
+
+    Ok(Json(AIPricingResponse {
+        success: true,
+        data: Some(data),
+        error: None,
+    }))
+}
+
+/// GET /api/treasury/stats
+/// Returns treasury statistics (admin endpoint)
+pub async fn get_ai_treasury_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TreasuryStatsResponse>, StatusCode> {
+    info!("📊 GET /api/treasury/stats");
+
+    // Try to get treasury balance from storage
+    match state.storage_engine.get_treasury_balance().await {
+        Ok(treasury) => {
+            // Calculate USD value
+            let qnk_to_usd = 0.005;
+            let revenue_usd = (treasury.total_revenue_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
+
+            // Calculate average cost per request
+            let avg_cost = if treasury.total_requests_served > 0 {
+                treasury.total_revenue_qnk / treasury.total_requests_served
+            } else {
+                0
+            };
+
+            let data = TreasuryStatsData {
+                wallet_address: treasury.wallet_address,
+                total_revenue_qnk: treasury.total_revenue_qnk,
+                total_revenue_usd: revenue_usd,
+                total_requests_served: treasury.total_requests_served,
+                total_tokens_generated: treasury.total_tokens_generated,
+                average_cost_per_request_qnk: avg_cost,
+                created_at: treasury.created_at,
+                updated_at: treasury.updated_at,
+            };
+
+            Ok(Json(TreasuryStatsResponse {
+                success: true,
+                data: Some(data),
+                error: None,
+            }))
+        }
+        Err(e) => {
+            error!("❌ Failed to fetch treasury stats: {}", e);
+            Ok(Json(TreasuryStatsResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Database error: {}", e)),
+            }))
+        }
+    }
+}

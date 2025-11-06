@@ -471,6 +471,15 @@ impl MistralRsEngine {
 
         // Stream tokens
         while let Some(response) = rx.recv().await {
+            debug!("🔍 Received Response variant: {}", match &response {
+                Response::Chunk(_) => "Chunk",
+                Response::Done(_) => "Done",
+                Response::ValidationError(_) => "ValidationError",
+                Response::InternalError(_) => "InternalError",
+                Response::ModelError(_, _) => "ModelError",
+                _ => "Other/Unknown"
+            });
+
             match response {
                 Response::Chunk(chunk) => {
                     if first_token_time.is_none() {
@@ -528,8 +537,30 @@ impl MistralRsEngine {
                         speedup_factor: 1.0,
                     };
 
-                    // Update internal stats
-                    *self.stats.write().await = stats.clone();
+                    // Update internal stats (cumulative)
+                    {
+                        let mut current_stats = self.stats.write().await;
+                        info!("📊 Updating cumulative stats: +{} tokens, +{:.2}ms",
+                            stats.tokens_generated, stats.total_time_ms);
+                        current_stats.tokens_generated += stats.tokens_generated;
+                        current_stats.prompt_tokens += stats.prompt_tokens;
+                        current_stats.total_time_ms += stats.total_time_ms;
+                        // Recalculate average tokens per second across all generations
+                        if current_stats.total_time_ms > 0.0 {
+                            current_stats.tokens_per_second = (current_stats.tokens_generated as f64 / (current_stats.total_time_ms / 1000.0));
+                        }
+                        // Update time to first token (use latest)
+                        current_stats.time_to_first_token_ms = stats.time_to_first_token_ms;
+                        // KV cache stats are cumulative
+                        current_stats.kv_cache_hits += stats.kv_cache_hits;
+                        current_stats.kv_cache_misses += stats.kv_cache_misses;
+                        // Recalculate speedup factor
+                        if current_stats.kv_cache_hits + current_stats.kv_cache_misses > 0 {
+                            current_stats.speedup_factor = 1.0 + (current_stats.kv_cache_hits as f64 * 13.27 / (current_stats.kv_cache_hits + current_stats.kv_cache_misses) as f64);
+                        }
+                        info!("📈 Cumulative stats now: {} tokens total, {:.1} tok/s",
+                            current_stats.tokens_generated, current_stats.tokens_per_second);
+                    }
 
                     callback(StreamEvent::Complete(stats)).await?;
                     break;
@@ -544,11 +575,34 @@ impl MistralRsEngine {
                     callback(StreamEvent::Error(err.clone())).await?;
                     return Err(anyhow!("Model error: {}", err));
                 }
-                _ => {}
+                other => {
+                    warn!("⚠️  Unhandled Response type in generate_stream");
+                    let _ = other; // Suppress unused variable warning
+                }
             }
         }
 
         Ok(generated_text)
+    }
+
+    /// Simple non-streaming generation for worker nodes
+    /// Returns the complete generated text without streaming
+    pub async fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+        let generated_text = Arc::new(RwLock::new(String::new()));
+        let text_clone = generated_text.clone();
+
+        self.generate_stream(prompt, max_tokens, |event| {
+            let text = text_clone.clone();
+            async move {
+                if let StreamEvent::Token(token) = event {
+                    text.write().await.push_str(&token);
+                }
+                Ok(())
+            }
+        }).await?;
+
+        let result = generated_text.read().await.clone();
+        Ok(result)
     }
 
     /// Get current statistics

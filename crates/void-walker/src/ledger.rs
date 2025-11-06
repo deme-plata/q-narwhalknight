@@ -229,7 +229,9 @@ impl MultiverseChain {
     /// Verify entire chain integrity
     pub fn verify_chain(&self) -> bool {
         for (i, block) in self.blocks.iter().enumerate() {
-            if !block.verify() {
+            // v0.6.0-beta: Pass None for network_id since void-walker is a demo crate
+            if let Err(e) = block.verify(None) {
+                eprintln!("Block verification failed: {}", e);
                 return false;
             }
 
@@ -268,7 +270,7 @@ mod tests {
         let bridge = Bridge::new(origin, target, 5, [42; 32]);
 
         let block = MultiverseBlock::from(bridge);
-        assert!(block.verify());
+        assert!(block.verify(None).is_ok()); // v0.6.0-beta: Updated for new verify signature
         assert!(!block.block_id.is_empty());
     }
 
@@ -321,7 +323,7 @@ mod tests {
         let bridge = Bridge::new(origin, target, 3, [123; 32]);
         let block = MultiverseBlock::from(bridge);
 
-        assert!(block.verify());
+        assert!(block.verify(None).is_ok()); // v0.6.0-beta: Updated for new verify signature
         assert!(block.difficulty() > 0.0);
     }
 }

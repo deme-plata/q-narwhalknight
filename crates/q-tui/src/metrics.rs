@@ -35,6 +35,22 @@ pub struct Metrics {
     pub mining_enabled: bool,
     pub hashrate: f64,
     pub blocks_mined: u64,
+
+    // Sync status
+    pub is_syncing: bool,
+    pub sync_progress_percent: f32,
+    pub sync_current_height: u64,
+    pub sync_target_height: u64,
+    pub sync_speed_blocks_per_sec: f32,
+
+    // Distributed AI metrics
+    pub ai_enabled: bool,
+    pub ai_nodes_available: usize,
+    pub ai_total_requests: u64,
+    pub ai_nodes_participated: u64,
+    pub ai_avg_nodes_per_request: f64,
+    pub ai_layers_processed: u64,
+    pub ai_active_requests: usize,
 }
 
 impl Default for Metrics {
@@ -63,6 +79,18 @@ impl Default for Metrics {
             mining_enabled: false,
             hashrate: 0.0,
             blocks_mined: 0,
+            is_syncing: false,
+            sync_progress_percent: 0.0,
+            sync_current_height: 0,
+            sync_target_height: 0,
+            sync_speed_blocks_per_sec: 0.0,
+            ai_enabled: false,
+            ai_nodes_available: 0,
+            ai_total_requests: 0,
+            ai_nodes_participated: 0,
+            ai_avg_nodes_per_request: 0.0,
+            ai_layers_processed: 0,
+            ai_active_requests: 0,
         }
     }
 }

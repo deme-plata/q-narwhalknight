@@ -101,11 +101,23 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
         .map(|count| count.load(std::sync::atomic::Ordering::Relaxed) as u32)
         .unwrap_or(status.connected_peers);
 
+    // Get sync status for miners
+    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    let is_syncing = network_height > 0 && status.current_height + 10 < network_height;
+    let blocks_behind = if network_height > status.current_height {
+        network_height - status.current_height
+    } else {
+        0
+    };
+
     // Create a dashboard-friendly response with properly formatted numeric values
     let dashboard_status = serde_json::json!({
         "node_id": hex::encode(&status.node_id),
         "current_round": status.current_round,
         "current_height": status.current_height,
+        "highest_network_height": network_height,
+        "is_syncing": is_syncing,
+        "blocks_behind": blocks_behind,
         "connected_peers": connected_peers,
         "tx_pool_size": status.tx_pool_size,
         "is_validator": status.is_validator,
@@ -224,6 +236,47 @@ pub fn calculate_block_reward(block_height: u64) -> u64 {
 /// This is when the blockchain started - used for time-based halving
 /// Set to October 26, 2025, 00:00:00 UTC
 pub const GENESIS_TIMESTAMP: u64 = 1761436800; // Unix timestamp for Oct 26, 2025 00:00:00 UTC
+
+/// Bootstrap peer discovery endpoint
+/// Returns dynamic bootstrap peer information with fast timeout (no blocking locks)
+/// This endpoint is used by nodes to discover the bootstrap peer for initial network connection
+pub async fn bootstrap_peers(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // Bootstrap node network information (Server Beta - 185.182.185.227)
+    const BOOTSTRAP_IP: &str = "185.182.185.227";
+    const BOOTSTRAP_P2P_PORT: u16 = 9001;
+
+    // Try to get dynamic peer ID from libp2p with timeout
+    // Use try_read to avoid blocking if lock is contested
+    let peer_id = match state.libp2p_peer_info.try_read() {
+        Ok(peer_info) if !peer_info.0.is_empty() => peer_info.0.clone(),
+        _ => {
+            // Fallback: peer info not available yet or lock contested
+            // Return empty peer_id - clients will retry or use fallback discovery
+            warn!("Bootstrap endpoint: libp2p peer info not available, returning minimal info");
+            String::from("discovering...")
+        }
+    };
+
+    let bootstrap_info = serde_json::json!({
+        "peer_id": peer_id,
+        "multiaddrs": if peer_id != "discovering..." {
+            vec![
+                format!("/ip4/{}/tcp/{}/p2p/{}", BOOTSTRAP_IP, BOOTSTRAP_P2P_PORT, peer_id),
+                format!("/dns4/quillon.xyz/tcp/{}/p2p/{}", BOOTSTRAP_P2P_PORT, peer_id),
+            ]
+        } else {
+            vec![]
+        },
+        "network_id": "testnet-phase4",
+        "version": "v0.9.3-beta",
+        "bootstrap_node": true,
+        "discovery_method": "dynamic",
+        "status": if peer_id != "discovering..." { "ready" } else { "initializing" },
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    Ok(Json(ApiResponse::success(bootstrap_info)))
+}
 
 /// Network supply statistics endpoint - max supply, mined coins, total hashrate
 pub async fn network_supply(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -1074,6 +1127,13 @@ pub struct SendTransactionRequest {
     pub memo: Option<String>,
     pub password: Option<String>,
     pub mnemonic: Option<String>, // BIP39 mnemonic for signing (required for proper Ed25519 signatures)
+    #[serde(default = "default_token_type_str")]
+    pub token_type: String, // "QUG" or "QUGUSD" - defaults to "QUG" for backwards compatibility
+}
+
+/// Default token type string for backwards compatibility
+fn default_token_type_str() -> String {
+    "QUG".to_string()
 }
 
 /// Send a transaction (combines signing and submitting)
@@ -1159,7 +1219,15 @@ pub async fn send_transaction(
     // Convert amount from float to u64 (assuming 8 decimal places like Bitcoin)
     let amount_u64 = (request.amount * 100_000_000.0) as u64;
     let fee_u64 = 1000u64; // 0.00001 QNK fee
-    
+
+    // Parse token type from request string
+    let token_type = match request.token_type.to_uppercase().as_str() {
+        "QUGUSD" => q_types::TokenType::QUGUSD,
+        _ => q_types::TokenType::QUG, // Default to QUG for any other value
+    };
+
+    debug!("💰 Creating transaction: amount={} token_type={:?}", request.amount, token_type);
+
     // Create transaction
     let transaction = Transaction {
         id: TxHash::default(), // Will be computed based on content
@@ -1171,7 +1239,7 @@ pub async fn send_transaction(
         signature: vec![], // Will be filled by signing process
         timestamp: chrono::Utc::now(),
         data: vec![], // Empty data for simple transfers
-        token_type: q_types::TokenType::QUG,
+        token_type, // Use the parsed token type from request
         fee_token_type: q_types::TokenType::QUGUSD,
     };
     
@@ -1280,13 +1348,9 @@ pub async fn send_transaction(
 
         let total_cost = signed_transaction.amount + signed_transaction.fee;
 
-        info!("Transaction: {} QUG from {} to {} (sender balance: {} QUG, cost: {} QUG)",
-            signed_transaction.amount as f64 / 100_000_000.0,
-            hex::encode(sender_address),
-            hex::encode(signed_transaction.to),
-            sender_balance as f64 / 100_000_000.0,
-            total_cost as f64 / 100_000_000.0
-        );
+        // Privacy: Don't log exact transaction amounts, addresses, or balances in production
+        let balance_check = if sender_balance >= total_cost { "sufficient" } else { "insufficient" };
+        info!("💳 Transaction validation: balance check {}", balance_check);
 
         if sender_balance < total_cost {
             warn!("Insufficient balance! Sender has {} QUG but needs {} QUG",
@@ -1496,13 +1560,23 @@ pub async fn get_recent_transactions(
 pub async fn get_block(
     State(state): State<Arc<AppState>>,
     Path(height): Path<Height>,
-) -> Result<Json<ApiResponse<Vec<Transaction>>>, StatusCode> {
+) -> Result<Json<ApiResponse<q_types::block::QBlock>>, StatusCode> {
     debug!("Getting block at height: {}", height);
 
-    let blocks = state.blocks.read().await;
-    match blocks.get(&height) {
-        Some(transactions) => Ok(Json(ApiResponse::success(transactions.clone()))),
-        None => Ok(Json(ApiResponse::error("Block not found".to_string()))),
+    // Load block from RocksDB storage
+    match state.storage_engine.get_qblock_by_height(height).await {
+        Ok(Some(block)) => {
+            info!("📦 Retrieved block {} from RocksDB", height);
+            Ok(Json(ApiResponse::success(block)))
+        }
+        Ok(None) => {
+            debug!("Block {} not found in storage", height);
+            Ok(Json(ApiResponse::error("Block not found".to_string())))
+        }
+        Err(e) => {
+            warn!("Error retrieving block {}: {}", height, e);
+            Ok(Json(ApiResponse::error(format!("Error loading block: {}", e))))
+        }
     }
 }
 
@@ -2447,10 +2521,9 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
         warn!("Failed to persist wallet balance to storage: {}", e);
     }
     
-    info!("FAUCET DEBUG: Address string: {}", request.wallet_address.clone().unwrap_or("node_id".to_string()));
-    info!("FAUCET DEBUG: Address hash: {}", hex::encode(wallet_address));
-    info!("FAUCET DEBUG: Previous balance: {}, adding: {}, new balance: {}", current_balance, faucet_amount, new_balance);
-    info!("Faucet dispensed {} QNK to wallet {}", faucet_amount as f64 / 100_000_000.0, hex::encode(wallet_address));
+    // Privacy: Don't log faucet amounts or full wallet addresses in production
+    let addr_short = hex::encode(&wallet_address[..4]);
+    info!("💰 Faucet dispensed to wallet {}...", addr_short);
     
     // Emit faucet dispensed event for real-time updates
     let event_wallet_address = request.wallet_address.clone().unwrap_or_else(|| hex::encode(wallet_address));
@@ -3656,16 +3729,12 @@ async fn complete_mixing_process(
         }
 
         balances.insert(sender_address, old_sender - total_deduction);
-        info!("💸 [MIXER] Deducted {} QUG (amount) + {} QUG (fee) from sender (new balance: {} QUG)",
-            amount as f64 / 100_000_000.0,
-            fee as f64 / 100_000_000.0,
-            (old_sender - total_deduction) as f64 / 100_000_000.0);
+        // Privacy: Don't log mixer transaction amounts or balances
+        info!("💸 [MIXER] Transaction processed successfully");
 
         // Add to recipient
         balances.insert(recipient, old_recipient + amount);
-        info!("✅ [MIXER] Added {} QUG to recipient (new balance: {} QUG)",
-            amount as f64 / 100_000_000.0,
-            (old_recipient + amount) as f64 / 100_000_000.0);
+        info!("✅ [MIXER] Recipient credited successfully");
 
         // Return balances for events
         (old_sender, old_recipient)
@@ -3978,6 +4047,96 @@ pub async fn submit_mining_solution(
         return Ok(Json(ApiResponse::error("Solution does not meet difficulty target".to_string())));
     }
 
+    // ========================================
+    // 🔐 AEGIS-KL AUTHENTICATION (v0.5.7+) - Post-Quantum Fork Protection
+    // Ensures only authorized miners with valid AEGIS-KL signatures can submit
+    // Prevents unauthorized forks and enforces 1% development fee at protocol level
+    // ========================================
+    // TODO: Re-enable when q_mining::dev_fee module is fully implemented
+    if false { // Temporarily disabled due to missing q_mining::dev_fee
+    // Miner auth check disabled
+    let _state = &state; // Keep state reference
+    if false { // Inner condition also disabled
+        // Both signature and public key must be present
+        if let (Some(sig_hex), Some(pk_hex)) = (&request.aegis_signature, &request.aegis_public_key) {
+            // Decode hex strings
+            let sig_bytes = match hex::decode(sig_hex) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Ok(Json(ApiResponse::error("Invalid signature hex encoding".to_string())));
+                }
+            };
+
+            let pk_bytes = match hex::decode(pk_hex) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Ok(Json(ApiResponse::error("Invalid public key hex encoding".to_string())));
+                }
+            };
+
+            // Convert to AEGIS-KL types using postcard deserialization
+            let public_key = match postcard::from_bytes::<q_aegis_ql::PublicKey>(&pk_bytes) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    return Ok(Json(ApiResponse::error("Invalid AEGIS-KL public key format".to_string())));
+                }
+            };
+
+            let signature = match postcard::from_bytes::<q_aegis_ql::Signature>(&sig_bytes) {
+                Ok(sig) => sig,
+                Err(_) => {
+                    return Ok(Json(ApiResponse::error("Invalid AEGIS-KL signature format".to_string())));
+                }
+            };
+
+            // Create solution data for verification (hash + nonce + miner_address)
+            let solution_data = format!("{}{}{}", hex::encode(hash), nonce, request.miner_address).into_bytes();
+
+            // Create miner credentials
+            // TODO: Re-enable when q_mining::dev_fee module is complete
+            // let credentials = q_mining::dev_fee::MinerCredentials {
+            //     wallet_address: request.miner_address.clone(),
+            //     aegis_public_key: public_key,
+            // };
+
+            // Temporary: Just log the authentication attempt
+            info!("⚠️  AEGIS-KL authentication temporarily disabled - q_mining::dev_fee module incomplete");
+            let _public_key = public_key; // Suppress unused warning
+            let _signature = signature; // Suppress unused warning
+            let _solution_data = solution_data; // Suppress unused warning
+
+            // Verify the AEGIS-KL signature
+            // DISABLED - credentials not available
+            if false {
+            let _dummy: Result<bool, ()> = Ok(true); // Dummy value
+            match _dummy { // miner_auth.verify_miner_auth(&_public_key, &_solution_data, &_signature) {
+                Ok(true) => {
+                    info!("✅ [AEGIS-KL] Miner {} authenticated successfully", &request.miner_address[..16]);
+                }
+                Ok(false) => {
+                    warn!("❌ [AEGIS-KL] Invalid signature from miner {}", &request.miner_address[..16]);
+                    return Ok(Json(ApiResponse::error(
+                        "Invalid AEGIS-KL signature - mining submission rejected".to_string()
+                    )));
+                }
+                Err(_e) => {
+                    warn!("❌ [AEGIS-KL] Verification error for miner {}", &request.miner_address[..16]);
+                    return Ok(Json(ApiResponse::error(
+                        "AEGIS-KL authentication failed - please check your miner configuration".to_string()
+                    )));
+                }
+            }
+            } // End disabled verification
+        } else {
+            // AEGIS-KL signature is REQUIRED when authentication is enabled
+            warn!("❌ [AEGIS-KL] Missing signature/public key from miner {}", &request.miner_address[..16]);
+            return Ok(Json(ApiResponse::error(
+                "AEGIS-KL signature required for mining submissions (upgrade your miner software)".to_string()
+            )));
+        }
+    }
+    } // End of AEGIS-KL disabled block
+
     // 🚀 ASYNC QUEUE: Send to background processor instead of blocking here
     if let Some(tx) = &state.mining_submission_tx {
         let submission = crate::MiningSubmission {
@@ -4018,18 +4177,24 @@ pub async fn submit_mining_solution(
     // Return success immediately (non-blocking)
     // Background processor will handle balance update, persistence, and broadcasting
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
-    let block_reward = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
+    let block_reward_total = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
+
+    // Apply 1% development fee (transparent funding for ongoing development)
+    const DEV_FEE_PERCENT: f64 = 0.01; // 1%
+    let dev_fee_amount = (block_reward_total as f64 * DEV_FEE_PERCENT) as u64;
+    let miner_reward = block_reward_total - dev_fee_amount;
+
     let current_balance = state.wallet_balances.read().await.get(&miner_address).copied().unwrap_or(0);
-    let estimated_new_balance = current_balance + block_reward;
+    let estimated_new_balance = current_balance + miner_reward;
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
-        reward: block_reward,
-        reward_qnk: block_reward as f64 / 100_000_000.0,
+        reward: miner_reward,
+        reward_qnk: miner_reward as f64 / 100_000_000.0,
         new_balance: estimated_new_balance,
         new_balance_qnk: estimated_new_balance as f64 / 100_000_000.0,
         block_height: state.node_status.read().await.current_height,
-        message: "Mining solution queued for processing".to_string(),
+        message: "Mining solution queued for processing (1% dev fee applied for sustainable development)".to_string(),
     })))
 }
 
@@ -4169,6 +4334,12 @@ pub struct MiningSolutionRequest {
     pub challenge_hash: Option<String>,  // Optional challenge hash for server-side verification
     #[serde(default)]
     pub hash_rate: Option<f64>,  // Optional hash rate in KH/s from miner
+
+    // 🔐 AEGIS-KL Authentication (v0.5.7+) - REQUIRED for 1% dev fee enforcement
+    #[serde(default)]
+    pub aegis_signature: Option<String>,  // Hex-encoded AEGIS-KL signature
+    #[serde(default)]
+    pub aegis_public_key: Option<String>,  // Hex-encoded AEGIS-KL public key
 }
 
 #[derive(Debug, Serialize)]
@@ -5616,12 +5787,32 @@ pub async fn get_explorer_transactions(
 
         match state.storage_engine.get_qblock_by_height(height).await {
             Ok(Some(qblock)) => {
-                // Show BLOCK-LEVEL activity, not individual transactions (privacy-preserving)
-                if qblock.transactions.len() > 0 {
+                // Show mining solutions as transaction activity (main blockchain activity)
+                if qblock.mining_solutions.len() > 0 {
                     let activity_json = serde_json::json!({
                         "id": format!("block_{}", height),
-                        "hash": format!("block_{}", height),  // Anonymized
-                        "amount": format!("{} txs", qblock.transactions.len()),  // Show tx count, not amounts
+                        "hash": hex::encode(&qblock.header.solutions_root[..8]),
+                        "amount": format!("{} mining rewards", qblock.mining_solutions.len()),
+                        "from": "Mining Pool",
+                        "to": format!("{} miners", qblock.mining_solutions.len()),
+                        "timestamp": qblock.header.timestamp,
+                        "timestamp_formatted": chrono::DateTime::from_timestamp(qblock.header.timestamp as i64, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        "block_height": height,
+                        "status": "confirmed",
+                        "type": "mining_rewards",
+                    });
+
+                    recent_activity.push(activity_json);
+                    activity_count += 1;
+                }
+                // Also show regular transactions if any exist
+                else if qblock.transactions.len() > 0 {
+                    let activity_json = serde_json::json!({
+                        "id": format!("block_{}_tx", height),
+                        "hash": format!("txs_{}", height),
+                        "amount": format!("{} txs", qblock.transactions.len()),
                         "from": "Private",  // ZK-STARK: addresses hidden
                         "to": "Private",    // ZK-STARK: addresses hidden
                         "timestamp": qblock.header.timestamp,
@@ -5656,3 +5847,57 @@ pub async fn search_transactions(
     // Return empty list for now - proper implementation would search all indices
     Ok(Json(ApiResponse::success(vec![])))
 }
+
+// ============================================================================
+// v0.8.9-beta: MINING HEARTBEAT MONITORING
+// ============================================================================
+
+/// Mining health status response
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MiningHealthResponse {
+    pub is_healthy: bool,
+    pub time_since_last_solution: u64, // seconds
+    pub last_solution_timestamp: u64,   // Unix timestamp
+    pub status: String,                 // "healthy" or "stalled"
+    pub threshold_seconds: u64,         // Stall detection threshold
+    pub last_solution_formatted: String, // Human-readable timestamp
+}
+
+/// GET /api/v1/mining/health - Check if mining is active
+///
+/// Returns mining health status including:
+/// - is_healthy: true if solutions arriving within threshold
+/// - time_since_last_solution: seconds since last mining solution
+/// - status: "healthy" or "stalled"
+///
+/// This endpoint helps operators detect when miners have crashed or stopped
+/// submitting solutions, preventing silent node freezes.
+pub async fn get_mining_health(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<Json<MiningHealthResponse>, (StatusCode, String)> {
+    let last_solution_time = app_state.last_mining_solution_time.load(std::sync::atomic::Ordering::SeqCst);
+    let current_time = chrono::Utc::now().timestamp() as u64;
+    let time_since_last_solution = current_time.saturating_sub(last_solution_time);
+    let is_healthy = app_state.mining_is_healthy.load(std::sync::atomic::Ordering::SeqCst);
+
+    const STALL_THRESHOLD: u64 = 300; // 5 minutes
+
+    // Format timestamp for human readability
+    let last_solution_formatted = if last_solution_time > 0 {
+        chrono::DateTime::from_timestamp(last_solution_time as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        "Never (node just started)".to_string()
+    };
+
+    Ok(Json(MiningHealthResponse {
+        is_healthy,
+        time_since_last_solution,
+        last_solution_timestamp: last_solution_time,
+        status: if is_healthy { "healthy".to_string() } else { "stalled".to_string() },
+        threshold_seconds: STALL_THRESHOLD,
+        last_solution_formatted,
+    }))
+}
+

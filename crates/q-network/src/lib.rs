@@ -28,6 +28,9 @@ pub mod resonance_protocol;
 // Transaction Tunneling - Ultra-low-latency fast path
 pub mod transaction_tunneling;
 
+// ZK Peer Height Proofs - Trustless P2P Sync (v0.9.6-beta)
+pub mod zk_peer_height_proof;
+
 pub use crypto_agile::{AgileHandshake, CryptoProvider, CryptoScheme, Kyber1024KeyExchange};
 pub use network_manager::{NetworkManager, NetworkManagerConfig};
 pub use peer_registry::{PeerCapability, PeerInfo, PeerRegistry};
@@ -49,11 +52,22 @@ pub use transaction_tunneling::{
     TunnelingStats, CircuitBreakerState, ConsensusMessageType,
 };
 
+// Export ZK peer height proof components (v0.9.6-beta)
+pub use zk_peer_height_proof::{
+    PeerHeightWithProof, PeerHeightVerifier, generate_height_proof,
+};
+
 // Distributed VM, DEX, and AI modules
 pub mod distributed_vm;
 pub mod distributed_dex;
 pub mod distributed_ai;
+pub mod distributed_ai_coordinator;
+pub mod distributed_ai_worker; // FLAW #1 FIX: Worker node inference handler
 pub mod distributed_protocol;
+pub mod layer_forwarding;
+pub mod distributed_inference_bridge;
+pub mod kv_cache_manager;
+pub mod distributed_mistralrs_bridge;
 
 // Export distributed components
 pub use distributed_vm::{
@@ -70,6 +84,26 @@ pub use distributed_protocol::{
 };
 pub use distributed_ai::{
     DistributedAITopics, AIGossipsubMessage, AIMessagePayload, NodeCapability,
+};
+pub use distributed_ai_coordinator::{
+    DistributedAICoordinator, AINode, DistributedInferenceRequest,
+    DistributedAIStats, InferenceResponseChunk,
+};
+pub use distributed_ai_worker::{
+    DistributedAIWorker, ActiveInferenceRequest,
+};
+pub use layer_forwarding::{
+    LayerOutputManager, TensorData, TensorDType, LayerOutput, LayerForwardingStats,
+};
+pub use distributed_inference_bridge::{
+    DistributedInferenceBridge, InferenceSession, SessionState, SessionStats,
+};
+pub use kv_cache_manager::{
+    KVCacheManager, KVCacheEntry, SessionKVCache, KVCacheStats,
+};
+pub use distributed_mistralrs_bridge::{
+    DistributedMistralRsBridge, DistributedMistralRsConfig,
+    DistributedRequest, DistributedResponse,
 };
 
 // Simplified network structure for compilation

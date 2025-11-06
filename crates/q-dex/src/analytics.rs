@@ -118,7 +118,7 @@ impl Default for QuantumAnalyticsConfig {
             historical_data_retention_days: 365,
             wave_analysis_window_size: 1024,
             quantum_correlation_threshold: 0.707, // √2/2
-            uncertainty_measurement_precision: BigDecimal::from(0.001),
+            uncertainty_measurement_precision: "0.001".parse().unwrap(),
             fourier_analysis_components: 256,
             decoherence_detection_sensitivity: 0.1618, // Golden ratio
             real_time_streaming_enabled: true,
@@ -229,7 +229,7 @@ impl QuantumTradingAnalytics {
                 let data_point = QuantumMarketDataPoint {
                     timestamp: Utc::now(),
                     pair_id: "ORB/ORBUSD".to_string(),
-                    price: BigDecimal::from(1.618), // Golden ratio base price
+                    price: "1.618".parse().unwrap(), // Golden ratio base price
                     volume: BigDecimal::from(rand::random::<u32>() % 100000),
                     liquidity: BigDecimal::from(1000000 + rand::random::<u32>() % 500000),
                     quantum_state: if rand::random::<f64>() > 0.5 {
@@ -239,7 +239,7 @@ impl QuantumTradingAnalytics {
                     },
                     wave_amplitude: rand::random::<f64>() * 0.1,
                     wave_frequency: rand::random::<f64>() * 10.0,
-                    uncertainty_factor: BigDecimal::from(0.01618), // Golden ratio uncertainty
+                    uncertainty_factor: "0.01618".parse().unwrap(), // Golden ratio uncertainty
                     entanglement_correlation: 0.707,               // √2/2
                     decoherence_rate: rand::random::<f64>() * 0.1,
                 };
@@ -351,10 +351,12 @@ impl QuantumTradingAnalytics {
 
     /// Collect quantum price data with physics-based algorithms
     pub async fn collect_quantum_price_data(&self, pair_id: &str) -> Result<BigDecimal> {
+        use std::str::FromStr;
         // Simulate quantum price discovery using golden ratio
-        let base_price = BigDecimal::from(1.618);
-        let quantum_fluctuation = BigDecimal::from(rand::random::<f64>() * 0.1 - 0.05);
-        let golden_ratio_adjustment = &base_price * BigDecimal::from(0.00618);
+        let base_price: BigDecimal = "1.618".parse().unwrap();
+        let random_val = rand::random::<f64>() * 0.1 - 0.05;
+        let quantum_fluctuation = BigDecimal::from_str(&random_val.to_string())?;
+        let golden_ratio_adjustment = &base_price * BigDecimal::from_str("0.00618")?;
 
         let quantum_price = base_price + quantum_fluctuation + golden_ratio_adjustment;
 
@@ -368,12 +370,12 @@ impl QuantumTradingAnalytics {
 
         Ok(QuantumMarketData {
             pair_id: "ORB/ORBUSD".to_string(),
-            current_price: BigDecimal::from(1.618),
+            current_price: "1.618".parse().unwrap(),
             volume_24h: BigDecimal::from(100000),
             liquidity: BigDecimal::from(1000000),
             price_change_24h: 5.5,
-            high_24h: BigDecimal::from(1.7),
-            low_24h: BigDecimal::from(1.5),
+            high_24h: "1.7".parse().unwrap(),
+            low_24h: "1.5".parse().unwrap(),
             trades_count: quantum_metrics.total_quantum_trades,
             quantum_signature: Some(vec![0u8; 64]),
             privacy_stats: QuantumPrivacyStats::default(),
@@ -435,15 +437,16 @@ impl QuantumTradingAnalytics {
 
         // Create sample OHLCV data with quantum properties
         for i in 0..10 {
+            use std::str::FromStr;
             let timestamp = Utc::now() - Duration::seconds((10 - i) * window_size as i64);
             let base_price = 1.618 + (i as f64 * 0.01);
 
             ohlcv_data.push(QuantumOhlcvData {
                 timestamp,
-                open: BigDecimal::from(base_price),
-                high: BigDecimal::from(base_price + 0.05),
-                low: BigDecimal::from(base_price - 0.05),
-                close: BigDecimal::from(base_price + 0.02),
+                open: BigDecimal::from_str(&base_price.to_string())?,
+                high: BigDecimal::from_str(&(base_price + 0.05).to_string())?,
+                low: BigDecimal::from_str(&(base_price - 0.05).to_string())?,
+                close: BigDecimal::from_str(&(base_price + 0.02).to_string())?,
                 volume: BigDecimal::from(10000 + i * 1000),
                 quantum_hash: Some(vec![i as u8; 32]),
             });
@@ -478,7 +481,7 @@ impl QuantumTradingAnalytics {
             .collect();
 
         if recent_data.is_empty() {
-            return Ok(BigDecimal::from(0.1618)); // Default golden ratio volatility
+            return Ok("0.1618".parse().unwrap()); // Default golden ratio volatility
         }
 
         // Calculate price changes
@@ -490,10 +493,11 @@ impl QuantumTradingAnalytics {
 
         // Calculate standard deviation (simplified)
         if price_changes.is_empty() {
-            return Ok(BigDecimal::from(0.1618));
+            return Ok("0.1618".parse().unwrap());
         }
 
-        let mean = price_changes.iter().sum::<BigDecimal>() / BigDecimal::from(price_changes.len());
+        let len = BigDecimal::from(price_changes.len() as i64);
+        let mean = price_changes.iter().sum::<BigDecimal>() / &len;
         let variance = price_changes
             .iter()
             .map(|change| {
@@ -501,11 +505,12 @@ impl QuantumTradingAnalytics {
                 &diff * &diff
             })
             .sum::<BigDecimal>()
-            / BigDecimal::from(price_changes.len());
+            / &len;
 
         // Apply quantum uncertainty enhancement
+        let golden_ratio: BigDecimal = "1.618".parse().unwrap();
         let quantum_volatility =
-            variance.sqrt().unwrap_or_else(|| BigDecimal::from(0.1618)) * BigDecimal::from(1.618); // Golden ratio enhancement
+            variance.sqrt().unwrap_or_else(|| "0.1618".parse().unwrap()) * golden_ratio; // Golden ratio enhancement
 
         Ok(quantum_volatility)
     }
@@ -518,8 +523,8 @@ impl QuantumTradingAnalytics {
             pair_id: "ORB/ORBUSD".to_string(),
             exchange_a: "QuantumDEX".to_string(),
             exchange_b: "Q-AMM".to_string(),
-            price_difference: BigDecimal::from(0.01618),
-            profit_potential: BigDecimal::from(0.618),
+            price_difference: "0.01618".parse().unwrap(),
+            profit_potential: "0.618".parse().unwrap(),
             quantum_enhanced: true,
             confidence_level: 0.95,
             detected_at: Utc::now(),

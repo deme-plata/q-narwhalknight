@@ -43,6 +43,8 @@ pub mod sampling;
 pub mod generation;
 pub mod distributed_cache;
 pub mod mistralrs_engine;
+pub mod model_manager;
+pub mod chat_templates;
 
 // Re-export commonly used types
 pub use types::{
@@ -80,6 +82,8 @@ pub use mistral_integration::{
 };
 pub use tokenizer::GgufTokenizer;
 pub use mistralrs_engine::{MistralRsEngine, MistralRsConfig, StreamEvent};
+pub use model_manager::{ModelManager, ModelMetadata};
+pub use chat_templates::{format_chat_prompt, format_conversation};
 
 #[cfg(test)]
 mod tests {

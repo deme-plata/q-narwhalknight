@@ -186,9 +186,10 @@ impl DatabaseReplicationManager {
         };
 
         // Create backup (this generates the manifest CID)
-        // Note: db_path should be configurable
+        // v0.9.8-beta FIX: Use correct database path "./data/q-narwhal-db" instead of "./data"
+        // The incorrect path was causing database blocking and block production stalls
         let manifest_cid = storage_mut.backup_database(
-            "./data", // TODO: Make this configurable
+            "./data/q-narwhal-db", // Fixed: was "./data" which doesn't contain CURRENT file
             BackupOptions {
                 snapshot_type: SnapshotType::Full,
                 compress: true,

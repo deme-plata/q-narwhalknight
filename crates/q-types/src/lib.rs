@@ -18,6 +18,8 @@ pub use block::{
     FinalityCertificate,
 };
 
+// P2P block synchronization types are defined at the end of this file (BlockRequest, BlockResponse)
+
 /// Core blockchain types for Q-NarwhalKnight Phase 0
 /// These will be extended with post-quantum primitives in Phase 1
 ///
@@ -652,7 +654,7 @@ impl NetworkId {
     /// Get the string identifier for this network
     pub fn as_str(&self) -> &'static str {
         match self {
-            NetworkId::Testnet => "testnet",
+            NetworkId::Testnet => "testnet-phase4",
             NetworkId::Mainnet => "mainnet",
         }
     }
@@ -699,6 +701,44 @@ impl NetworkId {
     /// Get the acknowledgments gossipsub topic for this network
     pub fn acks_topic(&self) -> String {
         format!("{}/ack", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the block-requests gossipsub topic for this network (P2P historical sync)
+    pub fn block_requests_topic(&self) -> String {
+        format!("{}/block-requests", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the block-responses gossipsub topic for this network (P2P historical sync)
+    pub fn block_responses_topic(&self) -> String {
+        format!("{}/block-responses", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the BATCH block-responses gossipsub topic for this network (OPTIMIZED P2P sync)
+    /// This topic carries BatchBlockResponse messages with 100-1000 blocks per message
+    /// Dramatically reduces network overhead compared to single-block responses
+    pub fn batch_block_responses_topic(&self) -> String {
+        format!("{}/batch-block-responses", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the peer-heights gossipsub topic for this network (Turbo Sync height announcements)
+    /// Peers announce their highest verified block height on this topic
+    /// ✅ v0.9.6-beta: Network-aware to prevent cross-network contamination
+    pub fn peer_heights_topic(&self) -> String {
+        format!("{}/peer-heights", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the block-pack-requests gossipsub topic for this network (Turbo Sync requests)
+    /// Nodes publish BlockPackRequest messages on this topic to request compressed block packs
+    /// ✅ v0.9.6-beta: Network-aware to prevent cross-network contamination
+    pub fn block_pack_requests_topic(&self) -> String {
+        format!("{}/block-pack-requests", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the block-pack-responses gossipsub topic for this network (Turbo Sync responses)
+    /// Nodes publish BlockPack messages (compressed batches) on this topic
+    /// ✅ v0.9.6-beta: Network-aware to prevent cross-network contamination
+    pub fn block_pack_responses_topic(&self) -> String {
+        format!("{}/block-pack-responses", self.gossipsub_topic_prefix())
     }
 }
 
@@ -763,8 +803,8 @@ impl NetworkConfig {
             launch_time: DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            version: "v0.0.9-beta-testnet".to_string(),
-            chain_id: 1, // Testnet chain ID
+            version: "v0.9.18-beta-testnet".to_string(),
+            chain_id: 2025, // Q-NarwhalKnight unique chain ID (year of launch)
             api_port: 8080,
             p2p_port: 9001,
             // Multiple bootstrap nodes for redundancy
@@ -878,17 +918,127 @@ impl<T> NetworkMessage<T> {
     }
 }
 
+// ========================================
+// P2P BLOCK SYNCHRONIZATION MESSAGES
+// ========================================
+
+/// Request for historical blocks via gossipsub P2P
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockRequest {
+    /// Peer ID of the requester (for tracking)
+    pub requester_peer_id: String,
+    /// First block height needed
+    pub start_height: u64,
+    /// Last block height needed (inclusive)
+    pub end_height: u64,
+    /// Unique request ID for matching responses
+    pub request_id: [u8; 16],
+    /// Timestamp of request
+    pub timestamp: DateTime<Utc>,
+}
+
+impl BlockRequest {
+    /// Create a new block request
+    pub fn new(requester_peer_id: String, start_height: u64, end_height: u64) -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut request_id = [0u8; 16];
+        rng.fill(&mut request_id);
+
+        Self {
+            requester_peer_id,
+            start_height,
+            end_height,
+            request_id,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Get number of blocks requested
+    pub fn block_count(&self) -> u64 {
+        if self.end_height >= self.start_height {
+            self.end_height - self.start_height + 1
+        } else {
+            0
+        }
+    }
+}
+
+/// Response containing a historical block via gossipsub P2P
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockResponse {
+    /// Request ID this response belongs to
+    pub request_id: [u8; 16],
+    /// The actual block data
+    pub block: QBlock,
+    /// Peer ID of the responder
+    pub responder_peer_id: String,
+    /// Timestamp of response
+    pub timestamp: DateTime<Utc>,
+}
+
+/// OPTIMIZED: Batch response containing multiple blocks for ultra-fast sync
+/// Reduces gossipsub overhead by 100-1000x by sending blocks in batches
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchBlockResponse {
+    /// Request ID this response belongs to
+    pub request_id: [u8; 16],
+    /// Multiple blocks in a single message (dramatically reduces network overhead)
+    pub blocks: Vec<QBlock>,
+    /// Peer ID of the responder
+    pub responder_peer_id: String,
+    /// Timestamp of response
+    pub timestamp: DateTime<Utc>,
+    /// Start height of this batch
+    pub start_height: u64,
+    /// End height of this batch
+    pub end_height: u64,
+}
+
+impl BatchBlockResponse {
+    /// Create a new batch block response
+    pub fn new(request_id: [u8; 16], blocks: Vec<QBlock>, responder_peer_id: String) -> Self {
+        let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+        let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
+        Self {
+            request_id,
+            blocks,
+            responder_peer_id,
+            timestamp: chrono::Utc::now(),
+            start_height,
+            end_height,
+        }
+    }
+
+    /// Get number of blocks in this batch
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+impl BlockResponse {
+    /// Create a new block response
+    pub fn new(request_id: [u8; 16], block: QBlock, responder_peer_id: String) -> Self {
+        Self {
+            request_id,
+            block,
+            responder_peer_id,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod network_separation_tests {
     use super::*;
 
     #[test]
     fn test_network_id_string_conversion() {
-        // Test NetworkId to string conversion
-        assert_eq!(NetworkId::Testnet.as_str(), "testnet");
+        // Test NetworkId to string conversion (Phase 4 uses "testnet-phase4")
+        assert_eq!(NetworkId::Testnet.as_str(), "testnet-phase4");
         assert_eq!(NetworkId::Mainnet.as_str(), "mainnet");
 
-        // Test string parsing
+        // Test string parsing (still accepts "testnet" for backwards compatibility)
         assert_eq!("testnet".parse::<NetworkId>().unwrap(), NetworkId::Testnet);
         assert_eq!("mainnet".parse::<NetworkId>().unwrap(), NetworkId::Mainnet);
 
@@ -913,19 +1063,19 @@ mod network_separation_tests {
         let mainnet = NetworkId::Mainnet;
 
         // Test topic prefix generation
-        assert_eq!(testnet.gossipsub_topic_prefix(), "/qnk/testnet");
+        assert_eq!(testnet.gossipsub_topic_prefix(), "/qnk/testnet-phase4");
         assert_eq!(mainnet.gossipsub_topic_prefix(), "/qnk/mainnet");
 
         // Test transaction topics
-        assert_eq!(testnet.transactions_topic(), "/qnk/testnet/transactions");
+        assert_eq!(testnet.transactions_topic(), "/qnk/testnet-phase4/transactions");
         assert_eq!(mainnet.transactions_topic(), "/qnk/mainnet/transactions");
 
         // Test block topics
-        assert_eq!(testnet.blocks_topic(), "/qnk/testnet/blocks");
+        assert_eq!(testnet.blocks_topic(), "/qnk/testnet-phase4/blocks");
         assert_eq!(mainnet.blocks_topic(), "/qnk/mainnet/blocks");
 
         // Test ACK topics
-        assert_eq!(testnet.acks_topic(), "/qnk/testnet/ack");
+        assert_eq!(testnet.acks_topic(), "/qnk/testnet-phase4/ack");
         assert_eq!(mainnet.acks_topic(), "/qnk/mainnet/ack");
 
         // Verify topics are different between networks
@@ -940,15 +1090,15 @@ mod network_separation_tests {
         // Verify network ID
         assert_eq!(config.network_id, NetworkId::Testnet);
 
-        // Verify chain ID
-        assert_eq!(config.chain_id, 1);
+        // Verify chain ID (2025 = year of launch)
+        assert_eq!(config.chain_id, 2025);
 
         // Verify ports
         assert_eq!(config.api_port, 8080);
         assert_eq!(config.p2p_port, 9001);
 
         // Verify version
-        assert_eq!(config.version, "v0.0.9-beta-testnet");
+        assert_eq!(config.version, "v0.5.7-beta-testnet");
 
         // Verify genesis hash starts with "testnet-"
         assert_eq!(&config.genesis_hash[..8], b"testnet-");
@@ -1145,16 +1295,16 @@ mod network_separation_tests {
         let testnet = NetworkConfig::testnet();
         let mainnet = NetworkConfig::mainnet();
 
-        // Verify testnet has bootstrap peers
-        assert!(!testnet.bootstrap_peers.is_empty());
-        assert_eq!(testnet.bootstrap_peers[0], "/ip4/185.182.185.227/tcp/9001");
+        // Testnet bootstrap peers are currently disabled
+        // Users should rely on mDNS for local network discovery
+        // or manually connect to known peers
+        assert!(testnet.bootstrap_peers.is_empty(), "Testnet bootstrap peers should be empty until peer ID discovery is fixed");
 
-        // Verify mainnet has bootstrap peers
-        assert!(!mainnet.bootstrap_peers.is_empty());
-        assert_eq!(mainnet.bootstrap_peers[0], "/ip4/185.182.185.227/tcp/9002");
-
-        // Verify different ports for different networks
-        assert_ne!(testnet.bootstrap_peers, mainnet.bootstrap_peers);
+        // Mainnet has bootstrap peers configured
+        assert!(!mainnet.bootstrap_peers.is_empty(), "Mainnet should have bootstrap peers");
+        assert_eq!(mainnet.bootstrap_peers.len(), 2, "Mainnet should have 2 bootstrap peers");
+        assert!(mainnet.bootstrap_peers[0].contains("185.182.185.227"), "First bootstrap peer should be 185.182.185.227");
+        assert!(mainnet.bootstrap_peers[1].contains("161.35.219.10"), "Second bootstrap peer should be 161.35.219.10");
     }
 
     #[test]
@@ -1200,9 +1350,9 @@ mod network_separation_tests {
             }
         }
 
-        // All testnet topics should start with /qnk/testnet
+        // All testnet topics should start with /qnk/testnet-phase4 (Phase 4 network)
         for topic in &testnet_topics {
-            assert!(topic.starts_with("/qnk/testnet/"));
+            assert!(topic.starts_with("/qnk/testnet-phase4/"));
         }
 
         // All mainnet topics should start with /qnk/mainnet

@@ -5,7 +5,6 @@
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use q_types::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 /// Quantum state of a trading entity
@@ -27,6 +26,12 @@ pub enum WavePattern {
     Neutral,      // No interference
 }
 
+impl Default for WavePattern {
+    fn default() -> Self {
+        WavePattern::Neutral
+    }
+}
+
 /// Quantum privacy tiers for trading
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QuantumPrivacyTier {
@@ -38,6 +43,57 @@ pub enum QuantumPrivacyTier {
     Maximum = 2,
     /// Quantum-level privacy with post-quantum cryptography
     Quantum = 3,
+}
+
+/// Quantum price feed with uncertainty
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumPriceFeed {
+    pub symbol: String,
+    pub price: BigDecimal,
+    pub timestamp: DateTime<Utc>,
+    pub source: String,
+    pub quantum_uncertainty: BigDecimal,
+    pub wave_function_collapsed: bool,
+    pub entanglement_strength: f64,
+}
+
+/// Quantum DEX physics parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumDexParameters {
+    // Physics constants
+    pub planck_constant: BigDecimal,
+    pub golden_ratio: BigDecimal,
+    pub euler_constant: BigDecimal,
+    pub pi_constant: BigDecimal,
+
+    // Quantum-specific trading parameters
+    pub uncertainty_principle_factor: f64,
+    pub wave_collapse_threshold: f64,
+    pub entanglement_strength: f64,
+    pub decoherence_time_seconds: u64,
+
+    // Risk management parameters
+    pub max_leverage: f64,
+    pub liquidation_threshold: f64,
+    pub slippage_protection: f64,
+}
+
+impl Default for QuantumDexParameters {
+    fn default() -> Self {
+        Self {
+            planck_constant: "0.00000000000000000000000000000000066260701".parse().unwrap(),
+            golden_ratio: "1.618033988749895".parse().unwrap(),
+            euler_constant: "2.718281828459045".parse().unwrap(),
+            pi_constant: "3.141592653589793".parse().unwrap(),
+            uncertainty_principle_factor: 0.1618,
+            wave_collapse_threshold: 0.05,
+            entanglement_strength: 0.707,
+            decoherence_time_seconds: 300,
+            max_leverage: 10.0,
+            liquidation_threshold: 0.8,
+            slippage_protection: 0.005,
+        }
+    }
 }
 
 /// Quantum-enhanced token definition with physics properties
@@ -52,6 +108,20 @@ pub struct QuantumToken {
     pub privacy_enabled: bool,
     pub zk_proofs_required: bool,
     pub created_at: DateTime<Utc>,
+
+    // Market data fields
+    pub price_usd: Option<BigDecimal>,
+    pub market_cap: Option<BigDecimal>,
+    pub circulating_supply: Option<BigDecimal>,
+    pub volume_24h: Option<BigDecimal>,
+
+    // Token metadata
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    pub website: Option<String>,
+    pub tags: Vec<String>,
+    pub address: Option<String>,
+    pub quantum_signature_verified: bool,
 
     // Quantum-specific properties
     pub quantum_volatility: BigDecimal,

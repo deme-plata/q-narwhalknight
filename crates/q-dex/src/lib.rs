@@ -19,11 +19,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{debug, info};
 
 pub mod analytics;
 pub mod api;
 pub mod liquidity;
+pub mod oracle_price_bridge;
 pub mod screener;
 pub mod trading;
 pub mod types;
@@ -34,10 +35,13 @@ use self::api::QuantumDexApiServer;
 use self::liquidity::QuantumLiquidityManager;
 use self::screener::QuantumDexScreenerIntegration;
 use self::trading::QuantumTradingEngine;
+use q_storage::token_registry::{TokenRegistry, TokenMetadata, PoolMetadata};
+use q_storage::price_history::{PriceHistoryManager, TradeRecord};
 
 pub use analytics::*;
 pub use api::*;
 pub use liquidity::*;
+pub use oracle_price_bridge::*;
 pub use screener::*;
 pub use trading::*;
 pub use types::*;
@@ -52,23 +56,29 @@ pub struct QuantumDexManager {
     pub trading: Arc<QuantumTradingEngine>,
     pub analytics: Arc<QuantumTradingAnalytics>,
 
-    // Quantum-enhanced data stores
+    // NEW: Persistent storage systems
+    pub token_registry: Arc<TokenRegistry>,
+    pub price_history: Arc<PriceHistoryManager>,
+
+    // Quantum-enhanced data stores (now mostly cached from registry)
     pub token_data: Arc<RwLock<HashMap<String, QuantumTokenInfo>>>,
     pub pair_data: Arc<RwLock<HashMap<String, QuantumTradingPair>>>,
     pub market_data: Arc<RwLock<QuantumMarketData>>,
-    pub price_feeds: Arc<RwLock<HashMap<String, QuantumPriceFeed>>>,
+    pub price_feeds: Arc<RwLock<HashMap<String, crate::types::QuantumPriceFeed>>>,
     pub quantum_params: Arc<RwLock<QuantumDexParameters>>,
 }
 
 impl QuantumDexManager {
     /// Create a new quantum-enhanced DEX manager
-    pub fn new() -> Result<Self> {
+    pub fn new(token_registry: Arc<TokenRegistry>, price_history: Arc<PriceHistoryManager>) -> Result<Self> {
         Ok(Self {
             api_server: Arc::new(QuantumDexApiServer::new(8080)),
             screener: Arc::new(QuantumDexScreenerIntegration::new()),
             liquidity: Arc::new(QuantumLiquidityManager::new()),
             trading: Arc::new(QuantumTradingEngine::new()),
             analytics: Arc::new(QuantumTradingAnalytics::new()),
+            token_registry,
+            price_history,
             token_data: Arc::new(RwLock::new(HashMap::new())),
             pair_data: Arc::new(RwLock::new(HashMap::new())),
             market_data: Arc::new(RwLock::new(QuantumMarketData::default())),
@@ -120,10 +130,10 @@ impl QuantumDexManager {
 
         // Physics constants scaled for financial applications
         *params = QuantumDexParameters {
-            planck_constant: BigDecimal::from(6.62607015e-34), // For volatility scaling
-            golden_ratio: BigDecimal::from(1.618033988749895), // For price discovery
-            euler_constant: BigDecimal::from(2.718281828459045), // For liquidity curves
-            pi_constant: BigDecimal::from(3.141592653589793),  // For wave functions
+            planck_constant: "0.00000000000000000000000000000000066260701".parse().unwrap(), // For volatility scaling
+            golden_ratio: "1.618033988749895".parse().unwrap(), // For price discovery
+            euler_constant: "2.718281828459045".parse().unwrap(), // For liquidity curves
+            pi_constant: "3.141592653589793".parse().unwrap(),  // For wave functions
 
             // Quantum-specific trading parameters
             uncertainty_principle_factor: 0.1618, // Golden ratio scaled
@@ -141,91 +151,174 @@ impl QuantumDexManager {
         Ok(())
     }
 
-    /// Setup quantum-enhanced token data
+    /// Setup quantum-enhanced token data - now loads from registry
     async fn setup_quantum_tokens(&self) -> Result<()> {
-        let mut token_data = self.token_data.write().await;
+        info!("💎 Loading quantum token data from registry");
 
-        // ORB Token with quantum properties
-        token_data.insert("ORB".to_string(), QuantumTokenInfo {
-            address: "0x0000000000000000000000000000000000000ORB".to_string(),
+        // Bootstrap default tokens if registry is empty
+        self.bootstrap_default_tokens().await?;
+
+        // Load all tokens from registry into cache for fast access
+        let tokens = self.token_registry.get_all_tokens().await?;
+
+        let mut token_data = self.token_data.write().await;
+        for token in tokens {
+            // Convert TokenMetadata to QuantumTokenInfo
+            let quantum_token = self.convert_to_quantum_token_info(&token);
+            token_data.insert(token.symbol.clone(), quantum_token);
+        }
+
+        // Load all pools from registry
+        let pools = self.token_registry.get_all_pools().await?;
+
+        let mut pair_data = self.pair_data.write().await;
+        for pool in pools {
+            // Convert PoolMetadata to QuantumTradingPair
+            let quantum_pair = self.convert_to_quantum_trading_pair(&pool);
+            pair_data.insert(pool.pair_id.clone(), quantum_pair);
+        }
+
+        info!("✅ Loaded {} tokens and {} pools from registry", token_data.len(), pair_data.len());
+        Ok(())
+    }
+
+    /// Bootstrap default tokens (ORB and ORBUSD) if registry is empty
+    async fn bootstrap_default_tokens(&self) -> Result<()> {
+        // Check if ORB token already exists
+        if let Ok(Some(_)) = self.token_registry.get_token_by_symbol("ORB").await {
+            return Ok(()); // Already bootstrapped
+        }
+
+        info!("🌱 Bootstrapping default tokens (ORB and ORBUSD)");
+
+        // Register ORB token
+        let orb_token = TokenMetadata {
+            contract_address: "0x0000000000000000000000000000000000000ORB".to_string(),
             symbol: "ORB".to_string(),
             name: "OroBit Quantum Token".to_string(),
             decimals: 18,
-            total_supply: BigDecimal::from(21_000_000), // Bitcoin-like cap
+            total_supply: BigDecimal::from(21_000_000),
             circulating_supply: BigDecimal::from(0),
-            market_cap: BigDecimal::from(0),
+            creator: "system".to_string(),
+            created_at: Utc::now(),
+            is_verified: true,
+            is_active: true,
             price_usd: BigDecimal::from(0),
+            market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
+            price_change_24h: 0.0,
             logo_url: Some("https://q-narwhalknight.xyz/orb-logo.png".to_string()),
             website: Some("https://q-narwhalknight.xyz".to_string()),
             description: Some("ORB - Quantum-enhanced governance token for Q-NarwhalKnight with post-quantum security".to_string()),
             tags: vec!["quantum".to_string(), "governance".to_string(), "defi".to_string(), "post-quantum".to_string()],
-            created_at: Utc::now(),
-            
-            // Quantum-specific properties
-            quantum_volatility: BigDecimal::from(0.1618), // Golden ratio volatility
-            wave_function_state: QuantumState::Superposition,
-            entanglement_pairs: vec!["ORBUSD".to_string()],
-            quantum_signature_verified: true,
-            defi_protocols: vec!["Q-NarwhalKnight".to_string(), "QuantumDEX".to_string()],
-        });
+            has_liquidity_pool: false,
+            liquidity_pools: vec![],
+            last_updated: Utc::now(),
+        };
+        self.token_registry.register_token(orb_token).await?;
 
-        // ORBUSD Quantum Stablecoin
-        token_data.insert("ORBUSD".to_string(), QuantumTokenInfo {
-            address: "0x0000000000000000000000000000000ORBUSD".to_string(),
+        // Register ORBUSD token
+        let orbusd_token = TokenMetadata {
+            contract_address: "0x0000000000000000000000000000000ORBUSD".to_string(),
             symbol: "ORBUSD".to_string(),
             name: "OroBit USD Quantum Stablecoin".to_string(),
             decimals: 18,
             total_supply: BigDecimal::from(0), // Algorithmic supply
             circulating_supply: BigDecimal::from(0),
-            market_cap: BigDecimal::from(0),
+            creator: "system".to_string(),
+            created_at: Utc::now(),
+            is_verified: true,
+            is_active: true,
             price_usd: BigDecimal::from(1), // Quantum-stabilized at $1
+            market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
+            price_change_24h: 0.0,
             logo_url: Some("https://q-narwhalknight.xyz/orbusd-logo.png".to_string()),
             website: Some("https://q-narwhalknight.xyz/orbusd".to_string()),
             description: Some("ORBUSD - Physics-inspired algorithmic stablecoin with quantum uncertainty-based stability".to_string()),
             tags: vec!["stablecoin".to_string(), "algorithmic".to_string(), "quantum".to_string(), "physics".to_string()],
-            created_at: Utc::now(),
-            
-            // Quantum stablecoin properties
-            quantum_volatility: BigDecimal::from(0.001), // Ultra-low volatility through quantum stabilization
-            wave_function_state: QuantumState::Collapsed, // Stable state
-            entanglement_pairs: vec!["ORB".to_string(), "USD".to_string()],
-            quantum_signature_verified: true,
-            defi_protocols: vec!["Q-Stablecoin".to_string(), "QuantumDEX".to_string()],
-        });
+            has_liquidity_pool: false,
+            liquidity_pools: vec![],
+            last_updated: Utc::now(),
+        };
+        self.token_registry.register_token(orbusd_token).await?;
 
-        // Setup quantum trading pairs
-        let mut pair_data = self.pair_data.write().await;
-
-        pair_data.insert(
-            "ORB/ORBUSD".to_string(),
-            QuantumTradingPair {
-                pair_id: "ORB/ORBUSD".to_string(),
-                base_token: "ORB".to_string(),
-                quote_token: "ORBUSD".to_string(),
-                base_address: Some("0x0000000000000000000000000000000000000ORB".to_string()),
-                quote_address: Some("0x0000000000000000000000000000000ORBUSD".to_string()),
-                exchange: "QuantumDEX".to_string(),
-                price: BigDecimal::from(0),
-                volume_24h: BigDecimal::from(0),
-                liquidity: BigDecimal::from(0),
-                fee_rate: "0.003".parse().unwrap(), // 0.3% quantum-optimized
-                fee_tier: "0.003".parse().unwrap(),
-                active: true,
-                created_at: Utc::now(),
-
-                // Quantum pair properties
-                quantum_correlation: 0.707, // √2/2 entanglement
-                wave_interference_pattern: WavePattern::Constructive,
-                price_uncertainty: BigDecimal::from(0.01), // 1% Heisenberg uncertainty
-                quantum_liquidity_depth: BigDecimal::from(1000000), // 1M quantum-enhanced
-                entangled_state: true,
-            },
-        );
-
-        info!("💎 Quantum token data configured with physics-inspired properties");
+        info!("✅ Default tokens bootstrapped");
         Ok(())
+    }
+
+    /// Convert TokenMetadata to QuantumTokenInfo
+    fn convert_to_quantum_token_info(&self, token: &TokenMetadata) -> QuantumTokenInfo {
+        QuantumTokenInfo {
+            symbol: token.symbol.clone(),
+            name: token.name.clone(),
+            decimals: token.decimals,
+            contract_address: Some(token.contract_address.clone()),
+            total_supply: token.total_supply.clone(),
+            quantum_secured: token.is_verified,
+            privacy_enabled: true,
+            zk_proofs_required: false,
+            created_at: token.created_at,
+
+            // Market data fields (Option types)
+            price_usd: Some(token.price_usd.clone()),
+            market_cap: Some(token.market_cap.clone()),
+            circulating_supply: Some(token.circulating_supply.clone()),
+            volume_24h: Some(token.volume_24h.clone()),
+
+            // Token metadata
+            description: token.description.clone(),
+            logo_url: token.logo_url.clone(),
+            website: token.website.clone(),
+            tags: token.tags.clone(),
+            address: Some(token.contract_address.clone()),
+            quantum_signature_verified: token.is_verified,
+
+            // Quantum-specific properties
+            quantum_volatility: "0.1618".parse().unwrap(),
+            wave_function_state: QuantumState::Superposition,
+            entanglement_pairs: vec![],
+            defi_protocols: vec!["QuantumDEX".to_string()],
+        }
+    }
+
+    /// Convert PoolMetadata to QuantumTradingPair
+    fn convert_to_quantum_trading_pair(&self, pool: &PoolMetadata) -> QuantumTradingPair {
+        // Calculate current price from reserves
+        let price = if pool.reserve_quote > BigDecimal::from(0) {
+            &pool.reserve_base / &pool.reserve_quote
+        } else {
+            BigDecimal::from(0)
+        };
+
+        QuantumTradingPair {
+            id: pool.pair_id.clone(),
+            pair_id: pool.pair_id.clone(),
+            base_token: pool.base_token.clone(),
+            quote_token: pool.quote_token.clone(),
+            base_address: Some(pool.base_token_address.clone()),
+            quote_address: Some(pool.quote_token_address.clone()),
+            exchange: "QuantumDEX".to_string(),
+            price,
+            volume_24h: pool.volume_24h.clone(),
+            liquidity: pool.liquidity_usd.clone(),
+            fee_rate: (pool.fee_rate.to_string().parse::<f64>().unwrap_or(0.003) * 10000.0) as u16,
+            fee_tier: pool.fee_rate.clone(),
+            min_trade_size: "0.001".parse().unwrap(),
+            max_trade_size: "1000000".parse().unwrap(),
+            quantum_secured: true,
+            privacy_tier: QuantumPrivacyTier::Quantum,
+            zk_proof_required: false,
+            created_at: pool.created_at,
+            active: pool.is_active,
+
+            // Quantum pair properties
+            quantum_correlation: 0.707,
+            wave_interference_pattern: WavePattern::Constructive,
+            price_uncertainty: "0.01".parse().unwrap(),
+            quantum_liquidity_depth: pool.liquidity_usd.clone(),
+            entangled_state: true,
+        }
     }
 
     /// Start quantum-enhanced data updates
@@ -248,19 +341,22 @@ impl QuantumDexManager {
                     let mut feeds = price_feeds.write().await;
 
                     // Add quantum uncertainty to price
+                    use std::str::FromStr;
                     let params = quantum_params.read().await;
                     let uncertainty_factor = params.uncertainty_principle_factor;
-                    let price_with_uncertainty =
-                        quantum_price * BigDecimal::from(1.0 + uncertainty_factor);
+                    let multiplier = BigDecimal::from_str(&(1.0 + uncertainty_factor).to_string())
+                        .unwrap_or_else(|_| "1.01618".parse().unwrap());
+                    let price_with_uncertainty = quantum_price * multiplier;
 
                     feeds.insert(
                         "ORB/ORBUSD".to_string(),
-                        QuantumPriceFeed {
+                        crate::types::QuantumPriceFeed {
                             symbol: "ORB/ORBUSD".to_string(),
                             price: price_with_uncertainty,
                             timestamp: Utc::now(),
                             source: "QuantumDEX".to_string(),
-                            quantum_uncertainty: BigDecimal::from(uncertainty_factor),
+                            quantum_uncertainty: BigDecimal::from_str(&uncertainty_factor.to_string())
+                                .unwrap_or_else(|_| "0.01618".parse().unwrap()),
                             wave_function_collapsed: true,
                             entanglement_strength: 0.707,
                         },
@@ -307,10 +403,16 @@ impl QuantumDexManager {
     ) -> Result<QuantumLiquidityPosition> {
         let quantum_request = QuantumTradeRequest {
             user: provider.to_string(),
+            trader_id: provider.to_string(),
             pair_id: pair_id.to_string(),
-            side: "quantum_liquidity".to_string(),
+            side: TradeSide::Buy, // Liquidity provision treated as buy side
             amount: amount_a.clone(),
             price: None,
+            order_type: OrderType::Market,
+            privacy_level: QuantumPrivacyTier::Basic,
+            zk_proof_required: false,
+            max_slippage: 0.01, // 1% default slippage
+            expires_at: None,
             quantum_signature: vec![0u8; 64], // Post-quantum signature placeholder
             entanglement_proof: Some(vec![0u8; 32]),
         };
@@ -376,8 +478,11 @@ impl QuantumDexManager {
     ) -> Result<()> {
         let mut token_data = self.token_data.write().await;
         if let Some(token) = token_data.get_mut(symbol) {
-            token.price_usd = price;
-            token.market_cap = &token.circulating_supply * &token.price_usd;
+            token.price_usd = Some(price.clone());
+            // Calculate market cap: circulating_supply * price_usd
+            if let (Some(circ_supply), Some(price_val)) = (&token.circulating_supply, &token.price_usd) {
+                token.market_cap = Some(circ_supply * price_val);
+            }
             token.wave_function_state = if collapsed {
                 QuantumState::Collapsed
             } else {
@@ -385,6 +490,189 @@ impl QuantumDexManager {
             };
         }
         Ok(())
+    }
+
+    // ============ NEW: TOKEN REGISTRY INTEGRATION ============
+
+    /// Register a new token (called from VM when token is created)
+    pub async fn register_token_from_vm(
+        &self,
+        contract_address: String,
+        symbol: String,
+        name: String,
+        decimals: u8,
+        total_supply: BigDecimal,
+        creator: String,
+    ) -> Result<()> {
+        info!("🪙 Registering new token from VM: {} ({})", symbol, contract_address);
+
+        let token = TokenMetadata {
+            contract_address: contract_address.clone(),
+            symbol: symbol.clone(),
+            name,
+            decimals,
+            total_supply: total_supply.clone(),
+            circulating_supply: total_supply, // Initially all circulating
+            creator,
+            created_at: Utc::now(),
+            is_verified: false, // New tokens start unverified
+            is_active: true,
+            price_usd: BigDecimal::from(0),
+            market_cap: BigDecimal::from(0),
+            volume_24h: BigDecimal::from(0),
+            price_change_24h: 0.0,
+            logo_url: None,
+            website: None,
+            description: None,
+            tags: vec!["custom".to_string()],
+            has_liquidity_pool: false,
+            liquidity_pools: vec![],
+            last_updated: Utc::now(),
+        };
+
+        // Register in persistent storage
+        self.token_registry.register_token(token.clone()).await?;
+
+        // Update in-memory cache
+        let quantum_token = self.convert_to_quantum_token_info(&token);
+        self.token_data.write().await.insert(symbol, quantum_token);
+
+        info!("✅ Token registered and available in DEX");
+        Ok(())
+    }
+
+    /// Register a new liquidity pool (called when pool is created)
+    pub async fn register_liquidity_pool(
+        &self,
+        pool_address: String,
+        base_token: String,
+        quote_token: String,
+        initial_reserve_base: BigDecimal,
+        initial_reserve_quote: BigDecimal,
+        creator: String,
+    ) -> Result<String> {
+        info!("🏊 Registering new liquidity pool: {}/{}", base_token, quote_token);
+
+        // Get token addresses
+        let base_token_meta = self.token_registry.get_token_by_symbol(&base_token).await?
+            .ok_or_else(|| anyhow::anyhow!("Base token not found: {}", base_token))?;
+        let quote_token_meta = self.token_registry.get_token_by_symbol(&quote_token).await?
+            .ok_or_else(|| anyhow::anyhow!("Quote token not found: {}", quote_token))?;
+
+        let pair_id = format!("{}/{}", base_token, quote_token);
+        let pool_id = format!("pool-{}-{}", base_token, quote_token).to_lowercase();
+
+        // Calculate initial shares (geometric mean)
+        let initial_shares = (&initial_reserve_base * &initial_reserve_quote)
+            .sqrt()
+            .ok_or_else(|| anyhow::anyhow!("Cannot calculate initial shares"))?;
+
+        let pool = PoolMetadata {
+            pool_id: pool_id.clone(),
+            pool_address: pool_address.clone(),
+            pair_id: pair_id.clone(),
+            base_token: base_token.clone(),
+            quote_token: quote_token.clone(),
+            base_token_address: base_token_meta.contract_address,
+            quote_token_address: quote_token_meta.contract_address,
+            reserve_base: initial_reserve_base,
+            reserve_quote: initial_reserve_quote,
+            total_shares: initial_shares,
+            fee_rate: "0.003".parse().unwrap(), // 0.3% default fee
+            created_at: Utc::now(),
+            creator,
+            is_active: true,
+            is_paused: false,
+            liquidity_locked_until: None,
+            volume_24h: BigDecimal::from(0),
+            fees_24h: BigDecimal::from(0),
+            liquidity_usd: BigDecimal::from(0), // Will be calculated
+            apr: 0.0,
+            provider_count: 1, // Creator is first provider
+            last_updated: Utc::now(),
+        };
+
+        // Register in persistent storage
+        self.token_registry.register_pool(pool.clone()).await?;
+
+        // Update in-memory cache
+        let quantum_pair = self.convert_to_quantum_trading_pair(&pool);
+        self.pair_data.write().await.insert(pair_id, quantum_pair);
+
+        info!("✅ Liquidity pool registered: {}", pool_id);
+        Ok(pool_id)
+    }
+
+    /// Record a trade (updates price history and registry)
+    pub async fn record_trade(
+        &self,
+        trade_result: &QuantumTradeResult,
+    ) -> Result<()> {
+        use q_storage::price_history::{TradeRecord, TradeSide as StorageTradeSide};
+
+        // Convert to storage trade record
+        let trade_record = TradeRecord {
+            trade_id: trade_result.trade_id.clone(),
+            pair_id: trade_result.pair_id.clone(),
+            timestamp: trade_result.executed_at,
+            price: trade_result.price.clone(),
+            amount: trade_result.amount_filled.clone(),
+            side: match trade_result.side {
+                TradeSide::Buy => StorageTradeSide::Buy,
+                TradeSide::Sell => StorageTradeSide::Sell,
+            },
+            trader: Some(trade_result.trader_id.clone()),
+        };
+
+        // Record in price history (this updates OHLCV candles)
+        self.price_history.record_trade(trade_record).await?;
+
+        // Update token registry with latest price and volume
+        let tokens: Vec<String> = trade_result.pair_id.split('/').map(|s| s.to_string()).collect();
+        if tokens.len() == 2 {
+            if let Ok(Some(base_token)) = self.token_registry.get_token_by_symbol(&tokens[0]).await {
+                self.token_registry.update_token_price(
+                    &base_token.contract_address,
+                    trade_result.price.clone(),
+                    trade_result.amount_filled.clone(),
+                ).await?;
+            }
+        }
+
+        debug!("📊 Trade recorded in price history: {}", trade_result.trade_id);
+        Ok(())
+    }
+
+    /// Get all available tokens from registry (replaces hardcoded list)
+    pub async fn get_all_available_tokens(&self) -> Result<Vec<QuantumTokenInfo>> {
+        let tokens = self.token_registry.get_active_tokens().await?;
+        Ok(tokens.iter().map(|t| self.convert_to_quantum_token_info(t)).collect())
+    }
+
+    /// Get historical price data from price history manager
+    pub async fn get_historical_prices(
+        &self,
+        pair_id: &str,
+        interval: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<QuantumOhlcvData>> {
+        use q_storage::price_history::CandleInterval;
+
+        let candle_interval = CandleInterval::from_str(interval)
+            .unwrap_or(CandleInterval::Hour1);
+
+        let candles = self.price_history.get_recent_candles(pair_id, candle_interval, limit.unwrap_or(100)).await?;
+
+        // Convert to QuantumOhlcvData
+        Ok(candles.iter().map(|c| QuantumOhlcvData {
+            timestamp: c.timestamp,
+            open: c.open.clone(),
+            high: c.high.clone(),
+            low: c.low.clone(),
+            close: c.close.clone(),
+            volume: c.volume.clone(),
+            quantum_hash: Some(vec![0u8; 32]), // Placeholder
+        }).collect())
     }
 }
 
@@ -415,7 +703,7 @@ mod tests {
         manager.initialize().await.unwrap();
 
         let params = manager.quantum_params.read().await;
-        assert_eq!(params.golden_ratio, BigDecimal::from(1.618033988749895));
+        assert_eq!(params.golden_ratio, "1.618033988749895".parse().unwrap());
         assert_eq!(params.uncertainty_principle_factor, 0.1618);
     }
 }

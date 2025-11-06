@@ -214,6 +214,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "adobe-cmap-parser"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae8abfa9a4688de8fc9f42b3f013b6fffec18ed8a554f5f113577e0b9b3212a3"
+dependencies = [
+ "pom",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6153,6 +6162,15 @@ dependencies = [
 
 [[package]]
 name = "euclid"
+version = "0.20.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bb7ef65b3777a325d1eeefefab5b6d4959da54747e33bd6258e789640f307ad"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "euclid"
 version = "0.22.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad9cdb4b747e485a12abb0e6566612956c7a1bafa3bdb8d682c5b6d403589e48"
@@ -8517,7 +8535,7 @@ dependencies = [
  "clru",
  "const-field-offset",
  "derive_more 2.0.1",
- "euclid",
+ "euclid 0.22.11",
  "fontdue",
  "i-slint-common",
  "i-slint-core-macros",
@@ -9535,7 +9553,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c62026ae44756f8a599ba21140f350303d4f08dcdcc71b5ad9c9bb8128c13c62"
 dependencies = [
  "arrayvec",
- "euclid",
+ "euclid 0.22.11",
  "smallvec",
 ]
 
@@ -9546,7 +9564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce9729cc38c18d86123ab736fd2e7151763ba226ac2490ec092d1dd148825e32"
 dependencies = [
  "arrayvec",
- "euclid",
+ "euclid 0.22.11",
  "smallvec",
 ]
 
@@ -10831,6 +10849,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "lopdf"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e775e4ee264e8a87d50a9efef7b67b4aa988cf94e75630859875fc347e6c872b"
+dependencies = [
+ "chrono",
+ "encoding_rs",
+ "flate2",
+ "itoa",
+ "linked-hash-map",
+ "log",
+ "md5",
+ "nom 7.1.3",
+ "rayon",
+ "time",
+ "weezl",
+]
+
+[[package]]
+name = "lopdf"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5c8ecfc6c72051981c0459f75ccc585e7ff67c70829560cda8e647882a9abff"
+dependencies = [
+ "encoding_rs",
+ "flate2",
+ "indexmap 2.12.0",
+ "itoa",
+ "log",
+ "md-5",
+ "nom 7.1.3",
+ "rangemap",
+ "time",
+ "weezl",
+]
+
+[[package]]
 name = "lrtable"
 version = "0.13.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10894,7 +10949,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e16770d760c7848b0c1c2d209101e408207a65168109509f8483837a36cf2e7"
 dependencies = [
  "arrayvec",
- "euclid",
+ "euclid 0.22.11",
  "num-traits",
 ]
 
@@ -11101,6 +11156,12 @@ dependencies = [
  "cfg-if",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
@@ -13457,6 +13518,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-extract"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbb3a5387b94b9053c1e69d8abfd4dd6dae7afda65a5c5279bc1f42ab39df575"
+dependencies = [
+ "adobe-cmap-parser",
+ "encoding_rs",
+ "euclid 0.20.14",
+ "lopdf 0.34.0",
+ "postscript",
+ "type1-encoding-parser",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "pem"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13833,6 +13909,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pom"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60f6ce597ecdcc9a098e7fddacb1065093a3d66446fa16c675e7e71d1b5c28e6"
+
+[[package]]
 name = "portable-atomic"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13877,6 +13959,12 @@ dependencies = [
  "heapless",
  "serde",
 ]
+
+[[package]]
+name = "postscript"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78451badbdaebaf17f053fd9152b3ffb33b516104eacb45e7864aaa9c712f306"
 
 [[package]]
 name = "potential_utf"
@@ -14414,7 +14502,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14433,7 +14521,7 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
@@ -14461,6 +14549,7 @@ dependencies = [
  "q-zk-stark",
  "rand 0.8.5",
  "rayon",
+ "reqwest 0.12.24",
  "serde",
  "serde_json",
  "sha3 0.10.8",
@@ -14476,7 +14565,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "argon2",
@@ -14506,8 +14595,14 @@ dependencies = [
  "hex",
  "hyper 1.7.0",
  "hyper-util",
+ "image 0.25.8",
  "libp2p 0.53.2",
+ "lopdf 0.32.0",
+ "mime",
+ "mime_guess",
+ "multer 3.1.0",
  "num_cpus",
+ "pdf-extract",
  "pin-project-lite",
  "postcard",
  "pqcrypto-dilithium",
@@ -14518,10 +14613,12 @@ dependencies = [
  "q-benchmarks",
  "q-crypto-simd",
  "q-dag-knight",
+ "q-dex",
  "q-ipfs-storage",
  "q-kernel-io",
  "q-narwhal-core",
  "q-network",
+ "q-oracle",
  "q-plugin-system",
  "q-quantum-crypto",
  "q-quantum-mixing",
@@ -14587,7 +14684,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14617,7 +14714,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -14645,7 +14742,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14727,7 +14824,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14754,7 +14851,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14778,21 +14875,26 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.7.9",
  "bigdecimal",
  "chrono",
  "dashmap 6.1.0",
  "ed25519-dalek",
  "futures",
+ "hex",
  "proptest",
+ "q-oracle",
  "q-quantum-crypto",
+ "q-storage",
  "q-tor-client",
  "q-types",
  "q-zk-snark",
  "q-zk-stark",
+ "rand 0.8.5",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -14806,7 +14908,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14893,7 +14995,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14958,7 +15060,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15073,8 +15175,10 @@ dependencies = [
  "hex",
  "libp2p 0.53.2",
  "opencl3",
+ "q-aegis-ql",
  "q-dag-knight",
  "q-network",
+ "q-precision",
  "q-types",
  "rayon",
  "serde",
@@ -15088,7 +15192,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15132,10 +15236,11 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bincode 1.3.3",
  "blake3",
  "chrono",
  "crossbeam",
@@ -15143,6 +15248,7 @@ dependencies = [
  "futures",
  "hex",
  "libp2p 0.53.2",
+ "num_cpus",
  "postcard",
  "pqcrypto-dilithium",
  "pqcrypto-kyber 0.7.9",
@@ -15156,22 +15262,25 @@ dependencies = [
  "q-tor-circuit",
  "q-tor-client",
  "q-types",
+ "q-zk-stark",
  "rand 0.8.5",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
  "sha3 0.10.8",
+ "sysinfo 0.30.13",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
  "tracing",
  "uuid 1.18.1",
  "zeroize",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "q-oracle"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15203,7 +15312,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "backoff",
@@ -15364,7 +15473,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15393,7 +15502,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15427,7 +15536,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -15462,7 +15571,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15576,7 +15685,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15606,7 +15715,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15634,25 +15743,34 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bigdecimal",
  "bincode 1.3.3",
  "blake3",
+ "chrono",
+ "dashmap 5.5.3",
  "futures",
  "hex",
+ "libc",
  "libp2p 0.53.2",
+ "lru",
  "lz4",
+ "postcard",
  "prometheus",
  "proptest",
+ "q-aegis-ql",
  "q-dag-knight",
  "q-narwhal-core",
  "q-quantum-rng",
  "q-types",
+ "q-zk-p2p",
  "rocksdb",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha3 0.10.8",
  "sled",
  "tempfile",
@@ -15660,11 +15778,12 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "q-tor-circuit"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15684,7 +15803,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -15714,7 +15833,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bytes",
@@ -15756,7 +15875,7 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15764,6 +15883,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "postcard",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha3 0.10.8",
@@ -15773,7 +15893,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15805,7 +15925,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -15904,7 +16024,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "0.0.29-beta"
+version = "0.9.18-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -16436,6 +16556,12 @@ name = "range-alloc"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d6831663a5098ea164f89cff59c6284e95f4e3c76ce9848d4529f5ccca9bde"
+
+[[package]]
+name = "rangemap"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f93e7e49bb0bf967717f7bd674458b3d6b0c5f48ec7e3038166026a69fc22223"
 
 [[package]]
 name = "ratatui"
@@ -21734,6 +21860,15 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+]
+
+[[package]]
+name = "type1-encoding-parser"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3d6cc09e1a99c7e01f2afe4953789311a1c50baebbdac5b477ecf78e2e92a5b"
+dependencies = [
+ "pom",
 ]
 
 [[package]]

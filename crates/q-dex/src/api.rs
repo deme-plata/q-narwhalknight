@@ -155,11 +155,14 @@ async fn quantum_health_check() -> Result<Json<serde_json::Value>, StatusCode> {
 }
 
 /// Quantum system status endpoint
-async fn quantum_status(
-    axum::extract::State(state): axum::extract::State<Arc<RwLock<QuantumApiState>>>,
-) -> Result<Json<QuantumApiState>, StatusCode> {
-    let quantum_state = state.read().await;
-    Ok(Json(quantum_state.clone()))
+async fn quantum_status() -> Result<Json<serde_json::Value>, StatusCode> {
+    // TODO: Integrate with actual quantum state
+    Ok(Json(serde_json::json!({
+        "quantum_systems": "operational",
+        "entanglement_active": true,
+        "wave_functions": "superposition",
+        "privacy_level": "maximum"
+    })))
 }
 
 /// Get quantum token information
@@ -178,7 +181,17 @@ async fn get_quantum_token(
         privacy_enabled: true,
         zk_proofs_required: params.include_quantum_data.unwrap_or(false),
         created_at: chrono::Utc::now(),
-        quantum_volatility: BigDecimal::from(0.1618),
+        price_usd: Some("1.618".parse().unwrap()),
+        market_cap: Some(BigDecimal::from(1_000_000) * "1.618".parse::<BigDecimal>().unwrap()),
+        circulating_supply: Some(BigDecimal::from(1_000_000)),
+        volume_24h: None,
+        description: Some(format!("Quantum-enhanced token {}", symbol)),
+        logo_url: None,
+        website: None,
+        tags: vec!["quantum".to_string()],
+        address: Some(format!("0x{:0>40}", hex::encode(&symbol))),
+        quantum_signature_verified: true,
+        quantum_volatility: "0.1618".parse().unwrap(),
         wave_function_state: QuantumState::Superposition,
         entanglement_pairs: vec!["ORB".to_string(), "ORBUSD".to_string()],
         defi_protocols: vec!["Q-NarwhalKnight".to_string()],
@@ -203,7 +216,17 @@ async fn list_quantum_tokens(
             privacy_enabled: true,
             zk_proofs_required: true,
             created_at: chrono::Utc::now(),
-            quantum_volatility: BigDecimal::from(0.1618),
+            price_usd: Some("1.618".parse().unwrap()),
+            market_cap: Some(BigDecimal::from(21_000_000) * "1.618".parse::<BigDecimal>().unwrap()),
+            circulating_supply: Some(BigDecimal::from(21_000_000)),
+            volume_24h: Some(BigDecimal::from(100_000)),
+            description: Some("ORB - Quantum-enhanced governance token for Q-NarwhalKnight".to_string()),
+            logo_url: Some("https://q-narwhalknight.xyz/orb-logo.png".to_string()),
+            website: Some("https://q-narwhalknight.xyz".to_string()),
+            tags: vec!["quantum".to_string(), "governance".to_string(), "defi".to_string()],
+            address: Some("0x0000000000000000000000000000000000000ORB".to_string()),
+            quantum_signature_verified: true,
+            quantum_volatility: "0.1618".parse().unwrap(),
             wave_function_state: QuantumState::Superposition,
             entanglement_pairs: vec!["ORBUSD".to_string()],
             defi_protocols: vec!["Q-NarwhalKnight".to_string(), "QuantumDEX".to_string()],
@@ -218,7 +241,17 @@ async fn list_quantum_tokens(
             privacy_enabled: true,
             zk_proofs_required: false,
             created_at: chrono::Utc::now(),
-            quantum_volatility: BigDecimal::from(0.001),
+            price_usd: Some("1.0".parse().unwrap()),
+            market_cap: Some(BigDecimal::from(0)),
+            circulating_supply: Some(BigDecimal::from(0)),
+            volume_24h: Some(BigDecimal::from(50_000)),
+            description: Some("ORBUSD - Quantum-stabilized algorithmic stablecoin".to_string()),
+            logo_url: Some("https://q-narwhalknight.xyz/orbusd-logo.png".to_string()),
+            website: Some("https://q-narwhalknight.xyz/orbusd".to_string()),
+            tags: vec!["stablecoin".to_string(), "quantum".to_string(), "algorithmic".to_string()],
+            address: Some("0x0000000000000000000000000000000ORBUSD".to_string()),
+            quantum_signature_verified: true,
+            quantum_volatility: "0.001".parse().unwrap(),
             wave_function_state: QuantumState::Collapsed,
             entanglement_pairs: vec!["ORB".to_string(), "USD".to_string()],
             defi_protocols: vec!["Q-Stablecoin".to_string(), "QuantumDEX".to_string()],
@@ -242,11 +275,11 @@ async fn get_quantum_pair(
         base_address: Some("0x0000000000000000000000000000000000000ORB".to_string()),
         quote_address: Some("0x0000000000000000000000000000000ORBUSD".to_string()),
         exchange: "QuantumDEX".to_string(),
-        price: BigDecimal::from(1.618),
+        price: "1.618".parse().unwrap(),
         volume_24h: BigDecimal::from(100000),
         fee_rate: 30, // 0.3%
-        fee_tier: BigDecimal::from(0.003),
-        min_trade_size: BigDecimal::from(0.001),
+        fee_tier: "0.003".parse().unwrap(),
+        min_trade_size: "0.001".parse().unwrap(),
         max_trade_size: BigDecimal::from(1000000),
         liquidity: BigDecimal::from(1000000),
         quantum_secured: true,
@@ -256,7 +289,7 @@ async fn get_quantum_pair(
         active: true,
         quantum_correlation: 0.707,
         wave_interference_pattern: WavePattern::Constructive,
-        price_uncertainty: BigDecimal::from(0.01),
+        price_uncertainty: "0.01".parse().unwrap(),
         quantum_liquidity_depth: BigDecimal::from(1000000),
         entangled_state: true,
     };
@@ -277,11 +310,11 @@ async fn list_quantum_pairs(
         base_address: Some("0x0000000000000000000000000000000000000ORB".to_string()),
         quote_address: Some("0x0000000000000000000000000000000ORBUSD".to_string()),
         exchange: "QuantumDEX".to_string(),
-        price: BigDecimal::from(1.618),
+        price: "1.618".parse().unwrap(),
         volume_24h: BigDecimal::from(100000),
         fee_rate: 30,
-        fee_tier: BigDecimal::from(0.003),
-        min_trade_size: BigDecimal::from(0.001),
+        fee_tier: "0.003".parse().unwrap(),
+        min_trade_size: "0.001".parse().unwrap(),
         max_trade_size: BigDecimal::from(1000000),
         liquidity: BigDecimal::from(1000000),
         quantum_secured: true,
@@ -291,7 +324,7 @@ async fn list_quantum_pairs(
         active: true,
         quantum_correlation: 0.707,
         wave_interference_pattern: WavePattern::Constructive,
-        price_uncertainty: BigDecimal::from(0.01),
+        price_uncertainty: "0.01".parse().unwrap(),
         quantum_liquidity_depth: BigDecimal::from(1000000),
         entangled_state: true,
     }];
@@ -305,12 +338,12 @@ async fn get_quantum_market_data(
 ) -> Result<Json<QuantumMarketData>, StatusCode> {
     let market_data = QuantumMarketData {
         pair_id: "ORB/ORBUSD".to_string(),
-        current_price: BigDecimal::from(1.618),
+        current_price: "1.618".parse().unwrap(),
         volume_24h: BigDecimal::from(100000),
         liquidity: BigDecimal::from(1000000),
         price_change_24h: 5.5,
-        high_24h: BigDecimal::from(1.7),
-        low_24h: BigDecimal::from(1.5),
+        high_24h: "1.7".parse().unwrap(),
+        low_24h: "1.5".parse().unwrap(),
         trades_count: 1234,
         quantum_signature: Some(vec![0u8; 64]),
         privacy_stats: QuantumPrivacyStats::default(),
@@ -328,10 +361,10 @@ async fn get_quantum_ohlcv(
     // TODO: Integrate with actual OHLCV data
     let ohlcv_data = vec![QuantumOhlcvData {
         timestamp: chrono::Utc::now(),
-        open: BigDecimal::from(1.6),
-        high: BigDecimal::from(1.65),
-        low: BigDecimal::from(1.55),
-        close: BigDecimal::from(1.618),
+        open: "1.6".parse().unwrap(),
+        high: "1.65".parse().unwrap(),
+        low: "1.55".parse().unwrap(),
+        close: "1.618".parse().unwrap(),
         volume: BigDecimal::from(10000),
         quantum_hash: Some(vec![0u8; 32]),
     }];
@@ -375,8 +408,8 @@ async fn execute_quantum_trade(
             TradeSide::Sell
         },
         amount_filled: request.amount.parse().unwrap_or_default(),
-        price: BigDecimal::from(1.618),
-        fees_paid: BigDecimal::from(0.005),
+        price: "1.618".parse().unwrap(),
+        fees_paid: "0.005".parse().unwrap(),
         privacy_level: QuantumPrivacyTier::Quantum,
         zk_proof: Some(QuantumZkProof {
             proof_data: vec![0u8; 256],

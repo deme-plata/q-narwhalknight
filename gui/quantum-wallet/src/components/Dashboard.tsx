@@ -1,11 +1,17 @@
 import { useState, useEffect, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, ArrowUpRight } from 'lucide-react';
+import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send } from 'lucide-react';
 import { qnkAPI, type NodeStatus, debounce } from '../services/api';
 import TransactionDetailsModal from './TransactionDetailsModal';
 import QRCodeModal from './QRCodeModal';
 import StripeCheckout from './StripeCheckout';
 import DAGKnightVisualization from './DAGKnightVisualization';
+import LoanApplicationModal from './LoanApplicationModal';
+import LoanApprovalModal from './LoanApprovalModal';
+import LoanPaybackModal from './LoanPaybackModal';
+import ActiveLoansCard from './ActiveLoansCard';
+import WalletCardWithGraph from './WalletCardWithGraph';
+import PhaseTransitionModal from './PhaseTransitionModal';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
 interface Transaction {
@@ -18,6 +24,11 @@ interface Transaction {
   txHash: string;
 }
 
+interface BalanceHistoryPoint {
+  timestamp: number;
+  balance: number;
+}
+
 interface WalletBalance {
   symbol: string;
   name: string;
@@ -26,181 +37,15 @@ interface WalletBalance {
   icon: 'qug' | 'usd' | 'btc' | 'eth' | 'sol' | 'zec' | 'iron' | 'custom';
   color: string;
   comingSoon?: boolean;
-  shieldedOnly?: boolean; // For privacy coins like Zcash
+  shieldedOnly?: boolean; // For Privacy coins like Zcash
+  history?: BalanceHistoryPoint[]; // Balance history for mini-graph
 }
 
 interface DashboardProps {
-  // Remove mock props - will fetch from API
+  onNavigateToSend?: (coinSymbol: string) => void;
 }
 
-// Animated Balance Component with wicked awesome effects
-const AnimatedBalance = memo(function AnimatedBalance({
-  value,
-  isAnimating,
-  symbol
-}: {
-  value: number;
-  isAnimating: boolean;
-  symbol: string;
-}) {
-  const [displayValue, setDisplayValue] = useState(value);
-  const [particles, setParticles] = useState<Array<{ id: number; x: number; y: number }>>([]);
-
-  // Smooth counting animation
-  useEffect(() => {
-    if (value === displayValue) return;
-
-    const difference = value - displayValue;
-    const duration = 300; // ms - faster animation for frequent mining rewards
-    const steps = 20; // fewer steps for snappier animation
-    const increment = difference / steps;
-    const stepTime = duration / steps;
-
-    let currentStep = 0;
-    const interval = setInterval(() => {
-      currentStep++;
-      if (currentStep >= steps) {
-        setDisplayValue(value);
-        clearInterval(interval);
-      } else {
-        setDisplayValue(prev => prev + increment);
-      }
-    }, stepTime);
-
-    return () => clearInterval(interval);
-  }, [value]);
-
-  // Particle burst effect when balance increases
-  useEffect(() => {
-    if (isAnimating && value > displayValue) {
-      const newParticles = Array.from({ length: 8 }, (_, i) => ({
-        id: Date.now() + i,
-        x: Math.random() * 100 - 50,
-        y: Math.random() * 100 - 50,
-      }));
-      setParticles(newParticles);
-      setTimeout(() => setParticles([]), 600); // faster particle cleanup
-    }
-  }, [isAnimating]);
-
-  const formatBalance = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 8,
-    }).format(amount);
-  };
-
-  return (
-    <div className="relative inline-block">
-      {/* Particle effects */}
-      <AnimatePresence>
-        {particles.map(particle => (
-          <motion.div
-            key={particle.id}
-            initial={{
-              opacity: 1,
-              scale: 0,
-              x: 0,
-              y: 0,
-            }}
-            animate={{
-              opacity: 0,
-              scale: 1.5,
-              x: particle.x,
-              y: particle.y,
-            }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.6, ease: "easeOut" }}
-            className="absolute top-1/2 left-1/2 w-2 h-2 rounded-full pointer-events-none"
-            style={{
-              background: symbol === 'QUG'
-                ? 'linear-gradient(135deg, #FFD700, #FFA500)'
-                : 'linear-gradient(135deg, #10b981, #34d399)',
-              boxShadow: '0 0 8px currentColor',
-            }}
-          />
-        ))}
-      </AnimatePresence>
-
-      {/* Quantum glow pulse */}
-      {isAnimating && (
-        <motion.div
-          className="absolute inset-0 rounded-lg pointer-events-none"
-          initial={{ opacity: 0, scale: 0.8 }}
-          animate={{
-            opacity: [0, 0.6, 0],
-            scale: [0.8, 1.1, 0.8],
-          }}
-          transition={{
-            duration: 0.5,
-            repeat: 1,
-            ease: "easeInOut"
-          }}
-          style={{
-            background: symbol === 'QUG'
-              ? 'radial-gradient(circle, rgba(255, 215, 0, 0.4), transparent 70%)'
-              : 'radial-gradient(circle, rgba(16, 185, 129, 0.4), transparent 70%)',
-            filter: 'blur(10px)',
-          }}
-        />
-      )}
-
-      {/* Balance number with rainbow shimmer */}
-      <motion.div
-        className="relative z-10 text-2xl font-bold text-white"
-        animate={isAnimating ? {
-          textShadow: [
-            '0 0 10px rgba(255, 215, 0, 0.8)',
-            '0 0 20px rgba(255, 107, 0, 0.8)',
-            '0 0 20px rgba(16, 185, 129, 0.8)',
-            '0 0 20px rgba(59, 130, 246, 0.8)',
-            '0 0 10px rgba(168, 85, 247, 0.8)',
-            '0 0 10px rgba(255, 215, 0, 0.8)',
-          ],
-        } : {}}
-        transition={{
-          duration: 2,
-          repeat: isAnimating ? 1 : 0,
-          ease: "easeInOut"
-        }}
-      >
-        {formatBalance(displayValue)}
-      </motion.div>
-
-      {/* Sparkle effect overlay */}
-      {isAnimating && (
-        <motion.div
-          className="absolute inset-0 pointer-events-none overflow-hidden rounded-lg"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-        >
-          {[...Array(6)].map((_, i) => (
-            <motion.div
-              key={i}
-              className="absolute w-1 h-1 bg-white rounded-full"
-              style={{
-                top: `${Math.random() * 100}%`,
-                left: `${Math.random() * 100}%`,
-              }}
-              animate={{
-                scale: [0, 1.5, 0],
-                opacity: [0, 1, 0],
-              }}
-              transition={{
-                duration: 1,
-                delay: i * 0.15,
-                repeat: 1,
-              }}
-            />
-          ))}
-        </motion.div>
-      )}
-    </div>
-  );
-});
-
-const Dashboard = memo(function Dashboard({}: DashboardProps) {
+const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) {
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>(() => {
     // Load faucet transactions from localStorage on mount
@@ -221,6 +66,11 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [faucetMessage, setFaucetMessage] = useState('');
   const [sseConnected, setSseConnected] = useState(false);
+  const [showLoanModal, setShowLoanModal] = useState(false);
+  const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
+  const [approvedLoanDetails, setApprovedLoanDetails] = useState<any>(null);
+  const [showLoanPaybackModal, setShowLoanPaybackModal] = useState(false);
+  const [selectedLoanId, setSelectedLoanId] = useState<string | null>(null);
   const [transactionError, setTransactionError] = useState<string | null>(null);
 
   // Multi-wallet state
@@ -231,6 +81,16 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
   const [balanceAnimations, setBalanceAnimations] = useState<Record<string, boolean>>({});
   const [previousBalances, setPreviousBalances] = useState<Record<string, number>>({});
 
+  // Balance history tracking (keep last 20 data points per wallet) - load from localStorage
+  const [_balanceHistory, setBalanceHistory] = useState<Record<string, BalanceHistoryPoint[]>>(() => {
+    try {
+      const saved = localStorage.getItem('walletBalanceHistory');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
   // Transaction details modal state
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -240,6 +100,11 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
 
   // Node info modal state
   const [isNodeInfoModalOpen, setIsNodeInfoModalOpen] = useState(false);
+
+  // AI Report modal state
+  const [isAIReportModalOpen, setIsAIReportModalOpen] = useState(false);
+  const [aiReportLoading, setAiReportLoading] = useState(false);
+  const [aiReport, setAiReport] = useState<string>('');
 
   // USD wallet modal states
   const [isAddUSDModalOpen, setIsAddUSDModalOpen] = useState(false);
@@ -257,6 +122,84 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
+
+  // Phase transition modal state
+  const [showPhaseModal, setShowPhaseModal] = useState(() => {
+    // Check if user has already seen the v0.9.18-beta announcement
+    const hasSeenV0918 = localStorage.getItem('v0918betaModalSeen');
+    return !hasSeenV0918; // Show if they haven't seen v0.9.18-beta announcement yet
+  });
+
+  // Generate AI Report
+  const generateAIReport = async () => {
+    setAiReportLoading(true);
+    setIsAIReportModalOpen(true);
+    setAiReport('');
+
+    try {
+      // Prepare context for AI
+      const networkStats = nodeStatus ? {
+        tpsCurrent: nodeStatus.tps_current || 0,
+        tpsAverage: nodeStatus.tps_average || 0,
+        connectedPeers: nodeStatus.connected_peers || 0,
+        isValidator: nodeStatus.is_validator,
+        currentHeight: nodeStatus.current_height || 0
+      } : null;
+
+      const walletContext = {
+        balance: nodeStatus?.balance || 0,
+        walletAddress: walletAddress,
+        recentTransactions: recentTransactions.slice(0, 10),
+        networkStats
+      };
+
+      const prompt = `Analyze this Q-NarwhalKnight wallet and network performance:
+
+Wallet Balance: ${walletContext.balance.toFixed(4)} QUG
+${networkStats ? `Network TPS: ${networkStats.tpsCurrent} current, ${networkStats.tpsAverage} average
+Connected Peers: ${networkStats.connectedPeers}
+Block Height: ${networkStats.currentHeight}
+Validator Status: ${networkStats.isValidator ? 'Active' : 'Not active'}` : 'Network: Offline'}
+
+Recent Transactions: ${walletContext.recentTransactions.length} transactions
+
+Provide a brief analysis (under 250 tokens) covering:
+1. Balance health & recommendations
+2. Network participation insights
+3. Key optimizations for earning rewards`;
+
+      // Stream AI response with reduced token limit for faster generation
+      const eventSource = new EventSource(`/api/chat/stream?content=${encodeURIComponent(prompt)}&max_tokens=250`);
+      let fullReport = '';
+
+      eventSource.addEventListener('token', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          fullReport = data.cumulative || '';
+          setAiReport(fullReport);
+        } catch (e) {
+          console.error('Failed to parse AI token:', e);
+        }
+      });
+
+      eventSource.addEventListener('complete', () => {
+        setAiReportLoading(false);
+        eventSource.close();
+      });
+
+      eventSource.addEventListener('error', (error) => {
+        console.error('AI Report generation error:', error);
+        setAiReportLoading(false);
+        setAiReport('Failed to generate AI report. Please try again.');
+        eventSource.close();
+      });
+
+    } catch (error) {
+      console.error('Failed to generate AI report:', error);
+      setAiReportLoading(false);
+      setAiReport('Failed to generate AI report. Please try again.');
+    }
+  };
 
   // Save faucet transactions to localStorage whenever they change
   useEffect(() => {
@@ -412,6 +355,32 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         console.error('❌ Failed to fetch QUG balance, using nodeStatus:', error);
       }
 
+      const now = Date.now();
+
+      // Load saved history from localStorage
+      let savedHistory: Record<string, BalanceHistoryPoint[]> = {};
+      try {
+        const saved = localStorage.getItem('walletBalanceHistory');
+        savedHistory = saved ? JSON.parse(saved) : {};
+      } catch {
+        savedHistory = {};
+      }
+
+      // Merge saved history with new data point
+      const qugSavedHistory = savedHistory['QUG'] || [];
+      let qugHistory: BalanceHistoryPoint[] = [
+        ...qugSavedHistory,
+        { timestamp: now, balance: qugBalance }
+      ].slice(-20); // Keep last 20 points
+
+      // Ensure at least 2 points for graph rendering
+      if (qugHistory.length < 2) {
+        qugHistory = [
+          { timestamp: now - 60000, balance: qugBalance }, // 1 minute ago
+          { timestamp: now, balance: qugBalance }
+        ];
+      }
+
       const balances: WalletBalance[] = [
         {
           symbol: 'QUG',
@@ -419,8 +388,11 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
           balance: qugBalance,
           icon: 'qug',
           color: 'from-amber-400 to-yellow-500',
+          history: qugHistory
         }
       ];
+
+      console.log('📊 [fetchWalletBalances] Initialized QUG with history:', qugHistory.length, 'points (', qugSavedHistory.length, 'from localStorage)');
 
       // Fetch QUGUSD balance (Quillon USD stablecoin)
       let qugUsdBalance = 0;
@@ -449,6 +421,12 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
       }
 
       // Add QUGUSD to balances (always show, even with 0 balance)
+      const qugusdSavedHistory = savedHistory['QUGUSD'] || [];
+      const qugusdHistory: BalanceHistoryPoint[] = [
+        ...qugusdSavedHistory,
+        { timestamp: now, balance: qugUsdBalance }
+      ].slice(-20);
+
       balances.push({
         symbol: 'QUGUSD',
         name: 'Quillon USD',
@@ -456,7 +434,10 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         usdValue: qugUsdBalance, // 1:1 peg to USD
         icon: 'usd',
         color: 'from-blue-400 to-cyan-500',
+        history: qugusdHistory
       });
+
+      console.log('📊 [fetchWalletBalances] Initialized QUGUSD with history:', qugusdHistory.length, 'points (', qugusdSavedHistory.length, 'from localStorage)');
 
       // Fetch USD balance from payment API - ALWAYS show USD wallet
       let usdValue = 0;
@@ -483,13 +464,22 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
       }
 
       // Always add USD wallet (even with 0 balance) so user can see Add/Send controls
+      const usdSavedHistory = savedHistory['USD'] || [];
+      const usdHistory: BalanceHistoryPoint[] = [
+        ...usdSavedHistory,
+        { timestamp: now, balance: usdValue }
+      ].slice(-20);
+
       balances.push({
         symbol: 'USD',
         name: 'US Dollar',
         balance: usdValue,
         icon: 'usd',
         color: 'from-green-400 to-emerald-500',
+        history: usdHistory
       });
+
+      console.log('📊 [fetchWalletBalances] Initialized USD with history:', usdHistory.length, 'points (', usdSavedHistory.length, 'from localStorage)');
 
       // Note: Custom tokens would be fetched here if the API supported them
       // Currently, only QUG and QUGUSD are supported in the multi-token balance endpoint
@@ -1203,6 +1193,83 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
     };
   }, []);
 
+  // Listen for real-time balance updates from SSE (via App.tsx custom event)
+  useEffect(() => {
+    const handleWalletBalanceUpdate = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { symbol, balance, reason } = customEvent.detail;
+
+      console.log(`💰 Dashboard: Received wallet-balance-updated event for ${symbol}:`, balance, 'Reason:', reason);
+
+      // Update balance history and wallet balance atomically
+      setBalanceHistory(prev => {
+        const history = prev[symbol] || [];
+        const newPoint: BalanceHistoryPoint = {
+          timestamp: Date.now(),
+          balance
+        };
+        const updatedHistory = [...history, newPoint].slice(-20); // Keep last 20 points
+        const newHistoryState = { ...prev, [symbol]: updatedHistory };
+
+        // Save to localStorage
+        try {
+          localStorage.setItem('walletBalanceHistory', JSON.stringify(newHistoryState));
+        } catch (error) {
+          console.warn('Failed to save balance history to localStorage:', error);
+        }
+
+        console.log(`📊 Dashboard: Updated history for ${symbol}:`, updatedHistory.length, 'points');
+
+        // Update walletBalances with the new history
+        setWalletBalances(wallets => {
+          return wallets.map(wallet => {
+            if (wallet.symbol === symbol) {
+              console.log(`✅ Dashboard: Updating ${symbol} balance from ${wallet.balance} to ${balance} with ${updatedHistory.length} history points`);
+              return {
+                ...wallet,
+                balance,
+                history: updatedHistory
+              };
+            }
+            return wallet;
+          });
+        });
+
+        return newHistoryState;
+      });
+    };
+
+    window.addEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
+    console.log('👂 Dashboard: Listening for wallet-balance-updated events');
+
+    return () => {
+      window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
+      console.log('🔇 Dashboard: Stopped listening for wallet-balance-updated events');
+    };
+  }, []);
+
+  // Listen for loan approval events from SSE (via App.tsx custom event)
+  useEffect(() => {
+    const handleLoanApproval = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const loanData = customEvent.detail;
+
+      console.log('🏦 Dashboard: Received loan-approved event:', loanData);
+
+      // Store loan details and show approval modal
+      setApprovedLoanDetails(loanData);
+      setShowLoanApprovalModal(true);
+    };
+
+    window.addEventListener('loan-approved', handleLoanApproval);
+    console.log('👂 Dashboard: Listening for loan-approved events');
+
+    return () => {
+      window.removeEventListener('loan-approved', handleLoanApproval);
+      console.log('🔇 Dashboard: Stopped listening for loan-approved events');
+    };
+  }, []);
+
   // Refresh wallet balances when refreshTrigger changes
   useEffect(() => {
     if (refreshTrigger > 0) {
@@ -1211,15 +1278,26 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         const currentWalletAddress = localStorage.getItem('walletAddress');
         if (!currentWalletAddress) return;
 
+        // Initialize QUG balance and history
+        const qugBalance = nodeStatus?.balance || 0;
+        const now = Date.now();
+        const qugHistory: BalanceHistoryPoint[] = [
+          { timestamp: now - 60000, balance: qugBalance }, // 1 minute ago
+          { timestamp: now, balance: qugBalance }
+        ];
+
         const balances: WalletBalance[] = [
           {
             symbol: 'QUG',
             name: 'Quillon Graph',
-            balance: nodeStatus?.balance || 0,
+            balance: qugBalance,
             icon: 'qug',
             color: 'from-amber-400 to-yellow-500',
+            history: qugHistory  // Add history directly
           }
         ];
+
+        console.log('📊 Initialized QUG with balance history:', qugHistory.length, 'points');
 
         // Fetch USD balance
         try {
@@ -1234,13 +1312,22 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
             if (data.success && data.data) {
               const usdValue = parseFloat(data.data.balance_usd || '0');
               setUsdBalance(usdValue);
+
+              const usdHistory: BalanceHistoryPoint[] = [
+                { timestamp: now - 60000, balance: usdValue },
+                { timestamp: now, balance: usdValue }
+              ];
+
               balances.push({
                 symbol: 'USD',
                 name: 'US Dollar',
                 balance: usdValue,
                 icon: 'usd',
                 color: 'from-green-400 to-emerald-500',
+                history: usdHistory  // Add history directly
               });
+
+              console.log('📊 Initialized USD with balance history:', usdHistory.length, 'points');
             }
           }
         } catch (error) {
@@ -1257,14 +1344,23 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
 
             // Add QUGUSD if it exists and has balance
             if (tokensObj.QUGUSD && tokensObj.QUGUSD.balance_base_units > 0) {
+              const qugusdBalance = tokensObj.QUGUSD.balance_base_units / 1e8;
+
+              const qugusdHistory: BalanceHistoryPoint[] = [
+                { timestamp: now - 60000, balance: qugusdBalance },
+                { timestamp: now, balance: qugusdBalance }
+              ];
+
               balances.push({
                 symbol: 'QUGUSD',
                 name: 'Quillon USD',
-                balance: tokensObj.QUGUSD.balance_base_units / 1e8,
+                balance: qugusdBalance,
                 icon: 'usd' as const,
                 color: 'from-green-400 to-emerald-500',
+                history: qugusdHistory  // Add history directly
               });
-              console.log('💵 Added QUGUSD balance:', tokensObj.QUGUSD.balance_base_units / 1e8);
+
+              console.log('📊 Initialized QUGUSD with balance:', qugusdBalance, 'history:', qugusdHistory.length, 'points');
             }
           }
         } catch (error) {
@@ -1423,6 +1519,13 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
     }
   };
 
+  // Handle Loan Payback
+  const handleLoanPayback = (loanId: string) => {
+    console.log('💰 Opening loan payback modal for loan:', loanId);
+    setSelectedLoanId(loanId);
+    setShowLoanPaybackModal(true);
+  };
+
   // Handle Add USD - show Stripe checkout
   const handleAddUSD = async () => {
     if (!usdAmount || parseFloat(usdAmount) <= 0) {
@@ -1538,6 +1641,16 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
 
   return (
     <div className="space-y-8">
+      {/* Phase 4 Transition Modal */}
+      {showPhaseModal && (
+        <PhaseTransitionModal
+          onClose={() => {
+            setShowPhaseModal(false);
+            localStorage.setItem('v0918betaModalSeen', 'true');
+          }}
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -1633,6 +1746,27 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
+                onClick={generateAIReport}
+                className="p-3 rounded-xl transition-colors group relative"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(147, 51, 234, 0.15))',
+                  border: '2px solid rgba(168, 85, 247, 0.3)'
+                }}
+                title="AI Wallet Analysis"
+              >
+                <img
+                  src="/quantum-ai-logo.png"
+                  alt="AI Report"
+                  className="w-5 h-5 object-contain"
+                  style={{
+                    filter: 'drop-shadow(0 0 8px rgba(168, 85, 247, 0.5))'
+                  }}
+                />
+              </motion.button>
+
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={copyWalletAddress}
                 disabled={!walletAddress}
                 className="p-3 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1655,219 +1789,120 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-bold text-white">My Wallets</h3>
-              {nodeStatus && nodeStatus.balance === 0 && (
+              <div className="flex items-center gap-2">
+                {/* Apply for Loan Button */}
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
-                  onClick={requestFaucetTokens}
-                  disabled={faucetLoading}
-                  className="px-4 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+                  onClick={() => {
+                    console.log('🏦 Apply for Loan button clicked - opening modal');
+                    setShowLoanModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl transition-colors text-sm font-medium flex items-center gap-2"
                   style={{
-                    background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))',
-                    border: '2px solid rgba(34, 197, 94, 0.3)',
-                    color: 'rgb(74, 222, 128)'
+                    background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(147, 51, 234, 0.15))',
+                    border: '2px solid rgba(168, 85, 247, 0.3)',
+                    color: 'rgb(192, 132, 252)'
                   }}
                 >
-                  {faucetLoading ? (
-                    <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
-                      <Coins className="w-4 h-4" />
-                    </motion.div>
-                  ) : (
-                    <Coins className="w-4 h-4" />
-                  )}
-                  Get Test Tokens
+                  <DollarSign className="w-4 h-4" />
+                  Apply for Loan
                 </motion.button>
-              )}
+
+                {nodeStatus && nodeStatus.balance === 0 && (
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={requestFaucetTokens}
+                    disabled={faucetLoading}
+                    className="px-4 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))',
+                      border: '2px solid rgba(34, 197, 94, 0.3)',
+                      color: 'rgb(74, 222, 128)'
+                    }}
+                  >
+                    {faucetLoading ? (
+                      <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+                        <Coins className="w-4 h-4" />
+                      </motion.div>
+                    ) : (
+                      <Coins className="w-4 h-4" />
+                    )}
+                    Get Test Tokens
+                  </motion.button>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {walletBalances.map((wallet, index) => (
-                <motion.div
-                  key={wallet.symbol}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.1 * index }}
-                  className="p-4 rounded-xl cursor-pointer group relative overflow-hidden"
-                  style={{
-                    background: `linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))`,
-                    border: `2px solid rgba(212, 175, 55, ${wallet.comingSoon ? '0.1' : '0.3'})`,
-                  }}
-                  whileHover={{ scale: wallet.comingSoon ? 1 : 1.02 }}
-                >
-                  {wallet.comingSoon && (
-                    <div className="absolute top-2 right-2 px-2 py-1 rounded-lg text-xs font-bold bg-gradient-to-r from-purple-500/30 to-pink-500/30 border border-purple-400/30 text-purple-300">
-                      Coming Soon
-                    </div>
-                  )}
-                  {wallet.shieldedOnly && (
-                    <div className="absolute bottom-2 right-2 px-2 py-1 rounded-lg text-xs font-bold bg-gradient-to-r from-green-500/30 to-emerald-500/30 border border-green-400/30 text-green-300 flex items-center gap-1">
-                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M8 1l-6 2v5c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V3l-6-2z"/>
-                      </svg>
-                      Shielded
-                    </div>
-                  )}
-
-                  <div className="flex items-start justify-between mb-3">
-                    <div className={`p-2 rounded-lg bg-gradient-to-br ${wallet.color}`}>
-                      {(wallet.icon === 'qug' || wallet.icon === 'usd') && (
-                        <div className="relative w-5 h-5">
-                          <div className="absolute inset-0 rounded-full" style={{
-                            background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                            padding: '1px'
-                          }}>
-                            <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
-                              <img
-                                src="/quillon-logo.png"
-                                alt="Quillon"
-                                className="w-full h-full object-contain"
-                                style={{ filter: 'invert(1)' }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      {wallet.icon === 'btc' && (
-                        <div className="relative w-5 h-5">
-                          {/* Bitcoin logo with gradient styling */}
-                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <defs>
-                              <linearGradient id="btcGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stopColor="#F7931A" />
-                                <stop offset="100%" stopColor="#FFA500" />
-                              </linearGradient>
-                            </defs>
-                            <circle cx="12" cy="12" r="10" fill="url(#btcGradient)"/>
-                            <path d="M13.5 9.5c0-.5-.3-.9-.8-1.1.3-.2.5-.6.5-1 0-.8-.6-1.4-1.4-1.4h-.6V5h-1v1h-.7V5h-1v1H7v1h.5c.3 0 .5.2.5.5v7c0 .3-.2.5-.5.5H7v1h1.5v1h1v-1h.7v1h1v-1h.6c1.5 0 2.7-1.2 2.7-2.7 0-.9-.4-1.6-1-2.1.6-.4 1-1.1 1-1.7zm-3.3-.5h.6c.6 0 1 .4 1 1s-.4 1-1 1h-.6V9zm.8 5h-.8v-2.5h.8c.8 0 1.5.7 1.5 1.5s-.7 1-1.5 1z" fill="white"/>
-                          </svg>
-                        </div>
-                      )}
-                      {wallet.icon === 'eth' && (
-                        <div className="relative w-5 h-5">
-                          {/* Ethereum logo with proper styling */}
-                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M11.944 17.97L4.58 13.62 11.943 24l7.37-10.38-7.372 4.35h.003zM12.056 0L4.69 12.223l7.365 4.354 7.365-4.35L12.056 0z" fill="currentColor" className="text-indigo-400"/>
-                          </svg>
-                        </div>
-                      )}
-                      {wallet.icon === 'sol' && (
-                        <div className="relative w-5 h-5">
-                          {/* Solana logo with gradient styling */}
-                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <defs>
-                              <linearGradient id="solGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stopColor="#9945FF" />
-                                <stop offset="100%" stopColor="#14F195" />
-                              </linearGradient>
-                            </defs>
-                            <path d="M4.5 17.5l2.5-2.5h14l-2.5 2.5H4.5zM4.5 11.5L7 9h14l-2.5 2.5H4.5zM7 6.5L4.5 9h14L21 6.5H7z" fill="url(#solGradient)"/>
-                          </svg>
-                        </div>
-                      )}
-                      {wallet.icon === 'zec' && (
-                        <div className="relative w-5 h-5">
-                          {/* Zcash shielded logo with privacy focus */}
-                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <defs>
-                              <linearGradient id="zecGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stopColor="#F4B728" />
-                                <stop offset="100%" stopColor="#D4AF37" />
-                              </linearGradient>
-                            </defs>
-                            <circle cx="12" cy="12" r="10" fill="url(#zecGradient)"/>
-                            {/* Shield symbol for privacy */}
-                            <path d="M12 3L6 6v5c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V6l-6-3z" fill="white" opacity="0.9"/>
-                            <path d="M15 9l-5 5h3l-5 5 5-5h-3l5-5z" fill="url(#zecGradient)" opacity="0.8"/>
-                          </svg>
-                        </div>
-                      )}
-                      {wallet.icon === 'iron' && (
-                        <div className="relative w-5 h-5">
-                          {/* Iron Fish logo with metallic/privacy theme */}
-                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <defs>
-                              <linearGradient id="ironGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stopColor="#64748b" />
-                                <stop offset="50%" stopColor="#94a3b8" />
-                                <stop offset="100%" stopColor="#475569" />
-                              </linearGradient>
-                            </defs>
-                            {/* Fish shape with metallic gradient */}
-                            <path d="M12 3c-4 0-7 2-9 5 2 3 5 5 9 5s7-2 9-5c-2-3-5-5-9-5z" fill="url(#ironGradient)"/>
-                            <circle cx="12" cy="8" r="2" fill="white" opacity="0.8"/>
-                            <path d="M12 13v8l-3-2 3-1-3-1.5z" fill="url(#ironGradient)" opacity="0.7"/>
-                            <path d="M12 13v8l3-2-3-1 3-1.5z" fill="url(#ironGradient)" opacity="0.7"/>
-                          </svg>
-                        </div>
-                      )}
-                      {wallet.icon === 'custom' && <Wallet className="w-5 h-5 text-white" />}
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs text-gray-400 mb-1">{wallet.name}</div>
-                      <div className="text-lg font-bold text-white">{wallet.symbol}</div>
-                    </div>
-                  </div>
-
-                  <div className={`mb-2 ${wallet.comingSoon ? 'text-gray-500' : ''}`}>
-                    {wallet.comingSoon ? (
-                      <div className="text-2xl font-bold text-gray-500">0.00</div>
-                    ) : (
-                      <AnimatedBalance
-                        value={wallet.balance}
-                        isAnimating={balanceAnimations[wallet.symbol] || false}
-                        symbol={wallet.symbol}
-                      />
+              {walletBalances.map((wallet, index) => {
+                return (
+                  <WalletCardWithGraph
+                    key={wallet.symbol}
+                    wallet={wallet}
+                    index={index}
+                    isAnimating={balanceAnimations[wallet.symbol] || false}
+                    onCardClick={!wallet.comingSoon && wallet.symbol !== 'USD' && onNavigateToSend ? () => onNavigateToSend(wallet.symbol) : undefined}
+                  >
+                    {/* USD Action Buttons */}
+                    {!wallet.comingSoon && wallet.symbol === 'USD' && (
+                      <div className="flex gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsAddUSDModalOpen(true);
+                            setStripeError(null);
+                          }}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-green-500/20 border border-green-500/30 text-green-300 flex items-center justify-center gap-1"
+                          title="Add USD"
+                        >
+                          <Plus className="w-3 h-3" />
+                          Add
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onNavigateToSend) {
+                              onNavigateToSend('USD');
+                            }
+                          }}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-blue-500/20 border border-blue-500/30 text-blue-300 flex items-center justify-center gap-1"
+                          title="Send USD"
+                        >
+                          <Send className="w-3 h-3" />
+                          Send
+                        </motion.button>
+                      </div>
                     )}
-                  </div>
 
-                  {!wallet.comingSoon && wallet.symbol === 'USD' && (
-                    <div className="flex gap-2 mt-3">
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setIsAddUSDModalOpen(true);
-                          setStripeError(null);
-                        }}
-                        className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-green-500/20 border border-green-500/30 text-green-300 flex items-center justify-center gap-1"
-                        title="Add USD"
-                      >
-                        <Plus className="w-3 h-3" />
-                        Add
-                      </motion.button>
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setIsSendUSDModalOpen(true);
-                          setStripeError(null);
-                        }}
-                        className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-blue-500/20 border border-blue-500/30 text-blue-300 flex items-center justify-center gap-1"
-                        title="Send USD"
-                      >
-                        <Send className="w-3 h-3" />
-                        Send
-                      </motion.button>
-                    </div>
-                  )}
-
-                  {!wallet.comingSoon && wallet.symbol !== 'USD' && wallet.balance > 0 && (
-                    <div className="flex gap-2 mt-3">
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-amber-500/20 border border-amber-500/30 text-amber-300 flex items-center justify-center gap-1"
-                        title="Swap"
-                      >
-                        <ArrowUpRight className="w-3 h-3" />
-                        Swap
-                      </motion.button>
-                    </div>
-                  )}
-                </motion.div>
-              ))}
+                    {/* Send Button for QUG and QUGUSD wallets */}
+                    {!wallet.comingSoon && (wallet.symbol === 'QUG' || wallet.symbol === 'QUGUSD') && (
+                      <div className="flex gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onNavigateToSend) {
+                              onNavigateToSend(wallet.symbol);
+                            }
+                          }}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-blue-500/20 border border-blue-500/30 text-blue-300 flex items-center justify-center gap-1"
+                          title="Send"
+                        >
+                          <Send className="w-3 h-3" />
+                          Send
+                        </motion.button>
+                      </div>
+                    )}
+                  </WalletCardWithGraph>
+                );
+              })}
             </div>
           </div>
 
@@ -1900,6 +1935,15 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
             </motion.div>
           )}
         </div>
+      </motion.div>
+
+      {/* Active Loans Card */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.35 }}
+      >
+        <ActiveLoansCard onPayback={handleLoanPayback} />
       </motion.div>
 
       {/* DAG-Knight Consensus Visualization */}
@@ -2168,6 +2212,140 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
         walletAddress={walletAddress}
         balance={nodeStatus?.balance || 0}
       />
+
+      {/* AI Report Modal */}
+      <AnimatePresence>
+        {isAIReportModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            onClick={() => setIsAIReportModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="rounded-2xl p-6 max-w-3xl w-full max-h-[80vh] overflow-y-auto shadow-2xl"
+              style={{
+                background: 'linear-gradient(135deg, rgba(20, 20, 30, 0.98), rgba(30, 30, 45, 0.98))',
+                border: '2px solid rgba(168, 85, 247, 0.3)',
+                boxShadow: '0 0 40px rgba(168, 85, 247, 0.3)'
+              }}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl">
+                    <img
+                      src="/quantum-ai-logo.png"
+                      alt="Quantum AI"
+                      className="w-8 h-8 object-contain"
+                      style={{
+                        filter: 'drop-shadow(0 0 10px rgba(168, 85, 247, 0.6))'
+                      }}
+                    />
+                  </div>
+                  <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">
+                    AI Wallet Analysis
+                  </h2>
+                </div>
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={() => setIsAIReportModalOpen(false)}
+                  className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+                >
+                  <svg className="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </motion.button>
+              </div>
+
+              {/* AI Report Content */}
+              <div className="space-y-4">
+                {aiReportLoading && !aiReport && (
+                  <div className="flex items-center justify-center py-12">
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                      className="w-16 h-16"
+                    >
+                      <img
+                        src="/quantum-ai-logo.png"
+                        alt="Loading"
+                        className="w-full h-full object-contain"
+                        style={{
+                          filter: 'drop-shadow(0 0 20px rgba(168, 85, 247, 0.8))'
+                        }}
+                      />
+                    </motion.div>
+                  </div>
+                )}
+
+                {aiReport && (
+                  <div className="p-6 rounded-xl bg-gradient-to-br from-purple-500/10 to-pink-500/10 border-2 border-purple-500/20">
+                    <div className="prose prose-invert max-w-none">
+                      <div className="text-gray-200 whitespace-pre-wrap leading-relaxed">
+                        {aiReport}
+                      </div>
+                    </div>
+
+                    {aiReportLoading && (
+                      <motion.div
+                        animate={{ opacity: [0.5, 1, 0.5] }}
+                        transition={{ duration: 1.5, repeat: Infinity }}
+                        className="mt-4 text-purple-400 text-sm flex items-center gap-2"
+                      >
+                        <div className="w-2 h-2 rounded-full bg-purple-400"></div>
+                        Generating analysis...
+                      </motion.div>
+                    )}
+                  </div>
+                )}
+
+                {!aiReportLoading && !aiReport && (
+                  <div className="text-center py-8 text-gray-400">
+                    Click "Generate Report" to analyze your wallet and mining performance.
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="mt-6 flex gap-3 justify-end">
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setIsAIReportModalOpen(false)}
+                  className="px-6 py-3 rounded-xl transition-colors"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(100, 100, 120, 0.2), rgba(80, 80, 100, 0.15))',
+                    border: '2px solid rgba(100, 100, 120, 0.3)'
+                  }}
+                >
+                  Close
+                </motion.button>
+
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={generateAIReport}
+                  disabled={aiReportLoading}
+                  className="px-6 py-3 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.3), rgba(147, 51, 234, 0.2))',
+                    border: '2px solid rgba(168, 85, 247, 0.4)'
+                  }}
+                >
+                  {aiReportLoading ? 'Generating...' : 'Regenerate Report'}
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Node Info Modal */}
       <AnimatePresence>
@@ -2625,6 +2803,44 @@ const Dashboard = memo(function Dashboard({}: DashboardProps) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Loan Application Modal */}
+      {showLoanModal && (
+        <LoanApplicationModal
+          onClose={() => setShowLoanModal(false)}
+          walletBalances={walletBalances}
+          walletAddress={walletAddress}
+        />
+      )}
+
+      {/* Loan Approval Modal - Triggered by SSE loan-approved event */}
+      {showLoanApprovalModal && approvedLoanDetails && (
+        <LoanApprovalModal
+          onClose={() => {
+            setShowLoanApprovalModal(false);
+            setApprovedLoanDetails(null);
+          }}
+          loanDetails={{
+            amount: approvedLoanDetails.amount,
+            interestRate: approvedLoanDetails.interestRate,
+            termMonths: approvedLoanDetails.termMonths,
+            monthlyPayment: approvedLoanDetails.monthlyPayment,
+            collateralAmount: approvedLoanDetails.collateralAmount,
+            collateralType: approvedLoanDetails.collateralType,
+          }}
+        />
+      )}
+
+      {/* Loan Payback Modal */}
+      {showLoanPaybackModal && selectedLoanId && (
+        <LoanPaybackModal
+          loanId={selectedLoanId}
+          onClose={() => {
+            setShowLoanPaybackModal(false);
+            setSelectedLoanId(null);
+          }}
+        />
+      )}
 
     </div>
   );

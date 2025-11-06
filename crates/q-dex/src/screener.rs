@@ -317,14 +317,16 @@ impl QuantumDexScreenerIntegration {
 
                     for (pair_id, cache_entry) in cache_guard.iter_mut() {
                         // Simulate quantum-enhanced data update
+                        use std::str::FromStr;
+                        let random_price = 1.618 + rand::random::<f64>() * 0.1;
                         cache_entry.cached_data = QuantumMarketData {
                             pair_id: pair_id.clone(),
-                            current_price: BigDecimal::from(1.618 + rand::random::<f64>() * 0.1),
+                            current_price: BigDecimal::from_str(&random_price.to_string()).unwrap_or_else(|_| "1.618".parse().unwrap()),
                             volume_24h: BigDecimal::from(100000 + rand::random::<u32>() % 50000),
                             liquidity: BigDecimal::from(1000000 + rand::random::<u32>() % 500000),
                             price_change_24h: (rand::random::<f64>() - 0.5) * 20.0,
-                            high_24h: BigDecimal::from(1.7),
-                            low_24h: BigDecimal::from(1.5),
+                            high_24h: "1.7".parse().unwrap(),
+                            low_24h: "1.5".parse().unwrap(),
                             trades_count: 1000 + rand::random::<u64>() % 500,
                             quantum_signature: Some(vec![rand::random::<u8>(); 64]),
                             privacy_stats: QuantumPrivacyStats::default(),
@@ -351,7 +353,7 @@ impl QuantumDexScreenerIntegration {
                                 pair_id: pair_id.clone(),
                                 source: "QuantumDEX".to_string(),
                                 current_price: cache_entry.cached_data.current_price.clone(),
-                                quantum_uncertainty: BigDecimal::from(0.01618),
+                                quantum_uncertainty: "0.01618".parse().unwrap(),
                                 wave_amplitude: rand::random::<f64>() * 0.1,
                                 frequency_hz: 1.618,
                                 entanglement_strength: 0.707,
@@ -418,16 +420,16 @@ impl QuantumDexScreenerIntegration {
                 price_quantum: format!(
                     "{} ± {}",
                     cache_entry.cached_data.current_price,
-                    &cache_entry.cached_data.current_price * BigDecimal::from(0.01618)
+                    &cache_entry.cached_data.current_price * "0.01618".parse::<BigDecimal>().unwrap()
                 ),
                 liquidity: QuantumDexScreenerLiquidity {
                     usd: cache_entry.cached_data.liquidity.to_string(),
-                    base: (cache_entry.cached_data.liquidity.clone() / BigDecimal::from(1.618))
+                    base: (cache_entry.cached_data.liquidity.clone() / "1.618".parse::<BigDecimal>().unwrap())
                         .to_string(),
-                    quote: (cache_entry.cached_data.liquidity.clone() * BigDecimal::from(1.618))
+                    quote: (cache_entry.cached_data.liquidity.clone() * "1.618".parse::<BigDecimal>().unwrap())
                         .to_string(),
                     quantum_depth: (cache_entry.cached_data.liquidity.clone()
-                        * BigDecimal::from(1.414))
+                        * "1.414".parse::<BigDecimal>().unwrap())
                     .to_string(),
                     uncertainty_range: "± 1.618%".to_string(),
                     wave_interference: "Constructive".to_string(),
@@ -441,10 +443,10 @@ impl QuantumDexScreenerIntegration {
                     m5: (cache_entry.cached_data.volume_24h.clone() / BigDecimal::from(288))
                         .to_string(),
                     quantum_adjusted: (cache_entry.cached_data.volume_24h.clone()
-                        * BigDecimal::from(1.618))
+                        * "1.618".parse::<BigDecimal>().unwrap())
                     .to_string(),
                     privacy_volume: (cache_entry.cached_data.volume_24h.clone()
-                        * BigDecimal::from(0.42))
+                        * "0.42".parse::<BigDecimal>().unwrap())
                     .to_string(),
                 },
                 quantum_metrics: QuantumPairMetrics {
@@ -577,7 +579,7 @@ impl QuantumDexScreenerIntegration {
         let mut cache = self.market_data_cache.write().await;
 
         if let Some(cache_entry) = cache.get_mut(pair_id) {
-            cache_entry.wave_function_state = new_state;
+            cache_entry.wave_function_state = new_state.clone();
             cache_entry.last_update = Utc::now();
             info!(
                 "🌊 Wave function state updated for {}: {:?}",

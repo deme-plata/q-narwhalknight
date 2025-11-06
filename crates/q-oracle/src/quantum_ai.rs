@@ -12,7 +12,7 @@ use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use ndarray::{Array1, Array2};
 use num_traits::{Float, FromPrimitive};
-use q_types::{Error, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

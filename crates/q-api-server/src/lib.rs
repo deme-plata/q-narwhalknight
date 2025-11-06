@@ -50,15 +50,18 @@ use q_vm::contracts::{ContractRegistry, OrobitSmartContractEcosystem};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{error, info};
 use uuid::Uuid;
 
 pub mod config;
 pub mod console_viz;  // Beautiful animated console visualization
-pub mod dex_integration_api;
-#[cfg(test)]
-pub mod dex_integration_tests;
-pub mod liquidity_api;  // Liquidity provision API
+// v0.9.1-beta: DEX modules commented out (q_dex/q_oracle crates not yet implemented)
+// pub mod dex_integration_api;
+// #[cfg(test)]
+// pub mod dex_integration_tests;
+// pub mod dex_handlers;  // ✅ NEW - Dynamic token registry & price history API
+// pub mod dex_initialization;  // ✅ NEW - DEX component initialization
+// pub mod liquidity_api;  // Liquidity provision API
 pub mod quillon_bank_api;  // ✅ ENABLED - Full Quillon Bank CDP system
 pub mod cdp_simple;  // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod handlers;
@@ -83,6 +86,8 @@ pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
 pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
 pub mod aegis_auth_middleware;  // ✅ ENABLED - AEGIS-QL post-quantum authentication for founder operations
 pub mod chat_api;  // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod dex_initialization;  // ✅ ENABLED - DEX component initialization
+pub mod dex_handlers;  // ✅ ENABLED - DEX HTTP API handlers
 // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
@@ -453,6 +458,12 @@ pub struct AppState {
     // ⛏️ MINING STATISTICS - Real-time network hash rate tracking
     pub mining_statistics: Option<Arc<RwLock<MiningStatistics>>>, // Track active miners and hash rates
 
+    // 💓 MINING HEARTBEAT MONITORING (v0.8.9-beta) - Detect mining stalls
+    /// Timestamp of last mining solution received (Unix timestamp)
+    pub last_mining_solution_time: Arc<std::sync::atomic::AtomicU64>,
+    /// Flag indicating if mining is healthy (true = solutions arriving)
+    pub mining_is_healthy: Arc<std::sync::atomic::AtomicBool>,
+
     // Quantum Privacy Mixer State
     pub mixing_requests: Arc<RwLock<HashMap<String, PendingMixingRequest>>>, // participant_id -> request
     pub quantum_mixer: Option<Arc<QuantumMixingEngine>>,
@@ -480,6 +491,13 @@ pub struct AppState {
 
     // Atomic peer count for fast lock-free access
     pub libp2p_peer_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
+
+    // SYNC MODE: Track highest block height seen from network to prevent mining during sync
+    pub highest_network_height: Arc<std::sync::atomic::AtomicU64>,
+
+    // 🎨 v0.6.6-beta: Beautiful sync progress tracking for tqdm-style progress bar
+    pub sync_start_time: Arc<std::sync::RwLock<Option<std::time::Instant>>>,
+    pub sync_start_height: Arc<std::sync::atomic::AtomicU64>,
 
     // Mining submission queue (async processing to prevent server overload)
     pub mining_submission_tx: Option<tokio::sync::mpsc::UnboundedSender<MiningSubmission>>,
@@ -514,6 +532,9 @@ pub struct AppState {
     // PHASE 2: Parallel Block Production - Multiple producers for concurrent block creation
     pub block_producer_pool: Arc<crate::block_producer::ParallelBlockProducerPool>,
 
+    // AI Model Management - Lazy Loading with HTTP Download
+    pub ai_model_manager: Option<Arc<q_ai_inference::ModelManager>>,
+
     // PHASE 3: DAG-Knight Consensus - Byzantine Fault-Tolerant Block Ordering
     pub consensus: Arc<RwLock<DAGKnightConsensus>>,
 
@@ -538,6 +559,15 @@ pub struct AppState {
     // Quantum Oracle - AI-Enhanced Price Aggregation (927k+ TPS)
     // pub quantum_oracle: Option<Arc<q_oracle::QuantumOracle>>, // Temporarily disabled
 
+    // ============ DEX & TOKEN REGISTRY SYSTEM ============
+    // Dynamic Token Registry - RocksDB-backed persistent storage for all tokens
+    pub token_registry: Option<Arc<q_storage::token_registry::TokenRegistry>>,
+    // Price History Manager - Time-series OHLCV candles for historical price tracking
+    pub price_history: Option<Arc<q_storage::price_history::PriceHistoryManager>>,
+    // v0.9.1-beta: DEX types enabled
+    pub dex_manager: Option<Arc<q_dex::QuantumDexManager>>,
+    pub price_bridge: Option<Arc<()>>, // Placeholder for oracle integration
+
     // Quillon Bank - Full Quantum Banking System with CDP
     pub quillon_bank: Arc<RwLock<QuillonBankSystem>>, // ✅ ENABLED - Real banking system
 
@@ -554,6 +584,9 @@ pub struct AppState {
 
     // QUG/QUGUSD Stablecoin System - CollateralVault for over-collateralized minting
     pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
+
+    // Quillon Bank Loan Applications - Pending loan applications with RocksDB persistence
+    pub pending_loan_applications: Arc<RwLock<HashMap<String, crate::quillon_bank_api::LoanApplication>>>,
 
     // Advanced Infrastructure
     pub tor_circuit_manager: Option<Arc<DedicatedCircuitManager>>,
@@ -586,6 +619,22 @@ pub struct AppState {
 
     // High-performance mistral.rs engine (10-100x faster, <2s first token)
     pub mistralrs_engine: Option<Arc<q_ai_inference::MistralRsEngine>>,
+
+    // Distributed AI Coordinator - Horizontal scaling across network nodes
+    pub distributed_ai_coordinator: Option<Arc<q_network::DistributedAICoordinator>>,
+
+    // 🚀 TURBO SYNC - Git-Inspired 50-250x Faster Blockchain Synchronization
+    pub turbo_sync: Option<Arc<q_storage::TurboSyncManager>>,
+
+    // 🌉 v0.9.6-beta: TURBO SYNC PEER BRIDGE - Synchronizes libp2p peers to TurboSync registry
+    // Fixes: "No peers available with target height" even when peers connected via libp2p
+    pub peer_bridge: Option<Arc<q_storage::TurboSyncPeerBridge>>,
+
+    // 🔐 AEGIS-KL MINER AUTHENTICATION - Post-Quantum Fork Protection (v0.5.7+)
+    // Ensures only authorized miners with valid AEGIS-KL signatures can submit solutions
+    // Prevents unauthorized forks and enforces 1% development fee at protocol level
+    // TODO: Re-enable when q_mining::dev_fee is implemented
+    // pub miner_auth: Option<Arc<q_mining::dev_fee::MinerAuth>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -661,16 +710,6 @@ impl AppState {
         let wallet_manager = WalletManager::new();
         let node_id = [0u8; 32]; // Default node ID
 
-        let node_status = NodeStatus {
-            node_id,
-            current_round: 0,
-            current_height: 0,
-            connected_peers: 0,
-            tx_pool_size: 0,
-            is_validator,
-            uptime: std::time::Duration::from_secs(0),
-        };
-
         // Initialize storage engine with wallet balances persistence
         let storage_config = StorageConfig {
             db_path: config
@@ -687,7 +726,72 @@ impl AppState {
             max_open_files: 1000,
         };
 
+        // 🔍 v0.6.6-beta: Capture db_path before storage_config is moved
+        let db_path_for_logging = storage_config.db_path.clone();
+
         let storage_engine = Arc::new(StorageEngine::new(storage_config).await?);
+
+        // ✅ HEIGHT RECOVERY FIX (v0.8.5-beta): Repair height pointer before loading height
+        // This fixes databases where height pointer is stuck at old value from v0.8.3-beta
+        // Automatically detects and repairs pointer mismatches on startup
+        tracing::info!("🔧 [v0.8.5] Running height pointer integrity check...");
+        match storage_engine.repair_height_pointer().await {
+            Ok(repaired_height) => {
+                tracing::info!("✅ [v0.8.5] Height pointer verified/repaired: {}", repaired_height);
+            }
+            Err(e) => {
+                tracing::warn!("⚠️  [v0.8.5] Height repair encountered error (non-critical): {}", e);
+                tracing::warn!("⚠️  [v0.8.5] Will continue with normal height loading...");
+            }
+        }
+
+        // ✅ CRITICAL FIX (v0.5.18-beta): Load initial blockchain height from RocksDB
+        // This fixes the mainnet-critical bug where nodes would restart at height 0 instead of 145,000+
+        // 🔍 v0.6.6-beta: Added comprehensive diagnostic logging to catch height recovery failures
+        tracing::info!("🔍 [v0.6.6] Attempting to load blockchain height from database...");
+        tracing::info!("🔍 [v0.6.6] Database path: {:?}", db_path_for_logging);
+
+        let initial_height = match storage_engine.get_highest_contiguous_block().await {
+            Ok(height) if height > 0 => {
+                tracing::info!("✅ [v0.6.6] SUCCESS: Loaded blockchain state from database: height {}", height);
+                tracing::info!("✅ [v0.6.6] Node will resume from block {}", height);
+                height
+            }
+            Ok(zero_height) => {
+                tracing::warn!("⚠️  [v0.6.6] Database returned height {} - no blocks found!", zero_height);
+                tracing::warn!("⚠️  [v0.6.6] Database path: {:?}", db_path_for_logging);
+                tracing::warn!("⚠️  [v0.6.6] Starting fresh blockchain at height 0");
+                tracing::warn!("⚠️  [v0.6.6] If you expected blocks to be present, CHECK DATABASE INTEGRITY!");
+                0
+            }
+            Err(e) => {
+                tracing::error!("🚨 [v0.6.6] CRITICAL ERROR: Failed to load blockchain height from database!");
+                tracing::error!("🚨 [v0.6.6] Error: {}", e);
+                tracing::error!("🚨 [v0.6.6] Database path: {:?}", db_path_for_logging);
+                tracing::error!("🚨 [v0.6.6] This will cause blockchain reset! Starting at height 0");
+                tracing::error!("🚨 [v0.6.6] Node will re-sync from peers (slow but safe)");
+                0
+            }
+        };
+
+        // 🔍 v0.6.6-beta: Verify loaded height makes sense
+        tracing::info!("🔍 [v0.6.6] Final initial_height: {}", initial_height);
+        if initial_height == 0 {
+            tracing::warn!("⚠️  [v0.6.6] Blockchain starting at height 0");
+            tracing::warn!("⚠️  [v0.6.6] If this is unexpected, database may be empty or corrupted");
+        } else {
+            tracing::info!("✅ [v0.6.6] Blockchain initialized at height {}", initial_height);
+        }
+
+        let node_status = NodeStatus {
+            node_id,
+            current_round: 0,
+            current_height: initial_height,  // ✅ Load from database instead of hardcoded 0
+            connected_peers: 0,
+            tx_pool_size: 0,
+            is_validator,
+            uptime: std::time::Duration::from_secs(0),
+        };
 
         // Load existing wallet balances from storage
         let mut wallet_balances = HashMap::new();
@@ -706,6 +810,24 @@ impl AppState {
                 );
             }
         }
+
+        // 💎 Load total minted supply from storage (max supply enforcement)
+        let total_supply = match storage_engine.load_total_supply().await {
+            Ok(supply) => {
+                tracing::info!(
+                    "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
+                    supply / 100_000_000
+                );
+                supply
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load total supply from storage: {}, starting from 0",
+                    e
+                );
+                0
+            }
+        };
 
         // Load existing token balances from persistent storage
         let mut token_balances = HashMap::new();
@@ -881,6 +1003,37 @@ impl AppState {
         };
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
+        // Load existing loan applications from persistent storage
+        let mut pending_loan_applications_map = HashMap::new();
+        match storage_engine.load_loan_applications().await {
+            Ok(persisted_loans) => {
+                for (loan_id, loan_bytes) in persisted_loans {
+                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(&loan_bytes) {
+                        Ok(loan) => {
+                            pending_loan_applications_map.insert(loan_id.clone(), loan);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize loan application {}: {}, skipping",
+                                loan_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    "🏦 Loaded {} loan applications from persistent storage",
+                    pending_loan_applications_map.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load loan applications from storage: {}, starting with empty loans",
+                    e
+                );
+            }
+        }
+
         Ok(Self {
             config,
             node_id,
@@ -903,9 +1056,15 @@ impl AppState {
             faucet_state: Arc::new(RwLock::new(FaucetState::default())),
 
             // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
-            total_minted_supply: Arc::new(RwLock::new(0)), // Start at 0, will load from storage
+            total_minted_supply: Arc::new(RwLock::new(total_supply)), // Loaded from storage on startup
             supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
             mining_statistics: Some(Arc::new(RwLock::new(MiningStatistics::default()))),
+
+            // 💓 MINING HEARTBEAT MONITORING (v0.8.9-beta) - Detect mining stalls
+            last_mining_solution_time: Arc::new(std::sync::atomic::AtomicU64::new(
+                chrono::Utc::now().timestamp() as u64
+            )),
+            mining_is_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
 
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
@@ -964,6 +1123,9 @@ impl AppState {
             libp2p_command_tx: None,  // Disabled in test mode
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
+            highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
+            sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
+            sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             mining_submission_tx: None,  // Disabled in test mode
             connection_manager: None,
             dag_sync_manager: None,  // Will be initialized with PeerRegistry
@@ -1038,8 +1200,19 @@ impl AppState {
                 info!("🚀 Phase 2: Parallel Block Production initialized with {} producers (LOADED FROM STORAGE)", num_producers);
                 info!("⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!");
 
+                // 🚨 v0.9.9-beta CRITICAL FIX: Sync producers immediately after initialization
+                // This ensures producers have the correct height even if crash recovery runs later
+                // and updates the blockchain height. Without this, producers stay at stale height
+                // from initialization and cause height regression errors after restart.
+                if let Err(e) = pool.sync_from_storage(&storage_engine).await {
+                    error!("❌ Failed to sync producers at startup: {}", e);
+                }
+
                 Arc::new(pool)
             },
+
+            // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
+            ai_model_manager: None,
 
             // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
             consensus: {
@@ -1104,6 +1277,9 @@ impl AppState {
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,
 
+            // Quillon Bank Loan Applications - Persistent storage
+            pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),
+
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
 
@@ -1121,6 +1297,25 @@ impl AppState {
             // AI Inference Engine - Initialized in main.rs with auto-download
             inference_engine: None,
             mistralrs_engine: None,
+
+            // Distributed AI Coordinator - Initialized separately
+            distributed_ai_coordinator: None,
+
+            // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
+            turbo_sync: None,
+
+            // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
+            peer_bridge: None,
+
+            // AEGIS-KL Miner Authentication (initialized in main.rs)
+            // miner_auth: None,
+
+            // v0.9.1-beta: DeFi components (initialized later when needed)
+            token_registry: None,
+            price_history: None,
+            // v0.9.1-beta: DEX components enabled
+            dex_manager: None,
+            price_bridge: None,
         })
     }
 
@@ -1173,6 +1368,21 @@ impl AppState {
         };
 
         let storage_engine = Arc::new(StorageEngine::new(storage_config).await?);
+
+        // ✅ v0.9.10-beta CRITICAL FIX: Repair height pointer BEFORE loading blockchain state
+        // This ensures crash recovery runs even in the `new_with_networks()` code path
+        // which was missing the recovery call that exists in `new()`. Without this,
+        // producers initialize at height=0 because storage appears empty on restart.
+        tracing::info!("🔧 [v0.9.10] Running height pointer integrity check...");
+        match storage_engine.repair_height_pointer().await {
+            Ok(repaired_height) => {
+                tracing::info!("✅ [v0.9.10] Height pointer verified/repaired: {}", repaired_height);
+            }
+            Err(e) => {
+                tracing::error!("❌ [v0.9.10] Height pointer repair failed: {}", e);
+                tracing::error!("⚠️  Node will start from genesis - blockchain may need resync");
+            }
+        }
 
         // Initialize NetworkManager to bridge DNS-phantom to libp2p
         let network_manager = {
@@ -1240,6 +1450,24 @@ impl AppState {
                 );
             }
         }
+
+        // 💎 Load total minted supply from storage (max supply enforcement)
+        let total_supply = match storage_engine.load_total_supply().await {
+            Ok(supply) => {
+                tracing::info!(
+                    "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
+                    supply / 100_000_000
+                );
+                supply
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load total supply from storage: {}, starting from 0",
+                    e
+                );
+                0
+            }
+        };
 
         // Load existing token balances from persistent storage
         let mut token_balances = HashMap::new();
@@ -1415,6 +1643,37 @@ impl AppState {
         };
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
+        // Load existing loan applications from persistent storage
+        let mut pending_loan_applications_map = HashMap::new();
+        match storage_engine.load_loan_applications().await {
+            Ok(persisted_loans) => {
+                for (loan_id, loan_bytes) in persisted_loans {
+                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(&loan_bytes) {
+                        Ok(loan) => {
+                            pending_loan_applications_map.insert(loan_id.clone(), loan);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize loan application {}: {}, skipping",
+                                loan_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    "🏦 Loaded {} loan applications from persistent storage",
+                    pending_loan_applications_map.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load loan applications from storage: {}, starting with empty loans",
+                    e
+                );
+            }
+        }
+
         Ok(Self {
             config,
             node_id,
@@ -1436,10 +1695,16 @@ impl AppState {
             // Faucet system
             faucet_state: Arc::new(RwLock::new(FaucetState::default())),
 
-            // 🔒 MAX SUPPLY ENFORCEMENT - Load from storage or start at 0
-            total_minted_supply: Arc::new(RwLock::new(0)), // TODO: Load from storage
+            // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
+            total_minted_supply: Arc::new(RwLock::new(total_supply)), // Loaded from storage on startup
             supply_consensus_state: Arc::new(RwLock::new(SupplyConsensusState::default())),
             mining_statistics: Some(Arc::new(RwLock::new(MiningStatistics::default()))),
+
+            // 💓 MINING HEARTBEAT MONITORING (v0.8.9-beta) - Detect mining stalls
+            last_mining_solution_time: Arc::new(std::sync::atomic::AtomicU64::new(
+                chrono::Utc::now().timestamp() as u64
+            )),
+            mining_is_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
 
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
@@ -1465,6 +1730,9 @@ impl AppState {
 
             // Atomic peer count (will be populated from network manager)
             libp2p_peer_count: None,  // Will be initialized in main.rs after network manager creation
+            highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
+            sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
+            sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
 
             // Mining submission async queue
             mining_submission_tx: None,  // Will be initialized in main.rs
@@ -1569,8 +1837,19 @@ impl AppState {
                 info!("🚀 Phase 2: Parallel Block Production initialized with {} producers (LOADED FROM STORAGE)", num_producers);
                 info!("⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!");
 
+                // 🚨 v0.9.9-beta CRITICAL FIX: Sync producers immediately after initialization
+                // This ensures producers have the correct height even if crash recovery runs later
+                // and updates the blockchain height. Without this, producers stay at stale height
+                // from initialization and cause height regression errors after restart.
+                if let Err(e) = pool.sync_from_storage(&storage_engine).await {
+                    error!("❌ Failed to sync producers at startup: {}", e);
+                }
+
                 Arc::new(pool)
             },
+
+            // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
+            ai_model_manager: None,
 
             // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
             consensus: {
@@ -1635,6 +1914,9 @@ impl AppState {
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,
 
+            // Quillon Bank Loan Applications - Persistent storage
+            pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),
+
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
 
@@ -1652,6 +1934,25 @@ impl AppState {
             // AI Inference Engine - Initialized in main.rs with auto-download
             inference_engine: None,
             mistralrs_engine: None,
+
+            // Distributed AI Coordinator - Initialized separately
+            distributed_ai_coordinator: None,
+
+            // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
+            turbo_sync: None,
+
+            // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
+            peer_bridge: None,
+
+            // AEGIS-KL Miner Authentication (initialized in main.rs)
+            // miner_auth: None,
+
+            // v0.9.1-beta: DeFi components (initialized later when needed)
+            token_registry: None,
+            price_history: None,
+            // v0.9.1-beta: DEX components enabled
+            dex_manager: None,
+            price_bridge: None,
         })
     }
 

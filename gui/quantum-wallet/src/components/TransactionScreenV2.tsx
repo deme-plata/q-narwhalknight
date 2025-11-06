@@ -1,13 +1,19 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera } from 'lucide-react';
+import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
 import QuantumMixerVisualization from './QuantumMixerVisualization';
+import AddressBook from './AddressBook';
 
-interface TransactionScreenV2Props {
-  currentBalance?: number;
+interface WalletBalance {
+  symbol: string;
+  name: string;
+  balance: number;
+  usdValue?: number;
+  icon: 'qug' | 'usd' | 'btc' | 'eth' | 'sol' | 'zec' | 'iron' | 'custom';
+  color: string;
 }
 
 interface TransactionState {
@@ -21,7 +27,20 @@ interface TransactionState {
   starkProof: any;
 }
 
-export default function TransactionScreenV2({ currentBalance = 0 }: TransactionScreenV2Props) {
+export default function TransactionScreenV2() {
+  // Get pre-selected coin from localStorage (set by Dashboard)
+  const [selectedCoin, setSelectedCoin] = useState<string>(() => {
+    const stored = localStorage.getItem('selectedCoinForSend');
+    if (stored) {
+      localStorage.removeItem('selectedCoinForSend'); // Clear after reading
+      return stored;
+    }
+    return 'QUG'; // Default to QUG
+  });
+
+  // Wallet balances state
+  const [walletBalances, setWalletBalances] = useState<WalletBalance[]>([]);
+
   // Simple transaction state (no wallet selection complexity)
   const [transaction, setTransaction] = useState<TransactionState>({
     toAddress: '',
@@ -101,44 +120,86 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
     }
   }, []);
 
-  const requestFaucetTokens = async () => {
-    try {
-      const walletAddress = getWalletAddress();
-      if (!walletAddress) {
-        setTransaction(prev => ({ ...prev, error: 'No wallet address found' }));
-        return;
+  // Fetch wallet balances to display the selected coin's wallet card
+  useEffect(() => {
+    const fetchBalances = async () => {
+      const currentWalletAddress = localStorage.getItem('walletAddress');
+      if (!currentWalletAddress) return;
+
+      const balances: WalletBalance[] = [];
+
+      // Fetch QUG balance
+      try {
+        const balanceResponse = await qnkAPI.getWalletBalance(currentWalletAddress);
+        if (balanceResponse.success && balanceResponse.data) {
+          balances.push({
+            symbol: 'QUG',
+            name: 'Quillon Graph',
+            balance: balanceResponse.data.balance_qnk || 0,
+            icon: 'qug',
+            color: 'from-amber-400 to-yellow-500',
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to fetch QUG balance:', error);
       }
 
-      console.log(`🚰 Requesting faucet tokens for ${walletAddress}`);
-      setTransaction(prev => ({ ...prev, error: null }));
-      
-      const faucetResponse = await qnkAPI.requestFaucet(walletAddress);
-      
-      if (faucetResponse.success) {
-        setTransaction(prev => ({ 
-          ...prev, 
-          error: '✅ Faucet request successful! Balance will update automatically.' 
-        }));
-        
-        // Clear success message after 3 seconds
-        setTimeout(() => {
-          setTransaction(prev => ({ ...prev, error: null }));
-        }, 3000);
-      } else {
-        throw new Error(faucetResponse.error || 'Faucet request failed');
+      // Fetch QUGUSD balance
+      try {
+        const response = await qnkAPI.getMultiTokenBalance();
+        if (response.success && response.data && response.data.tokens) {
+          const tokensObj = response.data.tokens;
+          if (tokensObj.qugusd && tokensObj.qugusd.balance !== undefined) {
+            const qugUsdBalance = parseFloat(tokensObj.qugusd.balance) || 0;
+            balances.push({
+              symbol: 'QUGUSD',
+              name: 'Quillon USD',
+              balance: qugUsdBalance,
+              usdValue: qugUsdBalance,
+              icon: 'usd',
+              color: 'from-blue-400 to-cyan-500',
+            });
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch QUGUSD balance:', error);
       }
-    } catch (error) {
-      console.error('❌ Faucet request failed:', error);
-      setTransaction(prev => ({ 
-        ...prev, 
-        error: `Faucet request failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
-      }));
-    }
-  };
+
+      // Fetch USD balance
+      try {
+        const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/payment/balance`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wallet_address: currentWalletAddress }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.data) {
+            const usdValue = parseFloat(data.data.balance_usd || '0');
+            balances.push({
+              symbol: 'USD',
+              name: 'US Dollar',
+              balance: usdValue,
+              icon: 'usd',
+              color: 'from-green-400 to-emerald-500',
+            });
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch USD balance:', error);
+      }
+
+      setWalletBalances(balances);
+    };
+
+    fetchBalances();
+  }, []);
 
   const validateTransaction = (): { valid: boolean; error?: string } => {
     console.log('💰 TransactionScreenV2: validateTransaction called');
-    console.log('💰 currentBalance prop:', currentBalance);
+    const balance = selectedWallet?.balance || 0;
+    console.log('💰 Selected wallet balance:', balance);
     console.log('💰 transaction.amount:', transaction.amount);
 
     if (!transaction.toAddress.trim()) {
@@ -154,20 +215,20 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
       return { valid: false, error: 'Please enter a valid amount' };
     }
 
-    const fee = 0.00001; // QUG
+    const fee = 0.00001;
     const totalRequired = amount + fee;
 
     console.log('💰 Balance check:');
     console.log('   Amount:', amount);
     console.log('   Fee:', fee);
     console.log('   Total required:', totalRequired);
-    console.log('   Current balance:', currentBalance);
-    console.log('   Has sufficient balance?', currentBalance >= totalRequired);
+    console.log('   Current balance:', balance);
+    console.log('   Has sufficient balance?', balance >= totalRequired);
 
-    if (currentBalance < totalRequired) {
+    if (balance < totalRequired) {
       return {
         valid: false,
-        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amount} + ${fee} fee), Available: ${currentBalance.toFixed(8)} QUG`
+        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} ${selectedCoin} (${amount} + ${fee} fee), Available: ${balance.toFixed(8)} ${selectedCoin}`
       };
     }
 
@@ -282,14 +343,16 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
           from: walletAddress,
           to: toAddress,
           amount: parseFloat(amount),
-          memo: memo || undefined
+          memo: memo || undefined,
+          tokenType: selectedCoin
         });
 
         result = await qnkAPI.sendTransaction(
           walletAddress,
           toAddress,
           parseFloat(amount), // Keep as QUG, no unit conversion
-          memo || undefined
+          memo || undefined,
+          selectedCoin // Pass the selected coin (QUG, QUGUSD, or USD)
         );
       }
 
@@ -369,71 +432,117 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
     setShowQRScanner(false);
   };
 
+  // Get the selected wallet for display
+  const selectedWallet = walletBalances.find(w => w.symbol === selectedCoin);
+
   return (
-    <div className="max-w-2xl mx-auto space-y-8">
+    <div className="max-w-7xl mx-auto space-y-8">
       {/* Header */}
       <div className="text-center">
         <h1 className="text-3xl lg:text-4xl font-bold text-white mb-2">Send Transaction</h1>
-        <p className="text-gray-400">Quantum-secured transfer with STARK proof generation</p>
+        <p className="text-gray-400">Quantum-secured transfer with STARK proof generation & ZK-verified address book</p>
       </div>
 
-      {/* Current Balance Display */}
-      <motion.div
-        className="backdrop-blur-xl rounded-3xl p-6"
-        style={{
-          background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
-          border: '2px solid rgba(212, 175, 55, 0.3)',
-          boxShadow: '0 0 30px rgba(212, 175, 55, 0.2)'
-        }}
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-      >
-        <div className="flex justify-between items-center">
-          <div>
-            <h3 className="text-lg font-semibold text-white">Your Balance</h3>
-            <p className="text-sm text-gray-400">Available for transactions</p>
-          </div>
-          <div className="text-right">
-            <div className="text-2xl font-bold text-quantum-green">
-              {currentBalance.toFixed(8)} QUG
-            </div>
-            {currentBalance <= 0 && (
-              <button
-                onClick={requestFaucetTokens}
-                className="mt-2 px-4 py-2 bg-quantum-yellow/20 border border-quantum-yellow/50 rounded-lg text-quantum-yellow text-sm hover:bg-quantum-yellow/30 transition-colors"
-              >
-                Request Test Tokens
-              </button>
-            )}
-          </div>
-        </div>
-        
-        {/* Error Display */}
-        {transaction.error && (
-          <motion.div
-            className="mt-4 bg-quantum-pink/20 border border-quantum-pink/50 rounded-xl p-4 flex items-center gap-3"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <AlertTriangle className="w-5 h-5 text-quantum-pink flex-shrink-0" />
-            <p className="text-quantum-pink">{transaction.error}</p>
-          </motion.div>
-        )}
-      </motion.div>
-
-      {/* Transaction Form */}
-      {currentBalance >= 0 && (
+      {/* Selected Wallet Card Display */}
+      {selectedWallet && (
         <motion.div
-          className="backdrop-blur-xl rounded-3xl p-8"
+          className="backdrop-blur-xl rounded-3xl p-6"
           style={{
-            background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
-            border: '2px solid rgba(212, 175, 55, 0.2)',
-            boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)'
+            background: `linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)`,
+            border: '2px solid rgba(212, 175, 55, 0.3)',
+            boxShadow: '0 0 30px rgba(212, 175, 55, 0.2)'
           }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
-          <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className={`p-3 rounded-xl bg-gradient-to-br ${selectedWallet.color}`}>
+                {(selectedWallet.icon === 'qug' || selectedWallet.icon === 'usd') && (
+                  <div className="relative w-8 h-8">
+                    <div className="absolute inset-0 rounded-full" style={{
+                      background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+                      padding: '1px'
+                    }}>
+                      <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
+                        <img
+                          src="/quillon-logo.png"
+                          alt="Quillon"
+                          className="w-full h-full object-contain"
+                          style={{ filter: 'invert(1)' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {selectedWallet.icon === 'custom' && <Wallet className="w-8 h-8 text-white" />}
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-white">{selectedWallet.name}</h3>
+                <p className="text-sm text-gray-400">Sending from {selectedWallet.symbol} wallet</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-bold text-quantum-green">
+                {selectedWallet.balance.toFixed(8)} {selectedWallet.symbol}
+              </div>
+              {selectedWallet.usdValue !== undefined && (
+                <div className="text-sm text-gray-400 mt-1">
+                  ≈ ${selectedWallet.usdValue.toFixed(2)} USD
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Coin Selector Dropdown */}
+          {walletBalances.length > 1 && (
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Select Coin to Send
+              </label>
+              <select
+                value={selectedCoin}
+                onChange={(e) => setSelectedCoin(e.target.value)}
+                className="w-full px-4 py-3 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white focus:outline-none focus:border-quantum-cyan transition-colors"
+              >
+                {walletBalances.map(wallet => (
+                  <option key={wallet.symbol} value={wallet.symbol}>
+                    {wallet.symbol} - {wallet.balance.toFixed(8)} {wallet.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Error Display */}
+          {transaction.error && (
+            <motion.div
+              className="mt-4 bg-quantum-pink/20 border border-quantum-pink/50 rounded-xl p-4 flex items-center gap-3"
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <AlertTriangle className="w-5 h-5 text-quantum-pink flex-shrink-0" />
+              <p className="text-quantum-pink">{transaction.error}</p>
+            </motion.div>
+          )}
+        </motion.div>
+      )}
+
+      {/* Two-Column Grid: Transaction Form + Address Book */}
+      {selectedWallet && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* LEFT COLUMN: Transaction Form */}
+          <motion.div
+            className="backdrop-blur-xl rounded-3xl p-8"
+            style={{
+              background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+              border: '2px solid rgba(212, 175, 55, 0.2)',
+              boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)'
+            }}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <div className="space-y-6">
             {/* Recipient */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
@@ -471,7 +580,7 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
             {/* Amount */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                Amount (QUG)
+                Amount ({selectedCoin})
               </label>
               <input
                 type="number"
@@ -480,14 +589,14 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
                 className="w-full px-4 py-4 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan transition-colors text-2xl font-bold"
                 placeholder="0.00"
                 step="0.00000001"
-                max={currentBalance}
+                max={selectedWallet?.balance || 0}
               />
               <div className="flex justify-between items-center text-sm mt-1">
                 <span className="text-gray-400">
-                  Available: <span className="text-quantum-green font-semibold">{currentBalance.toFixed(8)} QUG</span>
+                  Available: <span className="text-quantum-green font-semibold">{(selectedWallet?.balance || 0).toFixed(8)} {selectedCoin}</span>
                 </span>
                 <span className="text-gray-400">
-                  Fee: <span className="text-quantum-yellow">0.00001 QUG</span>
+                  Fee: <span className="text-quantum-yellow">0.00001 {selectedCoin}</span>
                 </span>
               </div>
             </div>
@@ -649,11 +758,25 @@ export default function TransactionScreenV2({ currentBalance = 0 }: TransactionS
               </AnimatePresence>
             </div>
           </div>
-        </motion.div>
+          </motion.div>
+
+          {/* RIGHT COLUMN: Address Book */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+          >
+            <AddressBook
+              onSelectAddress={(address) => {
+                setTransaction(prev => ({ ...prev, toAddress: address }));
+              }}
+            />
+          </motion.div>
+        </div>
       )}
 
       {/* Send Button */}
-      {currentBalance >= 0 && (
+      {selectedWallet && (
         <motion.button
           onClick={handleSendTransaction}
           disabled={transaction.isProcessing || !validateTransaction().valid}

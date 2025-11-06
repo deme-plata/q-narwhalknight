@@ -109,6 +109,21 @@ pub struct SendMessageResponse {
     pub ai_response: ChatMessage,
 }
 
+/// Request for switching AI model
+#[derive(Debug, Deserialize)]
+pub struct SwitchModelRequest {
+    pub model: String,
+}
+
+/// Response for model switch
+#[derive(Debug, Serialize)]
+pub struct SwitchModelResponse {
+    pub success: bool,
+    pub model: String,
+    pub model_size_gb: f64,
+    pub message: String,
+}
+
 /// POST /api/chat/create - Create new chat session
 pub async fn create_chat(
     State(state): State<Arc<AppState>>,
@@ -227,60 +242,197 @@ pub async fn send_message(
     // Generate AI response using our KV-cache optimized inference engine
     let generation_start = std::time::Instant::now();
 
-    let (ai_content, generation_stats) = match state.inference_engine.as_ref() {
-        Some(engine) => {
-            let mut engine = engine.lock().await;
+    // Format prompt with model-specific chat template for better results
+    let formatted_prompt = q_ai_inference::format_chat_prompt(&metadata.model, &req.content);
+    let max_tokens = 150;
 
-            // Format prompt with instruction template for better results
-            let formatted_prompt = format!("[INST] {} [/INST]", req.content);
+    // Check if we should use distributed inference
+    let peer_count = state.libp2p_peer_count.as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
 
-            // Generate with reasonable max tokens
-            let max_tokens = 150;
-            match engine.generate(&formatted_prompt, max_tokens).await {
-                Ok(response) => {
-                    let stats = engine.get_stats().await;
-                    let total_time_ms = generation_start.elapsed().as_millis() as u64;
+    let (ai_content, generation_stats) = if metadata.distributed_enabled && peer_count > 0 && state.distributed_ai_coordinator.is_some() {
+        // 🌐 DISTRIBUTED PATH: Use coordinator for multi-node inference
+        info!("🌐 Using distributed AI inference ({} peers available)", peer_count);
 
-                    let gen_stats = GenerationStats {
-                        total_tokens: stats.total_tokens_generated,
-                        latency_ms: total_time_ms,
-                        tokens_per_second: if stats.average_time_per_token_ms > 0.0 {
-                            (1000.0 / stats.average_time_per_token_ms) as f64
-                        } else {
-                            0.0
-                        },
-                        privacy_overhead_ms: if metadata.encryption_enabled { 25 } else { 0 },
-                        zk_proof_time_ms: if metadata.zk_proofs_enabled { 100 } else { 0 },
-                        distributed_nodes_used: if metadata.distributed_enabled { 3 } else { 1 },
-                    };
+        let coordinator = state.distributed_ai_coordinator.as_ref().unwrap();
+        match coordinator.coordinate_inference(&formatted_prompt, max_tokens, &metadata.model).await {
+            Ok((response, nodes_used)) => {
+                let total_time_ms = generation_start.elapsed().as_millis() as u64;
 
-                    info!("✨ AI generated {} tokens in {:.2}s (speedup: {:.2}x)",
-                          stats.total_tokens_generated,
-                          total_time_ms as f32 / 1000.0,
-                          stats.speedup_factor);
+                let gen_stats = GenerationStats {
+                    total_tokens: response.split_whitespace().count(),
+                    latency_ms: total_time_ms,
+                    tokens_per_second: if total_time_ms > 0 {
+                        (response.split_whitespace().count() as f64 * 1000.0) / total_time_ms as f64
+                    } else {
+                        0.0
+                    },
+                    privacy_overhead_ms: if metadata.encryption_enabled { 25 } else { 0 },
+                    zk_proof_time_ms: if metadata.zk_proofs_enabled { 100 } else { 0 },
+                    distributed_nodes_used: nodes_used.len(),
+                };
 
-                    (response, gen_stats)
-                }
-                Err(e) => {
-                    error!("Failed to generate AI response: {}", e);
-                    let fallback = format!(
-                        "I received your message, but encountered an error generating a response: {}",
-                        e
-                    );
-                    let fallback_stats = GenerationStats {
-                        total_tokens: 0,
-                        latency_ms: generation_start.elapsed().as_millis() as u64,
-                        tokens_per_second: 0.0,
-                        privacy_overhead_ms: 0,
-                        zk_proof_time_ms: 0,
-                        distributed_nodes_used: 1,
-                    };
-                    (fallback, fallback_stats)
+                info!("✨ Distributed AI: {} nodes, {} tokens in {:.2}s",
+                      nodes_used.len(), gen_stats.total_tokens, total_time_ms as f32 / 1000.0);
+
+                (response, gen_stats)
+            }
+            Err(e) => {
+                warn!("⚠️ Distributed inference failed, falling back to local: {}", e);
+
+                // Fallback to local inference
+                match state.inference_engine.as_ref() {
+                    Some(engine) => {
+                        let mut engine = engine.lock().await;
+                        match engine.generate(&formatted_prompt, max_tokens).await {
+                            Ok(response) => {
+                                let stats = engine.get_stats().await;
+                                let total_time_ms = generation_start.elapsed().as_millis() as u64;
+
+                                let gen_stats = GenerationStats {
+                                    total_tokens: stats.total_tokens_generated,
+                                    latency_ms: total_time_ms,
+                                    tokens_per_second: if stats.average_time_per_token_ms > 0.0 {
+                                        (1000.0 / stats.average_time_per_token_ms) as f64
+                                    } else {
+                                        0.0
+                                    },
+                                    privacy_overhead_ms: if metadata.encryption_enabled { 25 } else { 0 },
+                                    zk_proof_time_ms: if metadata.zk_proofs_enabled { 100 } else { 0 },
+                                    distributed_nodes_used: 1,
+                                };
+
+                                info!("✨ Local AI (fallback): {} tokens in {:.2}s",
+                                      stats.total_tokens_generated, total_time_ms as f32 / 1000.0);
+
+                                (response, gen_stats)
+                            }
+                            Err(e) => {
+                                error!("Failed to generate AI response (local fallback): {}", e);
+                                let fallback = format!(
+                                    "I received your message, but encountered an error: {}",
+                                    e
+                                );
+                                (fallback, GenerationStats {
+                                    total_tokens: 0,
+                                    latency_ms: 0,
+                                    tokens_per_second: 0.0,
+                                    privacy_overhead_ms: 0,
+                                    zk_proof_time_ms: 0,
+                                    distributed_nodes_used: 0,
+                                })
+                            }
+                        }
+                    }
+                    None => {
+                        error!("No inference engine available");
+                        let fallback = "I received your message, but AI inference is not configured.".to_string();
+                        (fallback, GenerationStats {
+                            total_tokens: 0,
+                            latency_ms: 0,
+                            tokens_per_second: 0.0,
+                            privacy_overhead_ms: 0,
+                            zk_proof_time_ms: 0,
+                            distributed_nodes_used: 0,
+                        })
+                    }
                 }
             }
         }
-        None => {
-            // Fallback if inference engine not initialized
+    } else {
+        // 💻 LOCAL PATH: Single node or distributed disabled
+        // Use HIGH-PERFORMANCE mistral.rs engine with cumulative stats tracking
+        if let Some(ref engine) = state.mistralrs_engine {
+            info!("🚀 Using mistral.rs engine with cumulative stats tracking");
+            // Use generate_stream and collect the full response
+            use std::sync::Arc as StdArc;
+            use tokio::sync::Mutex as TokioMutex;
+
+            let response_text = StdArc::new(TokioMutex::new(String::new()));
+            let final_stats = StdArc::new(TokioMutex::new(None));
+
+            let response_text_clone = response_text.clone();
+            let final_stats_clone = final_stats.clone();
+
+            let result = engine.generate_stream(
+                        &formatted_prompt,
+                        max_tokens,
+                        move |event| {
+                            let response_text = response_text_clone.clone();
+                            let final_stats = final_stats_clone.clone();
+                            async move {
+                                match event {
+                                    q_ai_inference::StreamEvent::Token(token) => {
+                                        response_text.lock().await.push_str(&token);
+                                    }
+                                    q_ai_inference::StreamEvent::Complete(stats) => {
+                                        *final_stats.lock().await = Some(stats);
+                                    }
+                                    _ => {}
+                                }
+                                Ok(())
+                            }
+                        }
+                    ).await;
+
+                    match result {
+                        Ok(_) => {
+                            let response_str = response_text.lock().await.clone();
+                            let stats_option = final_stats.lock().await.clone();
+
+                            let stats = stats_option.unwrap_or_else(|| {
+                                // Fallback stats if Complete event wasn't received
+                                q_ai_inference::mistralrs_engine::GenerationStats {
+                                    tokens_generated: 0,
+                                    prompt_tokens: 0,
+                                    total_time_ms: generation_start.elapsed().as_millis() as f64,
+                                    tokens_per_second: 0.0,
+                                    time_to_first_token_ms: 0.0,
+                                    kv_cache_hits: 0,
+                                    kv_cache_misses: 0,
+                                    speedup_factor: 1.0,
+                                }
+                            });
+
+                            let total_time_ms = generation_start.elapsed().as_millis() as u64;
+
+                            let gen_stats = GenerationStats {
+                                total_tokens: stats.tokens_generated,
+                                latency_ms: total_time_ms,
+                                tokens_per_second: stats.tokens_per_second,
+                                privacy_overhead_ms: if metadata.encryption_enabled { 25 } else { 0 },
+                                zk_proof_time_ms: if metadata.zk_proofs_enabled { 100 } else { 0 },
+                                distributed_nodes_used: 1,
+                            };
+
+                            info!("✨ Local AI (mistral.rs with cumulative stats): {} tokens in {:.2}s ({:.2} tok/s, speedup: {:.2}x)",
+                                  stats.tokens_generated,
+                                  total_time_ms as f32 / 1000.0,
+                                  stats.tokens_per_second,
+                                  stats.speedup_factor);
+
+                            (response_str, gen_stats)
+                        }
+                        Err(e) => {
+                            error!("Failed to generate with mistral.rs: {}", e);
+                            let fallback = format!(
+                                "I received your message, but encountered an error: {}",
+                                e
+                            );
+                            let fallback_stats = GenerationStats {
+                                total_tokens: 0,
+                                latency_ms: generation_start.elapsed().as_millis() as u64,
+                                tokens_per_second: 0.0,
+                                privacy_overhead_ms: 0,
+                                zk_proof_time_ms: 0,
+                                distributed_nodes_used: 1,
+                            };
+                            (fallback, fallback_stats)
+                        }
+                    }
+        } else {
+            // Fallback if mistral.rs engine not available
             warn!("💬 Inference engine not initialized, using placeholder response");
             let fallback = format!(
                 "I received your message: '{}'. The AI inference engine is initializing...",
@@ -339,6 +491,60 @@ pub async fn delete_chat(
         Err(e) => {
             error!("Failed to delete chat: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /api/chat/:id/switch-model - Switch AI model for a chat
+pub async fn switch_model(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+    Json(req): Json<SwitchModelRequest>,
+) -> Result<Json<ApiResponse<SwitchModelResponse>>, StatusCode> {
+    info!("🔄 Switching model to {} for chat {}", req.model, chat_id);
+
+    // Check if ModelManager is available
+    if state.ai_model_manager.is_none() {
+        warn!("ModelManager not available, model switching disabled");
+        return Ok(Json(ApiResponse::success(SwitchModelResponse {
+            success: false,
+            model: req.model.clone(),
+            model_size_gb: 0.0,
+            message: "Model switching not available - ModelManager not initialized".to_string(),
+        })));
+    }
+
+    let model_manager = state.ai_model_manager.as_ref().unwrap();
+
+    // Pre-load the requested model to verify it's available
+    match model_manager.get_or_load_model(&req.model).await {
+        Ok(_engine) => {
+            // Model loaded successfully - determine model size for response
+            let model_size_gb = if req.model.contains("Small") || req.model.contains("24B") {
+                14.0
+            } else if req.model.contains("7B") || req.model.contains("Mistral-7B") {
+                4.3
+            } else {
+                0.0
+            };
+
+            info!("✅ Loaded model {} for chat {} ({} GB)", req.model, chat_id, model_size_gb);
+
+            Ok(Json(ApiResponse::success(SwitchModelResponse {
+                success: true,
+                model: req.model,
+                model_size_gb,
+                message: format!("Model switched successfully. Model loaded and ready ({:.1} GB)", model_size_gb),
+            })))
+        }
+        Err(e) => {
+            error!("Failed to load model {}: {}", req.model, e);
+            Ok(Json(ApiResponse::success(SwitchModelResponse {
+                success: false,
+                model: req.model,
+                model_size_gb: 0.0,
+                message: format!("Failed to load model: {}", e),
+            })))
         }
     }
 }
@@ -424,11 +630,188 @@ pub async fn stream_message(
             return;
         }
 
-        // Use HIGH-PERFORMANCE mistral.rs engine (10-100x faster)
-        if let Some(ref engine) = state.mistralrs_engine {
-            let max_tokens = query.max_tokens.unwrap_or(150);
+        // Check if distributed inference is enabled for this chat
+        let use_distributed = metadata.distributed_enabled
+            && state.distributed_ai_coordinator.is_some();
 
-            info!("🚀 Generating {} tokens with mistral.rs HIGH-PERFORMANCE engine...", max_tokens);
+        if use_distributed {
+            info!("🌐 Using DISTRIBUTED AI inference across network nodes");
+
+            if let Some(ref coordinator) = state.distributed_ai_coordinator {
+                let max_tokens = query.max_tokens.unwrap_or(2048); // Increased from 150 to allow full responses
+                let nodes_available = coordinator.get_node_count().await;
+
+                info!("🤖 {} network nodes available for distributed inference", nodes_available);
+
+                // For now, fallback to single-node if < 2 nodes available
+                // TODO: Implement full distributed inference pipeline
+                if nodes_available < 1 {
+                    warn!("⚠️  Insufficient nodes for distributed inference, falling back to single-node");
+                } else {
+                    // ✨ DISTRIBUTED INFERENCE WITH REAL-TIME STREAMING ✨
+                    // Register response channel and stream results from worker nodes
+
+                    match coordinator.request_distributed_inference(
+                        query.content.clone(),
+                        max_tokens,
+                        0.7,
+                        metadata.model.clone(),
+                    ).await {
+                        Ok(request_id) => {
+                            info!("📡 Distributed inference request published: {}", request_id);
+
+                            // Create channel to receive inference results
+                            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                            // Register channel with coordinator
+                            coordinator.register_response_channel(request_id.clone(), response_tx).await;
+
+                            // Send progress notification
+                            let progress_event = Event::default()
+                                .event("progress")
+                                .data(format!("Distributed inference across {} nodes...", nodes_available));
+                            let _ = tx.send(Ok(progress_event)).await;
+
+                            // Save placeholder message
+                            let placeholder_message = ChatMessage {
+                                index: ai_message_index,
+                                role: "assistant".to_string(),
+                                content: "".to_string(),
+                                timestamp: current_timestamp(),
+                                images: None,
+                                audio: None,
+                                generation_stats: None,
+                            };
+                            if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &placeholder_message).await {
+                                error!("❌ Failed to save placeholder message: {}", e);
+                            }
+
+                            // Stream responses from network nodes
+                            let cumulative_text = Arc::new(tokio::sync::RwLock::new(String::new()));
+                            let storage_clone = state.storage_engine.clone();
+                            let chat_id_clone = chat_id.clone();
+                            let tx_clone = tx.clone();
+
+                            let start_time = std::time::Instant::now();
+
+                            while let Some(chunk) = response_rx.recv().await {
+                                match chunk {
+                                    q_network::InferenceResponseChunk::Token(token) => {
+                                        // Update cumulative text
+                                        let cum_text = {
+                                            let mut cum = cumulative_text.write().await;
+                                            cum.push_str(&token);
+                                            cum.clone()
+                                        };
+
+                                        // Send token event
+                                        let token_data = serde_json::json!({
+                                            "token": token,
+                                            "cumulative": cum_text
+                                        });
+                                        let token_event = Event::default().event("token").data(token_data.to_string());
+                                        let _ = tx_clone.send(Ok(token_event)).await;
+
+                                        // Persist to disk
+                                        let updated_message = ChatMessage {
+                                            index: ai_message_index,
+                                            role: "assistant".to_string(),
+                                            content: cum_text,
+                                            timestamp: current_timestamp(),
+                                            images: None,
+                                            audio: None,
+                                            generation_stats: None,
+                                        };
+                                        let _ = storage_clone.save_chat_message(&chat_id_clone, &updated_message).await;
+                                    }
+                                    q_network::InferenceResponseChunk::Complete { total_tokens, latency_ms, nodes_used } => {
+                                        let total_time_ms = start_time.elapsed().as_millis() as u64;
+                                        let tokens_per_second = if total_time_ms > 0 {
+                                            (total_tokens as f64 / total_time_ms as f64) * 1000.0
+                                        } else {
+                                            0.0
+                                        };
+
+                                        info!("✅ Distributed inference complete: {} tokens, {} nodes, {}ms", total_tokens, nodes_used.len(), latency_ms);
+
+                                        // Send completion event
+                                        let complete_data = serde_json::json!({
+                                            "total_tokens": total_tokens,
+                                            "total_time_ms": total_time_ms,
+                                            "tokens_per_second": tokens_per_second,
+                                            "engine": "distributed-ai",
+                                            "nodes_used": nodes_used.len(),
+                                            "worker_latency_ms": latency_ms
+                                        });
+                                        let complete_event = Event::default().event("complete").data(complete_data.to_string());
+                                        let _ = tx_clone.send(Ok(complete_event)).await;
+
+                                        // Save final message with stats
+                                        let final_text = cumulative_text.read().await.clone();
+                                        let final_message = ChatMessage {
+                                            index: ai_message_index,
+                                            role: "assistant".to_string(),
+                                            content: final_text,
+                                            timestamp: current_timestamp(),
+                                            images: None,
+                                            audio: None,
+                                            generation_stats: Some(GenerationStats {
+                                                total_tokens,
+                                                latency_ms: total_time_ms,
+                                                tokens_per_second,
+                                                privacy_overhead_ms: 0,
+                                                zk_proof_time_ms: 0,
+                                                distributed_nodes_used: nodes_used.len(),
+                                            }),
+                                        };
+                                        let _ = storage_clone.save_chat_message(&chat_id_clone, &final_message).await;
+                                        break;
+                                    }
+                                    q_network::InferenceResponseChunk::Error(err) => {
+                                        error!("❌ Distributed inference error: {}", err);
+                                        let error_event = Event::default().event("error").data(err);
+                                        let _ = tx_clone.send(Ok(error_event)).await;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            return;
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to publish distributed inference request: {}", e);
+                            let error_event = Event::default().event("error").data(format!("Distributed inference failed: {}", e));
+                            let _ = tx.send(Ok(error_event)).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Use HIGH-PERFORMANCE mistral.rs engine (10-100x faster) - SINGLE NODE
+        if let Some(ref engine) = state.mistralrs_engine {
+            let max_tokens = query.max_tokens.unwrap_or(2048); // Increased from 150 to allow full responses
+
+            info!("🚀 Generating {} tokens with mistral.rs SINGLE-NODE HIGH-PERFORMANCE engine...", max_tokens);
+
+            // CRITICAL: Save placeholder AI message IMMEDIATELY to ensure persistence
+            // even if user navigates away before generation completes
+            let placeholder_message = ChatMessage {
+                index: ai_message_index,
+                role: "assistant".to_string(),
+                content: "".to_string(), // Will be updated as tokens arrive
+                timestamp: current_timestamp(),
+                images: None,
+                audio: None,
+                generation_stats: None,
+            };
+
+            if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &placeholder_message).await {
+                error!("❌ Failed to save placeholder AI message: {}", e);
+            } else {
+                debug!("💾 Saved placeholder AI message (will be updated during generation)");
+            }
 
             let cumulative_text = Arc::new(tokio::sync::RwLock::new(String::new()));
             let tx_clone = tx.clone();
@@ -450,12 +833,11 @@ pub async fn stream_message(
                                 let _ = tx.send(Ok(progress_event)).await;
                             }
                             q_ai_inference::StreamEvent::Token(token_text) => {
-                                {
+                                let cum_text = {
                                     let mut cum = cumulative.write().await;
                                     cum.push_str(&token_text);
-                                }
-
-                                let cum_text = cumulative.read().await.clone();
+                                    cum.clone()
+                                };
 
                                 let token_data = serde_json::json!({
                                     "token": token_text,
@@ -464,9 +846,10 @@ pub async fn stream_message(
 
                                 let token_event = Event::default().event("token").data(token_data.to_string());
 
-                                if tx.send(Ok(token_event)).await.is_err() {
-                                    return Err(anyhow::anyhow!("Client disconnected"));
-                                }
+                                // Try to send to client, but don't stop generation if they disconnected
+                                let _  = tx.send(Ok(token_event)).await;
+                                // Note: We continue generating even if client disconnected,
+                                // and save the complete response when done
                             }
                             q_ai_inference::StreamEvent::Complete(stats) => {
                                 info!("✅ mistral.rs SSE stream complete - {} tokens in {:.2}s ({:.1} tok/s)",
@@ -489,7 +872,7 @@ pub async fn stream_message(
                                         tokens_per_second: stats.tokens_per_second,
                                         privacy_overhead_ms: 0,
                                         zk_proof_time_ms: 0,
-                                        distributed_nodes_used: 0,
+                                        distributed_nodes_used: 1, // Single-node inference
                                     }),
                                 };
 
@@ -577,14 +960,175 @@ pub async fn update_settings(
     }
 }
 
+/// GET /api/chat/stream?content=Hello - Anonymous AI stream (no chat storage)
+///
+/// This endpoint is for one-off AI queries like wallet analysis where we don't need
+/// to persist the conversation history. Used by the Dashboard's AI Wallet Analysis feature.
+pub async fn stream_message_anonymous(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StreamQuery>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+    tokio::spawn(async move {
+        info!("🌊 Anonymous SSE stream started - '{}'", query.content);
+
+        let start_event = Event::default().event("start").data("Generation started");
+        let _ = tx.send(Ok(start_event)).await;
+
+        // Use HIGH-PERFORMANCE mistral.rs engine for anonymous queries
+        if let Some(ref engine) = state.mistralrs_engine {
+            let max_tokens = query.max_tokens.unwrap_or(500); // Default 500 tokens for wallet analysis
+
+            info!("🚀 Generating {} tokens with mistral.rs (anonymous mode)...", max_tokens);
+
+            let cumulative_text = Arc::new(tokio::sync::RwLock::new(String::new()));
+            let tx_clone = tx.clone();
+
+            match engine.generate_stream(
+                &query.content,
+                max_tokens,
+                |event| {
+                    let tx = tx_clone.clone();
+                    let cumulative = cumulative_text.clone();
+                    async move {
+                        match event {
+                            q_ai_inference::StreamEvent::Progress(msg) => {
+                                let progress_event = Event::default().event("progress").data(msg);
+                                let _ = tx.send(Ok(progress_event)).await;
+                            }
+                            q_ai_inference::StreamEvent::Token(token_text) => {
+                                let cum_text = {
+                                    let mut cum = cumulative.write().await;
+                                    cum.push_str(&token_text);
+                                    cum.clone()
+                                };
+
+                                let token_data = serde_json::json!({
+                                    "token": token_text,
+                                    "cumulative": cum_text
+                                });
+
+                                let token_event = Event::default().event("token").data(token_data.to_string());
+
+                                if tx.send(Ok(token_event)).await.is_err() {
+                                    warn!("⚠️ Client disconnected during anonymous streaming");
+                                    return Err(anyhow::anyhow!("Client disconnected"));
+                                }
+                            }
+                            q_ai_inference::StreamEvent::Complete(stats) => {
+                                info!("✅ Anonymous stream complete - {} tokens in {:.2}s ({:.1} tok/s)",
+                                      stats.tokens_generated,
+                                      stats.total_time_ms / 1000.0,
+                                      stats.tokens_per_second);
+
+                                let complete_data = serde_json::json!({
+                                    "total_tokens": stats.tokens_generated,
+                                    "prompt_tokens": stats.prompt_tokens,
+                                    "total_time_ms": stats.total_time_ms,
+                                    "tokens_per_second": stats.tokens_per_second,
+                                    "time_to_first_token_ms": stats.time_to_first_token_ms,
+                                    "engine": "mistral.rs (anonymous mode)"
+                                });
+
+                                let complete_event = Event::default().event("complete").data(complete_data.to_string());
+                                let _ = tx.send(Ok(complete_event)).await;
+                            }
+                            q_ai_inference::StreamEvent::Error(err) => {
+                                error!("❌ Anonymous stream error: {}", err);
+                                let error_event = Event::default().event("error").data(err);
+                                let _ = tx.send(Ok(error_event)).await;
+                            }
+                        }
+                        Ok(())
+                    }
+                }
+            ).await {
+                Ok(_) => {
+                    info!("✅ Anonymous generation completed successfully");
+                }
+                Err(e) => {
+                    error!("❌ Anonymous generation error: {}", e);
+                    let error_event = Event::default().event("error").data(format!("Generation error: {}", e));
+                    let _ = tx.send(Ok(error_event)).await;
+                }
+            }
+        } else {
+            warn!("⚠️  Anonymous stream: mistral.rs engine not initialized");
+            let error_event = Event::default().event("error").data("AI inference engine not initialized. Set Q_ENABLE_AI=1 to enable.");
+            let _ = tx.send(Ok(error_event)).await;
+        }
+    });
+
+    Sse::new(ReceiverStream::new(rx)).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// Create chat API router
+/// GET /api/chat/metrics - Get AI performance metrics
+async fn get_ai_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let mut metrics = serde_json::json!({
+        "single_node": {},
+        "distributed": {}
+    });
+
+    // Get single-node mistralrs engine stats
+    if let Some(ref engine) = state.mistralrs_engine {
+        let stats = engine.get_stats().await;
+        let average_latency_ms = if stats.tokens_generated > 0 {
+            (stats.total_time_ms / stats.tokens_generated as f64)
+        } else {
+            0.0
+        };
+
+        metrics["single_node"] = serde_json::json!({
+            "tokens_generated": stats.tokens_generated,
+            "prompt_tokens": stats.prompt_tokens,
+            "total_time_ms": stats.total_time_ms,
+            "tokens_per_second": stats.tokens_per_second,
+            "time_to_first_token_ms": stats.time_to_first_token_ms,
+            "average_latency_ms": average_latency_ms,
+            "kv_cache_hits": stats.kv_cache_hits,
+            "kv_cache_misses": stats.kv_cache_misses,
+            "speedup_factor": stats.speedup_factor,
+            "cache_hit_rate": if stats.kv_cache_hits + stats.kv_cache_misses > 0 {
+                (stats.kv_cache_hits as f64 / (stats.kv_cache_hits + stats.kv_cache_misses) as f64)
+            } else {
+                0.0
+            }
+        });
+    }
+
+    // Get distributed AI coordinator stats
+    if let Some(ref coordinator) = state.distributed_ai_coordinator {
+        let stats = coordinator.get_stats().await;
+        let node_count = coordinator.get_node_count().await;
+        metrics["distributed"] = serde_json::json!({
+            "total_requests": stats.total_distributed_requests,
+            "nodes_participated": stats.total_nodes_participated,
+            "average_nodes_per_request": stats.average_nodes_per_request,
+            "layers_processed": stats.total_layers_processed,
+            "coordinator_elections": stats.coordinator_elections,
+            "active_requests": stats.current_active_requests,
+            "available_nodes": node_count,
+            "average_network_latency_ms": 0.0 // TODO: Track network latency in coordinator
+        });
+    }
+
+    Json(ApiResponse::success(metrics))
+}
+
 pub fn chat_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/create", post(create_chat))
         .route("/list", get(list_chats))
+        .route("/metrics", get(get_ai_metrics)) // NEW: AI performance metrics endpoint
+        .route("/stream", get(stream_message_anonymous)) // Anonymous stream for wallet analysis
         .route("/:id/messages", get(get_messages))
         .route("/:id/message", post(send_message))
         .route("/:id/stream", get(stream_message)) // NEW: SSE streaming endpoint
+        .route("/:id/switch-model", post(switch_model)) // NEW: Model switching endpoint
         .route("/:id", delete(delete_chat))
         .route("/:id/rename", put(rename_chat))
         .route("/:id/settings", put(update_settings))

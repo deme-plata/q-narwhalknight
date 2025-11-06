@@ -25,6 +25,7 @@ pub mod network;
 pub mod pool;
 pub mod rewards;
 pub mod commitment;
+pub mod dev_fee;
 
 #[cfg(feature = "gpu-mining")]
 pub mod gpu;
@@ -37,6 +38,7 @@ pub use network::{MiningNetwork, MiningMessage, MinerConnection};
 pub use pool::{MiningPool, PoolManager, PoolWorker};
 pub use rewards::{RewardCalculator, RewardResult, RewardConfig, RewardStats};
 pub use commitment::{DAGCommitter, CommitmentProtocol, MerkleCommitment};
+pub use dev_fee::{DevFeeConfig, MinerAuth, MinerCredentials, calculate_dev_fee_split, FOUNDER_WALLET, DEV_FEE_PERCENT};
 
 #[cfg(feature = "gpu-mining")]
 pub use gpu::{GPUMiner, OpenCLContext, SHA3Kernel};

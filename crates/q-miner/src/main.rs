@@ -212,6 +212,13 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     let wallet = wallet.to_string();
     let server_url = server_url.to_string();
 
+    // CRITICAL FIX: Shared signal for when a new block is produced
+    // All mining threads will check this and immediately fetch new challenge
+    let new_block_signal = Arc::new(AtomicU64::new(0)); // Increments when new block arrives
+
+    // Shared current hashrate for network statistics (in KH/s for compatibility with API)
+    let current_hashrate_khs = Arc::new(tokio::sync::RwLock::new(0.0f64));
+
     info!("🔥 Starting {} CPU mining threads", threads);
 
     let handles: Vec<_> = (0..threads)
@@ -220,9 +227,11 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
             let is_running = is_running.clone();
             let wallet = wallet.clone();
             let server_url = server_url.clone();
+            let new_block_signal = new_block_signal.clone();
+            let hashrate_khs = current_hashrate_khs.clone();
 
             tokio::spawn(async move {
-                mining_thread(thread_id, hash_counter, is_running, intensity, wallet, server_url).await
+                mining_thread(thread_id, hash_counter, is_running, intensity, wallet, server_url, new_block_signal, hashrate_khs).await
             })
         })
         .collect();
@@ -230,16 +239,18 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     // Start hash rate monitor
     let monitor_counter = hash_counter.clone();
     let monitor_running = is_running.clone();
+    let monitor_hashrate = current_hashrate_khs.clone();
     let monitor_handle = tokio::spawn(async move {
-        hash_rate_monitor(monitor_counter, monitor_running).await;
+        hash_rate_monitor(monitor_counter, monitor_running, monitor_hashrate).await;
     });
 
-    // Start SSE listener for real-time mining rewards
+    // Start SSE listener for real-time mining rewards AND new blocks
     let sse_wallet = wallet.clone();
     let sse_server_url = server_url.clone();
     let sse_running = is_running.clone();
+    let sse_new_block_signal = new_block_signal.clone();
     let sse_handle = tokio::spawn(async move {
-        start_sse_listener(sse_wallet, sse_server_url, sse_running).await;
+        start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal).await;
     });
 
     if gpu_enabled {
@@ -247,15 +258,15 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     }
 
     info!("✅ Q-NarwhalKnight miner started successfully!");
-    info!("🎧 Connected to SSE stream for real-time rewards");
+    info!("🎧 Connected to SSE stream for real-time block updates");
     info!("Press Ctrl+C to stop mining...");
-    
+
     // Wait for shutdown signal
     signal::ctrl_c().await?;
-    
+
     info!("🛑 Shutdown signal received, stopping mining...");
     is_running.store(false, Ordering::SeqCst);
-    
+
     // Wait for all threads to stop
     for handle in handles {
         let _ = handle.await;
@@ -299,6 +310,8 @@ async fn mining_thread(
     intensity: u8,
     wallet: String,
     server_url: String,
+    new_block_signal: Arc<AtomicU64>,
+    current_hashrate_khs: Arc<tokio::sync::RwLock<f64>>,
 ) {
     info!("🔥 CPU mining thread {} started", thread_id);
 
@@ -309,6 +322,39 @@ async fn mining_thread(
     let api_url = &server_url;
 
     let client = reqwest::Client::new();
+
+    // Check if server is syncing before starting to mine
+    match check_server_sync_status(api_url).await {
+        Ok((is_syncing, blocks_behind)) if is_syncing => {
+            info!("⏸️  Thread {} waiting: Server is syncing ({} blocks behind network)", thread_id, blocks_behind);
+            info!("   Mining will start automatically when sync is complete");
+            // Wait for sync to complete before fetching challenge
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                if !is_running.load(Ordering::SeqCst) {
+                    return;
+                }
+                match check_server_sync_status(api_url).await {
+                    Ok((false, _)) => {
+                        info!("✅ Thread {} detected sync complete - starting mining", thread_id);
+                        break;
+                    }
+                    Ok((true, behind)) => {
+                        info!("⏸️  Thread {} still waiting: {} blocks behind", thread_id, behind);
+                    }
+                    Err(_) => {
+                        // Connection error, will retry
+                    }
+                }
+            }
+        }
+        Ok(_) => {
+            // Not syncing, proceed normally
+        }
+        Err(e) => {
+            warn!("⚠️  Thread {} couldn't check sync status: {} - proceeding anyway", thread_id, e);
+        }
+    }
 
     // Fetch initial mining challenge
     let mut current_challenge = match fetch_mining_challenge(api_url).await {
@@ -342,15 +388,25 @@ async fn mining_thread(
 
     let mut last_challenge_refresh = std::time::Instant::now();
     let challenge_refresh_interval = std::time::Duration::from_secs(50); // Refresh before 60s expiry
+    let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
     while is_running.load(Ordering::SeqCst) {
-        // Refresh challenge if expired or near expiration
-        if last_challenge_refresh.elapsed() >= challenge_refresh_interval {
+        // CRITICAL FIX: Check if new block arrived via SSE
+        let current_block_signal = new_block_signal.load(Ordering::Relaxed);
+        let should_refresh_immediately = current_block_signal != last_known_block_signal;
+
+        // Refresh challenge if expired, near expiration, OR new block arrived
+        if should_refresh_immediately || last_challenge_refresh.elapsed() >= challenge_refresh_interval {
             match fetch_mining_challenge(api_url).await {
                 Ok(new_challenge) => {
                     if new_challenge.block_height != current_challenge.block_height {
-                        info!("🔄 Thread {} updated challenge: block #{} -> #{}",
-                             thread_id, current_challenge.block_height, new_challenge.block_height);
+                        if should_refresh_immediately {
+                            info!("🔄 Thread {} IMMEDIATELY updated challenge (new block signal): block #{} -> #{}",
+                                 thread_id, current_challenge.block_height, new_challenge.block_height);
+                        } else {
+                            info!("🔄 Thread {} updated challenge (periodic): block #{} -> #{}",
+                                 thread_id, current_challenge.block_height, new_challenge.block_height);
+                        }
                     }
                     current_challenge = new_challenge;
 
@@ -363,6 +419,7 @@ async fn mining_thread(
                     }
 
                     last_challenge_refresh = std::time::Instant::now();
+                    last_known_block_signal = current_block_signal;
                 }
                 Err(e) => {
                     warn!("⚠️  Thread {} failed to refresh challenge: {}", thread_id, e);
@@ -385,8 +442,12 @@ async fn mining_thread(
 
             // Check if solution meets difficulty target
             if hash < target {
-                info!("💎 Thread {} found solution! Block #{}, Nonce: {}, Hash: {:02x?}",
-                     thread_id, current_challenge.block_height, nonce, &hash[..8]);
+                // Clean output: just show the solution found without verbose hash bytes
+                info!("💎 Solution found! Block #{}, Thread {}",
+                     current_challenge.block_height, thread_id);
+
+                // Get current hashrate for network statistics
+                let hashrate_khs = *current_hashrate_khs.read().await;
 
                 // Submit solution to the network with challenge_hash for server-side verification
                 let solution = serde_json::json!({
@@ -394,7 +455,8 @@ async fn mining_thread(
                     "nonce": nonce,
                     "hash": hex::encode(hash),
                     "difficulty_target": hex::encode(target),
-                    "challenge_hash": hex::encode(challenge_hash)
+                    "challenge_hash": hex::encode(challenge_hash),
+                    "hash_rate": hashrate_khs  // Send hashrate in KH/s for network statistics
                 });
 
                 // CRITICAL: Submit solution in background to avoid blocking mining thread
@@ -441,9 +503,11 @@ async fn mining_thread(
 async fn hash_rate_monitor(
     hash_counter: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
+    current_hashrate_khs: Arc<tokio::sync::RwLock<f64>>,
 ) {
     let mut last_hash_count = 0u64;
     let mut last_time = std::time::Instant::now();
+    let start_time = std::time::Instant::now();
 
     while is_running.load(Ordering::SeqCst) {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -456,9 +520,18 @@ async fn hash_rate_monitor(
 
         if time_elapsed > 0.0 {
             let hash_rate = hashes_computed as f64 / time_elapsed;
+            let hash_rate_khs = hash_rate / 1_000.0; // Convert H/s to KH/s
+            let tpm = (hash_rate * 60.0) / 1_000_000.0; // Tasks Per Minute in millions
+            let uptime = current_time.duration_since(start_time).as_secs();
+            let uptime_mins = uptime / 60;
+            let uptime_secs = uptime % 60;
 
-            info!("📊 Hash Rate: {:.2} H/s ({:.2} KH/s) - Total: {}",
-                 hash_rate, hash_rate / 1000.0, current_hash_count);
+            // Update shared hashrate for network statistics
+            *current_hashrate_khs.write().await = hash_rate_khs;
+
+            // Clean status bar format
+            info!("⛏️  Mining │ {:.2} MH/s │ {:.2}M TPM │ Uptime: {}m {}s │ Total: {:.2}M hashes",
+                 hash_rate / 1_000_000.0, tpm, uptime_mins, uptime_secs, current_hash_count as f64 / 1_000_000.0);
         }
 
         last_hash_count = current_hash_count;
@@ -466,8 +539,13 @@ async fn hash_rate_monitor(
     }
 }
 
-/// SSE listener for real-time mining rewards
-async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<AtomicBool>) {
+/// SSE listener for real-time mining rewards AND new block notifications
+async fn start_sse_listener(
+    wallet: String,
+    server_url: String,
+    is_running: Arc<AtomicBool>,
+    new_block_signal: Arc<AtomicU64>,
+) {
     use eventsource_client::{self as eventsource, Client as _};
     use futures::StreamExt;
 
@@ -498,6 +576,23 @@ async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<
         while is_running.load(Ordering::SeqCst) {
             match stream.next().await {
                 Some(Ok(eventsource::SSE::Event(ev))) => {
+                    // CRITICAL FIX: Handle new-block events for immediate challenge refresh
+                    if ev.event_type == "new-block" {
+                        match serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            Ok(data) => {
+                                if let Some(block_height) = data.get("height").and_then(|v| v.as_u64()) {
+                                    // Increment signal to notify all mining threads
+                                    let new_signal = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
+                                    info!("🔔 NEW BLOCK #{} detected via SSE - signaling mining threads (signal: {})",
+                                         block_height, new_signal);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse new-block event: {}", e);
+                            }
+                        }
+                    }
+
                     // Handle mining_reward events
                     if ev.event_type == "mining_reward" {
                         match serde_json::from_str::<serde_json::Value>(&ev.data) {
@@ -578,6 +673,32 @@ async fn start_sse_listener(wallet: String, server_url: String, is_running: Arc<
     }
 
     info!("🛑 SSE listener stopped");
+}
+
+/// Check if server is currently syncing (returns is_syncing, blocks_behind)
+async fn check_server_sync_status(api_url: &str) -> Result<(bool, u64)> {
+    let client = reqwest::Client::new();
+    let normalized_url = normalize_server_url(api_url);
+    let url = format!("{}/api/v1/status", normalized_url);
+
+    let response = client.get(&url).send().await?;
+    let api_response: ApiResponse<serde_json::Value> = response.json().await?;
+
+    if !api_response.success {
+        return Err(anyhow::anyhow!("API error: {:?}", api_response.error));
+    }
+
+    let data = api_response.data.ok_or_else(|| anyhow::anyhow!("No data in response"))?;
+
+    let is_syncing = data.get("is_syncing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let blocks_behind = data.get("blocks_behind")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    Ok((is_syncing, blocks_behind))
 }
 
 /// Fetch current mining challenge from API server

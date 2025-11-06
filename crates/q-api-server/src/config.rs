@@ -96,7 +96,7 @@ impl Default for Config {
         Self {
             port: 8080,
             host: "0.0.0.0".to_string(),
-            is_validator: false,
+            is_validator: true,  // ✅ Default TRUE so localhost mining works out-of-the-box
             p2p_port: 8081,
             bootstrap_peers: vec![],
             database_url: None,
@@ -386,11 +386,11 @@ impl Config {
         // Parse the JSON response
         let json: serde_json::Value = response.json()?;
 
-        // Extract libp2p listen addresses from the response
+        // Extract multiaddrs from the response (v0.9.5-beta fix)
+        // Server returns: { "data": { "multiaddrs": [...] } }
         let addrs = json
             .get("data")
-            .and_then(|data| data.get("libp2p"))
-            .and_then(|libp2p| libp2p.get("listen_addresses"))
+            .and_then(|data| data.get("multiaddrs"))
             .and_then(|addrs| addrs.as_array())
             .map(|arr| {
                 arr.iter()

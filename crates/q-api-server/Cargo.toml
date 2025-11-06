@@ -92,8 +92,8 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 q-resonance = { path = "../q-resonance" } # ✅ ENABLED - K-Parameter quantum phase analysis!
 q-vdf = { path = "../q-vdf" }
 q-quantum-crypto = { path = "../q-quantum-crypto" }
-# q-dex = { path = "../q-dex" } # Disabled - has BigDecimal serde issues
-# q-oracle = { path = "../q-oracle" } # Disabled - depends on q-dex
+q-dex = { path = "../q-dex" } # ✅ ENABLED - BigDecimal issues fixed!
+q-oracle = { path = "../q-oracle" } # ✅ ENABLED - All compilation errors resolved!
 # q-stablecoin = { path = "../q-stablecoin" } # Disabled - depends on q-dex
 q-quillon-bank = { path = "../q-quillon-bank" } # ✅ ENABLED - Quantum banking with CDP
 q-tor-circuit = { path = "../q-tor-circuit" }
@@ -114,6 +114,14 @@ axum-extra = { version = "0.9", features = ["typed-header"] }
 tokio-tungstenite = "0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+
+# File upload support for AI chat attachments
+multer = "3.1"  # Multipart form data parsing
+mime = "0.3"    # MIME type detection
+mime_guess = "2.0"  # MIME type guessing from filenames
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp"] }  # Image processing for vision models
+pdf-extract = "0.7"  # PDF text extraction
+lopdf = "0.32"  # Low-level PDF manipulation
 
 # Real-time event streaming
 tokio-util = { version = "0.7", features = ["codec"] }

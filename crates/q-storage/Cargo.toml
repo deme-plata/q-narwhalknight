@@ -18,19 +18,32 @@ async-trait = { workspace = true }
 
 # Storage engines
 bincode = { workspace = true }
+postcard = { workspace = true }
 lz4 = { workspace = true }
+zstd = "0.13"
 
 # Cryptography for hashing
 blake3 = "1.5"
+sha2 = { workspace = true }
 sha3 = { workspace = true }
 hex = "0.4"
 serde_json = "1.0"
+chrono = "0.4"
+bigdecimal = { version = "0.4", features = ["serde"] }
+
+# LRU cache for bounded memory (v0.8.0-beta security fix)
+lru = "0.12"
+
+# DashMap for concurrent peer trust tracking (v0.9.15-beta)
+dashmap = "5.5"
 
 # Q-NarwhalKnight types
 q-types = { path = "../q-types" }
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-quantum-rng = { path = "../q-quantum-rng" }
+q-zk-p2p = { path = "../q-zk-p2p" }
+q-aegis-ql = { path = "../q-aegis-ql" }  # v0.9.15-beta: Post-quantum signed sync
 
 # Networking for sync protocol
 libp2p = { workspace = true, features = ["request-response", "cbor"] }
@@ -42,10 +55,19 @@ prometheus = { workspace = true }
 # RocksDB has Windows cross-compilation issues with MinGW
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 rocksdb = { workspace = true }
+libc = "0.2"
 
 # Sled works on all platforms including Windows
 [target.'cfg(target_os = "windows")'.dependencies]
 sled = "0.34"
+
+[[bin]]
+name = "repair-database"
+path = "src/bin/repair_database.rs"
+
+[[bin]]
+name = "reset-balances"
+path = "src/bin/reset_balances.rs"
 
 [dev-dependencies]
 tempfile = "3.8"

@@ -4,7 +4,8 @@
 
 use crate::types::*;
 use bigdecimal::BigDecimal;
-use q_types::{Error, NodeId, Phase, Result};
+use anyhow::Result;
+use q_types::{NodeId, Phase};
 
 /// Oracle Privacy Layer with Tor integration
 pub struct OraclePrivacyLayer {

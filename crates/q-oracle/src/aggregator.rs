@@ -3,10 +3,11 @@
 //! Physics-inspired price aggregation with quantum mechanics principles
 
 use crate::types::*;
+use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use q_types::{Error, Result};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -190,7 +191,7 @@ impl QuantumPriceAggregator {
                 timestamp: aggregated.last_updated,
             })
         } else {
-            Err(Error::from(format!(
+            Err(anyhow::anyhow!(format!(
                 "No aggregated price found for feed: {}",
                 feed_id
             )))
@@ -287,7 +288,7 @@ impl QuantumPriceAggregator {
         let feed_submissions = submissions.get(feed_id);
 
         if feed_submissions.is_none() || feed_submissions.unwrap().is_empty() {
-            return Err(Error::from(format!(
+            return Err(anyhow::anyhow!(format!(
                 "No submissions found for feed: {}",
                 feed_id
             )));
@@ -303,12 +304,14 @@ impl QuantumPriceAggregator {
         for submission in submissions_list {
             let weight = submission.quantum_weight;
             total_weight += weight;
-            weighted_sum += &submission.value * BigDecimal::from(weight);
+            let weight_decimal = BigDecimal::from_str(&weight.to_string()).map_err(|e| anyhow::anyhow!("Failed to convert weight: {}", e))?;
+            weighted_sum += &submission.value * weight_decimal;
             wave_amplitude_sum += submission.wave_amplitude * weight;
         }
 
         let quantum_price = if total_weight > 0.0 {
-            weighted_sum / BigDecimal::from(total_weight)
+            let total_weight_decimal = BigDecimal::from_str(&total_weight.to_string()).map_err(|e| anyhow::anyhow!("Failed to convert total_weight: {}", e))?;
+            weighted_sum / total_weight_decimal
         } else {
             BigDecimal::from(0)
         };
@@ -378,7 +381,8 @@ impl QuantumPriceAggregator {
         price: &BigDecimal,
     ) -> Result<(BigDecimal, BigDecimal)> {
         let config = self.config.read().await;
-        let uncertainty_factor = BigDecimal::from(config.uncertainty_factor);
+        let uncertainty_factor = BigDecimal::from_str(&config.uncertainty_factor.to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to convert uncertainty_factor: {}", e))?;
 
         let uncertainty = price * &uncertainty_factor;
         let lower_bound = price - &uncertainty;

@@ -169,6 +169,12 @@ impl KVStore for RocksDBKV {
         Ok(())
     }
 
+    async fn write_batch_bulk(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        // Sled is already async and optimized, so bulk mode is same as regular
+        // (no explicit fsync control in sled)
+        self.write_batch(batch).await
+    }
+
     async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let tree = self.get_tree(cf)?;
         let mut results = Vec::new();

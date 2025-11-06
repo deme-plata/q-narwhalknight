@@ -15,7 +15,7 @@ use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 
 #[cfg(not(target_os = "windows"))]
 use crate::{
-    CF_AI_CHATS, CF_AI_CREDITS, CF_AI_TRANSACTIONS, CF_AI_TREASURY, CF_BALANCES, CF_BANNED_PEERS,
+    CF_AI_ATTACHMENTS, CF_AI_CHATS, CF_AI_CREDITS, CF_AI_TRANSACTIONS, CF_AI_TREASURY, CF_BALANCES, CF_BANNED_PEERS,
     CF_BLOCK_HASH_TO_HEIGHT, CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST,
     CF_NARWHAL_PAYLOADS, CF_PAYMENT_LOCKS, CF_PAYMENT_PROPOSALS, CF_PAYMENT_VOTES, CF_TRANSACTIONS,
 };
@@ -188,10 +188,13 @@ impl RocksDBKV {
             Self::create_ai_credits_cf(),
             Self::create_ai_transactions_cf(),
             Self::create_ai_treasury_cf(),
+            Self::create_ai_attachments_cf(),  // v0.9.9-beta: AI chat attachments
             Self::create_payment_proposals_cf(),
             Self::create_payment_votes_cf(),
             Self::create_payment_locks_cf(),
             Self::create_banned_peers_cf(),  // v0.9.7-beta: ZK proof ban persistence
+            Self::create_sync_certificates_cf(),  // v0.9.18-beta: TurboSync AEGIS-QL certificates
+            Self::create_peer_trust_cf(),  // v0.9.18-beta: AEGIS-QL peer trust metrics
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -410,6 +413,15 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(CF_AI_TREASURY, opts)
     }
 
+    /// Create AI attachments column family (attachment:* -> metadata) - v0.9.9-beta
+    fn create_ai_attachments_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11)); // "attachment:"
+
+        ColumnFamilyDescriptor::new(CF_AI_ATTACHMENTS, opts)
+    }
+
     /// Create payment proposals column family (proposal:* -> payment proposals)
     fn create_payment_proposals_cf() -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
@@ -461,6 +473,32 @@ impl RocksDBKV {
         opts.set_target_file_size_base(512 * 1024 * 1024); // 512MB
 
         ColumnFamilyDescriptor::new(CF_NARWHAL_PAYLOADS, opts)
+    }
+
+    /// Create sync certificates column family (sync_id -> SyncCertificate) - v0.9.18-beta
+    /// Stores AEGIS-QL sync affirmation certificates for TurboSync
+    fn create_sync_certificates_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Small-medium values (certificates), optimize for reads during sync
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+
+        ColumnFamilyDescriptor::new(crate::CF_SYNC_CERTIFICATES, opts)
+    }
+
+    /// Create peer trust column family (peer_id -> TrustMetrics) - v0.9.18-beta
+    /// Stores AEGIS-QL peer trust metrics for sync reliability
+    fn create_peer_trust_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Small values (metrics), optimize for frequent updates
+        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_max_write_buffer_number(2);
+
+        ColumnFamilyDescriptor::new(crate::CF_PEER_TRUST, opts)
     }
 
     /// Get column family handle (public for transactions - v0.8.1-beta)

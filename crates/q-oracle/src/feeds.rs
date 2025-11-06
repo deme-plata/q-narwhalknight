@@ -3,7 +3,7 @@
 //! Management of quantum-enhanced data feeds
 
 use crate::types::*;
-use q_types::{Error, Result};
+use anyhow::Result;
 
 /// Quantum Feed Manager
 pub struct QuantumFeedManager;

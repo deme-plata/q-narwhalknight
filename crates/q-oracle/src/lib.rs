@@ -18,11 +18,13 @@ pub mod reputation;
 pub mod types;
 pub mod verification;
 
+use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use q_types::{Error, NodeId, Phase, Result};
+use q_types::{NodeId, Phase};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -64,74 +66,6 @@ pub struct QuantumOracle {
     // System identification
     pub node_id: NodeId,
     pub phase: Phase,
-}
-
-/// Quantum Oracle configuration with physics-inspired parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuantumOracleConfig {
-    /// Maximum number of oracle nodes in quantum superposition
-    pub max_oracle_nodes: u64,
-    /// Quantum coherence threshold for data validation
-    pub coherence_threshold: f64,
-    /// Wave function collapse timeout (milliseconds)
-    pub wave_collapse_timeout_ms: u64,
-    /// Heisenberg uncertainty factor for price aggregation
-    pub uncertainty_factor: f64,
-    /// Quantum entanglement correlation strength
-    pub entanglement_strength: f64,
-    /// AI neural network depth (quantum layers)
-    pub quantum_neural_depth: u32,
-    /// Schrödinger equation time step for price evolution
-    pub schrodinger_time_step: f64,
-    /// Planck constant scaling for micro-fluctuations
-    pub planck_scaling: f64,
-    /// Speed of light constraint for data propagation (m/s)
-    pub light_speed_constraint: f64,
-    /// Quantum tunneling probability for outlier detection
-    pub tunneling_probability: f64,
-    /// Post-quantum security level
-    pub security_level: u8,
-    /// Privacy settings
-    pub privacy_config: QuantumPrivacyConfig,
-    /// Network performance targets
-    pub performance_targets: PerformanceTargets,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceTargets {
-    /// Target throughput (TPS)
-    pub target_tps: u64,
-    /// Maximum latency (milliseconds)
-    pub max_latency_ms: u64,
-    /// Minimum accuracy percentage
-    pub min_accuracy_pct: f64,
-    /// Maximum cost per query (ORB)
-    pub max_cost_per_query: BigDecimal,
-}
-
-impl Default for QuantumOracleConfig {
-    fn default() -> Self {
-        Self {
-            max_oracle_nodes: 1000,
-            coherence_threshold: 0.95,
-            wave_collapse_timeout_ms: 500,
-            uncertainty_factor: 0.01618,    // Golden ratio uncertainty
-            entanglement_strength: 0.707,   // √2/2 quantum correlation
-            quantum_neural_depth: 12,       // Deep quantum network
-            schrodinger_time_step: 0.001,   // 1ms quantum evolution
-            planck_scaling: 6.62607015e-34, // Planck's constant
-            light_speed_constraint: 299792458.0, // c in m/s
-            tunneling_probability: 0.001,   // 0.1% quantum tunneling
-            security_level: 5,              // Maximum post-quantum security
-            privacy_config: QuantumPrivacyConfig::default(),
-            performance_targets: PerformanceTargets {
-                target_tps: 927000, // 927k TPS target
-                max_latency_ms: 1,  // Sub-millisecond latency
-                min_accuracy_pct: 99.99,
-                max_cost_per_query: "0.1".parse().unwrap(), // 0.1 ORB per query
-            },
-        }
-    }
 }
 
 impl QuantumOracle {
@@ -220,7 +154,7 @@ impl QuantumOracle {
             .await?;
 
         if !verification_result.is_valid {
-            return Err(Error::from(format!(
+            return Err(anyhow::anyhow!(format!(
                 "Quantum verification failed: {}",
                 verification_result
                     .error_reason
@@ -235,7 +169,7 @@ impl QuantumOracle {
             .await?;
 
         if reputation_score < 0.8 {
-            return Err(Error::from(
+            return Err(anyhow::anyhow!(
                 "Oracle reputation too low for quantum submission",
             ));
         }
@@ -254,7 +188,7 @@ impl QuantumOracle {
                 "⚠️  High anomaly probability detected: {:.3}",
                 anomaly_score
             );
-            return Err(Error::from("Quantum AI detected anomalous data pattern"));
+            return Err(anyhow::anyhow!("Quantum AI detected anomalous data pattern"));
         }
 
         // Generate quantum entangled proof
@@ -265,7 +199,7 @@ impl QuantumOracle {
         // Submit to quantum price aggregator
         let aggregation_result = self
             .price_aggregator
-            .aggregate_quantum_price(&submission, uncertainty_adjusted_value)
+            .aggregate_quantum_price(&submission, uncertainty_adjusted_value.clone())
             .await?;
 
         // Update quantum metrics
@@ -278,7 +212,7 @@ impl QuantumOracle {
             feed_id: submission.feed_id,
             accepted: true,
             quantum_score: verification_result.quantum_score,
-            uncertainty_adjustment: uncertainty_adjusted_value.clone(),
+            uncertainty_adjustment: uncertainty_adjusted_value,
             anomaly_probability: anomaly_score,
             entanglement_proof: Some(entanglement_proof),
             aggregated_price: aggregation_result.final_price,
@@ -304,6 +238,9 @@ impl QuantumOracle {
             .calculate_quantum_confidence(&aggregator_result)
             .await?;
 
+        // Generate signature before moving collapsed_price
+        let quantum_signature = self.generate_quantum_signature(&collapsed_price).await?;
+
         Ok(QuantumPriceData {
             feed_id: feed_id.to_string(),
             price: collapsed_price,
@@ -312,7 +249,7 @@ impl QuantumOracle {
             entangled_feeds: aggregator_result.entangled_feeds,
             ai_prediction_score: aggregator_result.ai_score,
             uncertainty_range: aggregator_result.uncertainty_bounds,
-            quantum_signature: self.generate_quantum_signature(&collapsed_price).await?,
+            quantum_signature,
             timestamp: Utc::now(),
             block_height: None, // TODO: Integrate with consensus
         })
@@ -483,7 +420,7 @@ impl QuantumOracle {
             ("SOL/USD", "Solana with quantum momentum detection"),
         ];
 
-        for (symbol, description) in feeds {
+        for (symbol, description) in &feeds {
             let feed = QuantumFeed {
                 id: symbol.to_string(),
                 symbol: symbol.to_string(),
@@ -513,7 +450,8 @@ impl QuantumOracle {
         let uncertainty = &config.uncertainty_factor;
 
         // Apply Heisenberg uncertainty: ΔxΔp ≥ ℏ/2
-        let uncertainty_adjustment = value * BigDecimal::from(*uncertainty);
+        let uncertainty_decimal = BigDecimal::from_str(&uncertainty.to_string())?;
+        let uncertainty_adjustment = value * uncertainty_decimal;
 
         // Random quantum fluctuation based on Planck constant
         let quantum_noise = self.generate_quantum_noise(&config.planck_scaling).await?;
@@ -526,7 +464,7 @@ impl QuantumOracle {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let noise: f64 = rng.gen_range(-planck_scaling..=*planck_scaling);
-        Ok(BigDecimal::from(noise))
+        Ok(BigDecimal::from_str(&noise.to_string())?)
     }
 
     /// Generate quantum entanglement proof
@@ -560,7 +498,8 @@ impl QuantumOracle {
             Ok(result.quantum_price.clone())
         } else {
             // Apply quantum superposition weighted average
-            Ok(&result.quantum_price * BigDecimal::from(collapse_probability))
+            let prob_decimal = BigDecimal::from_str(&collapse_probability.to_string())?;
+            Ok(&result.quantum_price * prob_decimal)
         }
     }
 
@@ -634,6 +573,7 @@ mod tests {
             .generate_quantum_noise(&planck_scaling)
             .await
             .unwrap();
-        assert!(noise.abs() <= BigDecimal::from(planck_scaling));
+        let planck_decimal = BigDecimal::from_str(&planck_scaling.to_string()).unwrap();
+        assert!(noise.abs() <= planck_decimal);
     }
 }

@@ -28,6 +28,11 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
   const [isSearching, setIsSearching] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  // Debug: Log whenever currentBalance prop changes
+  useEffect(() => {
+    console.log('💰 TopBar: currentBalance prop changed to:', currentBalance);
+  }, [currentBalance]);
+
   // Mock search function - replace with real API calls
   const performSearch = async (query: string) => {
     if (query.length < 3) {
@@ -297,15 +302,38 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
 
         {/* Right: Coherence Index */}
         <div className="flex items-center gap-3">
-          <Shield className="w-5 h-5 text-amber-400" />
+          <motion.div
+            animate={{
+              scale: qci >= 0.9 ? [1, 1.1, 1] : [1, 1.05, 1],
+              rotate: [0, 360],
+            }}
+            transition={{
+              scale: { duration: 2, repeat: Infinity },
+              rotate: { duration: qci >= 0.9 ? 20 : 40, repeat: Infinity, ease: "linear" }
+            }}
+          >
+            <Shield className="w-5 h-5 text-amber-400" />
+          </motion.div>
           <div className="text-right">
             <div className="flex items-center gap-2">
-              <span className="text-amber-100 text-sm font-bold">
+              <motion.span
+                className="text-amber-100 text-sm font-bold"
+                key={qci}
+                initial={{ scale: 1.2, opacity: 0.5 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.3 }}
+              >
                 {(qci * 100).toFixed(0)}%
-              </span>
-              <span className="text-xs font-semibold bg-gradient-to-r from-amber-400 to-yellow-500 bg-clip-text text-transparent">
+              </motion.span>
+              <motion.span
+                className="text-xs font-semibold bg-gradient-to-r from-amber-400 to-yellow-500 bg-clip-text text-transparent"
+                key={getQCIStatus(qci)}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.4 }}
+              >
                 {getQCIStatus(qci)}
-              </span>
+              </motion.span>
             </div>
             <div className="text-amber-300/60 text-xs font-medium">Quantum Coherence</div>
           </div>
@@ -313,18 +341,56 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
             className="relative w-12 h-2 rounded-full overflow-hidden"
             style={{
               background: 'rgba(15, 23, 42, 0.7)',
-              border: '1px solid rgba(212, 175, 55, 0.3)'
+              border: '1px solid rgba(212, 175, 55, 0.3)',
+              boxShadow: qci >= 0.9
+                ? '0 0 15px rgba(212, 175, 55, 0.6), 0 0 30px rgba(255, 215, 0, 0.4)'
+                : qci >= 0.8
+                ? '0 0 10px rgba(212, 175, 55, 0.4)'
+                : '0 0 5px rgba(212, 175, 55, 0.2)'
             }}
           >
             <motion.div
-              className="h-full"
+              className="h-full relative"
               style={{
-                background: 'linear-gradient(90deg, #D4AF37, #FFD700, #FFA500)'
+                background: qci >= 0.9
+                  ? 'linear-gradient(90deg, #FFD700, #FFA500, #FF8C00, #FFD700)'
+                  : qci >= 0.8
+                  ? 'linear-gradient(90deg, #D4AF37, #FFD700, #FFA500)'
+                  : 'linear-gradient(90deg, #8B7355, #D4AF37, #FFD700)',
+                backgroundSize: '200% 100%'
               }}
               initial={{ width: 0 }}
-              animate={{ width: `${qci * 100}%` }}
-              transition={{ duration: 1 }}
-            />
+              animate={{
+                width: `${qci * 100}%`,
+                backgroundPosition: qci >= 0.8 ? ['0% 0%', '200% 0%'] : '0% 0%'
+              }}
+              transition={{
+                width: { duration: 1, ease: "easeOut" },
+                backgroundPosition: {
+                  duration: 2,
+                  repeat: Infinity,
+                  ease: "linear"
+                }
+              }}
+            >
+              {/* Shimmer effect for high coherence */}
+              {qci >= 0.8 && (
+                <motion.div
+                  className="absolute inset-0"
+                  style={{
+                    background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent)',
+                  }}
+                  animate={{
+                    x: ['-100%', '200%']
+                  }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: "linear"
+                  }}
+                />
+              )}
+            </motion.div>
           </div>
         </div>
       </div>

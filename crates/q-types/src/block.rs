@@ -8,6 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// Default values for backwards compatibility with existing blocks
+fn default_phase() -> u8 { 4 }  // Phase 4 is current testnet phase
+fn default_network_id() -> String { "testnet-phase4".to_string() }
+
 /// Block hash type (blake3)
 pub type BlockHash = [u8; 32];
 
@@ -32,6 +36,13 @@ pub struct QBlock {
     /// Transactions included in this block
     pub transactions: Vec<super::Transaction>,
 
+    /// Balance updates included in this block (v0.9.0-beta: Balance Consensus)
+    /// CRITICAL: Enables deterministic balance state across all nodes
+    /// When a block is synced, these balance updates MUST be applied
+    /// Optional for backwards compatibility (defaults to empty vec)
+    #[serde(default)]
+    pub balance_updates: Vec<BalanceUpdate>,
+
     /// Block size in bytes (for performance monitoring)
     pub size_bytes: usize,
 }
@@ -41,6 +52,17 @@ pub struct QBlock {
 pub struct BlockHeader {
     /// Block height (monotonically increasing, Bitcoin-style chain)
     pub height: u64,
+
+    /// Network phase identifier (1 = Phase 1, 2 = Phase 2, etc.)
+    /// CRITICAL: Prevents cross-phase contamination (Phase 1 blocks can't sync into Phase 2)
+    /// Optional for backwards compatibility with existing blocks (defaults to Phase 2)
+    #[serde(default = "default_phase")]
+    pub phase: u8,
+
+    /// Network ID ("testnet-phase1", "testnet-phase4", "mainnet", etc.)
+    /// Optional for backwards compatibility (defaults to "testnet-phase4")
+    #[serde(default = "default_network_id")]
+    pub network_id: String,
 
     /// Previous block hash (forms Bitcoin-style chain backbone)
     pub prev_block_hash: BlockHash,
@@ -68,6 +90,12 @@ pub struct BlockHeader {
 
     /// Block proposer (validator who created this block)
     pub proposer: super::NodeId,
+
+    /// Producer ID / Lane ID for parallel DAG production (0-7 for 8 parallel producers)
+    /// v0.8.11-beta: Enables unique block hashes for parallel producers at same height
+    /// Optional for backwards compatibility (defaults to 0)
+    #[serde(default)]
+    pub producer_id: u8,
 
     /// Total difficulty accumulated to this block
     pub total_difficulty: u128,
@@ -112,6 +140,33 @@ pub struct MiningSolution {
 
     /// Optional: Mining pool information
     pub pool_id: Option<String>,
+
+    /// Miner's hash rate at time of solution (H/s)
+    /// Stored as u64 for Eq compatibility, actual H/s value
+    /// This allows ultra-precise network hashrate calculation in real-time
+    #[serde(default)]
+    pub hash_rate_hs: u64,
+}
+
+/// Balance update (v0.9.0-beta: Balance Consensus)
+/// Represents a deterministic balance state transition
+/// MUST be applied in order when processing blocks
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BalanceUpdate {
+    /// Wallet address being updated
+    pub address: super::Address,
+
+    /// Balance before this update (for verification)
+    pub old_balance: u64,
+
+    /// Balance after this update
+    pub new_balance: u64,
+
+    /// Reason for balance change
+    pub reason: String, // "mining_reward", "transaction", "dev_fee", etc.
+
+    /// Timestamp of balance update
+    pub timestamp: u64,
 }
 
 /// Quantum consensus metadata (Q-NarwhalKnight innovations)
@@ -264,27 +319,38 @@ impl QBlock {
     }
 
     /// Verify block integrity
-    pub fn verify(&self) -> Result<(), String> {
-        // 1. Verify mining solutions meet difficulty
+    /// v0.6.0-beta: Added expected_network_id parameter to prevent cross-network pollution
+    pub fn verify(&self, expected_network_id: Option<&str>) -> Result<(), String> {
+        // 1. Verify network ID matches expected network (v0.6.0-beta)
+        if let Some(expected_id) = expected_network_id {
+            if self.header.network_id != expected_id {
+                return Err(format!(
+                    "Network ID mismatch: block has '{}', expected '{}'",
+                    self.header.network_id, expected_id
+                ));
+            }
+        }
+
+        // 2. Verify mining solutions meet difficulty
         for solution in &self.mining_solutions {
             if !Self::verify_difficulty(&solution.hash, &solution.difficulty_target) {
                 return Err(format!("Mining solution nonce {} does not meet difficulty", solution.nonce));
             }
         }
 
-        // 2. Verify solutions Merkle root
+        // 3. Verify solutions Merkle root
         let computed_root = Self::compute_solutions_merkle_root(&self.mining_solutions);
         if computed_root != self.header.solutions_root {
             return Err("Solutions Merkle root mismatch".to_string());
         }
 
-        // 3. Verify transactions Merkle root
+        // 4. Verify transactions Merkle root
         let computed_tx_root = Self::compute_tx_merkle_root(&self.transactions);
         if computed_tx_root != self.header.tx_root {
             return Err("Transaction Merkle root mismatch".to_string());
         }
 
-        // 4. Verify timestamp is reasonable (not too far in future)
+        // 5. Verify timestamp is reasonable (not too far in future)
         let now = chrono::Utc::now().timestamp() as u64;
         if self.header.timestamp > now + 300 {
             return Err("Block timestamp too far in future".to_string());
@@ -387,16 +453,35 @@ impl HypergraphCoordinates {
         total_difficulty: u128,
         quantum_entropy: f64,
     ) -> Self {
+        // 🔒 v0.5.25-beta P2P GOSSIPSUB FIX: Sanitize all f64 values
+        // Prevent NaN/Infinity which causes "invalid type: null, expected f64" deserialization errors
+        let mining_activity = (solutions_count as f64).sqrt();
+        let difficulty_growth = if total_difficulty > 0 {
+            (total_difficulty as f64).log10()
+        } else {
+            0.0 // Prevent -Infinity from log10(0)
+        };
+
         Self {
             temporal: round as f64,
             spatial: vec![
-                (solutions_count as f64).sqrt(), // x: mining activity
-                (total_difficulty as f64).log10(), // y: difficulty growth
-                quantum_entropy, // z: randomness
+                Self::sanitize_f64(mining_activity), // x: mining activity
+                Self::sanitize_f64(difficulty_growth), // y: difficulty growth
+                Self::sanitize_f64(quantum_entropy), // z: randomness
             ],
-            energetic: total_difficulty as f64,
-            entropic: quantum_entropy,
+            energetic: Self::sanitize_f64(total_difficulty as f64),
+            entropic: Self::sanitize_f64(quantum_entropy),
             metadata: HashMap::new(),
+        }
+    }
+
+    /// Ensure f64 values are valid (not NaN or Infinity) for P2P serialization
+    /// Fix for v0.5.25-beta: Gossipsub deserialization fails with "invalid type: null, expected f64"
+    fn sanitize_f64(value: f64) -> f64 {
+        if value.is_nan() || value.is_infinite() {
+            0.0
+        } else {
+            value
         }
     }
 }
@@ -456,6 +541,8 @@ mod tests {
         let block = QBlock {
             header: BlockHeader {
                 height: 1,
+                phase: 4,
+                network_id: "testnet-phase4".to_string(),
                 prev_block_hash: [0u8; 32],
                 solutions_root: [0u8; 32],
                 tx_root: [0u8; 32],
@@ -502,7 +589,8 @@ mod tests {
 
     #[test]
     fn test_mining_difficulty_verification() {
-        let easy_hash = [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        // Hash must be strictly less than target
+        let easy_hash = [0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
@@ -512,6 +600,7 @@ mod tests {
                       0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                       0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
+        // This should pass because easy_hash < target (0x00 < 0xFF at byte 2)
         assert!(QBlock::verify_difficulty(&easy_hash, &target));
     }
 }

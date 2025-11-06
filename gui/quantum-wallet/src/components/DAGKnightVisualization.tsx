@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, Zap, TrendingUp, GitBranch, X } from 'lucide-react';
+import { Activity, Zap, TrendingUp, GitBranch, X, Sparkles, Layers, Orbit } from 'lucide-react';
 
 interface DAGBlock {
   id: string; // block hash
@@ -17,14 +17,28 @@ interface DAGBlock {
   dagRound?: number;
   minerCount?: number;
   age?: number; // Age in milliseconds since creation (for entrance animation)
+  producerId?: number; // Phase 2: Producer ID for parallel visualization
+}
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  color: string;
+  size: number;
 }
 
 interface DAGKnightVisualizationProps {
   currentHeight: number;
 }
 
-export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps) {
+export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisualizationProps) {
+  // Accept currentHeight prop (used for initial sync check)
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  console.log('DAG Visualizer initialized at height:', currentHeight);
   const [blocks, setBlocks] = useState<DAGBlock[]>([]);
   const [selectedBlock, setSelectedBlock] = useState<DAGBlock | null>(null);
   const [stats, setStats] = useState({
@@ -33,21 +47,24 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
     totalBlocks: 0,
     blocksPerSecond: 0,
   });
+  const [visualMode, setVisualMode] = useState<'normal' | 'quantum' | 'constellation' | 'heatmap'>('quantum');
+  const [particles, setParticles] = useState<Particle[]>([]);
+
   const scrollOffset = useRef(0);
   const lastBlockTime = useRef(Date.now());
   const animationFrameId = useRef<number | undefined>(undefined);
   const laneAssignments = useRef<Map<number, number>>(new Map()); // height -> lane mapping
   const laneOccupancy = useRef<Map<number, number>>(new Map()); // lane -> rightmost x position
 
-  // Constants for layout (Phase 2: Optimized for parallel block visualization)
+  // Phase 2 Constants: 8 parallel producers!
   const BLOCK_WIDTH = 60;
   const BLOCK_HEIGHT = 40;
-  const LANE_HEIGHT = 80;
-  const NUM_LANES = 5;
-  const SCROLL_SPEED = 150; // Phase 2: 3x faster scroll for exciting animation
+  const LANE_HEIGHT = 70;
+  const NUM_LANES = 8; // Phase 2: 8 producers = 8 lanes
+  const SCROLL_SPEED = 200; // Faster for excitement
   const MIN_BLOCK_SPACING = 100; // Minimum horizontal spacing between blocks in same lane
 
-  // Assign lane based on producer_id for true parallelism, fallback to height distribution
+  // Assign lane based on producer_id for true Phase 2 parallelism
   const assignLane = (height: number, producerId?: number): number => {
     if (laneAssignments.current.has(height)) {
       return laneAssignments.current.get(height)!;
@@ -55,8 +72,8 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
 
     // Phase 2: Use producer_id for true parallel block production visualization
     let lane: number;
-    if (producerId !== undefined && producerId > 0) {
-      // True parallelism: each producer gets its own lane
+    if (producerId !== undefined) {
+      // True parallelism: each producer gets its own lane (0-7)
       lane = producerId % NUM_LANES;
     } else {
       // Fallback: distribute blocks across lanes for visual variety
@@ -67,23 +84,51 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
     return lane;
   };
 
+  // Create quantum particles around a block
+  const createParticles = (x: number, y: number, count: number = 20) => {
+    const newParticles: Particle[] = [];
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count;
+      const speed = 30 + Math.random() * 50;
+      newParticles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 0,
+        maxLife: 800 + Math.random() * 400,
+        color: ['#60a5fa', '#a78bfa', '#ec4899', '#10b981'][Math.floor(Math.random() * 4)],
+        size: 2 + Math.random() * 3,
+      });
+    }
+    setParticles(prev => [...prev, ...newParticles]);
+  };
+
   // Listen for new blocks via SSE
   useEffect(() => {
-    console.log('DAG Visualization starting, connecting to SSE stream...');
+    console.log('🎨 DAG Visualization starting (Phase 2 Mode - 8 Producers), connecting to SSE stream...');
 
     const eventSource = new EventSource('/api/v1/events');
 
     eventSource.addEventListener('new-block', (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log('Received new-block event:', data);
+        console.log('🎨 DAGKnight: Received new-block SSE event:', data);
 
+        // Handle tagged enum format: {type: "NewBlock", data: {...}}
         const blockData = data.data || data;
+        console.log('🎨 DAGKnight: Extracted block data:', blockData);
+        console.log('🎨 DAGKnight: producer_id from event:', blockData.producer_id);
+
         const now = Date.now();
         const timeSinceLastBlock = (now - lastBlockTime.current) / 1000;
 
-        // Assign lane for this block
-        const assignedLane = assignLane(blockData.height, blockData.producer_id);
+        // Phase 2: Extract producer_id from block data
+        const producerId = blockData.producer_id !== undefined ? blockData.producer_id : blockData.height % 8;
+        console.log('🎨 DAGKnight: Using producerId:', producerId, '(from event or fallback)');
+
+        // Assign lane for this block (Phase 2: based on producer_id)
+        const assignedLane = assignLane(blockData.height, producerId);
 
         // Calculate X position with collision avoidance
         const canvasWidth = canvasRef.current?.width || 1200;
@@ -102,19 +147,20 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         const newBlock: DAGBlock = {
           id: blockData.hash || `block-${blockData.height}`,
           height: blockData.height,
-          lane: assignedLane, // Phase 2: Pass producer_id for parallel lanes
+          lane: assignedLane,
           timestamp: now,
           parents: blockData.prev_hash ? [blockData.prev_hash] : (blockData.height > 0 ? [`block-${blockData.height - 1}`] : []),
-          isBlueSet: true, // All blocks are blue in single validator mode
-          x: blockX, // Anti-overlap positioning
-          miner: 'Validator',
+          isBlueSet: true, // All blocks are blue in Phase 2
+          x: blockX,
+          miner: `Producer #${producerId}`,
           txCount: blockData.tx_count || blockData.solutions_count || 0,
           reward: blockData.block_reward || 0,
           prevHash: blockData.prev_hash,
           totalDifficulty: blockData.total_difficulty,
           dagRound: blockData.dag_round,
           minerCount: blockData.miner_count,
-          age: 0, // Phase 2: Track age for entrance animation
+          age: 0, // Track age for entrance animation
+          producerId,
         };
 
         setBlocks(prev => {
@@ -133,6 +179,16 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
           return filtered;
         });
 
+        // Create quantum particles for new block (if in quantum mode)
+        if (visualMode === 'quantum') {
+          const canvas = canvasRef.current;
+          if (canvas) {
+            const blockScreenX = blockX - scrollOffset.current + BLOCK_WIDTH / 2;
+            const blockScreenY = assignedLane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
+            createParticles(blockScreenX, blockScreenY, 30);
+          }
+        }
+
         // Update stats
         setStats(prevStats => ({
           ...prevStats,
@@ -143,7 +199,7 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         }));
 
         lastBlockTime.current = now;
-        console.log('Block added to visualization:', newBlock);
+        console.log('✨ Block added to visualization:', newBlock);
       } catch (error) {
         console.error('Error processing new-block event:', error);
       }
@@ -157,7 +213,7 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
       console.log('Closing SSE connection');
       eventSource.close();
     };
-  }, []);
+  }, [visualMode]);
 
   // Handle canvas click to select blocks
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -188,7 +244,7 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
     setSelectedBlock(null);
   };
 
-  // Animation loop for scrolling
+  // Animation loop for scrolling and effects
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -206,18 +262,35 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
       // Scroll the view
       scrollOffset.current += SCROLL_SPEED * deltaTime;
 
-      // Phase 2: Update block ages for entrance animation effects
+      // Update block ages
       blocks.forEach(block => {
         if (block.age !== undefined) {
-          block.age += deltaTime * 1000; // Convert to milliseconds
+          block.age += deltaTime * 1000;
         }
       });
 
-      // Clear canvas
-      ctx.fillStyle = '#0a0a1a';
+      // Update particles
+      setParticles(prev =>
+        prev
+          .map(p => ({
+            ...p,
+            x: p.x + p.vx * deltaTime,
+            y: p.y + p.vy * deltaTime,
+            life: p.life + deltaTime * 1000,
+            vx: p.vx * 0.98, // Slow down over time
+            vy: p.vy * 0.98,
+          }))
+          .filter(p => p.life < p.maxLife)
+      );
+
+      // Clear canvas with gradient background
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#0a0a1a');
+      gradient.addColorStop(1, '#1a0a2a');
+      ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Draw grid lines for lanes
+      // Draw grid lines for lanes (Phase 2: 8 lanes)
       ctx.strokeStyle = 'rgba(139, 92, 246, 0.1)';
       ctx.lineWidth = 1;
       for (let i = 0; i <= NUM_LANES; i++) {
@@ -226,6 +299,35 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         ctx.moveTo(0, y);
         ctx.lineTo(canvas.width, y);
         ctx.stroke();
+
+        // Lane labels (Producer #0 - Producer #7)
+        if (i < NUM_LANES) {
+          ctx.fillStyle = 'rgba(139, 92, 246, 0.4)';
+          ctx.font = '10px monospace';
+          ctx.fillText(`Producer #${i}`, 10, y + 20);
+        }
+      }
+
+      // Constellation mode: draw all connections between nearby blocks
+      if (visualMode === 'constellation') {
+        blocks.forEach((block, i) => {
+          blocks.slice(i + 1).forEach(otherBlock => {
+            const blockX = block.x - scrollOffset.current + BLOCK_WIDTH / 2;
+            const blockY = block.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
+            const otherX = otherBlock.x - scrollOffset.current + BLOCK_WIDTH / 2;
+            const otherY = otherBlock.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
+
+            const dist = Math.sqrt((blockX - otherX) ** 2 + (blockY - otherY) ** 2);
+            if (dist < 200) {
+              ctx.strokeStyle = `rgba(139, 92, 246, ${0.3 * (1 - dist / 200)})`;
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(blockX, blockY);
+              ctx.lineTo(otherX, otherY);
+              ctx.stroke();
+            }
+          });
+        });
       }
 
       // Draw parent connection lines first (behind blocks)
@@ -240,16 +342,22 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
           const parentX = parent.x - scrollOffset.current + BLOCK_WIDTH / 2;
           const parentY = parent.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
 
-          // Connection color based on blue/red sets
-          const isBlueConnection = block.isBlueSet && parent.isBlueSet;
-          ctx.strokeStyle = isBlueConnection
-            ? 'rgba(59, 130, 246, 0.5)'  // Blue connection
-            : 'rgba(239, 68, 68, 0.4)';   // Red connection
+          // Rainbow gradient for connections in quantum mode
+          if (visualMode === 'quantum') {
+            const gradient = ctx.createLinearGradient(parentX, parentY, blockX, blockY);
+            gradient.addColorStop(0, 'rgba(96, 165, 250, 0.6)');
+            gradient.addColorStop(0.5, 'rgba(167, 139, 250, 0.6)');
+            gradient.addColorStop(1, 'rgba(236, 72, 153, 0.6)');
+            ctx.strokeStyle = gradient;
+          } else {
+            ctx.strokeStyle = block.isBlueSet
+              ? 'rgba(59, 130, 246, 0.5)'
+              : 'rgba(239, 68, 68, 0.4)';
+          }
           ctx.lineWidth = 2;
 
-          // Use Bezier curves for cross-lane connections to show parallelization clearly
+          // Bezier curves for cross-lane connections
           if (Math.abs(block.lane - parent.lane) > 0) {
-            // Cross-lane connection - use smooth Bezier curve
             const controlPoint1X = parentX + (blockX - parentX) * 0.3;
             const controlPoint1Y = parentY;
             const controlPoint2X = parentX + (blockX - parentX) * 0.7;
@@ -260,7 +368,7 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
             ctx.bezierCurveTo(controlPoint1X, controlPoint1Y, controlPoint2X, controlPoint2Y, blockX, blockY);
             ctx.stroke();
 
-            // Add arrow head to show direction
+            // Arrow head
             const arrowSize = 6;
             const angle = Math.atan2(blockY - controlPoint2Y, blockX - controlPoint2X);
             ctx.beginPath();
@@ -276,13 +384,12 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
             );
             ctx.stroke();
           } else {
-            // Same lane connection - simple line
+            // Same lane connection
             ctx.beginPath();
             ctx.moveTo(parentX, parentY);
             ctx.lineTo(blockX, blockY);
             ctx.stroke();
 
-            // Add simple arrow
             const arrowSize = 6;
             ctx.beginPath();
             ctx.moveTo(blockX - arrowSize, blockY - 3);
@@ -293,6 +400,21 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         });
       });
 
+      // Draw particles (quantum mode)
+      if (visualMode === 'quantum') {
+        particles.forEach(p => {
+          const alpha = 1 - (p.life / p.maxLife);
+          ctx.fillStyle = p.color.replace(')', `, ${alpha})`).replace('rgb', 'rgba');
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Trailing effect
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = p.color;
+        });
+      }
+
       // Draw blocks
       blocks.forEach(block => {
         const x = block.x - scrollOffset.current;
@@ -301,50 +423,55 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         // Skip if off-screen
         if (x < -BLOCK_WIDTH || x > canvas.width + BLOCK_WIDTH) return;
 
-        // Highlight selected block
         const isSelected = selectedBlock?.id === block.id;
 
-        // Phase 2: Entrance animation for new blocks (exciting!)
-        const age = block.age !== undefined ? block.age : 10000; // Old blocks have no age tracking
-        const isNewBlock = age < 1000; // New block animation for first 1 second
-        const animationProgress = Math.min(age / 1000, 1); // 0 to 1 over 1 second
+        // Entrance animation
+        const age = block.age !== undefined ? block.age : 10000;
+        const isNewBlock = age < 1000;
+        const animationProgress = Math.min(age / 1000, 1);
 
-        // Scale effect: blocks pop in with a slight scale animation
+        // Scale and pulse
         const scale = isNewBlock ? 0.7 + (0.3 * animationProgress) : 1.0;
         const opacity = isNewBlock ? animationProgress : 1.0;
-
-        // Pulse effect for very new blocks (first 500ms)
         const pulse = age < 500 ? 1 + (0.3 * Math.sin((age / 500) * Math.PI * 4)) : 1.0;
 
-        // Calculate scaled dimensions
         const scaledWidth = BLOCK_WIDTH * scale * pulse;
         const scaledHeight = BLOCK_HEIGHT * scale * pulse;
         const scaledX = x + (BLOCK_WIDTH - scaledWidth) / 2;
         const scaledY = y + (BLOCK_HEIGHT - scaledHeight) / 2;
 
-        // Block color based on blue/red set with opacity
-        const gradient = ctx.createLinearGradient(scaledX, scaledY, scaledX, scaledY + scaledHeight);
-        if (block.isBlueSet) {
-          gradient.addColorStop(0, isSelected ? `rgba(96, 165, 250, ${opacity})` : `rgba(59, 130, 246, ${0.9 * opacity})`);
-          gradient.addColorStop(1, isSelected ? `rgba(59, 130, 246, ${0.9 * opacity})` : `rgba(37, 99, 235, ${0.7 * opacity})`);
+        // Heatmap mode: color based on transaction count
+        if (visualMode === 'heatmap') {
+          const intensity = Math.min(block.txCount / 100, 1);
+          const gradient = ctx.createLinearGradient(scaledX, scaledY, scaledX, scaledY + scaledHeight);
+          gradient.addColorStop(0, `rgba(${255 * intensity}, ${255 * (1 - intensity)}, 100, ${opacity})`);
+          gradient.addColorStop(1, `rgba(${200 * intensity}, ${200 * (1 - intensity)}, 80, ${0.8 * opacity})`);
           ctx.fillStyle = gradient;
-          ctx.shadowColor = isNewBlock ? `rgba(96, 165, 250, ${0.9 * opacity})` : (isSelected ? 'rgba(96, 165, 250, 0.8)' : 'rgba(59, 130, 246, 0.5)');
+          ctx.shadowColor = `rgba(${255 * intensity}, ${255 * (1 - intensity)}, 100, 0.8)`;
+          ctx.shadowBlur = 15 + intensity * 20;
         } else {
-          gradient.addColorStop(0, isSelected ? `rgba(248, 113, 113, ${opacity})` : `rgba(239, 68, 68, ${0.9 * opacity})`);
-          gradient.addColorStop(1, isSelected ? `rgba(239, 68, 68, ${0.9 * opacity})` : `rgba(220, 38, 38, ${0.7 * opacity})`);
-          ctx.fillStyle = gradient;
-          ctx.shadowColor = isNewBlock ? `rgba(248, 113, 113, ${0.9 * opacity})` : (isSelected ? 'rgba(248, 113, 113, 0.8)' : 'rgba(239, 68, 68, 0.5)');
+          // Normal/quantum mode: gradient based on blue set
+          const gradient = ctx.createLinearGradient(scaledX, scaledY, scaledX, scaledY + scaledHeight);
+          if (block.isBlueSet) {
+            gradient.addColorStop(0, isSelected ? `rgba(96, 165, 250, ${opacity})` : `rgba(59, 130, 246, ${0.9 * opacity})`);
+            gradient.addColorStop(1, isSelected ? `rgba(59, 130, 246, ${0.9 * opacity})` : `rgba(37, 99, 235, ${0.7 * opacity})`);
+            ctx.fillStyle = gradient;
+            ctx.shadowColor = isNewBlock ? `rgba(96, 165, 250, ${0.9 * opacity})` : (isSelected ? 'rgba(96, 165, 250, 0.8)' : 'rgba(59, 130, 246, 0.5)');
+          } else {
+            gradient.addColorStop(0, isSelected ? `rgba(248, 113, 113, ${opacity})` : `rgba(239, 68, 68, ${0.9 * opacity})`);
+            gradient.addColorStop(1, isSelected ? `rgba(239, 68, 68, ${0.9 * opacity})` : `rgba(220, 38, 38, ${0.7 * opacity})`);
+            ctx.fillStyle = gradient;
+            ctx.shadowColor = isNewBlock ? `rgba(248, 113, 113, ${0.9 * opacity})` : (isSelected ? 'rgba(248, 113, 113, 0.8)' : 'rgba(239, 68, 68, 0.5)');
+          }
+          ctx.shadowBlur = isNewBlock ? 30 * pulse : (isSelected ? 20 : 10);
         }
 
-        // Exciting glow effect for new blocks!
-        ctx.shadowBlur = isNewBlock ? 30 * pulse : (isSelected ? 20 : 10);
-
-        // Draw rounded rectangle for block (using scaled dimensions for animation)
+        // Draw block
         ctx.beginPath();
         ctx.roundRect(scaledX, scaledY, scaledWidth, scaledHeight, 6);
         ctx.fill();
 
-        // Draw border
+        // Border
         ctx.strokeStyle = block.isBlueSet
           ? (isSelected ? `rgba(147, 197, 253, ${opacity})` : `rgba(96, 165, 250, ${0.8 * opacity})`)
           : (isSelected ? `rgba(252, 165, 165, ${opacity})` : `rgba(248, 113, 113, ${0.8 * opacity})`);
@@ -354,30 +481,19 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         // Reset shadow
         ctx.shadowBlur = 0;
 
-        // Draw block height text (with opacity for entrance animation)
+        // Block height text
         ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
-        ctx.font = `bold ${11 * scale}px monospace`;
+        ctx.font = 'bold 11px monospace';
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`#${block.height}`, scaledX + scaledWidth / 2, scaledY + scaledHeight / 2);
+        ctx.fillText(`#${block.height}`, x + BLOCK_WIDTH / 2, y + BLOCK_HEIGHT / 2);
+
+        // Transaction count (if > 0)
+        if (block.txCount > 0) {
+          ctx.font = '8px monospace';
+          ctx.fillStyle = `rgba(16, 185, 129, ${opacity})`;
+          ctx.fillText(`${block.txCount} tx`, x + BLOCK_WIDTH / 2, y + BLOCK_HEIGHT / 2 + 12);
+        }
       });
-
-      // Draw frontier line (right edge where new blocks appear)
-      const frontierX = canvas.width - 100;
-      ctx.strokeStyle = 'rgba(34, 197, 94, 0.5)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.moveTo(frontierX, 0);
-      ctx.lineTo(frontierX, canvas.height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Draw "LIVE" label at frontier
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
-      ctx.font = 'bold 12px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('LIVE', frontierX, 30);
 
       animationFrameId.current = requestAnimationFrame(animate);
     };
@@ -389,153 +505,85 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
         cancelAnimationFrame(animationFrameId.current);
       }
     };
-  }, [blocks, selectedBlock]);
+  }, [blocks, selectedBlock, visualMode, particles]);
 
   return (
-    <div className="relative w-full bg-gradient-to-br from-slate-900 via-purple-900/20 to-slate-900 rounded-xl overflow-hidden border border-purple-500/30">
-      {/* Header */}
-      <div className="absolute top-4 left-4 z-10 bg-slate-800/80 backdrop-blur-lg rounded-lg p-4 border border-purple-500/30">
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="absolute inset-0 bg-purple-500 rounded-full blur-md animate-pulse"></div>
-            <GitBranch className="w-8 h-8 text-purple-400 relative z-10" />
-          </div>
-          <div>
-            <div className="text-sm text-slate-400">DAG-Knight Consensus</div>
-            <div className="text-xl font-bold text-white">Live BlockDAG Stream</div>
-            <div className="text-xs text-green-400 mt-1">Real-time blockchain data</div>
-          </div>
-        </div>
+    <div className="relative">
+      {/* Visual Mode Controls */}
+      <div className="absolute top-4 right-4 z-10 flex gap-2">
+        <button
+          onClick={() => setVisualMode('normal')}
+          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
+            visualMode === 'normal'
+              ? 'bg-quantum-cyan text-white shadow-lg shadow-quantum-cyan/50'
+              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
+          }`}
+        >
+          <GitBranch className="w-4 h-4 inline mr-1" />
+          Normal
+        </button>
+        <button
+          onClick={() => setVisualMode('quantum')}
+          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
+            visualMode === 'quantum'
+              ? 'bg-quantum-purple text-white shadow-lg shadow-quantum-purple/50'
+              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
+          }`}
+        >
+          <Sparkles className="w-4 h-4 inline mr-1" />
+          Quantum
+        </button>
+        <button
+          onClick={() => setVisualMode('constellation')}
+          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
+            visualMode === 'constellation'
+              ? 'bg-quantum-pink text-white shadow-lg shadow-quantum-pink/50'
+              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
+          }`}
+        >
+          <Orbit className="w-4 h-4 inline mr-1" />
+          Constellation
+        </button>
+        <button
+          onClick={() => setVisualMode('heatmap')}
+          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
+            visualMode === 'heatmap'
+              ? 'bg-quantum-orange text-white shadow-lg shadow-quantum-orange/50'
+              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
+          }`}
+        >
+          <Activity className="w-4 h-4 inline mr-1" />
+          Heatmap
+        </button>
       </div>
 
       {/* Stats Panel */}
-      <div className="absolute top-4 right-4 z-10 bg-slate-800/80 backdrop-blur-lg rounded-lg p-4 border border-purple-500/30">
-        <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <Activity className="w-5 h-5 text-blue-400" />
-            <div>
-              <div className="text-xs text-slate-400">Blue Set</div>
-              <div className="text-lg font-bold text-blue-400">{stats.blueSetCount}</div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <Zap className="w-5 h-5 text-red-400" />
-            <div>
-              <div className="text-xs text-slate-400">Red Set</div>
-              <div className="text-lg font-bold text-red-400">{stats.redSetCount}</div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <TrendingUp className="w-5 h-5 text-green-400" />
-            <div>
-              <div className="text-xs text-slate-400">Throughput</div>
-              <div className="text-lg font-bold text-green-400">{stats.blocksPerSecond.toFixed(1)} BPS</div>
-            </div>
+      <div className="absolute top-4 left-4 z-10 space-y-2">
+        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-cyan/30">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-quantum-cyan" />
+            <span className="text-xs font-bold text-white">Total Blocks: {stats.totalBlocks}</span>
           </div>
         </div>
-      </div>
-
-      {/* Block Details Panel */}
-      {selectedBlock && (
-        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20 bg-slate-800/95 backdrop-blur-lg rounded-lg p-4 border border-purple-500/50 min-w-[400px]">
-          <div className="flex items-start justify-between mb-3">
-            <div className="text-sm font-semibold text-white">Block Details</div>
-            <button
-              onClick={() => setSelectedBlock(null)}
-              className="text-slate-400 hover:text-white transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-slate-400">Height:</span>
-              <span className="text-white font-mono">#{selectedBlock.height}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-400">Hash:</span>
-              <span className="text-white font-mono text-xs">{selectedBlock.id.substring(0, 16)}...</span>
-            </div>
-            {selectedBlock.prevHash && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">Parent:</span>
-                <span className="text-white font-mono text-xs">{selectedBlock.prevHash.substring(0, 16)}...</span>
-              </div>
-            )}
-            <div className="flex justify-between">
-              <span className="text-slate-400">Set:</span>
-              <span className={selectedBlock.isBlueSet ? 'text-blue-400' : 'text-red-400'}>
-                {selectedBlock.isBlueSet ? 'Blue (Preferred)' : 'Red (Valid)'}
-              </span>
-            </div>
-            {selectedBlock.dagRound !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">DAG Round:</span>
-                <span className="text-white">{selectedBlock.dagRound}</span>
-              </div>
-            )}
-            {selectedBlock.totalDifficulty !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">Difficulty:</span>
-                <span className="text-white">{selectedBlock.totalDifficulty.toLocaleString()}</span>
-              </div>
-            )}
-            <div className="flex justify-between">
-              <span className="text-slate-400">Transactions:</span>
-              <span className="text-white">{selectedBlock.txCount}</span>
-            </div>
-            {selectedBlock.minerCount !== undefined && selectedBlock.minerCount > 0 && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">Miners:</span>
-                <span className="text-white">{selectedBlock.minerCount}</span>
-              </div>
-            )}
-            {selectedBlock.reward > 0 && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">Reward:</span>
-                <span className="text-green-400">{(selectedBlock.reward / 100_000_000).toFixed(8)} QNK</span>
-              </div>
-            )}
-            {selectedBlock.miner && (
-              <div className="flex justify-between">
-                <span className="text-slate-400">Miner:</span>
-                <span className="text-white font-mono text-xs">{selectedBlock.miner.substring(0, 16)}...</span>
-              </div>
-            )}
+        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-green/30">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-quantum-green" />
+            <span className="text-xs font-bold text-white">
+              {stats.blocksPerSecond.toFixed(2)} blocks/sec
+            </span>
           </div>
         </div>
-      )}
-
-      {/* Legend */}
-      <div className="absolute bottom-4 left-4 z-10 bg-slate-800/80 backdrop-blur-lg rounded-lg p-4 border border-purple-500/30">
-        <div className="text-sm font-semibold text-white mb-3">Legend</div>
-        <div className="space-y-2">
+        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-purple/30">
           <div className="flex items-center gap-2">
-            <div className="w-4 h-4 rounded bg-blue-500"></div>
-            <span className="text-xs text-slate-300">Blue Set (Preferred Order)</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 rounded bg-red-500"></div>
-            <span className="text-xs text-slate-300">Red Set (Valid, Non-Preferred)</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-0.5 bg-blue-400"></div>
-            <span className="text-xs text-slate-300">Parent References</span>
+            <Layers className="w-4 h-4 text-quantum-purple" />
+            <span className="text-xs font-bold text-white">8 Parallel Producers</span>
           </div>
         </div>
-      </div>
-
-      {/* Info Panel */}
-      <div className="absolute bottom-4 right-4 z-10 bg-slate-800/80 backdrop-blur-lg rounded-lg p-4 border border-purple-500/30 max-w-sm">
-        <div className="text-sm text-slate-300">
-          <strong className="text-white">DAG-Knight Ordering</strong>
-          <p className="text-xs mt-1 text-slate-400">
-            Real-time blockchain visualization. Click blocks to view details. The{' '}
-            <span className="text-blue-400">blue set</span> represents the preferred ordering backbone, while{' '}
-            <span className="text-red-400">red blocks</span> are valid but not in the preferred chain. All blocks contribute to security and throughput.
-          </p>
+        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-pink/30">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-quantum-pink" />
+            <span className="text-xs font-bold text-white">Phase 2 Active</span>
+          </div>
         </div>
       </div>
 
@@ -543,17 +591,60 @@ export default function DAGKnightVisualization({ }: DAGKnightVisualizationProps)
       <canvas
         ref={canvasRef}
         width={1200}
-        height={500}
-        className="w-full h-[500px] cursor-pointer"
+        height={NUM_LANES * LANE_HEIGHT + 100}
+        className="w-full h-auto bg-quantum-dark rounded-xl border border-quantum-purple/30 cursor-pointer"
         onClick={handleCanvasClick}
       />
 
-      {/* Timeline indicator */}
-      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-slate-900/90 to-transparent flex items-center justify-center">
-        <div className="text-xs text-slate-400 font-mono">
-          ← Older Blocks | Timeline | Newer Blocks (Live Frontier) →
+      {/* Selected Block Details */}
+      {selectedBlock && (
+        <div className="absolute bottom-4 right-4 z-10 max-w-sm">
+          <div className="p-4 bg-quantum-indigo/90 backdrop-blur-xl rounded-xl border border-quantum-cyan/50 shadow-lg">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <GitBranch className="w-4 h-4 text-quantum-cyan" />
+                Block #{selectedBlock.height}
+              </h3>
+              <button
+                onClick={() => setSelectedBlock(null)}
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-gray-400">Miner:</span>
+                <span className="text-white font-mono">{selectedBlock.miner}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Transactions:</span>
+                <span className="text-quantum-green font-bold">{selectedBlock.txCount}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Reward:</span>
+                <span className="text-quantum-cyan font-bold">{selectedBlock.reward.toFixed(8)} QUG</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Lane:</span>
+                <span className="text-quantum-purple font-bold">{selectedBlock.lane}</span>
+              </div>
+              {selectedBlock.producerId !== undefined && (
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Producer:</span>
+                  <span className="text-quantum-pink font-bold">#{selectedBlock.producerId}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span className="text-gray-400">Hash:</span>
+                <span className="text-white font-mono text-[10px]">
+                  {selectedBlock.id.substring(0, 16)}...
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

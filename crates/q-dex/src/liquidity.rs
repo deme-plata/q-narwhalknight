@@ -7,6 +7,7 @@ use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -69,9 +70,9 @@ pub struct QuantumAutomatedMarketMaker {
 impl Default for QuantumAutomatedMarketMaker {
     fn default() -> Self {
         Self {
-            golden_ratio: BigDecimal::from(1.618033988749895),
-            euler_constant: BigDecimal::from(2.718281828459045),
-            pi_constant: BigDecimal::from(3.141592653589793),
+            golden_ratio: "1.618033988749895".parse().unwrap(),
+            euler_constant: "2.718281828459045".parse().unwrap(),
+            pi_constant: "3.141592653589793".parse().unwrap(),
             quantum_slippage_reduction: 0.618, // Golden ratio reduction
             impermanent_loss_protection: 0.85, // 85% protection
             max_price_impact: 0.05,            // 5% maximum impact
@@ -136,11 +137,11 @@ impl QuantumLiquidityManager {
             token_a_reserve: BigDecimal::from(618034), // Golden ratio * 1000 * 618
             token_b_reserve: BigDecimal::from(1000000), // 1M ORBUSD
             total_shares: BigDecimal::from(785398),    // √(618034 * 1000000)
-            fee_rate: BigDecimal::from(0.003),         // 0.3%
+            fee_rate: "0.003".parse().unwrap(),         // 0.3%
             quantum_k_invariant: BigDecimal::from(618034000000i64), // x * y constant
             wave_function_state: QuantumState::Entangled,
             entanglement_strength: 0.707, // Maximum quantum correlation
-            price_uncertainty: BigDecimal::from(0.01), // 1% Heisenberg uncertainty
+            price_uncertainty: "0.01".parse().unwrap(), // 1% Heisenberg uncertainty
             liquidity_depth_quantum: BigDecimal::from(2000000), // 2M total depth
             providers_count: 42,          // Initial quantum number
             created_at: Utc::now(),
@@ -283,16 +284,18 @@ impl QuantumLiquidityManager {
             position.token_a_amount = &position.token_a_amount - &amount_a_withdraw;
             position.token_b_amount = &position.token_b_amount - &amount_b_withdraw;
 
-            // Remove position if fully withdrawn
+            // Clone pair_id before potentially removing position
+            let pair_id = position.pair_id.clone();
             let amounts_to_withdraw = (amount_a_withdraw.clone(), amount_b_withdraw.clone());
 
+            // Remove position if fully withdrawn
             if position.shares == BigDecimal::from(0) {
                 positions.remove(position_id);
             }
 
             // Update pool reserves
             self.update_pool_reserves(
-                &position.pair_id,
+                &pair_id,
                 &amount_a_withdraw,
                 &amount_b_withdraw,
                 false,
@@ -369,7 +372,7 @@ impl QuantumLiquidityManager {
             let quantum_shares = &pool.total_shares * share_percentage;
 
             // Apply golden ratio optimization
-            let golden_ratio = BigDecimal::from(1.618033988749895);
+            let golden_ratio: BigDecimal = "1.618033988749895".parse().unwrap();
             let optimized_shares = &quantum_shares * &golden_ratio / BigDecimal::from(10);
 
             Ok(optimized_shares)
@@ -478,7 +481,8 @@ impl QuantumLiquidityManager {
             let base_amount_out = numerator / denominator;
 
             // Apply quantum slippage reduction
-            let slippage_reduction = BigDecimal::from(amm.quantum_slippage_reduction);
+            use std::str::FromStr;
+            let slippage_reduction = BigDecimal::from_str(&amm.quantum_slippage_reduction.to_string())?;
             let quantum_amount_out = &base_amount_out
                 * (BigDecimal::from(1) + slippage_reduction / BigDecimal::from(100));
 
@@ -543,7 +547,7 @@ impl QuantumLiquidityManager {
             let impermanent_loss = (BigDecimal::from(1) - il_multiplier) * BigDecimal::from(100);
 
             // Apply quantum protection
-            let protection_factor = BigDecimal::from(amm.impermanent_loss_protection);
+            let protection_factor = BigDecimal::from_str(&amm.impermanent_loss_protection.to_string())?;
             let protected_loss = &impermanent_loss * (BigDecimal::from(1) - protection_factor);
 
             Ok(protected_loss)
@@ -624,6 +628,6 @@ mod tests {
             .unwrap();
 
         // Should be less than 5.72% due to quantum protection
-        assert!(il < BigDecimal::from(5.72));
+        assert!(il < "5.72".parse().unwrap());
     }
 }

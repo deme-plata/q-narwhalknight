@@ -3,7 +3,8 @@
 //! Verification of oracle submissions with quantum proofs
 
 use crate::types::*;
-use q_types::{Error, Phase, Result};
+use anyhow::Result;
+use q_types::Phase;
 
 /// Quantum Verification System
 pub struct QuantumVerification {

@@ -36,7 +36,7 @@ function App() {
     blockHeight: 0,
     peers: 0,
     isOnline: false,
-    qci: 0.42, // Quantum Coherence Index (42%)
+    qci: 0.10, // Quantum Coherence Index - starts low, calculated dynamically
   });
 
   // Debug: Log whenever currentScreen changes
@@ -144,13 +144,31 @@ function App() {
           }
 
           if (mounted) {
+            // Calculate dynamic Quantum Coherence Index (QCI)
+            const peers = data.data.connected_peers || 0;
+            const blockHeight = data.data.current_height || 0;
+            const isHealthy = data.data.network_health === 'healthy';
+
+            // QCI Components:
+            // 1. Peer connectivity (30%): More peers = better network resilience
+            const peerScore = Math.min(peers / 10, 1.0) * 0.30; // Max score at 10+ peers
+
+            // 2. Block production (30%): Higher block height = stable production
+            const blockScore = (blockHeight > 0 ? 0.30 : 0.0); // Active if producing blocks
+
+            // 3. Network health (40%): Healthy state = optimal coherence
+            const healthScore = isHealthy ? 0.40 : 0.10; // Big penalty if unhealthy
+
+            // Calculate total QCI (0.0 to 1.0)
+            const calculatedQCI = peerScore + blockScore + healthScore;
+
             setNodeData({
               balance: walletBalance,
               nodeId: data.data.node_id || '',
-              blockHeight: data.data.current_height || 0,
-              peers: data.data.connected_peers || 0,
-              isOnline: data.data.network_health === 'healthy',
-              qci: 0.42
+              blockHeight: blockHeight,
+              peers: peers,
+              isOnline: isHealthy,
+              qci: calculatedQCI
             });
           }
         }
@@ -273,26 +291,67 @@ function App() {
                 eventHex = eventHex.substring(3);
               }
 
-              console.log('💰 App.tsx: Balance update SSE event:', {
+              console.log('💰 App.tsx: Balance update SSE event received!', {
                 eventWallet: eventHex,
                 currentWallet: currentHex,
                 match: eventHex === currentHex,
+                oldBalance: balanceData.old_balance,
                 newBalance: balanceData.new_balance,
-                reason: balanceData.change_reason
+                reason: balanceData.change_reason,
+                timestamp: balanceData.timestamp
               });
 
               // Only update if this balance event is for the current wallet
               if (currentHex && eventHex === currentHex) {
-                console.log('✅ App.tsx: Balance update applied:', balanceData.new_balance);
-                setNodeData(prev => ({ ...prev, balance: balanceData.new_balance }));
+                console.log('✅ App.tsx: BALANCE UPDATE APPLIED!', {
+                  oldBalance: balanceData.old_balance,
+                  newBalance: balanceData.new_balance,
+                  currentNodeDataBalance: nodeData.balance
+                });
+                setNodeData(prev => {
+                  console.log('💰 App.tsx: setNodeData called, prev balance:', prev.balance, '-> new balance:', balanceData.new_balance);
+                  return { ...prev, balance: balanceData.new_balance };
+                });
                 // Also update cached balance
                 localStorage.setItem('cachedBalance', balanceData.new_balance.toString());
+
+                // Dispatch custom event for Dashboard to update wallet balances
+                window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                  detail: {
+                    symbol: 'QUG',
+                    balance: balanceData.new_balance,
+                    reason: balanceData.change_reason
+                  }
+                }));
+                console.log('📢 App.tsx: Dispatched wallet-balance-updated event for Dashboard');
               } else {
-                console.log('❌ App.tsx: Balance update ignored (not for current wallet)');
+                console.log('❌ App.tsx: Balance update IGNORED (not for current wallet)', {
+                  eventWallet: eventHex,
+                  currentWallet: currentHex
+                });
               }
             } else if (type === 'faucet-dispensed') {
               console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
               fetchNodeStatus();
+            } else if (type === 'loan-approved') {
+              // Handle loan approval from Quillon Bank CLI
+              const loanData = parsedData.data || parsedData;
+
+              console.log('🏦 App.tsx: Loan approved via CLI:', loanData);
+
+              // Dispatch custom event for Dashboard to show approval modal
+              window.dispatchEvent(new CustomEvent('loan-approved', {
+                detail: {
+                  loanId: loanData.loan_id,
+                  amount: loanData.amount,
+                  interestRate: loanData.interest_rate,
+                  termMonths: loanData.term_months,
+                  monthlyPayment: loanData.monthly_payment,
+                  collateralAmount: loanData.collateral_amount,
+                  collateralType: loanData.collateral_type || 'QUG',
+                }
+              }));
+              console.log('📢 App.tsx: Dispatched loan-approved event for Dashboard');
             } else {
               console.log(`📨 App.tsx: SSE event type '${type}' received:`, parsedData);
             }
@@ -391,6 +450,14 @@ function App() {
     localStorage.setItem('selectedToken', JSON.stringify(token));
   };
 
+  // Handle coin send click - navigate to transaction screen with pre-selected coin
+  const handleCoinSendClick = (coinSymbol: string) => {
+    console.log('Coin send clicked:', coinSymbol);
+    setCurrentScreen('transactions');
+    // Store selected coin in localStorage for TransactionV2 to pick up
+    localStorage.setItem('selectedCoinForSend', coinSymbol);
+  };
+
   return (
     <div className="min-h-screen bg-quantum-dark relative overflow-hidden">
       <QuantumBackground />
@@ -417,13 +484,16 @@ function App() {
           />
 
           <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
-            {currentScreen === 'dashboard' && <Dashboard key="dashboard-stable" />}
-            {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
+            {currentScreen === 'dashboard' && <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} />}
+            {currentScreen === 'transactions' && <TransactionScreenV2 />}
             {currentScreen === 'dex' && <DexScreen />}
             {currentScreen === 'explorer' && <ExplorerScreen />}
             {currentScreen === 'mining' && <MiningScreen />}
             {currentScreen === 'vm' && <VittuaVMScreen />}
-            {currentScreen === 'aichat' && <AIChatScreen />}
+            {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
+            <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
+              <AIChatScreen />
+            </div>
             {currentScreen === 'download' && <DownloadNodeScreen />}
             {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
         </main>
