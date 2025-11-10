@@ -259,6 +259,44 @@ timeout 36000 cargo build --release --package q-api-server
 timeout 36000 cargo build --release --package q-narwhal-core
 ```
 
+#### **🚨 CRITICAL: PHASE TRANSITION SAFETY (v0.9.80-beta+)**
+
+**Phase 8 revealed TWO CRITICAL BUGS that caused 100% network isolation!**
+
+When transitioning to a new phase (Phase 9, 10, etc.), you MUST fix BOTH:
+
+**Bug #1: Environment Variable Priority**
+```rust
+// ❌ WRONG - CLI args checked BEFORE environment variables
+let network_str = matches.get_one::<String>("network")
+    .map(|s| s.as_str())
+    .unwrap_or("testnet");  // Q_NETWORK_ID completely ignored!
+
+// ✅ CORRECT - Check Q_NETWORK_ID FIRST
+let network_str = std::env::var("Q_NETWORK_ID")
+    .ok()
+    .or_else(|| matches.get_one::<String>("network").map(|s| s.to_string()))
+    .unwrap_or_else(|| "testnet-phase8".to_string());
+```
+**Location**: `crates/q-api-server/src/main.rs` line ~486
+
+**Bug #2: Missing from_str() Parser Case**
+```rust
+impl std::str::FromStr for NetworkId {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "testnet-phase8" => Ok(NetworkId::TestnetPhase8),  // ✅ Must add this!
+            // ...
+        }
+    }
+}
+```
+**Location**: `crates/q-types/src/lib.rs` line ~795
+
+**BOTH bugs must be fixed or phase transitions will fail!**
+
+See `PHASE_TRANSITION_BUG_PREVENTION_CHECKLIST.md` for complete guidance.
+
 #### **Commit Standards:**
 ```bash
 git commit -s -m "feat(tor): Add dedicated circuit management
