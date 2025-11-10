@@ -921,7 +921,8 @@ impl NetworkConfig {
             NetworkId::TestnetPhase5 => Self::testnet(),  // Legacy Phase 5
             NetworkId::TestnetPhase6 => Self::testnet(),  // Legacy Phase 6 (hyperinflation bug)
             NetworkId::TestnetPhase7 => Self::testnet(),  // Phase 7 (still too high emission)
-            NetworkId::TestnetPhase8 => Self::testnet(),  // Current Phase 8 (TRUE scarcity)
+            NetworkId::TestnetPhase8 => Self::testnet(),  // Phase 8 (TRUE scarcity)
+            NetworkId::TestnetPhase9 => Self::testnet(),  // ✅ Phase 9 (Stable Scarcity - 0.05 QUG/block)
             NetworkId::Mainnet => Self::mainnet(),
         }
     }
