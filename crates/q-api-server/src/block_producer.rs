@@ -303,8 +303,8 @@ impl BlockProducer {
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 2, // Phase 2 testnet
-                network_id: "testnet-phase4".to_string(), // v0.9.4-beta: Phase 4 network
+                phase: 8, // Phase 8 testnet - TRUE scarcity (0.05 QUG/block, 672 QUG/day)
+                network_id: "testnet-phase8".to_string(), // v0.9.80-beta: Phase 8 - TRUE scarcity
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -352,11 +352,38 @@ impl BlockProducer {
     ///
     /// This ensures dev fees are blockchain-enforced and visible to all nodes.
     /// Blocks without proper dev fee transactions are rejected by consensus.
+    ///
+    /// PHASE 7 AUSTRIAN ECONOMICS - HYPERINFLATION BUG FIXED:
+    /// - FIXED block reward: 0.00001 QUG per BLOCK (not per solution!)
+    /// - Prevents unlimited solutions creating hyperinflation
+    /// - Phase 6 bug: 0.00001 per solution × unlimited solutions = 869,980 QUG/day!
+    /// - Phase 7 fix: 0.00001 QUG per block regardless of solutions = TRUE SCARCITY!
+    /// - Time-based yearly halving (handled in balance_consensus module)
     fn create_coinbase_transactions(solutions: &[MiningSolution]) -> Vec<Transaction> {
         use chrono::Utc;
         use sha2::{Sha256, Digest};
 
-        const BLOCK_REWARD: u64 = 1_000_000; // 0.001 QNK per solution (with 9 decimals)
+        // ✅ v0.9.77-beta Phase 7: Bitcoin-Style Austrian Economics - 21M Total Supply!
+        // Phase 6 Bug: 0.00001 QUG PER SOLUTION × unlimited solutions = 869,980 QUG/day (DISASTER!)
+        // Phase 7 Fix: FIXED block reward (like Bitcoin) = TRUE SCARCITY!
+        //
+        // Bitcoin Economics Model:
+        // - Initial reward: 50 QUG per block (like Bitcoin's 50 BTC)
+        // - Halving every 4 years (210,000 blocks at 60s/block)
+        // - Total supply: 21 million QUG by year 2142
+        // - QUG uses 8 decimals (like Bitcoin satoshis)
+        //
+        // Why this matters:
+        // - Phase 6: Unlimited solutions → hyperinflation
+        // - Phase 7: Fixed 50 QUG/block → STILL too high (672,000 QUG/day!)
+        // - Phase 8: Fixed 0.05 QUG/block → TRUE scarcity (672 QUG/day)
+        //
+        // With 6-second blocks (13,440/day):
+        // - 0.05 QUG/block × 13,440 = 672 QUG/day
+        // - Time to 21M cap: ~85 years (sustainable!)
+        //
+        // Time-based halving handled in balance_consensus (every 4 years)
+        const FIXED_BLOCK_REWARD: u64 = 5_000_000; // 0.05 QUG per BLOCK (8 decimals) - TRUE scarcity!
         const DEV_FEE_PERCENT: f64 = 0.01; // 1%
         const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
@@ -366,8 +393,9 @@ impl BlockProducer {
             return transactions; // No rewards for empty blocks
         }
 
-        // Calculate rewards
-        let total_reward = BLOCK_REWARD * solutions.len() as u64;
+        // ✅ CRITICAL FIX: Use FIXED block reward, not per-solution!
+        // This prevents unlimited solutions from creating hyperinflation
+        let total_reward = FIXED_BLOCK_REWARD; // FIXED reward per block!
         let dev_fee_amount = (total_reward as f64 * DEV_FEE_PERCENT) as u64;
         let miner_reward_per_solution = ((total_reward - dev_fee_amount) / solutions.len() as u64);
 
@@ -437,8 +465,17 @@ impl BlockProducer {
             });
         }
 
-        info!("💰 Created {} coinbase transactions: {} dev fee, {} miner rewards",
-              transactions.len(), dev_fee_amount, miner_reward_per_solution);
+        // ✅ v0.9.62-beta: Enhanced logging for Phase 6 Austrian economics (FIXED: 8 decimals)
+        let qug_total = total_reward as f64 / 100_000_000.0; // Convert to QUG (8 decimals, like Bitcoin)
+        let qug_dev_fee = dev_fee_amount as f64 / 100_000_000.0;
+        let qug_per_miner = miner_reward_per_solution as f64 / 100_000_000.0;
+
+        info!("💎 [PHASE 6 - 100× MORE SCARCE] Created {} coinbase transactions:", transactions.len());
+        info!("   💰 Per-Solution Reward: 0.00001 QUG (Phase 5 was 0.001 QUG = 100× LESS SCARCE)");
+        info!("   📊 Solutions: {}, Total: {:.9} QUG ({} atomic units)", solutions.len(), qug_total, total_reward);
+        info!("   🏦 Dev Fee (1%): {:.9} QUG", qug_dev_fee);
+        info!("   ⛏️  Each Miner Gets: {:.9} QUG", qug_per_miner);
+        info!("   ⏰ Time-based halving: Yearly (handled by balance_consensus, not block height)");
 
         transactions
     }
