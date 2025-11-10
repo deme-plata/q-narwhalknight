@@ -10,12 +10,21 @@ pub use sha3::{Digest, Sha3_256};
 // DAG-Knight blockchain types module
 pub mod block;
 
+// ✅ v0.9.68-beta: libp2p request-response protocol for block sync
+pub mod block_pack;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
     QuantumMetadata, HypergraphCoordinates, EnergyComponents,
     SpectralSignature, VDFProof, FinalityStatus, FinalizedBlock,
     FinalityCertificate,
+};
+
+// Re-export block pack types
+pub use block_pack::{
+    BlockPackRequest, BlockPackResponse, BlockPackProtocol,
+    BlockPackCodec, MAX_BLOCKS_PER_REQUEST,
 };
 
 // P2P block synchronization types are defined at the end of this file (BlockRequest, BlockResponse)
@@ -644,9 +653,35 @@ pub fn verify_vertex_signature(
 /// Network identifier for testnet/mainnet separation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NetworkId {
-    /// Testnet (October 2025 - ongoing development)
-    Testnet,
-    /// Mainnet (Launch: December 15, 2025 00:00 UTC)
+    /// Testnet Phase 5 (Deprecated - sync-down bugs, use Phase 6)
+    #[serde(rename = "testnet-phase5")]
+    TestnetPhase5,
+
+    /// Testnet Phase 6 (November 2025 - Deprecated)
+    /// - Austrian economics attempt #1
+    /// - Per-solution rewards (caused hyperinflation: 869,980 QUG/day)
+    /// - Sync-down protection
+    #[serde(rename = "testnet-phase6")]
+    TestnetPhase6,
+
+    /// Testnet Phase 7 (CURRENT - November 2025+)
+    /// - Austrian economics FIXED: Block-based rewards with halving
+    /// - Prevents unlimited solutions per block
+    /// - Fresh database (data-mine7)
+    /// - Double reward bug FIXED
+    #[serde(rename = "testnet-phase7")]
+    TestnetPhase7,
+
+    /// Phase 8: TRUE Scarcity - Emission Rate Fixed (v0.9.78-beta)
+    /// - Block reward: 0.05 QUG (was 50 QUG in Phase 7!)
+    /// - Daily emission: ~672 QUG (was 672,000 QUG!)
+    /// - Time to 21M: ~85 years (sustainable)
+    /// - Fresh database (data-mine8)
+    /// - 1000× MORE SCARCE than Phase 7
+    #[serde(rename = "testnet-phase8")]
+    TestnetPhase8,
+
+    /// Mainnet (Launch: TBD - After Phase 8 testing complete)
     Mainnet,
 }
 
@@ -654,7 +689,10 @@ impl NetworkId {
     /// Get the string identifier for this network
     pub fn as_str(&self) -> &'static str {
         match self {
-            NetworkId::Testnet => "testnet-phase4",
+            NetworkId::TestnetPhase5 => "testnet-phase5",
+            NetworkId::TestnetPhase6 => "testnet-phase6",
+            NetworkId::TestnetPhase7 => "testnet-phase7",
+            NetworkId::TestnetPhase8 => "testnet-phase8",
             NetworkId::Mainnet => "mainnet",
         }
     }
@@ -662,7 +700,10 @@ impl NetworkId {
     /// Get the human-readable name for this network
     pub fn display_name(&self) -> &'static str {
         match self {
-            NetworkId::Testnet => "Q-NarwhalKnight Testnet",
+            NetworkId::TestnetPhase5 => "Q-NarwhalKnight Testnet Phase 5 (Deprecated)",
+            NetworkId::TestnetPhase6 => "Q-NarwhalKnight Testnet Phase 6 (Deprecated - Hyperinflation)",
+            NetworkId::TestnetPhase7 => "Q-NarwhalKnight Testnet Phase 7 (Deprecated - Still Too High Emission)",
+            NetworkId::TestnetPhase8 => "Q-NarwhalKnight Testnet Phase 8 - TRUE Scarcity (0.05 QUG/block)",
             NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
         }
     }
@@ -670,7 +711,10 @@ impl NetworkId {
     /// Get the default API port for this network
     pub fn default_api_port(&self) -> u16 {
         match self {
-            NetworkId::Testnet => 8080,
+            NetworkId::TestnetPhase5 => 8080,
+            NetworkId::TestnetPhase6 => 8080,
+            NetworkId::TestnetPhase7 => 8080,
+            NetworkId::TestnetPhase8 => 8080,
             NetworkId::Mainnet => 8081,
         }
     }
@@ -678,7 +722,10 @@ impl NetworkId {
     /// Get the default P2P port for this network
     pub fn default_p2p_port(&self) -> u16 {
         match self {
-            NetworkId::Testnet => 9001,
+            NetworkId::TestnetPhase5 => 9001,
+            NetworkId::TestnetPhase6 => 9001,
+            NetworkId::TestnetPhase7 => 9001,
+            NetworkId::TestnetPhase8 => 9001,
             NetworkId::Mainnet => 9002,
         }
     }
@@ -747,7 +794,10 @@ impl std::str::FromStr for NetworkId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "testnet" => Ok(NetworkId::Testnet),
+            "testnet" | "testnet-phase5" => Ok(NetworkId::TestnetPhase5),
+            "testnet-phase6" => Ok(NetworkId::TestnetPhase6),
+            "testnet-phase7" => Ok(NetworkId::TestnetPhase7),
+            "testnet-phase8" => Ok(NetworkId::TestnetPhase8),
             "mainnet" => Ok(NetworkId::Mainnet),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
@@ -756,7 +806,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        NetworkId::Testnet
+        // ✅ v0.9.78-beta: Default to Phase 8 (TRUE scarcity - 0.05 QUG/block)
+        NetworkId::TestnetPhase8
     }
 }
 
@@ -792,7 +843,7 @@ impl NetworkConfig {
     /// Create testnet configuration
     pub fn testnet() -> Self {
         Self {
-            network_id: NetworkId::Testnet,
+            network_id: NetworkId::TestnetPhase6,
             genesis_hash: [
                 // Testnet genesis hash (October 2025)
                 0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
@@ -811,10 +862,9 @@ impl NetworkConfig {
             // Format: /ip4/<IP>/tcp/<P2P_PORT>/p2p/<PEER_ID>
             // If peer ID is omitted, it will be fetched automatically from http://<IP>:18080/api/v1/peer-id
             bootstrap_peers: vec![
-                // Bootstrap peers temporarily disabled until peer ID discovery is fixed
-                // Users should rely on mDNS for local network discovery
-                // Or manually connect to known peers
-                // "/ip4/185.182.185.227/tcp/9001/p2p/<PEER_ID>".to_string(),
+                // v0.9.21-beta: Re-enabled bootstrap peer with automatic peer ID discovery
+                // Network manager will auto-fetch peer ID from http://185.182.185.227:8080/api/v1/status
+                "/ip4/185.182.185.227/tcp/9001".to_string(),
             ],
         }
     }
@@ -852,7 +902,10 @@ impl NetworkConfig {
     /// Get network configuration by network ID
     pub fn from_network_id(network_id: NetworkId) -> Self {
         match network_id {
-            NetworkId::Testnet => Self::testnet(),
+            NetworkId::TestnetPhase5 => Self::testnet(),  // Legacy Phase 5
+            NetworkId::TestnetPhase6 => Self::testnet(),  // Legacy Phase 6 (hyperinflation bug)
+            NetworkId::TestnetPhase7 => Self::testnet(),  // Phase 7 (still too high emission)
+            NetworkId::TestnetPhase8 => Self::testnet(),  // Current Phase 8 (TRUE scarcity)
             NetworkId::Mainnet => Self::mainnet(),
         }
     }
@@ -1034,8 +1087,8 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_id_string_conversion() {
-        // Test NetworkId to string conversion (Phase 4 uses "testnet-phase4")
-        assert_eq!(NetworkId::Testnet.as_str(), "testnet-phase4");
+        // Test NetworkId to string conversion (Phase 4 uses "testnet-phase5")
+        assert_eq!(NetworkId::Testnet.as_str(), "testnet-phase5");
         assert_eq!(NetworkId::Mainnet.as_str(), "mainnet");
 
         // Test string parsing (still accepts "testnet" for backwards compatibility)
@@ -1063,19 +1116,19 @@ mod network_separation_tests {
         let mainnet = NetworkId::Mainnet;
 
         // Test topic prefix generation
-        assert_eq!(testnet.gossipsub_topic_prefix(), "/qnk/testnet-phase4");
+        assert_eq!(testnet.gossipsub_topic_prefix(), "/qnk/testnet-phase5");
         assert_eq!(mainnet.gossipsub_topic_prefix(), "/qnk/mainnet");
 
         // Test transaction topics
-        assert_eq!(testnet.transactions_topic(), "/qnk/testnet-phase4/transactions");
+        assert_eq!(testnet.transactions_topic(), "/qnk/testnet-phase5/transactions");
         assert_eq!(mainnet.transactions_topic(), "/qnk/mainnet/transactions");
 
         // Test block topics
-        assert_eq!(testnet.blocks_topic(), "/qnk/testnet-phase4/blocks");
+        assert_eq!(testnet.blocks_topic(), "/qnk/testnet-phase5/blocks");
         assert_eq!(mainnet.blocks_topic(), "/qnk/mainnet/blocks");
 
         // Test ACK topics
-        assert_eq!(testnet.acks_topic(), "/qnk/testnet-phase4/ack");
+        assert_eq!(testnet.acks_topic(), "/qnk/testnet-phase5/ack");
         assert_eq!(mainnet.acks_topic(), "/qnk/mainnet/ack");
 
         // Verify topics are different between networks
@@ -1350,9 +1403,9 @@ mod network_separation_tests {
             }
         }
 
-        // All testnet topics should start with /qnk/testnet-phase4 (Phase 4 network)
+        // All testnet topics should start with /qnk/testnet-phase5 (Phase 4 network)
         for topic in &testnet_topics {
-            assert!(topic.starts_with("/qnk/testnet-phase4/"));
+            assert!(topic.starts_with("/qnk/testnet-phase5/"));
         }
 
         // All mainnet topics should start with /qnk/mainnet
