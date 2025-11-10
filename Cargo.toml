@@ -58,7 +58,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference"]
 
 [workspace.package]
-version = "0.9.18-beta"
+version = "0.9.80-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
@@ -93,8 +93,8 @@ hyper = "1.0"
 
 # Networking - Enhanced for real network connectivity
 # mdns removed from default features - will be added conditionally in q-network for Linux only
-libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio"] }
-reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls"] }
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response", "cbor"] }
+reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls", "blocking"] }
 
 # Real network implementations
 arti-client = "0.9"
@@ -112,8 +112,8 @@ hex = "0.4"
 ring = "0.17"
 sha3 = "0.10"
 sha2 = "0.10"
-rand = "0.8"
-rand_chacha = "0.3"
+rand = "0.9.1"
+rand_chacha = "0.9"
 
 # Post-quantum cryptography (Phase 1+) - GLIBC compatible versions
 pqcrypto-dilithium = "0.5"
@@ -121,6 +121,64 @@ pqcrypto-kyber = "0.7"
 pqcrypto-falcon = "0.3"
 pqcrypto-traits = "0.3"
 dilithium = "0.1"
+
+# Safetensors and tokenizers for model weights (required by mistralrs-core)
+safetensors = "0.6.0"
+tokenizers = { version = "0.21.2", default-features = false }
+
+# Additional mistralrs-core dependencies (avoiding duplicates)
+utoipa = "5.3.1"
+hf-hub = { version = "0.4.2", default-features = false, features = ["ureq", "tokio", "rustls-tls"] }
+tqdm = "0.7.0"
+minijinja = { version = "2.10.2", features = ["builtins", "json"] }
+minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+regex-automata = { version = "0.4.9", features = ["meta"] }
+rustc-hash = "2.1.1"
+vob = "3.0.4"
+cfgrammar = "0.13.10"
+lrtable = "0.13.10"
+galil-seiferas = "0.1.5"
+radix_trie = "0.2.1"
+bytemuck = "1.23.0"
+tokio-rayon = "2.1.0"
+rand_isaac = "0.4.0"
+indicatif = { version = "0.17.11", features = ["rayon"] }
+strum = { version = "0.27.1", features = ["derive"] }
+derive_more = { version = "2.0.1", default-features = false, features = ["from"] }
+akin = "0.4.0"
+variantly = "0.4.0"
+derive-new = "0.7.0"
+sysinfo = "0.30.13"
+bytemuck_derive = "1.9.3"
+schemars = "0.8.22"
+serde_yaml = "0.9.34"
+serde_plain = "1.0.2"
+as-any = "0.3.2"
+llguidance = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", default-features = false, features = ["lark"], rev = "c432092" }
+toktrie_hf_tokenizers = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", rev = "c432092" }
+serde-big-array = "0.5.1"
+interprocess = "2.2.3"
+urlencoding = "2.1.3"
+scraper = "0.23.1"
+html2text = "0.14.4"
+ordered-float = "5.0.0"
+hashbrown = "0.15.3"
+bm25 = "2.2.1"
+rubato = "0.16.2"  # Audio resampling for mistral.rs audio processing
+rustfft = "6.2.0"
+hound = "3.5.1"
+apodize = "1.0.0"
+symphonia = { version = "0.5.4", default-features = false, features = ["mp3", "flac", "vorbis", "wav", "isomp4", "ogg", "pcm"] }
+statrs = "0.17.1"
+
+# Additional dependencies needed by q-ai-inference and mistralrs-core
+ahash = "0.8.12"
+libc = "0.2.172"
+csv = "1.3.1"
+dirs = "6.0.0"
+objc = "0.2.7"  # macOS/iOS only
+memmap2 = "0.9.5"
+# Note: parking_lot, num-traits, async-trait, yoke, pyo3-build-config, ctrlc, directories already exist elsewhere
 
 # Database - RocksDB for quantum storage (no SQLite needed)
 # sqlx removed - we use custom RocksDB implementation
@@ -229,7 +287,7 @@ ark-snark = "0.4"
 
 # GPU acceleration for STARK proofs
 wgpu = "0.17"
-bytemuck = { version = "1.0", features = ["derive"] }
+# bytemuck moved to mistralrs-core dependencies section above (v1.23.0)
 
 # Additional utilities
 lazy_static = "1.4"
@@ -282,46 +340,8 @@ toml = "0.8.22"
 itertools = "0.14.0"
 rand_distr = "0.5.0"
 cli-table = "0.5.0"
-dirs = "6.0.0"
-tqdm = "0.7.0"
-minijinja = { version = "2.10.2", features = ["builtins", "json"] }
-minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
-regex-automata = { version = "0.4.9", features = ["meta"] }
-rustc-hash = "2.1.1"
-vob = "3.0.4"
-cfgrammar = "0.13.10"
-lrtable = "0.13.10"
-galil-seiferas = "0.1.5"
-radix_trie = "0.2.1"
-tokio-rayon = "2.1.0"
-rand_isaac = "0.4.0"
-indicatif = { version = "0.17.11", features = ["rayon"] }
-strum = { version = "0.27.1", features = ["derive"] }
-derive_more = { version = "2.0.1", default-features = false, features = ["from"] }
-akin = "0.4.0"
-variantly = "0.4.0"
-derive-new = "0.7.0"
-sysinfo = "0.30.13"
-csv = "1.3.1"
-bytemuck_derive = "1.9.3"
-schemars = "0.8.22"
-serde_yaml = "0.9.34"
-serde_plain = "1.0.2"
-as-any = "0.3.2"
-llguidance = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", default-features = false, features = ["lark"], rev = "c432092" }
-toktrie_hf_tokenizers = {git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", rev = "c432092" }
-objc = { version = "0.2.7" }
-serde-big-array = "0.5.1"
-interprocess = "2.2.3"
-urlencoding = "2.1.3"
-scraper = "0.23.1"
-html2text = "0.14.4"
-ordered-float = "5.0.0"
-hashbrown = "0.15.3"
-ahash = "0.8.12"
-libc = "0.2.172"
-bm25 = "2.2.1"
-symphonia = { version = "0.5.4", default-features = false, features = ["mp3", "flac", "vorbis", "wav", "isomp4", "ogg", "pcm"] }
+# Note: Removed duplicate mistralrs-core dependencies (dirs, tqdm, minijinja, etc.)
+# They are already defined in lines 129-172 above
 paste = "1.0.15"
 byteorder = "1.5.0"
 yoke = "0.7.5"
@@ -337,11 +357,7 @@ http = "1.3.1"
 rust-mcp-sdk = { version = "0.4.2", default-features = false, features = ["server", "hyper-server", "2025_03_26"] }
 rust-mcp-schema = { version = "0.1.11", default-features = false, features = ["schema_utils", "2024_11_05"] }
 bindgen_cuda = { git = "https://github.com/guoqingbao/bindgen_cuda.git", version = "0.1.6" }
-rubato = "0.16.2"
-rustfft = "6.3.0"
-hound = "3.5.1"
-apodize = "1.0.0"
-statrs = "0.18.0"
+# Note: rubato, rustfft, hound, apodize, statrs already defined above (lines 167-172)
 
 # Mistral.rs internal dependencies
 mistralrs-core = { path = "mistral.rs/mistralrs-core" }
@@ -353,7 +369,5 @@ mistralrs = { path = "mistral.rs/mistralrs" }
 mistralrs-audio = { path = "mistral.rs/mistralrs-audio" }
 mistralrs-mcp = { path = "mistral.rs/mistralrs-mcp" }
 
-# HuggingFace Hub client for model downloads
-hf-hub = { version = "0.4.2", default-features = false, features = ["ureq", "tokio", "rustls-tls"] }
-
+# Note: hf-hub already defined above (line 131)
 # Note: Benchmarks are defined in individual crate Cargo.toml files
