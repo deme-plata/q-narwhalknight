@@ -843,7 +843,8 @@ impl NetworkConfig {
     /// Create testnet configuration
     pub fn testnet() -> Self {
         Self {
-            network_id: NetworkId::TestnetPhase6,
+            // ✅ v0.9.80-beta: Phase 8 - TRUE scarcity (0.05 QUG/block)
+            network_id: NetworkId::TestnetPhase8,
             genesis_hash: [
                 // Testnet genesis hash (October 2025)
                 0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
