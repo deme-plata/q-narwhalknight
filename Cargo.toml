@@ -58,7 +58,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference"]
 
 [workspace.package]
-version = "0.9.80-beta"
+version = "0.9.90-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"

@@ -483,16 +483,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Parse network configuration (testnet/mainnet)
-    // ✅ v0.9.80-beta: Check Q_NETWORK_ID environment variable FIRST, then CLI args
+    // ✅ v0.9.90-beta: Check Q_NETWORK_ID environment variable FIRST, then CLI args (Bug #2 fix)
     let network_str = std::env::var("Q_NETWORK_ID")
         .ok()
         .or_else(|| matches.get_one::<String>("network").map(|s| s.to_string()))
-        .unwrap_or_else(|| "testnet-phase8".to_string());
+        .unwrap_or_else(|| "testnet-phase9".to_string());
 
     let network_id = network_str.parse::<q_types::NetworkId>()
         .unwrap_or_else(|e| {
-            warn!("Invalid network '{}': {}. Defaulting to Phase 8.", network_str, e);
-            q_types::NetworkId::TestnetPhase8
+            warn!("Invalid network '{}': {}. Defaulting to Phase 9.", network_str, e);
+            q_types::NetworkId::TestnetPhase9
         });
 
     let mut network_config = q_types::NetworkConfig::from_network_id(network_id);

@@ -681,7 +681,16 @@ pub enum NetworkId {
     #[serde(rename = "testnet-phase8")]
     TestnetPhase8,
 
-    /// Mainnet (Launch: TBD - After Phase 8 testing complete)
+    /// Phase 9: Stable Scarcity Model (v0.9.90-beta)
+    /// - Block reward: 0.05 QUG (same as Phase 8, proven sustainable)
+    /// - Daily emission: ~672 QUG
+    /// - Time to 21M: ~85 years
+    /// - Fresh database (data-mine9)
+    /// - Lessons from Phase 8: ALL FOUR bugs fixed in implementation
+    #[serde(rename = "testnet-phase9")]
+    TestnetPhase9,
+
+    /// Mainnet (Launch: TBD - After Phase 9 testing complete)
     Mainnet,
 }
 
@@ -693,6 +702,7 @@ impl NetworkId {
             NetworkId::TestnetPhase6 => "testnet-phase6",
             NetworkId::TestnetPhase7 => "testnet-phase7",
             NetworkId::TestnetPhase8 => "testnet-phase8",
+            NetworkId::TestnetPhase9 => "testnet-phase9", // ✅ Phase 9 added
             NetworkId::Mainnet => "mainnet",
         }
     }
@@ -703,7 +713,8 @@ impl NetworkId {
             NetworkId::TestnetPhase5 => "Q-NarwhalKnight Testnet Phase 5 (Deprecated)",
             NetworkId::TestnetPhase6 => "Q-NarwhalKnight Testnet Phase 6 (Deprecated - Hyperinflation)",
             NetworkId::TestnetPhase7 => "Q-NarwhalKnight Testnet Phase 7 (Deprecated - Still Too High Emission)",
-            NetworkId::TestnetPhase8 => "Q-NarwhalKnight Testnet Phase 8 - TRUE Scarcity (0.05 QUG/block)",
+            NetworkId::TestnetPhase8 => "Q-NarwhalKnight Testnet Phase 8 (Deprecated - Four Bug Discovery)",
+            NetworkId::TestnetPhase9 => "Q-NarwhalKnight Testnet Phase 9 - Stable Scarcity (0.05 QUG/block)", // ✅ Phase 9 added
             NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
         }
     }
@@ -715,6 +726,7 @@ impl NetworkId {
             NetworkId::TestnetPhase6 => 8080,
             NetworkId::TestnetPhase7 => 8080,
             NetworkId::TestnetPhase8 => 8080,
+            NetworkId::TestnetPhase9 => 8080, // ✅ Phase 9 added
             NetworkId::Mainnet => 8081,
         }
     }
@@ -726,6 +738,7 @@ impl NetworkId {
             NetworkId::TestnetPhase6 => 9001,
             NetworkId::TestnetPhase7 => 9001,
             NetworkId::TestnetPhase8 => 9001,
+            NetworkId::TestnetPhase9 => 9001, // ✅ Phase 9 added
             NetworkId::Mainnet => 9002,
         }
     }
@@ -798,6 +811,7 @@ impl std::str::FromStr for NetworkId {
             "testnet-phase6" => Ok(NetworkId::TestnetPhase6),
             "testnet-phase7" => Ok(NetworkId::TestnetPhase7),
             "testnet-phase8" => Ok(NetworkId::TestnetPhase8),
+            "testnet-phase9" => Ok(NetworkId::TestnetPhase9), // ✅ CRITICAL: Bug #1 fix - Parser updated
             "mainnet" => Ok(NetworkId::Mainnet),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
@@ -806,8 +820,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        // ✅ v0.9.78-beta: Default to Phase 8 (TRUE scarcity - 0.05 QUG/block)
-        NetworkId::TestnetPhase8
+        // ✅ v0.9.90-beta: Default to Phase 9 (Stable Scarcity - 0.05 QUG/block)
+        NetworkId::TestnetPhase9
     }
 }
 
@@ -843,8 +857,9 @@ impl NetworkConfig {
     /// Create testnet configuration
     pub fn testnet() -> Self {
         Self {
-            // ✅ v0.9.80-beta: Phase 8 - TRUE scarcity (0.05 QUG/block)
-            network_id: NetworkId::TestnetPhase8,
+            // ✅ v0.9.90-beta: Phase 9 - Stable Scarcity (0.05 QUG/block)
+            // ✅ CRITICAL: Bug #3 fix - NetworkConfig updated to Phase 9
+            network_id: NetworkId::TestnetPhase9,
             genesis_hash: [
                 // Testnet genesis hash (October 2025)
                 0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
@@ -855,7 +870,7 @@ impl NetworkConfig {
             launch_time: DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            version: "v0.9.18-beta-testnet".to_string(),
+            version: "v0.9.90-beta-testnet".to_string(),
             chain_id: 2025, // Q-NarwhalKnight unique chain ID (year of launch)
             api_port: 8080,
             p2p_port: 9001,

@@ -303,8 +303,8 @@ impl BlockProducer {
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 8, // Phase 8 testnet - TRUE scarcity (0.05 QUG/block, 672 QUG/day)
-                network_id: "testnet-phase8".to_string(), // v0.9.80-beta: Phase 8 - TRUE scarcity
+                phase: 9, // Phase 9 testnet - Stable Scarcity (0.05 QUG/block, 672 QUG/day)
+                network_id: "testnet-phase9".to_string(), // ✅ v0.9.90-beta: Phase 9 - CRITICAL Bug #4 fix
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
