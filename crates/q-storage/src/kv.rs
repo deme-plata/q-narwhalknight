@@ -1326,6 +1326,11 @@ impl RocksDBKV {
     pub fn get_pruning_config(&self) -> &crate::pruning::PruningConfig {
         &self.pruning_config
     }
+
+    /// Get Arc<DB> handle for SafeBatchedWriter (v1.0.2-beta Phase 1A)
+    pub fn db(&self) -> Arc<DB> {
+        self.db.clone()
+    }
 }
 
 /// RocksDB statistics for monitoring

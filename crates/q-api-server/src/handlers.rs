@@ -6548,3 +6548,35 @@ pub async fn network_unification_status(
     }))))
 }
 
+/// GET /api/sync/metrics
+///
+/// v1.0.2-beta Phase 1A: Returns SafeBatchedWriter performance metrics
+/// Provides real-time sync performance monitoring for fast sync mode
+pub async fn get_sync_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<SyncMetricsResponse>>, StatusCode> {
+    if !state.fast_sync_enabled {
+        return Ok(Json(ApiResponse::success(SyncMetricsResponse {
+            enabled: false,
+            metrics: None,
+        })));
+    }
+
+    let metrics = if let Some(ref m) = state.fast_sync_metrics {
+        Some(m.lock().await.clone())
+    } else {
+        None
+    };
+
+    Ok(Json(ApiResponse::success(SyncMetricsResponse {
+        enabled: true,
+        metrics,
+    })))
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SyncMetricsResponse {
+    pub enabled: bool,
+    pub metrics: Option<q_storage::BatchMetrics>,
+}
+

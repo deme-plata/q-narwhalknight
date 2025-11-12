@@ -16,6 +16,7 @@ use tokio::time::timeout;
 use rocksdb::{WriteBatch, WriteOptions, DB};
 use anyhow::{Result, Context, bail};
 use tracing::{info, warn, error, debug};
+use serde::{Serialize, Deserialize};
 use q_types::block::QBlock;
 use crate::ordered_block_buffer::OrderedBlockBuffer;
 use crate::CF_BLOCKS;
@@ -51,13 +52,16 @@ impl Default for BatchConfig {
 }
 
 /// Metrics for monitoring batched sync performance
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BatchMetrics {
     pub blocks_flushed_total: u64,
     pub batches_flushed_total: u64,
     pub sync_failures: u64,
     pub backpressure_events: u64,
     pub integrity_errors: u64,
+    pub duration_triggers: u64,      // How many times duration trigger fired
+    pub block_count_triggers: u64,   // How many times block count trigger fired
+    pub bytes_triggers: u64,         // How many times bytes trigger fired
 }
 
 /// Safe batched writer with bounded queues and height ordering
@@ -290,18 +294,6 @@ impl SafeBatchedWriter {
     /// Get current metrics (for monitoring)
     pub fn get_metrics(&self) -> BatchMetrics {
         self.metrics.lock().unwrap().clone()
-    }
-}
-
-impl Clone for BatchMetrics {
-    fn clone(&self) -> Self {
-        Self {
-            blocks_flushed_total: self.blocks_flushed_total,
-            batches_flushed_total: self.batches_flushed_total,
-            sync_failures: self.sync_failures,
-            backpressure_events: self.backpressure_events,
-            integrity_errors: self.integrity_errors,
-        }
     }
 }
 

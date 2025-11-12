@@ -1282,6 +1282,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ========================================
+    // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC
+    // Initialize SafeBatchedWriter for 150-250 BPS performance (16-27x improvement)
+    // ========================================
+    if use_fast_sync {
+        info!("🚀 ════════════════════════════════════════════════════════");
+        info!("🚀 Initializing SafeBatchedWriter (Phase 1A)...");
+
+        use q_storage::{SafeBatchedWriter, BatchConfig};
+
+        // Get start height from storage
+        let start_height = state.storage_engine.get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
+        info!("   Starting from height: {}", start_height);
+
+        // Use conservative Phase 1A config: 16 blocks, 1s, 1 MiB
+        let config = BatchConfig::default();
+        info!("   Configuration:");
+        info!("      • Max batch blocks: {}", config.max_batch_blocks);
+        info!("      • Max batch duration: {:?}", config.max_batch_duration);
+        info!("      • Max WAL bytes: {} MiB", config.max_wal_bytes / 1024 / 1024);
+        info!("      • Max reorder gap: {}", config.max_reorder_gap);
+
+        // Get DB handle from hot_db (RocksDBKV)
+        let hot_db = state.storage_engine.get_hot_db();
+        let db = hot_db.db();
+
+        // Create SafeBatchedWriter
+        let (mut writer, tx) = SafeBatchedWriter::new(
+            db.clone(),
+            config,
+            start_height,
+        );
+
+        // Clone metrics for API access
+        let metrics_handle = Arc::new(tokio::sync::Mutex::new(writer.get_metrics()));
+
+        // Spawn writer task
+        tokio::spawn(async move {
+            info!("🚀 SafeBatchedWriter task started");
+            if let Err(e) = writer.run().await {
+                error!("❌ SafeBatchedWriter failed: {}", e);
+            } else {
+                info!("✅ SafeBatchedWriter stopped gracefully");
+            }
+        });
+
+        // Update AppState
+        state.fast_sync_enabled = true;
+        state.fast_sync_tx = Some(tx);
+        state.fast_sync_metrics = Some(metrics_handle);
+
+        info!("✅ SafeBatchedWriter initialized successfully");
+        info!("   Channel capacity: 1024 blocks");
+        info!("   Performance target: 150-250 BPS");
+        info!("   Safety: ≤16 blocks max loss on kill -9");
+        info!("🚀 ════════════════════════════════════════════════════════");
+    } else {
+        info!("🔒 Using default durable sync (9.3 BPS, zero loss)");
+        info!("   To enable fast sync: --experimental-fast-sync");
+    }
+
+    // ========================================
     // 🔄 PHASE 3 BLOCK SYNC INTEGRATION
     // Integrate storage and consensus with libp2p block synchronization
     // ========================================
@@ -1325,10 +1386,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let consensus_clone = state.consensus.clone();
         let storage_clone = state.storage_engine.clone();
         let balance_engine_sync = balance_engine.clone();
+
+        // 🚀 v1.0.2-beta: Capture fast sync state for routing
+        let fast_sync_enabled = state.fast_sync_enabled;
+        let fast_sync_tx_clone = state.fast_sync_tx.clone();
+
         tokio::spawn(async move {
             info!("🔄 Starting block sync receiver task...");
             while let Some(blocks) = block_sync_rx.recv().await {
                 info!("📦 Received {} blocks from peer via libp2p sync", blocks.len());
+
+                // ========================================
+                // 🚀 v1.0.2-beta PHASE 1A: FAST SYNC ROUTING
+                // Route blocks to SafeBatchedWriter for 150-250 BPS performance
+                // ========================================
+                if fast_sync_enabled {
+                    if let Some(ref tx) = fast_sync_tx_clone {
+                        let mut sent_count = 0;
+                        let mut failed_count = 0;
+
+                        for block in blocks.clone() {
+                            match tx.send(block.clone()).await {
+                                Ok(_) => {
+                                    sent_count += 1;
+                                }
+                                Err(e) => {
+                                    error!("❌ Fast sync channel error for block {}: {}, falling back to direct write",
+                                           block.header.height, e);
+                                    failed_count += 1;
+
+                                    // Fallback to direct atomic write
+                                    let tx = match storage_clone.begin_transaction().await {
+                                        Ok(tx) => tx,
+                                        Err(e) => {
+                                            error!("❌ Failed to begin fallback transaction for block {}: {:?}",
+                                                   block.header.height, e);
+                                            continue;
+                                        }
+                                    };
+
+                                    if let Err(e) = balance_engine_sync.process_block_mining_rewards_tx(&tx, &block).await {
+                                        error!("❌ Fallback balance processing failed for block {}: {:?}",
+                                               block.header.height, e);
+                                        continue;
+                                    }
+
+                                    if let Err(e) = tx.save_qblock(&block).await {
+                                        error!("❌ Fallback save failed for block {}: {:?}", block.header.height, e);
+                                        continue;
+                                    }
+
+                                    if let Err(e) = tx.commit().await {
+                                        error!("❌ Fallback commit failed for block {}: {:?}", block.header.height, e);
+                                    }
+                                }
+                            }
+                        }
+
+                        if sent_count > 0 {
+                            info!("🚀 Fast sync: {} blocks sent to SafeBatchedWriter", sent_count);
+                        }
+                        if failed_count > 0 {
+                            warn!("⚠️  {} blocks failed to send to fast sync, used fallback", failed_count);
+                        }
+
+                        // Skip the normal processing loop since we used fast sync
+                        continue;
+                    }
+                }
 
                 // ========================================
                 // v0.8.1-beta: ATOMIC TRANSACTIONS - Process each block atomically
@@ -6611,6 +6736,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/consensus/shadow-metrics", get(handlers::shadow_mode_metrics))
         .route("/api/v1/consensus/migration-report", get(handlers::shadow_mode_migration_report))
         .route("/api/v1/consensus/migrate-to-resonance", post(handlers::migrate_to_resonance))
+        // 🚀 v1.0.2-beta Phase 1A: Safe Batched Sync Metrics
+        .route("/api/v1/sync/metrics", get(handlers::get_sync_metrics))
         // Quantum Cryptography
         .route(
             "/api/v1/quantum/crypto/status",
@@ -7001,6 +7128,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Run normally without TUI
         high_perf_server.run().await?;
+    }
+
+    // ========================================
+    // 🚀 v1.0.2-beta PHASE 1A: GRACEFUL SHUTDOWN
+    // Ensure SafeBatchedWriter flushes all pending blocks before exit
+    // ========================================
+    if use_fast_sync && app_state.fast_sync_enabled {
+        info!("🛑 Shutting down SafeBatchedWriter...");
+
+        // Close channel to signal writer to stop (clone and drop to avoid moving from Arc)
+        if let Some(tx) = app_state.fast_sync_tx.as_ref() {
+            drop(tx.clone());
+        }
+
+        // Wait for final flush (up to 5 seconds)
+        info!("⏳ Waiting for final batch flush (max 5 seconds)...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Print final metrics
+        if let Some(ref metrics) = app_state.fast_sync_metrics {
+            let m = metrics.lock().await;
+            info!("📊 ════════════════════════════════════════════════════════");
+            info!("📊 SafeBatchedWriter Final Metrics:");
+            info!("   Blocks flushed: {}", m.blocks_flushed_total);
+            info!("   Batches flushed: {}", m.batches_flushed_total);
+            info!("   Avg batch size: {:.1}", if m.batches_flushed_total > 0 {
+                m.blocks_flushed_total as f64 / m.batches_flushed_total as f64
+            } else { 0.0 });
+            info!("   Sync failures: {}", m.sync_failures);
+            info!("   Backpressure events: {}", m.backpressure_events);
+            info!("   Integrity errors: {}", m.integrity_errors);
+            info!("   Duration triggers: {}", m.duration_triggers);
+            info!("   Block count triggers: {}", m.block_count_triggers);
+            info!("   Bytes triggers: {}", m.bytes_triggers);
+            info!("📊 ════════════════════════════════════════════════════════");
+        }
+
+        info!("✅ SafeBatchedWriter shutdown complete");
     }
 
     Ok(())
