@@ -1,0 +1,357 @@
+
+quantize.imatrix.dataset: group_40.txt
+quantize.imatrix.entries_count: 224
+quantize.imatrix.file: ./imatrix.dat
+2025-11-05T19:40:11.796341Z  WARN mistralrs_core::pipeline::gguf: Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.
+2025-11-05T19:40:14.764031Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-05T19:40:19.763738Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-05T19:40:19.763785Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-11-05T19:40:19.763791Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-11-05T19:40:22.440386Z  INFO q_api_server: ✅ mistral.rs HIGH-PERFORMANCE Engine loaded successfully!
+2025-11-05T19:40:22.440472Z  INFO q_api_server:    Model: Mistral-7B-Instruct-v0.3
+2025-11-05T19:40:22.440495Z  INFO q_api_server:    Performance: <2s first token, 5-15 tok/s on CPU
+2025-11-05T19:40:22.440517Z  INFO q_api_server:    KV-cache: ENABLED (14.27x speedup for multi-turn)
+2025-11-05T19:40:22.440539Z  INFO q_api_server:    Device: CPU (optimized GGUF Q4_K_M quantization)
+2025-11-05T19:40:22.440561Z  INFO q_api_server:    Streaming: SSE with real-time progress indicators
+2025-11-05T19:40:22.440585Z  INFO q_api_server: 🚀 Initializing High-Performance Consensus System
+2025-11-05T19:40:22.440785Z  INFO q_api_server:    Target: 50,000+ TPS (Phase 1)
+2025-11-05T19:40:22.440817Z  INFO q_api_server:    Future: 200,000+ TPS (Phase 2 - Parallel Workers)
+2025-11-05T19:40:22.440851Z  INFO q_api_server:    Future: 500,000+ TPS (Phase 3 - SIMD Crypto)
+2025-11-05T19:40:22.440874Z  INFO q_api_server:    Future: 1,000,000+ TPS (Phase 4 - io_uring Kernel I/O)
+2025-11-05T19:40:22.440902Z  INFO q_api_server:    Parallel Workers: 64 (16x CPU cores)
+2025-11-05T19:40:22.440924Z  INFO q_api_server: 📦 Initializing Production Mempool...
+2025-11-05T19:40:22.440950Z  INFO q_api_server: ✅ ProductionTorClient initialized successfully
+2025-11-05T19:40:22.440972Z  INFO q_api_server:    Note: Tor connection will be attempted when broadcasting
+2025-11-05T19:40:22.441002Z  INFO q_api_server: ✅ Production Mempool initialized with Tor broadcast
+2025-11-05T19:40:22.441024Z  INFO q_api_server:    Max transactions: 1M
+2025-11-05T19:40:22.441046Z  INFO q_api_server:    Byzantine protection: ENABLED
+2025-11-05T19:40:22.441068Z  INFO q_api_server:    Reliable broadcast: Bracha's protocol over Tor
+2025-11-05T19:40:22.441090Z  INFO q_api_server: ⚔️  Initializing DAG-Knight Consensus...
+2025-11-05T19:40:22.441112Z  INFO q_api_server:    Workers: 64 parallel vertex processors
+2025-11-05T19:40:22.441151Z  INFO q_api_server: ✅ DAG-Knight Consensus initialized successfully
+2025-11-05T19:40:22.441193Z  INFO q_api_server:    Validator ID: f45ca2ea18a6ca5e8413b666b9b5f4f4162515b7dbfc76450d4158f3e9f282f6
+2025-11-05T19:40:22.441216Z  INFO q_api_server:    Byzantine threshold: f=3 (tolerates 3 Byzantine nodes)
+2025-11-05T19:40:22.441238Z  INFO q_api_server:    Quantum anchor election: VDF-based
+2025-11-05T19:40:22.441260Z  INFO q_api_server:    Zero-message complexity ordering
+2025-11-05T19:40:22.441284Z  INFO q_api_server: 🌊 Initializing Quillon Resonance Consensus with K-Parameter analysis...
+2025-11-05T19:40:22.441312Z  INFO q_api_server: ✅ K-Parameter analyzer initialized
+2025-11-05T19:40:22.441334Z  INFO q_api_server:    Formula: K = 2π √(ΔH · Δs · ℏ) / τ
+2025-11-05T19:40:22.441356Z  INFO q_api_server:    Phase detection: Stable → Approaching → Critical
+2025-11-05T19:40:22.441378Z  INFO q_api_server:    Dynamic parameter tuning: ACTIVE
+2025-11-05T19:40:22.441400Z  INFO q_api_server: 🎭 Initializing Shadow Mode Coordinator...
+2025-11-05T19:40:22.441468Z  INFO q_api_server: ✅ Shadow Mode Coordinator initialized
+2025-11-05T19:40:22.441490Z  INFO q_api_server:    🎯 Primary: DAG-Knight Consensus
+2025-11-05T19:40:22.441512Z  INFO q_api_server:    🌊 Shadow: Quillon Resonance Consensus
+2025-11-05T19:40:22.441534Z  INFO q_api_server:    📊 Agreement Threshold: 85.0%
+2025-11-05T19:40:22.441556Z  INFO q_api_server:    🔄 Observation Rounds: 100
+2025-11-05T19:40:22.441578Z  INFO q_api_server:    ⚖️  Auto-weight adjustment: ENABLED
+2025-11-05T19:40:22.441599Z  INFO q_api_server:    String-theoretic consensus: SHADOW MODE
+2025-11-05T19:40:22.441621Z  INFO q_api_server:    Energy minimization: MONITORING
+2025-11-05T19:40:22.441642Z  INFO q_api_server:    Spectral BFT: COMPARISON
+2025-11-05T19:40:22.441664Z  INFO q_api_server: 🔄 Initializing DAG State Synchronization...
+2025-11-05T19:40:22.441688Z  INFO q_api_server: ✅ PeerRegistry initialized
+2025-11-05T19:40:22.441711Z  INFO q_api_server: ✅ PersistentChannelManager initialized with Tor circuits
+2025-11-05T19:40:22.441738Z  INFO q_api_server: ✅ DagSyncManager initialized - full sync enabled
+2025-11-05T19:40:22.441760Z  INFO q_api_server:    📦 Sync capabilities: DAG vertices, certificates, transactions
+2025-11-05T19:40:22.441795Z  INFO q_api_server:    💰 Sync capabilities: wallet balances, smart contracts
+2025-11-05T19:40:22.441817Z  INFO q_api_server:    🔗 Sync will trigger automatically on peer connection
+2025-11-05T19:40:22.441839Z  INFO q_api_server: ⚡ Initializing mining submission async queue...
+2025-11-05T19:40:22.441863Z  INFO q_api_server: ✅ Mining queue initialized - async processing enabled
+2025-11-05T19:40:22.441885Z  INFO q_api_server:    Non-blocking submission acceptance
+2025-11-05T19:40:22.441907Z  INFO q_api_server:    Background I/O processing
+2025-11-05T19:40:22.441928Z  INFO q_api_server:    Prevents server overload from mining activity
+2025-11-05T19:40:22.441950Z  INFO q_api_server: 🚀 Initializing Turbo Sync (Git-inspired fast sync)...
+2025-11-05T19:40:22.442238Z  INFO q_api_server: ✅ TRUE P2P Turbo Sync network channel configured!
+2025-11-05T19:40:22.442263Z  INFO q_api_server: 🌉 [PEER BRIDGE] Initialized TurboSync peer registry bridge
+2025-11-05T19:40:22.442302Z  INFO q_api_server: ✅ Turbo Sync initialized - 50-250x faster blockchain sync enabled!
+2025-11-05T19:40:22.442324Z  INFO q_api_server:    📦 Parallel streams: 8 (vs sequential)
+2025-11-05T19:40:22.442346Z  INFO q_api_server:    📊 Chunk size: 5,000 blocks (optimized for batched writes)
+2025-11-05T19:40:22.442368Z  INFO q_api_server:    🗜️  Compression: zstd level 3 (3-10x bandwidth reduction)
+2025-11-05T19:40:22.442390Z  INFO q_api_server:    ⚡ Pipelining: ENABLED (download + decompress simultaneously)
+2025-11-05T19:40:22.442412Z  INFO q_api_server:    🎯 Expected speed: 1,000-5,000 blocks/min (vs current ~179 blocks/min)
+2025-11-05T19:40:22.442433Z  INFO q_api_server:    🌍 Full sync time: 2-10 minutes (vs current ~14 hours)
+2025-11-05T19:40:22.442460Z  INFO q_api_server: 🔍 Checking gossipsub_rx_opt status: is_some=true
+2025-11-05T19:40:22.442489Z  INFO q_api_server: ✅ Gossipsub transaction/block synchronization enabled
+2025-11-05T19:40:22.442513Z  INFO q_api_server: ✅ [TURBO SYNC] Peer height announcement task started
+2025-11-05T19:40:22.442539Z  INFO q_api_server: ✅ HIGH-PERFORMANCE batched processor started (target: sub-60ms finality)
+2025-11-05T19:40:22.442564Z  INFO q_api_server: ✅ Mining heartbeat monitor started - detecting stalls >5 minutes
+2025-11-05T19:40:22.442590Z  INFO q_api_server: ✅ Time-based block production loop started
+2025-11-05T19:40:22.442615Z  INFO q_api_server: ✅ Active block sync loop started
+2025-11-05T19:40:22.442637Z  INFO q_api_server: 💾 Initializing IPFS-RocksDB decentralized storage system...
+2025-11-05T19:40:22.442659Z  INFO q_api_server::storage_api: Initializing IPFS-RocksDB storage system
+2025-11-05T19:40:22.443161Z  INFO q_api_server: ✅ IPFS-RocksDB storage system initialized successfully
+2025-11-05T19:40:22.443221Z  INFO q_api_server:    Distributed database backups enabled
+2025-11-05T19:40:22.443242Z  INFO q_api_server:    Content-addressed storage via IPFS
+2025-11-05T19:40:22.443264Z  INFO q_api_server:    libp2p network integration active
+2025-11-05T19:40:22.443286Z  INFO q_api_server: 🔄 Initializing database replication system...
+2025-11-05T19:40:22.443312Z  INFO q_api_server: 🚀 Starting database replication manager...
+2025-11-05T19:40:22.443340Z  INFO q_api_server::database_replication_bridge: 🌉 Creating Database Replication Bridge for gossipsub integration
+2025-11-05T19:40:22.443362Z  INFO q_api_server: 🌉 Starting database replication bridge...
+2025-11-05T19:40:22.443385Z  INFO q_api_server::database_replication_bridge: 🚀 Starting Database Replication Bridge
+2025-11-05T19:40:22.443412Z  INFO q_api_server::database_replication_bridge: ✅ Database Replication Bridge started
+2025-11-05T19:40:22.443434Z  INFO q_api_server::database_replication_bridge:    📤 Outgoing: Replication Manager → Gossipsub
+2025-11-05T19:40:22.443455Z  INFO q_api_server::database_replication_bridge:    📥 Incoming: Gossipsub → Replication Manager
+2025-11-05T19:40:22.443478Z  INFO q_api_server: ✅ Database replication bridge started successfully
+2025-11-05T19:40:22.443500Z  INFO q_api_server: 📢 Database updates topic subscription already active (set during initialization)
+2025-11-05T19:40:22.443522Z  WARN q_api_server: ⚠️  Outgoing database update forwarder disabled to prevent deadlock
+2025-11-05T19:40:22.443544Z  WARN q_api_server:    Database replication will work for incoming updates only
+2025-11-05T19:40:22.443567Z  INFO q_api_server: ✅ Database replication integrated with gossipsub
+2025-11-05T19:40:22.443589Z  INFO q_api_server:    Automatic synchronization: ENABLED
+2025-11-05T19:40:22.443610Z  INFO q_api_server:    Snapshot interval: 5 minutes
+2025-11-05T19:40:22.443632Z  INFO q_api_server:    Topic: /qnk/database-updates/1.0.0
+2025-11-05T19:40:22.443655Z  INFO q_api_server: 🔍 DEBUG: Reached after database replication - continuing initialization
+2025-11-05T19:40:22.443679Z  INFO q_api_server: ✅ Adaptive pruning scheduler started
+2025-11-05T19:40:22.443703Z  INFO q_api_server: ✅ Periodic balance sync task started (15s interval)
+2025-11-05T19:40:22.443725Z  INFO q_api_server: 🎨 Console visualization disabled - TUI mode active
+2025-11-05T19:40:22.443747Z  INFO q_api_server: 🔍 DEBUG: About to show activation banner
+2025-11-05T19:40:22.443768Z  INFO q_api_server: 🌟 ================================
+2025-11-05T19:40:22.443790Z  INFO q_api_server: 🌟   Q-NARWHALKNIGHT ACTIVATED
+2025-11-05T19:40:22.443811Z  INFO q_api_server: 🌟 ================================
+2025-11-05T19:40:22.443834Z  INFO q_api_server: 🆔 Node ID: f45ca2ea18a6ca5e8413b666b9b5f4f4162515b7dbfc76450d4158f3e9f282f6
+2025-11-05T19:40:22.443857Z  INFO q_api_server: 🧅 Tor Integration: ✅ Active (via NetworkManager)
+2025-11-05T19:40:22.443880Z  INFO q_api_server: ₿  Bitcoin Discovery: ❌ Disabled
+2025-11-05T19:40:22.443904Z  INFO q_api_server: 👻 DNS-Phantom Network: ❌ Disabled
+2025-11-05T19:40:22.443926Z  INFO q_api_server: 🔍 BEP-44 DHT Discovery: ❌ Disabled
+2025-11-05T19:40:22.443948Z  INFO q_api_server: 🚀 Production Peer Discovery: ❌ Disabled
+2025-11-05T19:40:22.443970Z  INFO q_api_server: 🌟 ================================
+2025-11-05T19:40:22.443992Z  INFO q_api_server: 🔍 DEBUG: About to build application router
+2025-11-05T19:40:22.444140Z  INFO q_api_server: 🔄 [PEER BRIDGE] Starting periodic sync task (every 5 seconds)
+2025-11-05T19:40:22.444168Z  INFO q_api_server: 🌐 [TURBO SYNC P2P] Network request processor started
+2025-11-05T19:40:22.444195Z  INFO q_api_server: 💓 Starting mining heartbeat monitor (v0.8.9-beta)...
+2025-11-05T19:40:22.444203Z  INFO q_api_server:    Stall detection threshold: 5 minutes
+2025-11-05T19:40:22.444205Z  INFO q_api_server:    Check interval: 60 seconds
+2025-11-05T19:40:22.444222Z  INFO q_api_server: 📨 Starting gossipsub transaction/block synchronization processor...
+2025-11-05T19:40:22.444242Z  INFO q_api_server: ⏰ Starting time-based block production loop...
+2025-11-05T19:40:22.444260Z  INFO q_api_server: 🚀 [TURBO SYNC] Starting peer height announcement task (5s interval for fast discovery)
+2025-11-05T19:40:22.444274Z  INFO q_api_server: 🔄 Starting OPTIMIZED active block sync loop for ultra-fast catch-up...
+2025-11-05T19:40:22.444285Z  INFO q_api_server: 🚀 Starting HIGH-PERFORMANCE batch processor (target: 20k+ TPS)
+2025-11-05T19:40:22.444443Z  INFO q_api_server::database_replication_bridge: 📤 Starting outgoing update forwarder
+2025-11-05T19:40:22.444454Z  INFO q_api_server: ✂️  Starting adaptive pruning scheduler (every 1 hour)...
+2025-11-05T19:40:22.444458Z  INFO q_api_server::database_replication_bridge: 📥 Starting incoming update forwarder
+2025-11-05T19:40:22.444464Z  INFO q_api_server: 💾 Starting periodic wallet balance sync to disk (every 15 seconds)...
+2025-11-05T19:40:22.445311Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.445348Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.445389Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 1e69e8dafa095e85, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.445445Z  INFO q_api_server::block_producer: 🎉 Producer #0 created block at height 1
+2025-11-05T19:40:22.445470Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.445491Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.445518Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash dff5a185b69e1da2, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.445540Z  INFO q_api_server::block_producer: 🎉 Producer #1 created block at height 1
+2025-11-05T19:40:22.445564Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.445586Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.445612Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 4b66b13918de6eb4, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.445635Z  INFO q_api_server::block_producer: 🎉 Producer #2 created block at height 1
+2025-11-05T19:40:22.445657Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.445679Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.445705Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash d6688262d209e64f, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.445728Z  INFO q_api_server::block_producer: 🎉 Producer #3 created block at height 1
+2025-11-05T19:40:22.445757Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.445785Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.445816Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 439eb59e2b4b4945, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.445839Z  INFO q_api_server::block_producer: 🎉 Producer #4 created block at height 1
+2025-11-05T19:40:22.445993Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.446015Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.446094Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 36cb9142f415d8ed, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.446159Z  INFO q_api_server::block_producer: 🎉 Producer #5 created block at height 1
+2025-11-05T19:40:22.446199Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.446263Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.446308Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 380702dc5f4bf1cc, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.446332Z  INFO q_api_server::block_producer: 🎉 Producer #6 created block at height 1
+2025-11-05T19:40:22.446393Z DEBUG q_api_server::block_producer: 📦 Producing empty block for DAG continuity (no mining solutions)
+2025-11-05T19:40:22.446452Z  INFO q_api_server::block_producer: 🏗️  Producing block: height=1, solutions=0 (Phase 2.2 lock-free drain)
+2025-11-05T19:40:22.446496Z  INFO q_api_server::block_producer: ✅ BLOCK PRODUCED: Height 1, Hash 8ee05621613929fe, Solutions 0, Difficulty 0
+2025-11-05T19:40:22.446559Z  INFO q_api_server::block_producer: 🎉 Producer #7 created block at height 1
+2025-11-05T19:40:22.446603Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #0: Height 1, Hash 1e69e8dafa095e85, Solutions 0
+2025-11-05T19:40:22.446674Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.446716Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.445734Z  INFO q_api_server: 📡 [COLD START] Announcing to network for bootstrap discovery (height 0)
+2025-11-05T19:40:22.448153Z  INFO q_api_server: 📡 [COLD START] Announced height 0 to bootstrap peer discovery
+2025-11-05T19:40:22.448173Z  INFO q_network::unified_network_manager: 📤 Publishing block 0 (54 bytes) to gossipsub topic: /qnk/testnet-phase4/peer-heights
+2025-11-05T19:40:22.448232Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 0 to topic /qnk/testnet-phase4/peer-heights: InsufficientPeers
+2025-11-05T19:40:22.445766Z DEBUG q_api_server: ⏳ Skipping pruning (current height: 0 < 100K minimum)
+2025-11-05T19:40:22.448894Z  INFO q_api_server: ✅ Manual block trigger endpoint DISABLED (secure by default)
+2025-11-05T19:40:22.449439Z  INFO q_api_server: 🚀 Starting parallel worker pool for 16x performance improvement
+2025-11-05T19:40:22.449473Z  INFO q_api_server:    16 parallel workers processing sharded transaction pool
+2025-11-05T19:40:22.449500Z  INFO q_api_server:    Expected TPS: 349072 (16x over 21,817 baseline)
+2025-11-05T19:40:22.449527Z  INFO q_api_server:    Full consensus pipeline: SIMD → Narwhal → DAG-Knight → Bullshark
+2025-11-05T19:40:22.449521Z  INFO q_api_server::p2p_listener: 🔗 P2P Connection Listener started on 0.0.0.0:61001
+2025-11-05T19:40:22.449571Z  INFO q_api_server::p2p_listener: 📡 Ready to accept peer connections from Alpha nodes
+2025-11-05T19:40:22.449591Z  INFO q_api_server::parallel_workers: 🔧 Initializing parallel worker pool with 16 workers
+2025-11-05T19:40:22.449618Z  INFO q_api_server::parallel_workers: 🚀 Starting 16 parallel batch processors
+2025-11-05T19:40:22.449645Z  INFO q_api_server::parallel_workers:    Expected improvement: 16x over single worker
+2025-11-05T19:40:22.449711Z  INFO q_api_server::parallel_workers:    Projected TPS: 349072 (with 21,817 baseline)
+2025-11-05T19:40:22.449785Z  INFO q_api_server::parallel_workers: ✅ All 16 workers started successfully
+2025-11-05T19:40:22.449814Z  INFO q_api_server: ✅ Parallel worker pool initialized successfully
+2025-11-05T19:40:22.449842Z  INFO q_api_server:    Workers will process transactions continuously in background
+2025-11-05T19:40:22.449868Z  INFO q_api_server: ✅ Sent SetPeerChannel command to network manager
+2025-11-05T19:40:22.449817Z DEBUG q_api_server::parallel_workers: Worker 1 starting
+2025-11-05T19:40:22.449921Z DEBUG q_api_server::parallel_workers: Worker 2 starting
+2025-11-05T19:40:22.449934Z DEBUG q_api_server::parallel_workers: Worker 3 starting
+2025-11-05T19:40:22.449937Z DEBUG q_api_server::parallel_workers: Worker 6 starting
+2025-11-05T19:40:22.449940Z DEBUG q_api_server::parallel_workers: Worker 4 starting
+2025-11-05T19:40:22.449942Z DEBUG q_api_server::parallel_workers: Worker 5 starting
+2025-11-05T19:40:22.449945Z DEBUG q_api_server::parallel_workers: Worker 7 starting
+2025-11-05T19:40:22.449947Z DEBUG q_api_server::parallel_workers: Worker 8 starting
+2025-11-05T19:40:22.449950Z DEBUG q_api_server::parallel_workers: Worker 9 starting
+2025-11-05T19:40:22.449956Z DEBUG q_api_server::parallel_workers: Worker 11 starting
+2025-11-05T19:40:22.449958Z DEBUG q_api_server::parallel_workers: Worker 10 starting
+2025-11-05T19:40:22.449961Z DEBUG q_api_server::parallel_workers: Worker 12 starting
+2025-11-05T19:40:22.449963Z DEBUG q_api_server::parallel_workers: Worker 14 starting
+2025-11-05T19:40:22.449966Z DEBUG q_api_server::parallel_workers: Worker 13 starting
+2025-11-05T19:40:22.449968Z DEBUG q_api_server::parallel_workers: Worker 15 starting
+2025-11-05T19:40:22.449977Z  INFO q_network::unified_network_manager: ✅ Peer channel set for libp2p → ConnectionManager bridge
+2025-11-05T19:40:22.449999Z  INFO q_network::unified_network_manager: 🌉 P2P peer discovery propagation ENABLED
+2025-11-05T19:40:22.449797Z DEBUG q_api_server::parallel_workers: Worker 0 starting
+2025-11-05T19:40:22.449890Z  INFO q_api_server: 🌉 libp2p → ConnectionManager bridge ENABLED
+2025-11-05T19:40:22.450980Z  INFO q_api_server: ℹ️  Database replication bridge disabled (preventing channel replacement bug)
+2025-11-05T19:40:22.451029Z  WARN q_api_server: ⚠️  Duplicate event loop spawn disabled (already running from line 565)
+2025-11-05T19:40:22.451046Z  INFO q_api_server: 🌉 Starting libp2p → ConnectionManager bridge receiver...
+2025-11-05T19:40:22.451054Z  INFO q_api_server: 🔍 DEBUG: About to initialize HTTP server
+2025-11-05T19:40:22.451106Z  INFO q_api_server: 🚀 Initializing High-Performance HTTP Server for 1M+ TPS
+2025-11-05T19:40:22.451156Z  INFO q_api_server:    TCP optimizations: NODELAY, REUSEPORT, 4MB buffers
+2025-11-05T19:40:22.451178Z  INFO q_api_server:    HTTP/2 support: Automatic via client negotiation
+2025-11-05T19:40:22.451200Z  INFO q_api_server: P2P connections will be accepted on port 61001
+2025-11-05T19:40:22.451227Z  INFO q_api_server::high_performance_server: 🚀 Starting High-Performance HTTP Server
+2025-11-05T19:40:22.451249Z  INFO q_api_server::high_performance_server:    Address: 0.0.0.0:61000
+2025-11-05T19:40:22.451278Z  INFO q_api_server::high_performance_server:    TCP buffer size: 4 MB recv, 4 MB send
+2025-11-05T19:40:22.451300Z  INFO q_api_server::high_performance_server:    TCP backlog: 1024 pending connections
+2025-11-05T19:40:22.451322Z  INFO q_api_server::high_performance_server:    Target throughput: 1,000,000+ TPS
+2025-11-05T19:40:22.451360Z  INFO q_api_server::high_performance_server:    ✓ TCP_NODELAY enabled (eliminates 40ms delay)
+2025-11-05T19:40:22.451389Z  INFO q_api_server::high_performance_server:    ✓ SO_REUSEADDR enabled
+2025-11-05T19:40:22.451412Z  INFO q_api_server::high_performance_server:    ✓ SO_REUSEPORT enabled (kernel load balancing)
+2025-11-05T19:40:22.451436Z  INFO q_api_server::high_performance_server:    ✓ TCP buffers configured
+2025-11-05T19:40:22.451477Z  INFO q_api_server::high_performance_server:    ✓ Listening with 1024 connection backlog
+2025-11-05T19:40:22.451547Z  INFO q_api_server::high_performance_server: ✅ TCP listener configured and ready
+2025-11-05T19:40:22.451574Z  INFO q_api_server::high_performance_server: 🌟 High-Performance Server READY - accepting connections...
+2025-11-05T19:40:22.451732Z  INFO q_api_server::high_performance_server:    HTTP/2 will be negotiated automatically per connection
+2025-11-05T19:40:22.466254Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.466452Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.466522Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.466594Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.466705Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 1e69e8dafa095e85, 0 txs, 1 parents)
+2025-11-05T19:40:22.466811Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.466878Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.466944Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.466971Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.467009Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.467061Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #1: Height 1, Hash dff5a185b69e1da2, Solutions 0
+2025-11-05T19:40:22.467169Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.467217Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.474082Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.474171Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.474203Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.474230Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.474261Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: dff5a185b69e1da2, 0 txs, 1 parents)
+2025-11-05T19:40:22.474307Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.474330Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.474352Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.474378Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.474402Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.474437Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #2: Height 1, Hash 4b66b13918de6eb4, Solutions 0
+2025-11-05T19:40:22.474467Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.474490Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.482115Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.482296Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.482347Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.482395Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.482430Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 4b66b13918de6eb4, 0 txs, 1 parents)
+2025-11-05T19:40:22.482485Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.482514Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.482561Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.482610Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.482662Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.482713Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #3: Height 1, Hash d6688262d209e64f, Solutions 0
+2025-11-05T19:40:22.482774Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.482819Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.507417Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.507456Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.507467Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.507669Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.507742Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: d6688262d209e64f, 0 txs, 1 parents)
+2025-11-05T19:40:22.507990Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.508004Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.508006Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.508014Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.508143Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.508413Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #4: Height 1, Hash 439eb59e2b4b4945, Solutions 0
+2025-11-05T19:40:22.508533Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.508546Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.524665Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.524706Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.524717Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.525219Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.525420Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 439eb59e2b4b4945, 0 txs, 1 parents)
+2025-11-05T19:40:22.525565Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.525577Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.525579Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.525773Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.525789Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.525906Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #5: Height 1, Hash 36cb9142f415d8ed, Solutions 0
+2025-11-05T19:40:22.525998Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.526035Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.537724Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.537765Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.537777Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.538158Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.538180Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 36cb9142f415d8ed, 0 txs, 1 parents)
+2025-11-05T19:40:22.538246Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.538258Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.538262Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.538318Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.538333Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.538341Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #6: Height 1, Hash 380702dc5f4bf1cc, Solutions 0
+2025-11-05T19:40:22.538381Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.538393Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.547366Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.547410Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.547424Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.547481Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.547502Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 380702dc5f4bf1cc, 0 txs, 1 parents)
+2025-11-05T19:40:22.547651Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.547762Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.547779Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.547863Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.547880Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.547960Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548001Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548080Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548118Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548174Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548218Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548282Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548294Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548399Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548419Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548532Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548547Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548602Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548619Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548695Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548708Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548786Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548829Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.548918Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.548960Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.549045Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.550779Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.550813Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.550818Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.550829Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.550877Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.550901Z  INFO q_api_server: ⏰ PHASE 2: TIME-BASED PARALLEL BLOCK PRODUCED by Producer #7: Height 1, Hash 8ee05621613929fe, Solutions 0
+2025-11-05T19:40:22.550921Z DEBUG q_api_server::streaming: Broadcasting event: new-block, subscriber count: 0
+2025-11-05T19:40:22.550959Z DEBUG q_api_server::streaming: Event emission skipped: no active subscribers
+2025-11-05T19:40:22.559704Z  INFO q_api_server: ✅ libp2p command channel available for TIME-BASED block 1 broadcast
+2025-11-05T19:40:22.559738Z  INFO q_api_server: ✅ TIME-BASED Block 1 serialized (396 bytes) - broadcasting to P2P network
+2025-11-05T19:40:22.559748Z  INFO q_api_server: 📡 TIME-BASED Block 1 broadcast command sent to P2P network (SYNC FIX ENABLED)
+2025-11-05T19:40:22.559756Z DEBUG q_api_server::block_producer: 🔄 Converting QBlock 1 to DAG Vertex for consensus
+2025-11-05T19:40:22.559766Z  INFO q_api_server::block_producer: ✅ Converted QBlock 1 → Vertex (ID: 8ee05621613929fe, 0 txs, 1 parents)
+2025-11-05T19:40:22.559801Z DEBUG q_api_server: Block 1 submitted to consensus (time-based), pending commit decision
+2025-11-05T19:40:22.559804Z DEBUG q_api_server: 🔍 Attempting to broadcast block 1 to P2P network (time-based)
+2025-11-05T19:40:22.559806Z  INFO q_api_server: ✅ libp2p command channel available for block 1 broadcast
+2025-11-05T19:40:22.559811Z  INFO q_api_server: ✅ Block 1 serialized (396 bytes) - sending to P2P network (time-based)
+2025-11-05T19:40:22.559815Z  INFO q_api_server: 📡 Block 1 broadcast command sent to P2P network (time-based)
+2025-11-05T19:40:22.559843Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.559907Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers
+2025-11-05T19:40:22.560016Z  INFO q_network::unified_network_manager: 📤 Publishing block 1 (396 bytes) to gossipsub topic: /qnk/testnet-phase4/blocks
+2025-11-05T19:40:22.560097Z  WARN q_network::unified_network_manager: ❌ Failed to publish block 1 to topic /qnk/testnet-phase4/blocks: InsufficientPeers

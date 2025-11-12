@@ -1,0 +1,35 @@
+# Dockerfile for testing Q-NarwhalKnight API Server
+# Lightweight Ubuntu-based container for isolated testing
+
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy the compiled binary
+COPY target/release/q-api-server /app/q-api-server
+
+# Make it executable
+RUN chmod +x /app/q-api-server
+
+# Create data directory for RocksDB
+RUN mkdir -p /app/data
+
+# Expose ports
+# 8090 - HTTP API (different from main node's 8080)
+# 9002 - P2P networking (different from main node's 9000)
+EXPOSE 8090 9002
+
+# Set environment variables for test mode
+ENV Q_DB_PATH=/app/data
+ENV Q_P2P_PORT=9002
+ENV RUST_LOG=info,q_api_server=debug,q_storage=info,q_network=debug,q_network::distributed_ai=debug
+
+# Run the server with distributed AI enabled
+CMD ["/app/q-api-server", "--port", "8090", "--node-id", "test-docker-node"]

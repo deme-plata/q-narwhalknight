@@ -90,6 +90,12 @@ eframe = { version = "0.24", optional = true }
 egui = { version = "0.24", optional = true }
 egui_plot = { version = "0.24", optional = true }
 
+# TUI framework
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+tui-textarea = { version = "0.4", optional = true }
+unicode-width = "0.1"
+
 # Math and cryptography
 sha3 = { workspace = true }
 blake3 = { workspace = true }
@@ -123,6 +129,7 @@ vulkan-mining = ["vulkano", "vulkano-shaders"]
 
 # User interfaces
 gui = ["eframe", "egui", "egui_plot"]
+tui = ["ratatui", "crossterm", "tui-textarea"]
 cli = []
 
 # Network features

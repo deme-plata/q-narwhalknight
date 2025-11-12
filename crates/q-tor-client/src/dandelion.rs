@@ -2,8 +2,8 @@
 /// Provides traffic analysis resistance by mixing transaction propagation patterns
 /// with quantum-enhanced entropy for timing obfuscation
 use anyhow::{Context, Result};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaChaRng;
+use rand::Rng;  // Keep Rng from rand (gen, gen_range methods)
+use rand_chacha::{ChaChaRng, rand_core::{RngCore, SeedableRng}};  // Use compatible trait versions
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

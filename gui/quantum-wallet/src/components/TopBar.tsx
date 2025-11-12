@@ -268,12 +268,15 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
           <div className="text-center relative">
             <motion.div
               className="font-bold text-lg bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent"
-              key={currentBalance}
-              initial={{ scale: 1.2, opacity: 0.5 }}
+              key={Math.floor(currentBalance * 100)}
+              initial={{ scale: 1.05, opacity: 1 }}
               animate={{ scale: 1, opacity: 1 }}
-              transition={{ duration: 0.3 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
-              {currentBalance.toLocaleString()} {TICKER_SYMBOL}
+              {currentBalance.toLocaleString('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 8
+              })} {TICKER_SYMBOL}
             </motion.div>
             <div className="text-amber-300/60 text-sm font-medium flex items-center gap-2 justify-center">
               <span>Total Balance</span>

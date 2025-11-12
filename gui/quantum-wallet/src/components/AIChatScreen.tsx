@@ -25,6 +25,7 @@ import {
   Users,
   Layers
 } from 'lucide-react';
+import TransactionPreviewModal from './TransactionPreviewModal';
 
 interface Message {
   id: string;
@@ -82,6 +83,11 @@ export default function AIChatScreen() {
   const backgroundGenerationRef = useRef<boolean>(false);
   const userHasScrolled = useRef(false);
   const lastScrollTop = useRef(0);
+
+  // ✅ v0.9.36-beta - AI Transaction Assistant State
+  const [transactionPreview, setTransactionPreview] = useState<any>(null);
+  const [showTransactionPreview, setShowTransactionPreview] = useState(false);
+  const [pendingTransactionMessage, setPendingTransactionMessage] = useState<string>('');
 
   // Load wallet and usage data
   const loadWalletData = async () => {
@@ -164,6 +170,22 @@ export default function AIChatScreen() {
       return () => clearInterval(interval);
     }
   }, [showMetrics]);
+
+  // Load metrics in background for the glowing icon indicator
+  useEffect(() => {
+    // Initial load
+    loadMetrics();
+
+    // Auto-refresh metrics every 5 seconds to update the icon glow
+    const interval = setInterval(() => {
+      // Only fetch in background if modal is closed (avoid duplicate fetches)
+      if (!showMetrics && !isLoadingMetrics) {
+        loadMetrics();
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [showMetrics, isLoadingMetrics]);
 
   // Auto-scroll to bottom when new messages arrive (only if user hasn't manually scrolled up)
   useEffect(() => {
@@ -612,8 +634,80 @@ export default function AIChatScreen() {
     }
   };
 
+  // ✅ v0.9.36-beta - AI Transaction Detection and Preparation
+  const detectAndPrepareTransaction = async (message: string): Promise<boolean> => {
+    // Check if message contains transaction keywords
+    const transactionKeywords = /\b(send|pay|transfer)\b.*\b(\d+(\.\d+)?)\s*(qug|quillon)\b/i;
+
+    if (!transactionKeywords.test(message)) {
+      return false; // Not a transaction request
+    }
+
+    console.log('💰 Transaction detected in message:', message);
+
+    try {
+      const walletAddress = localStorage.getItem('walletAddress') || 'default';
+
+      // Call AI Transaction Preparation API
+      const response = await fetch('/api/v1/ai/transaction/prepare', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Wallet-Address': walletAddress,
+        },
+        body: JSON.stringify({
+          natural_language_query: message,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.data) {
+        console.log('✅ Transaction preview generated:', data.data);
+        setTransactionPreview(data.data);
+        setShowTransactionPreview(true);
+        setPendingTransactionMessage(message);
+        return true; // Transaction detected and preview shown
+      } else {
+        console.error('❌ Failed to prepare transaction:', data.error);
+        return false;
+      }
+    } catch (error) {
+      console.error('❌ Transaction preparation error:', error);
+      return false;
+    }
+  };
+
+  const handleTransactionConfirm = async () => {
+    // Close modal
+    setShowTransactionPreview(false);
+
+    // TODO: Actually send the transaction to the blockchain
+    // For now, just send the message to AI chat as normal
+    setPendingTransactionMessage('');
+
+    // TODO: Implement actual transaction signing and submission
+    console.log('🚀 Transaction confirmed, would send:', transactionPreview);
+    console.log('📝 Original message:', pendingTransactionMessage);
+
+    // For now, proceed with sending the message to the AI
+    // In the future, this should create a signed transaction and submit it
+  };
+
+  const handleTransactionCancel = () => {
+    setShowTransactionPreview(false);
+    setTransactionPreview(null);
+    setPendingTransactionMessage('');
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || isGenerating) return;
+
+    // ✅ v0.9.36-beta - Check if this is a transaction request
+    const isTransaction = await detectAndPrepareTransaction(input);
+    if (isTransaction) {
+      return; // Transaction preview is shown, wait for user confirmation
+    }
 
     const userMessage = input;
     setInput('');
@@ -925,10 +1019,28 @@ export default function AIChatScreen() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowMetrics(true)}
-              className="p-2 rounded-lg hover:bg-purple-500/10 transition-all"
-              title="AI Performance Metrics"
+              className={`p-2 rounded-lg hover:bg-purple-500/10 transition-all relative ${
+                metricsData?.distributed?.nodes_participated > 1 ? 'animate-pulse' : ''
+              }`}
+              title={`AI Performance Metrics${
+                metricsData?.distributed?.nodes_participated > 1
+                  ? ` - ${metricsData.distributed.nodes_participated} Nodes Active!`
+                  : ''
+              }`}
             >
-              <Activity className="w-5 h-5 text-purple-400" />
+              <Activity
+                className={`w-5 h-5 ${
+                  metricsData?.distributed?.nodes_participated > 1
+                    ? 'text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.8)]'
+                    : 'text-purple-400'
+                }`}
+              />
+              {metricsData?.distributed?.nodes_participated > 1 && (
+                <div className="absolute -top-1 -right-1 w-3 h-3 bg-purple-500 rounded-full animate-ping" />
+              )}
+              {metricsData?.distributed?.nodes_participated > 1 && (
+                <div className="absolute -top-1 -right-1 w-3 h-3 bg-purple-500 rounded-full" />
+              )}
             </button>
             <button
               onClick={() => setShowCostsUsage(true)}
@@ -2190,6 +2302,16 @@ export default function AIChatScreen() {
           </>
         )}
       </AnimatePresence>
+
+      {/* ✅ v0.9.36-beta - AI Transaction Preview Modal */}
+      {showTransactionPreview && (
+        <TransactionPreviewModal
+          preview={transactionPreview}
+          onClose={handleTransactionCancel}
+          onConfirm={handleTransactionConfirm}
+          onCancel={handleTransactionCancel}
+        />
+      )}
     </div>
   );
 }

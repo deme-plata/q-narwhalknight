@@ -414,9 +414,9 @@ impl LatticeVRF {
             qrng.generate_bytes(32).await?
         } else {
             // Use classical secure randomness
-            use rand::RngCore;
+            use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
             let mut bytes = vec![0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            rand::rngs::OsRng.try_fill_bytes(&mut bytes).unwrap();
             bytes
         };
 

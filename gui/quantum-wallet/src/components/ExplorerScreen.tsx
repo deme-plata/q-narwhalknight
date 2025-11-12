@@ -664,24 +664,26 @@ export default function ExplorerScreen() {
         // Fetch recent smart contracts from new API endpoint
         const contractsResponse = await qnkAPI.getRecentContracts(5);
         const recentContracts: ActivityItem[] = contractsResponse.success && contractsResponse.data
-          ? contractsResponse.data.map((contract: any) => ({
-              type: 'contract' as const,
-              id: contract.address,
-              time: new Date(contract.timestamp * 1000).toLocaleString(),
-              contractInfo: {
-                address: contract.address,
-                name: contract.name,
-                type: contract.contract_type as 'evm' | 'wasm' | 'move' | 'native',
-                bytecodeSize: 0,
-                storageUsed: 0,
-                callCount: 0,
-                gasUsed: 0,
-                creator: contract.creator,
-                creationTime: new Date(contract.timestamp * 1000).toISOString(),
-                isActive: contract.is_active,
-                balance: 0
-              }
-            }))
+          ? contractsResponse.data
+              .filter((contract: any) => contract.timestamp) // Filter out placeholder data without timestamps
+              .map((contract: any) => ({
+                type: 'contract' as const,
+                id: contract.address,
+                time: new Date(contract.timestamp * 1000).toLocaleString(),
+                contractInfo: {
+                  address: contract.address,
+                  name: contract.name,
+                  type: contract.contract_type as 'evm' | 'wasm' | 'move' | 'native',
+                  bytecodeSize: 0,
+                  storageUsed: 0,
+                  callCount: 0,
+                  gasUsed: 0,
+                  creator: contract.creator,
+                  creationTime: new Date(contract.timestamp * 1000).toISOString(),
+                  isActive: contract.is_active,
+                  balance: 0
+                }
+              }))
           : [];
 
         setRecentActivity({

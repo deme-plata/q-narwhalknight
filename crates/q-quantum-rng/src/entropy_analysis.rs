@@ -528,12 +528,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_entropy_analysis() {
+        use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
         let config = super::super::quantum_tests::TestSuiteConfig::default();
         let analyzer = EntropyAnalyzer::new(config).unwrap();
 
         // Generate random test data
         let mut data = vec![0u8; 1000];
-        rand::rngs::OsRng.fill_bytes(&mut data);
+        rand::rngs::OsRng.try_fill_bytes(&mut data).unwrap();
 
         let quality = analyzer.analyze_entropy(&data).await.unwrap();
 

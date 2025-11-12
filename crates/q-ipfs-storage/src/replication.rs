@@ -99,6 +99,8 @@ pub struct DatabaseReplicationManager {
     storage: Arc<RwLock<Option<IpfsRocksStorage>>>,
     /// Configuration
     config: ReplicationConfig,
+    /// Database path (v0.9.50-beta: Make configurable to fix recurring IPFS path bug)
+    db_path: String,
     /// Replication statistics
     stats: Arc<RwLock<ReplicationStats>>,
     /// Channel for outgoing updates
@@ -111,10 +113,17 @@ pub struct DatabaseReplicationManager {
 
 impl DatabaseReplicationManager {
     /// Create a new replication manager
+    ///
+    /// # Arguments
+    /// * `node_id` - Local node identifier
+    /// * `storage` - IPFS storage instance
+    /// * `config` - Replication configuration
+    /// * `db_path` - Database path (v0.9.50-beta: from Q_DB_PATH env var)
     pub fn new(
         node_id: Vec<u8>,
         storage: Arc<RwLock<Option<IpfsRocksStorage>>>,
         config: ReplicationConfig,
+        db_path: String,
     ) -> (Self, mpsc::UnboundedReceiver<DatabaseUpdate>) {
         let (update_tx, update_rx) = mpsc::unbounded_channel();
 
@@ -122,6 +131,7 @@ impl DatabaseReplicationManager {
             node_id,
             storage,
             config,
+            db_path,
             stats: Arc::new(RwLock::new(ReplicationStats::default())),
             update_tx,
             received_sequences: Arc::new(RwLock::new(HashSet::new())),
@@ -186,10 +196,12 @@ impl DatabaseReplicationManager {
         };
 
         // Create backup (this generates the manifest CID)
-        // v0.9.8-beta FIX: Use correct database path "./data/q-narwhal-db" instead of "./data"
-        // The incorrect path was causing database blocking and block production stalls
+        // v0.9.50-beta FIX: Use configured database path from Q_DB_PATH env var
+        // Previous versions hardcoded this path, causing RECURRING block production stalls
+        // when the actual database was at a different location (e.g. ./data-mine5)
+        // This bug caused production outages in v0.9.7, v0.9.8, and v0.9.49
         let manifest_cid = storage_mut.backup_database(
-            "./data/q-narwhal-db", // Fixed: was "./data" which doesn't contain CURRENT file
+            &self.db_path, // v0.9.50-beta: Use configured path, not hardcoded!
             BackupOptions {
                 snapshot_type: SnapshotType::Full,
                 compress: true,
@@ -416,8 +428,9 @@ mod tests {
         let node_id = vec![1, 2, 3, 4];
         let storage = Arc::new(RwLock::new(None));
         let config = ReplicationConfig::default();
+        let db_path = "./data-test".to_string(); // v0.9.50-beta: Pass db_path
 
-        let (manager, _rx) = DatabaseReplicationManager::new(node_id, storage, config);
+        let (manager, _rx) = DatabaseReplicationManager::new(node_id, storage, config, db_path);
         let stats = manager.get_stats().await;
 
         assert_eq!(stats.updates_sent, 0);

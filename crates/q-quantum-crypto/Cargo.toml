@@ -34,7 +34,7 @@ hmac = "0.12"
 nalgebra = { version = "0.32", features = ["serde-serialize"] }
 ndarray = { version = "0.15", features = ["serde"] }
 num-complex = "0.4"
-statrs = "0.16"
+statrs = { workspace = true }
 
 # Serialization and data handling
 serde = { version = "1.0", features = ["derive"] }

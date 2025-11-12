@@ -2,6 +2,7 @@
 /// Supports multiple quantum entropy sources
 use anyhow::Result;
 use async_trait::async_trait;
+use rand::TryRngCore as _;  // Trait-only import for try_fill_bytes method (rand 0.9)
 use std::fmt;
 use tracing::{debug, error, info, warn};
 
@@ -234,7 +235,7 @@ impl QRNGHardware for ThermalNoiseRNG {
         // Phase 0: Simulate thermal noise with enhanced entropy
         debug!("Generating {} bytes from thermal noise (simulated)", count);
 
-        use rand::{RngCore, SeedableRng};
+        use rand::{RngCore as _, SeedableRng};  // RngCore as _ for fill_bytes trait
         use sha3::{Digest, Sha3_256};
 
         // Simulate thermal noise by mixing multiple entropy sources
@@ -254,7 +255,7 @@ impl QRNGHardware for ThermalNoiseRNG {
 
         // OS random source
         let mut os_random = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut os_random);
+        rand::rngs::OsRng.try_fill_bytes(&mut os_random).unwrap();
         entropy_sources.extend_from_slice(&os_random);
 
         // Hash all entropy sources
@@ -331,11 +332,10 @@ impl RadioNoiseRNG {
 impl QRNGHardware for RadioNoiseRNG {
     async fn generate_random_bytes(&self, count: usize) -> Result<Vec<u8>> {
         // Similar to thermal noise but with different characteristics
-        use rand::{RngCore, SeedableRng};
+        use rand::{SeedableRng, RngCore as _};  // RngCore as _ for fill_bytes
 
-        let mut rng = rand::rngs::OsRng;
         let mut bytes = vec![0u8; count];
-        rng.fill_bytes(&mut bytes);
+        rand::rngs::OsRng.try_fill_bytes(&mut bytes).unwrap();
 
         // Simulate radio noise collection time
         tokio::time::sleep(tokio::time::Duration::from_micros(
@@ -398,11 +398,10 @@ impl ChaosLaserRNG {
 #[async_trait]
 impl QRNGHardware for ChaosLaserRNG {
     async fn generate_random_bytes(&self, count: usize) -> Result<Vec<u8>> {
-        use rand::RngCore;
+        use rand::RngCore as _;  // For fill_bytes
 
-        let mut rng = rand::rngs::OsRng;
         let mut bytes = vec![0u8; count];
-        rng.fill_bytes(&mut bytes);
+        rand::rngs::OsRng.try_fill_bytes(&mut bytes).unwrap();
 
         // Very fast chaos laser simulation
         tokio::time::sleep(tokio::time::Duration::from_micros(count as u64)).await;
@@ -464,11 +463,10 @@ impl SimulationRNG {
 #[async_trait]
 impl QRNGHardware for SimulationRNG {
     async fn generate_random_bytes(&self, count: usize) -> Result<Vec<u8>> {
-        use rand::RngCore;
+        use rand::RngCore as _;  // For fill_bytes
 
-        let mut rng = rand::rngs::OsRng;
         let mut bytes = vec![0u8; count];
-        rng.fill_bytes(&mut bytes);
+        rand::rngs::OsRng.try_fill_bytes(&mut bytes).unwrap();
 
         // Minimal delay for simulation
         if count > 1024 {

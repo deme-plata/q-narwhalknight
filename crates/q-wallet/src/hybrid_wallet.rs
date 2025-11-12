@@ -72,18 +72,19 @@ impl HybridWallet {
     pub fn generate(phase: CryptoPhase) -> Self {
         let id = Uuid::new_v4();
 
+        use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
         let (ed25519_key, dilithium5_key) = match phase {
             CryptoPhase::Q0 => {
                 // Classical only: Ed25519
                 let mut secret_bytes = [0u8; 32];
-                rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+                rand::rngs::OsRng.try_fill_bytes(&mut secret_bytes).unwrap();
                 let ed25519_key = Ed25519SigningKey::from_bytes(&secret_bytes);
                 (Some(ed25519_key), None)
             }
             CryptoPhase::Q1 => {
                 // Hybrid: Both Ed25519 and Dilithium5
                 let mut secret_bytes = [0u8; 32];
-                rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+                rand::rngs::OsRng.try_fill_bytes(&mut secret_bytes).unwrap();
                 let ed25519_key = Ed25519SigningKey::from_bytes(&secret_bytes);
                 let dilithium5_key = Dilithium5KeyPair::generate();
                 (Some(ed25519_key), Some(dilithium5_key))

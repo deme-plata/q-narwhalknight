@@ -95,9 +95,9 @@ impl KyberHybridEncryption {
         aes_key.copy_from_slice(&shared_secret[..32]);
 
         // Generate random nonce for AES-GCM
-        use rand::RngCore;
+        use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
         let mut nonce = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        rand::rngs::OsRng.try_fill_bytes(&mut nonce).unwrap();
 
         // Encrypt plaintext with AES-256-GCM
         let cipher = Aes256Gcm::new(&aes_key.into());

@@ -13,6 +13,7 @@ pub mod dag_sync;
 pub mod network_manager;
 pub mod peer_registry;
 pub mod persistent_channels;
+pub mod protocol_handshake;
 
 // Real network implementations (production-ready)
 pub mod real_dht;
@@ -57,6 +58,9 @@ pub use zk_peer_height_proof::{
     PeerHeightWithProof, PeerHeightVerifier, generate_height_proof,
 };
 
+// Export protocol handshake components (v0.9.57-beta)
+pub use protocol_handshake::ProtocolHandshake;
+
 // Distributed VM, DEX, and AI modules
 pub mod distributed_vm;
 pub mod distributed_dex;
@@ -68,6 +72,7 @@ pub mod layer_forwarding;
 pub mod distributed_inference_bridge;
 pub mod kv_cache_manager;
 pub mod distributed_mistralrs_bridge;
+pub mod encrypted_tensor_forwarding; // PRIVACY: ZK + Aegis-QL encrypted tensors
 
 // Export distributed components
 pub use distributed_vm::{
@@ -84,6 +89,7 @@ pub use distributed_protocol::{
 };
 pub use distributed_ai::{
     DistributedAITopics, AIGossipsubMessage, AIMessagePayload, NodeCapability,
+    CURRENT_PROTOCOL_VERSION, // v0.9.29+ FIX: Export protocol version constant
 };
 pub use distributed_ai_coordinator::{
     DistributedAICoordinator, AINode, DistributedInferenceRequest,

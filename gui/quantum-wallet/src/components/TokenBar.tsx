@@ -429,8 +429,9 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
               <span className="text-xs text-orange-300/70 font-medium">Nitro Points</span>
               <motion.span
                 key={nitroPoints}
-                initial={{ scale: 1.2, color: '#FFD700' }}
+                initial={{ scale: 1.05, color: '#FFA500' }}
                 animate={{ scale: 1, color: '#FFA500' }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
                 className="text-lg font-bold bg-gradient-to-r from-orange-400 to-yellow-500 bg-clip-text text-transparent"
               >
                 {nitroPoints.toLocaleString()} / 1,500
@@ -699,8 +700,9 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
                       <span className="text-xs text-orange-300/50">100</span>
                       <motion.span
                         key={purchaseAmount}
-                        initial={{ scale: 1.2 }}
+                        initial={{ scale: 1.05 }}
                         animate={{ scale: 1 }}
+                        transition={{ duration: 0.2, ease: "easeOut" }}
                         className="text-lg font-bold bg-gradient-to-r from-orange-400 to-yellow-500 bg-clip-text text-transparent"
                       >
                         {purchaseAmount} Points

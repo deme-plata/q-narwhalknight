@@ -13,6 +13,7 @@ q-dag-knight = { path = "../q-dag-knight" }
 q-resonance = { path = "../q-resonance" }
 q-storage = { path = "../q-storage" }
 q-zk-stark = { path = "../q-zk-stark" }
+q-ai-inference = { path = "../q-ai-inference" }
 
 # Networking - gossipsub included from workspace
 # NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here

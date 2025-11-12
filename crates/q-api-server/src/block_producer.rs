@@ -66,6 +66,7 @@ impl Default for BlockProducerConfig {
 /// Block Producer state machine
 /// Phase 2.2: Lock-free solution queue for high-throughput block production
 /// Phase 3.1: SIMD-accelerated Merkle tree computation
+/// v0.9.99-beta: Adaptive rewards integration with BalanceConsensusEngine
 pub struct BlockProducer {
     /// Configuration
     config: BlockProducerConfig,
@@ -93,12 +94,18 @@ pub struct BlockProducer {
     /// SIMD Merkle tree computer (Phase 3.1)
     /// Optional: falls back to scalar if SIMD unavailable
     simd_merkle: Option<Arc<q_crypto_simd::SimdMerkleTree>>,
+
+    /// ✅ v0.9.99-beta: Adaptive block reward calculation
+    /// Provides throughput-independent emission (82,031 QUG/year regardless of bps)
+    /// Activates at block 200,000 for gradual migration
+    balance_consensus: Option<Arc<q_storage::BalanceConsensusEngine>>,
 }
 
 impl BlockProducer {
     /// Create new block producer
     /// Phase 2.2: Initialize with lock-free SegQueue
     /// Phase 3.1: SIMD Merkle disabled (use new_with_simd for Phase 3.1)
+    /// v0.9.99-beta: Optional adaptive rewards (backward compatible)
     pub fn new(config: BlockProducerConfig) -> Self {
         Self {
             config,
@@ -109,6 +116,26 @@ impl BlockProducer {
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: None,  // Scalar fallback
+            balance_consensus: None,  // v0.9.99-beta: Use fixed rewards (legacy mode)
+        }
+    }
+
+    /// Create new block producer with adaptive rewards
+    /// ✅ v0.9.99-beta: Recommended constructor for mainnet/testnet
+    pub fn new_with_adaptive_rewards(
+        config: BlockProducerConfig,
+        balance_consensus: Arc<q_storage::BalanceConsensusEngine>,
+    ) -> Self {
+        Self {
+            config,
+            pending_solutions: Arc::new(SegQueue::new()),
+            last_block_time: Instant::now(),
+            latest_block_hash: [0u8; 32],
+            current_height: 0,
+            total_difficulty: 0,
+            dag_round: 0,
+            simd_merkle: None,
+            balance_consensus: Some(balance_consensus),  // ✅ Adaptive rewards enabled!
         }
     }
 
@@ -142,6 +169,7 @@ impl BlockProducer {
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: Some(simd_merkle),
+            balance_consensus: None,  // v0.9.99-beta: Use fixed rewards (legacy mode)
         })
     }
 
@@ -297,14 +325,26 @@ impl BlockProducer {
         };
 
         // Create coinbase transactions (block rewards + dev fee)
-        let coinbase_transactions = Self::create_coinbase_transactions(&solutions);
+        // ✅ v0.9.99-beta: Adaptive rewards with fail-fast error handling
+        let coinbase_transactions = match self.create_coinbase_transactions(
+            &solutions,
+            self.current_height + 1,
+            timestamp,
+        ).await {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("🚨 CRITICAL: Failed to create coinbase transactions: {}", e);
+                error!("   Block production aborted - cannot produce block without valid rewards!");
+                return None; // Fail-fast! Never produce 0-reward blocks!
+            }
+        };
 
         // Create block
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 9, // Phase 9 testnet - Stable Scarcity (0.05 QUG/block, 672 QUG/day)
-                network_id: "testnet-phase9".to_string(), // ✅ v0.9.90-beta: Phase 9 - CRITICAL Bug #4 fix
+                phase: 11, // Phase 11 testnet - Data Loss FIX (0.05 QUG/block, 672 QUG/day)
+                network_id: "testnet-phase11".to_string(), // ✅ v1.0.1-beta: Phase 11 - CRITICAL Bug #4 fix
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -328,18 +368,27 @@ impl BlockProducer {
         // Calculate block hash
         let block_hash = block.calculate_hash();
 
-        // Update state
-        self.latest_block_hash = block_hash;
-        self.current_height += 1;
-        self.dag_round += 1;
-        self.last_block_time = Instant::now();
+        // ✅ v1.0.1-beta CRITICAL FIX: DO NOT ADVANCE HEIGHT YET!
+        //
+        // BEFORE: Height advanced HERE, before storage confirmation
+        // AFTER:  Height advances ONLY after save_qblock() succeeds
+        //
+        // Expert Consensus (Kimi AI, DeepSeek, ChatGPT):
+        // - "Never advance height before confirming block is on disk"
+        // - "This is the root cause of 900-block data loss on 2025-11-11"
+        // - "Async task cancellation between height++ and put_block() = catastrophic"
+        //
+        // Height advancement is now done by caller AFTER storage confirmation.
+        // See: advance_height() method (must be called after save_qblock succeeds)
 
-        info!("✅ BLOCK PRODUCED: Height {}, Hash {}, Solutions {}, Difficulty {}",
+        info!("📦 BLOCK CREATED (NOT YET SAVED): Height {}, Hash {}, Solutions {}, Difficulty {}",
             block.header.height,
             hex::encode(&block_hash[..8]),
             solutions.len(),
             block_difficulty
         );
+
+        warn!("⚠️  [v1.0.1-beta] Block created but height NOT advanced - caller MUST call advance_height() after save_qblock()");
 
         Some(block)
     }
@@ -353,49 +402,84 @@ impl BlockProducer {
     /// This ensures dev fees are blockchain-enforced and visible to all nodes.
     /// Blocks without proper dev fee transactions are rejected by consensus.
     ///
-    /// PHASE 7 AUSTRIAN ECONOMICS - HYPERINFLATION BUG FIXED:
-    /// - FIXED block reward: 0.00001 QUG per BLOCK (not per solution!)
-    /// - Prevents unlimited solutions creating hyperinflation
-    /// - Phase 6 bug: 0.00001 per solution × unlimited solutions = 869,980 QUG/day!
-    /// - Phase 7 fix: 0.00001 QUG per block regardless of solutions = TRUE SCARCITY!
-    /// - Time-based yearly halving (handled in balance_consensus module)
-    fn create_coinbase_transactions(solutions: &[MiningSolution]) -> Vec<Transaction> {
+    /// ✅ v0.9.99-beta: ADAPTIVE BLOCK REWARDS
+    /// - Blocks 0-199,999: Fixed 0.05 QUG per block (90-day migration period)
+    /// - Block 200,000+: Adaptive rewards (throughput-independent emission)
+    /// - Annual emission: 82,031 QUG/year regardless of throughput (1-10,000+ bps)
+    /// - Reward scales inversely with block rate: reward = annual_target / blocks_per_year
+    /// - Time-based halving every 4 years (handled by EmissionController)
+    ///
+    /// # Migration Strategy
+    /// - Phase 1 (Bootstrap): Fixed rewards for backward compatibility
+    /// - Phase 2 (Adaptive): Activates at block 200,000 (~90 days)
+    /// - Miners have predictable timeline to upgrade software
+    ///
+    /// # Arguments
+    /// * `solutions` - Mining solutions for this block
+    /// * `block_height` - Block height (for migration check)
+    /// * `block_timestamp` - Block timestamp (for reward calculation)
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Transaction>)` - Coinbase transactions (dev fee + miner rewards)
+    /// * `Err` - If adaptive reward calculation fails (MUST NOT be silently ignored!)
+    ///
+    /// # Error Handling
+    /// **CRITICAL**: Block production MUST abort if this method returns Err!
+    /// Producing a 0-reward block is economically catastrophic.
+    async fn create_coinbase_transactions(
+        &self,
+        solutions: &[MiningSolution],
+        block_height: u64,
+        block_timestamp: u64,
+    ) -> Result<Vec<Transaction>, anyhow::Error> {
         use chrono::Utc;
         use sha2::{Sha256, Digest};
 
-        // ✅ v0.9.77-beta Phase 7: Bitcoin-Style Austrian Economics - 21M Total Supply!
-        // Phase 6 Bug: 0.00001 QUG PER SOLUTION × unlimited solutions = 869,980 QUG/day (DISASTER!)
-        // Phase 7 Fix: FIXED block reward (like Bitcoin) = TRUE SCARCITY!
-        //
-        // Bitcoin Economics Model:
-        // - Initial reward: 50 QUG per block (like Bitcoin's 50 BTC)
-        // - Halving every 4 years (210,000 blocks at 60s/block)
-        // - Total supply: 21 million QUG by year 2142
-        // - QUG uses 8 decimals (like Bitcoin satoshis)
-        //
-        // Why this matters:
-        // - Phase 6: Unlimited solutions → hyperinflation
-        // - Phase 7: Fixed 50 QUG/block → STILL too high (672,000 QUG/day!)
-        // - Phase 8: Fixed 0.05 QUG/block → TRUE scarcity (672 QUG/day)
-        //
-        // With 6-second blocks (13,440/day):
-        // - 0.05 QUG/block × 13,440 = 672 QUG/day
-        // - Time to 21M cap: ~85 years (sustainable!)
-        //
-        // Time-based halving handled in balance_consensus (every 4 years)
-        const FIXED_BLOCK_REWARD: u64 = 5_000_000; // 0.05 QUG per BLOCK (8 decimals) - TRUE scarcity!
         const DEV_FEE_PERCENT: f64 = 0.01; // 1%
         const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        const ADAPTIVE_ACTIVATION_HEIGHT: u64 = 200_000; // ~90 days at 5-10 bps
+        const LEGACY_FIXED_REWARD: u64 = 5_000_000; // 0.05 QUG (Phase 1-10 legacy)
 
         let mut transactions = Vec::new();
 
         if solutions.is_empty() {
-            return transactions; // No rewards for empty blocks
+            return Ok(transactions); // No rewards for empty blocks
         }
 
-        // ✅ CRITICAL FIX: Use FIXED block reward, not per-solution!
-        // This prevents unlimited solutions from creating hyperinflation
-        let total_reward = FIXED_BLOCK_REWARD; // FIXED reward per block!
+        // ✅ v0.9.99-beta: MIGRATION STRATEGY - Gradual transition from fixed to adaptive
+        let total_reward = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
+            // Phase 1 (Bootstrap): Fixed 0.05 QUG reward for backward compatibility
+            info!("📊 Block #{}: Using FIXED reward (0.05 QUG) - Phase 1 Bootstrap", block_height);
+            LEGACY_FIXED_REWARD
+        } else {
+            // Phase 2 (Adaptive): Calculate reward based on throughput
+            match &self.balance_consensus {
+                Some(bc) => {
+                    // Get approximate total supply for reward calculation
+                    // Uses emission controller stats (fast, no storage I/O)
+                    let total_supply = bc.get_total_supply_approx().await
+                        .map_err(|e| anyhow::anyhow!("Failed to get total supply: {}", e))?;
+
+                    // Calculate adaptive reward
+                    let reward = bc.calculate_block_reward(block_timestamp, total_supply).await
+                        .map_err(|e| {
+                            error!("🚨 CRITICAL: Block reward calculation failed at height {}: {}", block_height, e);
+                            error!("   Block production MUST abort - cannot produce block without valid reward!");
+                            anyhow::anyhow!("Adaptive reward calculation failed: {}", e)
+                        })?;
+
+                    info!("📊 Block #{}: Adaptive reward = {} QUG (throughput-adjusted)",
+                        block_height, reward as f64 / 100_000_000.0);
+                    reward
+                }
+                None => {
+                    // Fallback to fixed if balance_consensus not provided (backward compat)
+                    warn!("⚠️  Block #{}: No balance_consensus configured - falling back to FIXED reward", block_height);
+                    warn!("   This is NOT recommended for mainnet - adaptive rewards required at block 200,000!");
+                    LEGACY_FIXED_REWARD
+                }
+            }
+        };
         let dev_fee_amount = (total_reward as f64 * DEV_FEE_PERCENT) as u64;
         let miner_reward_per_solution = ((total_reward - dev_fee_amount) / solutions.len() as u64);
 
@@ -465,19 +549,27 @@ impl BlockProducer {
             });
         }
 
-        // ✅ v0.9.62-beta: Enhanced logging for Phase 6 Austrian economics (FIXED: 8 decimals)
-        let qug_total = total_reward as f64 / 100_000_000.0; // Convert to QUG (8 decimals, like Bitcoin)
+        // ✅ v0.9.99-beta: Enhanced logging for adaptive rewards
+        let qug_total = total_reward as f64 / 100_000_000.0; // Convert to QUG (8 decimals)
         let qug_dev_fee = dev_fee_amount as f64 / 100_000_000.0;
         let qug_per_miner = miner_reward_per_solution as f64 / 100_000_000.0;
 
-        info!("💎 [PHASE 6 - 100× MORE SCARCE] Created {} coinbase transactions:", transactions.len());
-        info!("   💰 Per-Solution Reward: 0.00001 QUG (Phase 5 was 0.001 QUG = 100× LESS SCARCE)");
-        info!("   📊 Solutions: {}, Total: {:.9} QUG ({} atomic units)", solutions.len(), qug_total, total_reward);
-        info!("   🏦 Dev Fee (1%): {:.9} QUG", qug_dev_fee);
-        info!("   ⛏️  Each Miner Gets: {:.9} QUG", qug_per_miner);
-        info!("   ⏰ Time-based halving: Yearly (handled by balance_consensus, not block height)");
+        let reward_type = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
+            "FIXED (Phase 1 Bootstrap)"
+        } else {
+            "ADAPTIVE (Phase 2 - Throughput Independent)"
+        };
 
-        transactions
+        info!("💎 [v0.9.99-beta - {}] Created {} coinbase transactions:", reward_type, transactions.len());
+        info!("   📊 Block #{}: {} solutions, Total: {:.9} QUG ({} atomic units)",
+            block_height, solutions.len(), qug_total, total_reward);
+        info!("   🏦 Dev Fee (1%): {:.9} QUG → founder", qug_dev_fee);
+        info!("   ⛏️  Each Miner Gets: {:.9} QUG", qug_per_miner);
+        if block_height >= ADAPTIVE_ACTIVATION_HEIGHT {
+            info!("   ⚡ Adaptive rewards active: Emission constant at 82,031 QUG/year regardless of bps!");
+        }
+
+        Ok(transactions)
     }
 
     /// Generate quantum metadata for block
@@ -688,6 +780,32 @@ impl BlockProducer {
         self.latest_block_hash = hash;
         self.total_difficulty = difficulty;
         self.dag_round = height; // Sync DAG round with height
+    }
+
+    /// ✅ v1.0.1-beta CRITICAL FIX: Advance height ONLY after block storage confirms
+    ///
+    /// **CRITICAL**: This MUST only be called AFTER put_block() succeeds!
+    /// Calling this before storage confirmation will cause catastrophic data loss.
+    ///
+    /// # Expert Consensus
+    /// - Kimi AI: "Atomic height advancement after storage confirmation"
+    /// - DeepSeek: "Never advance height before write completes"
+    /// - ChatGPT: "Write-first, advance-second pattern is mandatory"
+    ///
+    /// # Arguments
+    /// * `block_hash` - Hash of the block that was just saved to storage
+    ///
+    /// # Safety
+    /// This method does NOT verify that the block exists on disk.
+    /// The caller MUST ensure save_qblock() returned Ok() before calling this.
+    pub fn advance_height(&mut self, block_hash: BlockHash) {
+        self.latest_block_hash = block_hash;
+        self.current_height += 1;
+        self.dag_round += 1;
+        self.last_block_time = Instant::now();
+
+        info!("✅ [v1.0.1-beta FIX] Height advanced to {} AFTER storage confirmation",
+              self.current_height);
     }
     // ==========================================
     // PHASE 3: DAG-KNIGHT CONSENSUS INTEGRATION

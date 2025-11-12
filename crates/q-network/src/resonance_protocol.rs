@@ -6,6 +6,7 @@
 //! Philosophy: We don't broadcast votes - we broadcast vibrations.
 //! The network is not a parliament - it's a symphony.
 
+use anyhow::Context; // ✅ v0.9.98-beta: For error context in fail-fast pattern
 use libp2p::gossipsub::{IdentTopic, Message, MessageId, Topic};
 use q_resonance::{
     deserialize_resonance_message, serialize_resonance_message, ResonanceCoordinator,
@@ -96,15 +97,17 @@ impl ResonanceProtocolHandler {
                     std::mem::discriminant(&msg)
                 );
 
+                // ✅ v0.9.98-beta: FAIL FAST - Propagate errors (AI Expert Consensus)
+                // ChatGPT, DeepSeek, Kimi AI all agree: "Propagate errors to gossipsub"
+                // Previous pattern (warn!) made gossipsub think message was delivered
+
                 // Forward to coordinator via channel
-                if let Err(e) = self.network_tx.send(msg.clone()) {
-                    error!("🎻 Failed to forward message to coordinator: {}", e);
-                } else {
-                    // Also process directly in coordinator
-                    if let Err(e) = self.coordinator.handle_gossip_message(msg).await {
-                        warn!("🎻 Coordinator failed to process message: {}", e);
-                    }
-                }
+                self.network_tx.send(msg.clone())
+                    .map_err(|e| anyhow::anyhow!("Failed to forward message to coordinator: {}", e))?;
+
+                // Process directly in coordinator - MUST succeed for durability
+                self.coordinator.handle_gossip_message(msg).await
+                    .context("Coordinator failed to process gossip message - durability not guaranteed")?;
 
                 Ok(())
             }

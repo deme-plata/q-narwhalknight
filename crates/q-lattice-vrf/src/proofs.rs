@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 use nalgebra::{DMatrix, DVector};
 use num_bigint::BigInt;
-use rand::RngCore;
+use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
@@ -674,7 +674,7 @@ impl ProofUtils {
     /// Generate secure randomness for proofs
     pub fn generate_secure_randomness(num_bytes: usize) -> Vec<u8> {
         let mut randomness = vec![0u8; num_bytes];
-        rand::rngs::OsRng.fill_bytes(&mut randomness);
+        rand::rngs::OsRng.try_fill_bytes(&mut randomness).unwrap();
         randomness
     }
 

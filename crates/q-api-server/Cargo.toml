@@ -178,3 +178,6 @@ tui = ["q-tui"]
 tokio-test = "0.4"
 axum-test = "14.0"
 q-vm = { path = "../q-vm" }
+
+[build-dependencies]
+chrono = "0.4"

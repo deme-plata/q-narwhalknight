@@ -1,7 +1,7 @@
 // Transaction Validation Fix
-// This module fixes the unit conversion issue where amounts are incorrectly multiplied by 100,000,000
+// QUG uses 9 decimals (1 QUG = 1,000,000,000 base units)
 
-export const QNK_UNIT_MULTIPLIER = 100000000;
+export const QNK_UNIT_MULTIPLIER = 1000000000;
 
 /**
  * Check if an amount has been unit-converted

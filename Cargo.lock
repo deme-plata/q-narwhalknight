@@ -29,6 +29,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
+name = "accelerate-src"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
+
+[[package]]
 name = "accesskit"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -483,6 +489,9 @@ name = "anyhow"
 version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+dependencies = [
+ "backtrace",
+]
 
 [[package]]
 name = "apodize"
@@ -2152,6 +2161,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen_cuda"
+version = "0.1.7"
+source = "git+https://github.com/guoqingbao/bindgen_cuda.git#19e33d0e55fec148f53aaed144de401ff1fd9a6a"
+dependencies = [
+ "glob",
+ "num_cpus",
+ "rayon",
+]
+
+[[package]]
 name = "bip39"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2787,7 +2806,7 @@ checksum = "d5b18de020c2729dbf7ac390325312644808b6ba9b7962f1f724e9185b1d53c7"
 dependencies = [
  "byteorder",
  "gemm 0.17.1",
- "half",
+ "half 2.7.1",
  "memmap2 0.9.9",
  "num-traits",
  "num_cpus",
@@ -2805,35 +2824,16 @@ name = "candle-core"
 version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
 dependencies = [
+ "accelerate-src",
  "byteorder",
- "float8",
- "gemm 0.17.1",
- "half",
- "memmap2 0.9.9",
- "num-traits",
- "num_cpus",
- "rand 0.9.2",
- "rand_distr 0.5.1",
- "rayon",
- "safetensors 0.6.2",
- "thiserror 1.0.69",
- "ug",
- "yoke 0.7.5",
- "zip 1.1.4",
-]
-
-[[package]]
-name = "candle-core"
-version = "0.9.1"
-source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
-dependencies = [
- "byteorder",
- "candle-kernels",
- "candle-metal-kernels",
+ "candle-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "candle-metal-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
  "cudarc 0.17.4",
  "float8",
  "gemm 0.17.1",
- "half",
+ "half 2.7.1",
+ "intel-mkl-src",
+ "libc",
  "memmap2 0.9.9",
  "metal 0.27.0",
  "num-traits",
@@ -2851,11 +2851,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-core"
+version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
+dependencies = [
+ "byteorder",
+ "candle-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-metal-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "cudarc 0.17.4",
+ "float8",
+ "gemm 0.17.1",
+ "half 2.7.1",
+ "memmap2 0.9.9",
+ "metal 0.27.0",
+ "num-traits",
+ "num_cpus",
+ "rand 0.9.2",
+ "rand_distr 0.5.1",
+ "rayon",
+ "safetensors 0.6.2",
+ "thiserror 1.0.69",
+ "ug",
+ "ug-cuda",
+ "ug-metal",
+ "yoke 0.7.5",
+ "zip 1.1.4",
+]
+
+[[package]]
+name = "candle-flash-attn"
+version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
+dependencies = [
+ "anyhow",
+ "bindgen_cuda 0.1.5",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "half 2.7.1",
+]
+
+[[package]]
+name = "candle-flash-attn-v3"
+version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
+dependencies = [
+ "anyhow",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "half 2.7.1",
+ "num_cpus",
+ "rayon",
+]
+
+[[package]]
+name = "candle-kernels"
+version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
+dependencies = [
+ "bindgen_cuda 0.1.5",
+]
+
+[[package]]
 name = "candle-kernels"
 version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
- "bindgen_cuda",
+ "bindgen_cuda 0.1.5",
+]
+
+[[package]]
+name = "candle-metal-kernels"
+version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
+dependencies = [
+ "half 2.7.1",
+ "metal 0.27.0",
+ "once_cell",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -2863,7 +2934,7 @@ name = "candle-metal-kernels"
 version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
- "half",
+ "half 2.7.1",
  "metal 0.27.0",
  "once_cell",
  "thiserror 1.0.69",
@@ -2877,7 +2948,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b006b30f66a0d94fc9cef0ac4de6ce510565f35ae2c6c35ce5d4aacfb0fc8eeb"
 dependencies = [
  "candle-core 0.6.0",
- "half",
+ "half 2.7.1",
  "num-traits",
  "rayon",
  "safetensors 0.4.5",
@@ -2888,10 +2959,28 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.9.1"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=5e6c385#5e6c385147daa6ec06a27e715dbb594581bdefec"
+dependencies = [
+ "accelerate-src",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "candle-metal-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "half 2.7.1",
+ "intel-mkl-src",
+ "metal 0.27.0",
+ "num-traits",
+ "rayon",
+ "safetensors 0.6.2",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
  "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
- "half",
+ "half 2.7.1",
  "num-traits",
  "rayon",
  "safetensors 0.6.2",
@@ -3013,7 +3102,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d067ad48b8650848b989a59a86c6c36a995d02d2bf778d45c3c5d57bc2718f02"
 dependencies = [
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -3096,6 +3185,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf 0.12.1",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3119,7 +3218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
- "half",
+ "half 2.7.1",
 ]
 
 [[package]]
@@ -3214,7 +3313,6 @@ dependencies = [
  "anstyle",
  "clap_lex 0.7.6",
  "strsim 0.11.1",
- "terminal_size",
 ]
 
 [[package]]
@@ -3486,6 +3584,20 @@ dependencies = [
  "castaway",
  "cfg-if",
  "itoa",
+ "ryu",
+ "static_assertions",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b79c4069c6cad78e2e0cdfcbd26275770669fb39fd308a752dc110e83b9af32"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
  "ryu",
  "static_assertions",
 ]
@@ -3904,7 +4016,7 @@ dependencies = [
  "log",
  "regalloc2 0.5.1",
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -3925,7 +4037,7 @@ dependencies = [
  "log",
  "regalloc2 0.9.3",
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -4006,7 +4118,7 @@ dependencies = [
  "cranelift-codegen 0.91.1",
  "log",
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -4018,7 +4130,7 @@ dependencies = [
  "cranelift-codegen 0.101.4",
  "log",
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -4041,7 +4153,7 @@ checksum = "f32e81605f352cf37af5463f11cd7deec7b6572741931a8d372f7fdd4a744f5d"
 dependencies = [
  "cranelift-codegen 0.101.4",
  "libc",
- "target-lexicon",
+ "target-lexicon 0.12.16",
 ]
 
 [[package]]
@@ -4225,6 +4337,22 @@ dependencies = [
 
 [[package]]
 name = "crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+dependencies = [
+ "bitflags 2.10.0",
+ "crossterm_winapi",
+ "mio 1.1.0",
+ "parking_lot 0.12.5",
+ "rustix 0.38.44",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi 0.3.9",
+]
+
+[[package]]
+name = "crossterm"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
@@ -4284,7 +4412,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa",
- "phf",
+ "phf 0.11.3",
  "smallvec",
 ]
 
@@ -4363,7 +4491,7 @@ version = "0.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17200eb07e7d85a243aa1bf4569a7aa998385ba98d14833973a817a63cc86e92"
 dependencies = [
- "half",
+ "half 2.7.1",
  "libloading 0.8.9",
 ]
 
@@ -4373,7 +4501,7 @@ version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9dd759ab14920eb9c07729a7e611cfa30da9088ee96c868a6faffb70c93e678a"
 dependencies = [
- "half",
+ "half 2.7.1",
  "libloading 0.8.9",
 ]
 
@@ -6239,7 +6367,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83197f59927b46c04a183a619b7c29df34e63e63c7869320862268c0ef687e0"
 dependencies = [
  "bit_field",
- "half",
+ "half 2.7.1",
  "lebe",
  "miniz_oxide",
  "rayon-core",
@@ -6476,7 +6604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4203231de188ebbdfb85c11f3c20ca2b063945710de04e7b59268731e728b462"
 dependencies = [
  "cudarc 0.17.4",
- "half",
+ "half 2.7.1",
  "num-traits",
 ]
 
@@ -7061,7 +7189,7 @@ checksum = "a2e7ea062c987abcd8db95db917b4ffb4ecdfd0668471d8dc54734fdff2354e8"
 dependencies = [
  "bytemuck",
  "dyn-stack 0.10.0",
- "half",
+ "half 2.7.1",
  "num-complex",
  "num-traits",
  "once_cell",
@@ -7081,7 +7209,7 @@ checksum = "a352d4a69cbe938b9e2a9cb7a3a63b7e72f9349174a2752a558a8a563510d0f3"
 dependencies = [
  "bytemuck",
  "dyn-stack 0.13.2",
- "half",
+ "half 2.7.1",
  "libm",
  "num-complex",
  "num-traits",
@@ -7103,7 +7231,7 @@ dependencies = [
  "dyn-stack 0.10.0",
  "gemm-common 0.17.1",
  "gemm-f32 0.17.1",
- "half",
+ "half 2.7.1",
  "num-complex",
  "num-traits",
  "paste",
@@ -7121,7 +7249,7 @@ dependencies = [
  "dyn-stack 0.13.2",
  "gemm-common 0.18.2",
  "gemm-f32 0.18.2",
- "half",
+ "half 2.7.1",
  "num-complex",
  "num-traits",
  "paste",
@@ -7667,6 +7795,12 @@ dependencies = [
  "tokio-util",
  "tracing",
 ]
+
+[[package]]
+name = "half"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
 
 [[package]]
 name = "half"
@@ -9042,6 +9176,19 @@ name = "input-sys"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd4f5b4d1c00331c5245163aacfe5f20be75b564c7112d45893d4ae038119eb0"
+
+[[package]]
+name = "instability"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "435d80800b936787d62688c927b6490e887c7ef5ff9ce922c6c6050fca75eb9a"
+dependencies = [
+ "darling 0.20.11",
+ "indoc",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
+]
 
 [[package]]
 name = "instant"
@@ -11055,7 +11202,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7a7213d12e1864c0f002f52c2923d4556935a43dec5e71355c2760e0f6e7a18"
 dependencies = [
  "log",
- "phf",
+ "phf 0.11.3",
  "phf_codegen",
  "string_cache",
  "string_cache_codegen",
@@ -11388,18 +11535,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69d83b0086dc8ecf3ce9ae2874b2d1290252e2a30720bea58a5c6639b0092873"
 dependencies = [
  "libc",
+ "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "mistralrs"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
- "candle-nn 0.9.1",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
  "clap 4.5.50",
  "either",
  "futures",
@@ -11416,8 +11563,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "apodize",
@@ -11427,9 +11573,9 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+version = "1.0.0-beta"
 dependencies = [
+ "accelerate-src",
  "ahash 0.8.12",
  "akin",
  "anyhow",
@@ -11437,11 +11583,14 @@ dependencies = [
  "as-any",
  "async-trait",
  "base64 0.22.1",
+ "bindgen_cuda 0.1.7",
  "bm25",
  "bytemuck",
  "bytemuck_derive",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
- "candle-nn 0.9.1",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "candle-flash-attn",
+ "candle-flash-attn-v3",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
  "cfgrammar",
  "chrono",
  "clap 4.5.50",
@@ -11453,7 +11602,7 @@ dependencies = [
  "float8",
  "futures",
  "galil-seiferas",
- "half",
+ "half 2.7.1",
  "hashbrown 0.15.5",
  "hf-hub",
  "hound",
@@ -11462,21 +11611,26 @@ dependencies = [
  "image 0.25.8",
  "indexmap 2.12.0",
  "indicatif",
+ "intel-mkl-src",
  "interprocess",
  "itertools 0.14.0",
  "libc",
  "llguidance",
  "lrtable",
+ "metal 0.27.0",
  "minijinja",
  "minijinja-contrib",
  "mistralrs-audio",
  "mistralrs-mcp",
+ "mistralrs-paged-attn",
  "mistralrs-quant",
  "mistralrs-vision",
  "num-traits",
+ "objc",
  "once_cell",
  "ordered-float 5.1.0",
  "parking_lot 0.12.5",
+ "pyo3",
  "radix_trie",
  "rand 0.9.2",
  "rand_distr 0.5.1",
@@ -11497,11 +11651,11 @@ dependencies = [
  "serde_json",
  "serde_plain",
  "serde_yaml",
- "statrs 0.18.0",
+ "statrs",
  "strum 0.27.2",
  "symphonia",
  "sysinfo 0.30.13",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
  "tokenizers",
  "tokio",
  "tokio-rayon",
@@ -11512,6 +11666,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.20",
  "urlencoding",
+ "utoipa",
  "uuid 1.18.1",
  "variantly",
  "vob",
@@ -11519,18 +11674,19 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
  "futures-util",
  "http 1.3.1",
+ "pyo3",
  "reqwest 0.12.24",
  "rust-mcp-schema",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-test",
  "tokio-tungstenite 0.24.0",
  "tracing",
  "utoipa",
@@ -11538,18 +11694,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "mistralrs-quant"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+name = "mistralrs-paged-attn"
+version = "1.0.0-beta"
 dependencies = [
- "byteorder",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
- "candle-nn 0.9.1",
+ "anyhow",
+ "bindgen_cuda 0.1.7",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
  "float8",
- "half",
+ "half 2.7.1",
+ "metal 0.27.0",
+ "once_cell",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "mistralrs-quant"
+version = "1.0.0-beta"
+dependencies = [
+ "bindgen_cuda 0.1.7",
+ "byteorder",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
+ "float8",
+ "half 2.7.1",
  "hf-hub",
  "lazy_static",
  "memmap2 0.9.9",
+ "metal 0.27.0",
  "once_cell",
  "paste",
  "rayon",
@@ -11557,7 +11728,7 @@ dependencies = [
  "safetensors 0.6.2",
  "serde",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "yoke 0.7.5",
@@ -11565,10 +11736,9 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "0.6.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git#bc0384ba9f5d8d007480d7e4a132d959e3c83309"
+version = "1.0.0-beta"
 dependencies = [
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=5e6c385)",
  "image 0.25.8",
  "rayon",
 ]
@@ -11854,65 +12024,21 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d506eb7e08d6329505faa8a3a00a5dcc6de9f76e0c77e4b75763ae3c770831ff"
-dependencies = [
- "approx 0.5.1",
- "matrixmultiply",
- "nalgebra-macros 0.1.0",
- "num-complex",
- "num-rational",
- "num-traits",
- "rand 0.8.5",
- "rand_distr 0.4.3",
- "simba 0.6.0",
- "typenum",
-]
-
-[[package]]
-name = "nalgebra"
 version = "0.32.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5c17de023a86f59ed79891b2e5d5a94c705dbe904a5b5c9c952ea6221b03e4"
 dependencies = [
  "approx 0.5.1",
  "matrixmultiply",
- "nalgebra-macros 0.2.2",
- "num-complex",
- "num-rational",
- "num-traits",
- "serde",
- "simba 0.8.1",
- "typenum",
-]
-
-[[package]]
-name = "nalgebra"
-version = "0.33.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
-dependencies = [
- "approx 0.5.1",
- "matrixmultiply",
+ "nalgebra-macros",
  "num-complex",
  "num-rational",
  "num-traits",
  "rand 0.8.5",
  "rand_distr 0.4.3",
- "simba 0.9.1",
+ "serde",
+ "simba",
  "typenum",
-]
-
-[[package]]
-name = "nalgebra-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01fcc0b8149b4632adc89ac3b7b31a12fb6099a0317a4eb2ebff574ef7de7218"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -13325,7 +13451,7 @@ dependencies = [
  "approx 0.5.1",
  "fast-srgb8",
  "palette_derive",
- "phf",
+ "phf 0.11.3",
 ]
 
 [[package]]
@@ -13647,7 +13773,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
  "phf_macros",
- "phf_shared",
+ "phf_shared 0.11.3",
+]
+
+[[package]]
+name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
 ]
 
 [[package]]
@@ -13657,7 +13792,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
 dependencies = [
  "phf_generator",
- "phf_shared",
+ "phf_shared 0.11.3",
 ]
 
 [[package]]
@@ -13666,7 +13801,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
- "phf_shared",
+ "phf_shared 0.11.3",
  "rand 0.8.5",
 ]
 
@@ -13677,7 +13812,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
 dependencies = [
  "phf_generator",
- "phf_shared",
+ "phf_shared 0.11.3",
  "proc-macro2",
  "quote",
  "syn 2.0.108",
@@ -13688,6 +13823,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
 ]
@@ -14501,16 +14645,97 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo3"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8970a78afe0628a3e3430376fc5fd76b6b45c4d43360ffd6cdd40bdde72b682a"
+dependencies = [
+ "anyhow",
+ "bigdecimal",
+ "chrono",
+ "chrono-tz",
+ "either",
+ "eyre",
+ "hashbrown 0.15.5",
+ "iana-time-zone",
+ "indexmap 2.12.0",
+ "indoc",
+ "libc",
+ "lock_api",
+ "memoffset 0.9.1",
+ "num-bigint",
+ "num-complex",
+ "num-rational",
+ "once_cell",
+ "ordered-float 5.1.0",
+ "parking_lot 0.12.5",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+ "rust_decimal",
+ "serde",
+ "smallvec",
+ "unindent",
+ "uuid 1.18.1",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "458eb0c55e7ece017adeba38f2248ff3ac615e53660d7c71a238d7d2a01c7598"
+dependencies = [
+ "once_cell",
+ "target-lexicon 0.13.3",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7114fe5457c61b276ab77c5055f206295b812608083644a5c5b2640c3102565c"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8725c0a622b374d6cb051d11a0983786448f7785336139c3c94f5aa6bef7e50"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn 2.0.108",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4109984c22491085343c05b0dbc54ddc405c3cf7b4374fc533f5c3313a572ccc"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "pyo3-build-config",
+ "quote",
+ "syn 2.0.108",
+]
+
+[[package]]
 name = "q-aegis-ql"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "criterion 0.5.1",
  "getrandom 0.2.16",
  "hex",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "rayon",
  "serde",
  "serde_json",
@@ -14521,7 +14746,7 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
@@ -14529,7 +14754,7 @@ dependencies = [
  "async-trait",
  "bincode 1.3.3",
  "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
- "candle-nn 0.9.1",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "chrono",
  "either",
  "flate2",
@@ -14540,11 +14765,11 @@ dependencies = [
  "itertools 0.14.0",
  "libp2p 0.54.1",
  "mistralrs",
+ "mistralrs-core",
  "num_cpus",
  "once_cell",
  "parking_lot 0.12.5",
  "q-aegis-ql",
- "q-network",
  "q-types",
  "q-zk-stark",
  "rand 0.8.5",
@@ -14565,7 +14790,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "argon2",
@@ -14684,7 +14909,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14714,7 +14939,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -14742,7 +14967,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14760,7 +14985,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "prometheus",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "sha3 0.10.8",
@@ -14824,7 +15049,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14837,7 +15062,7 @@ dependencies = [
  "q-narwhal-core",
  "q-quantum-rng",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "sha3 0.10.8",
@@ -14851,7 +15076,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14865,7 +15090,7 @@ dependencies = [
  "q-quantum-rng",
  "q-tor-client",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -14875,7 +15100,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14908,7 +15133,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14923,11 +15148,11 @@ dependencies = [
  "q-lattice-vrf",
  "q-quantum-rng",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "sha3 0.10.8",
- "statrs 0.16.1",
+ "statrs",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -14947,7 +15172,7 @@ dependencies = [
  "criterion 0.5.1",
  "futures",
  "hex",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "proptest",
@@ -14960,7 +15185,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.8",
- "statrs 0.16.1",
+ "statrs",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.20",
@@ -14974,7 +15199,7 @@ dependencies = [
  "async-trait",
  "bincode 1.3.3",
  "criterion 0.5.1",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "proptest",
@@ -14985,7 +15210,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "statrs 0.16.1",
+ "statrs",
  "tempfile",
  "tokio",
  "tracing",
@@ -14995,7 +15220,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15060,7 +15285,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15069,7 +15294,7 @@ dependencies = [
  "criterion 0.5.1",
  "futures",
  "hex",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "num-bigint",
  "num-integer",
@@ -15080,7 +15305,7 @@ dependencies = [
  "proptest",
  "q-quantum-rng",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rand_core 0.6.4",
  "ring 0.17.14",
  "serde",
@@ -15108,6 +15333,7 @@ dependencies = [
  "console",
  "criterion 0.5.1",
  "crossbeam",
+ "crossterm 0.28.1",
  "cudarc 0.10.0",
  "dialoguer",
  "dirs 5.0.1",
@@ -15116,7 +15342,7 @@ dependencies = [
  "egui_plot",
  "eventsource-client",
  "futures",
- "half",
+ "half 2.7.1",
  "hex",
  "indicatif",
  "jemallocator",
@@ -15131,7 +15357,8 @@ dependencies = [
  "q-quantum-rng",
  "q-storage",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
+ "ratatui 0.28.1",
  "raw-cpuid 10.7.0",
  "rayon",
  "reqwest 0.12.24",
@@ -15143,7 +15370,7 @@ dependencies = [
  "sha3 0.10.8",
  "signal-hook",
  "sysinfo 0.30.13",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -15153,6 +15380,8 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber 0.3.20",
+ "tui-textarea",
+ "unicode-width 0.1.14",
  "url",
  "uuid 1.18.1",
  "vdf",
@@ -15192,7 +15421,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15206,7 +15435,7 @@ dependencies = [
  "q-lattice-vrf",
  "q-quantum-rng",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "sha3 0.10.8",
@@ -15236,7 +15465,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15253,6 +15482,7 @@ dependencies = [
  "pqcrypto-dilithium",
  "pqcrypto-kyber 0.7.9",
  "proptest",
+ "q-ai-inference",
  "q-dag-knight",
  "q-lattice-vrf",
  "q-narwhal-core",
@@ -15263,7 +15493,7 @@ dependencies = [
  "q-tor-client",
  "q-types",
  "q-zk-stark",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
@@ -15280,7 +15510,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15297,7 +15527,7 @@ dependencies = [
  "q-types",
  "q-zk-snark",
  "q-zk-stark",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.12.24",
  "rust_decimal",
  "serde",
@@ -15312,7 +15542,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "backoff",
@@ -15396,7 +15626,7 @@ dependencies = [
  "hmac",
  "libp2p 0.52.4",
  "memmap2 0.7.1",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "once_cell",
@@ -15415,7 +15645,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.8",
- "statrs 0.16.1",
+ "statrs",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -15452,8 +15682,8 @@ dependencies = [
  "q-storage",
  "q-types",
  "q-zk-stark",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "rand_core 0.6.4",
  "ring 0.17.14",
  "risc0-zkvm",
@@ -15473,7 +15703,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15484,14 +15714,14 @@ dependencies = [
  "postcard",
  "proptest",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rand_core 0.6.4",
  "ring 0.17.14",
  "serde",
  "serde_json",
  "serialport",
  "sha3 0.10.8",
- "statrs 0.16.1",
+ "statrs",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -15502,7 +15732,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15520,7 +15750,7 @@ dependencies = [
  "q-types",
  "q-zk-snark",
  "q-zk-stark",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "rust_decimal",
  "serde",
@@ -15536,7 +15766,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -15555,7 +15785,7 @@ dependencies = [
  "q-quillon-bank",
  "q-types",
  "q-zk-stark",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.11.27",
  "rust_decimal",
  "serde",
@@ -15571,7 +15801,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15614,7 +15844,7 @@ dependencies = [
  "crossterm 0.27.0",
  "indicatif",
  "libp2p 0.53.2",
- "nalgebra 0.32.6",
+ "nalgebra",
  "num-complex",
  "plotters",
  "pqcrypto-dilithium",
@@ -15626,7 +15856,7 @@ dependencies = [
  "q-network",
  "q-robot-control",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "ratatui 0.26.3",
  "serde",
  "serde_json",
@@ -15658,7 +15888,7 @@ dependencies = [
  "libp2p 0.53.2",
  "memmap2 0.9.9",
  "multiaddr",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "parking_lot 0.12.5",
  "q-types",
@@ -15685,7 +15915,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15700,7 +15930,7 @@ dependencies = [
  "q-narwhal-core",
  "q-network",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rayon",
  "serde",
  "serde_json",
@@ -15715,7 +15945,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15743,7 +15973,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15767,6 +15997,8 @@ dependencies = [
  "q-quantum-rng",
  "q-types",
  "q-zk-p2p",
+ "rayon",
+ "rmp-serde",
  "rocksdb",
  "serde",
  "serde_json",
@@ -15783,7 +16015,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15792,7 +16024,7 @@ dependencies = [
  "proptest",
  "q-tor-client",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -15803,7 +16035,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -15816,8 +16048,8 @@ dependencies = [
  "proptest",
  "q-quantum-rng",
  "q-types",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -15833,7 +16065,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "bytes",
@@ -15845,7 +16077,7 @@ dependencies = [
  "q-types",
  "q-vm",
  "q-wallet",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.12.24",
  "rmp-serde",
  "serde",
@@ -15875,16 +16107,20 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode 1.3.3",
  "blake3",
  "chrono",
  "ed25519-dalek",
+ "futures",
+ "libp2p 0.53.2",
  "postcard",
- "rand 0.8.5",
+ "rand 0.9.2",
  "serde",
+ "serde_cbor",
  "serde_json",
  "sha3 0.10.8",
  "thiserror 1.0.69",
@@ -15893,7 +16129,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15925,7 +16161,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -15933,7 +16169,7 @@ dependencies = [
  "hex",
  "image 0.24.9",
  "kurbo 0.9.5",
- "nalgebra 0.32.6",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "palette",
@@ -15941,7 +16177,7 @@ dependencies = [
  "proptest",
  "q-narwhal-core",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rand_distr 0.4.3",
  "ratatui 0.24.0",
  "serde",
@@ -16024,7 +16260,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "0.9.18-beta"
+version = "1.0.0-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -16041,7 +16277,7 @@ dependencies = [
  "proptest",
  "q-storage",
  "q-types",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -16102,8 +16338,8 @@ dependencies = [
  "once_cell",
  "proptest",
  "q-types",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "rayon",
  "serde",
  "serde_json",
@@ -16615,6 +16851,27 @@ dependencies = [
  "paste",
  "stability 0.2.1",
  "strum 0.26.3",
+ "unicode-segmentation",
+ "unicode-truncate",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "ratatui"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdef7f9be5c0122f890d58bdf4d964349ba6a6161f705907526d891efabba57d"
+dependencies = [
+ "bitflags 2.10.0",
+ "cassowary",
+ "compact_str 0.8.1",
+ "crossterm 0.28.1",
+ "instability",
+ "itertools 0.13.0",
+ "lru",
+ "paste",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.1.14",
@@ -18223,7 +18480,7 @@ dependencies = [
  "fxhash",
  "log",
  "new_debug_unreachable",
- "phf",
+ "phf 0.11.3",
  "phf_codegen",
  "precomputed-hash",
  "servo_arc",
@@ -18339,6 +18596,16 @@ checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
 dependencies = [
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "serde_cbor"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
+dependencies = [
+ "half 1.8.3",
+ "serde",
 ]
 
 [[package]]
@@ -18717,6 +18984,7 @@ checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
 dependencies = [
  "libc",
  "mio 0.8.11",
+ "mio 1.1.0",
  "signal-hook",
 ]
 
@@ -18741,35 +19009,9 @@ dependencies = [
 
 [[package]]
 name = "simba"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0b7840f121a46d63066ee7a99fc81dcabbc6105e437cae43528cea199b5a05f"
-dependencies = [
- "approx 0.5.1",
- "num-complex",
- "num-traits",
- "paste",
- "wide",
-]
-
-[[package]]
-name = "simba"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "061507c94fc6ab4ba1c9a0305018408e312e17c041eb63bef8aa726fa33aceae"
-dependencies = [
- "approx 0.5.1",
- "num-complex",
- "num-traits",
- "paste",
- "wide",
-]
-
-[[package]]
-name = "simba"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
 dependencies = [
  "approx 0.5.1",
  "num-complex",
@@ -19190,7 +19432,7 @@ dependencies = [
  "itertools 0.11.0",
  "lalrpop",
  "lalrpop-util",
- "phf",
+ "phf 0.11.3",
  "thiserror 1.0.69",
  "unicode-xid",
 ]
@@ -19353,25 +19595,12 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "statrs"
-version = "0.16.1"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35a062dbadac17a42e0fc64c27f419b25d6fae98572eb43c8814c9e873d7721"
+checksum = "f697a07e4606a0a25c044de247e583a330dbb1731d11bc7350b81f48ad567255"
 dependencies = [
  "approx 0.5.1",
- "lazy_static",
- "nalgebra 0.29.0",
- "num-traits",
- "rand 0.8.5",
-]
-
-[[package]]
-name = "statrs"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a3fe7c28c6512e766b0874335db33c94ad7b8f9054228ae1c2abd47ce7d335e"
-dependencies = [
- "approx 0.5.1",
- "nalgebra 0.33.2",
+ "nalgebra",
  "num-traits",
  "rand 0.8.5",
 ]
@@ -19408,7 +19637,7 @@ checksum = "bf776ba3fa74f83bf4b63c3dcbbf82173db2632ed8452cb2d891d33f459de70f"
 dependencies = [
  "new_debug_unreachable",
  "parking_lot 0.12.5",
- "phf_shared",
+ "phf_shared 0.11.3",
  "precomputed-hash",
  "serde",
 ]
@@ -19420,7 +19649,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c711928715f1fe0fe509c53b43e993a9a557babc2d0a3567d0a3006f1ac931a0"
 dependencies = [
  "phf_generator",
- "phf_shared",
+ "phf_shared 0.11.3",
  "proc-macro2",
  "quote",
 ]
@@ -19939,6 +20168,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "target-lexicon"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c"
+
+[[package]]
 name = "tempfile"
 version = "3.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19980,16 +20215,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "terminal_size"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b8cb979cb11c32ce1603f8137b22262a9d131aaa5c37b5678025f22b8becd0"
-dependencies = [
- "rustix 1.1.2",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -20131,7 +20356,7 @@ checksum = "af9605de7fee8d9551863fd692cce7637f548dbd9db9180fcc07ccc6d26c336f"
 dependencies = [
  "fax",
  "flate2",
- "half",
+ "half 2.7.1",
  "quick-error 2.0.1",
  "weezl",
  "zune-jpeg",
@@ -21301,7 +21526,7 @@ dependencies = [
  "humantime 2.3.0",
  "itertools 0.12.1",
  "once_cell",
- "phf",
+ "phf 0.11.3",
  "rand 0.8.5",
  "serde",
  "serde_with",
@@ -21788,6 +22013,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui-textarea"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3e38ced1f941a9cfc923fbf2fe6858443c42cc5220bfd35bdd3648371e7bd8e"
+dependencies = [
+ "crossterm 0.27.0",
+ "ratatui 0.26.3",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
 name = "tungstenite"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21934,7 +22170,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90b70b37e9074642bc5f60bb23247fd072a84314ca9e71cdf8527593406a0dd3"
 dependencies = [
  "gemm 0.18.2",
- "half",
+ "half 2.7.1",
  "libloading 0.8.9",
  "memmap2 0.9.9",
  "num 0.4.3",
@@ -21955,7 +22191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14053653d0b7fa7b21015aa9a62edc8af2f60aa6f9c54e66386ecce55f22ed29"
 dependencies = [
  "cudarc 0.16.6",
- "half",
+ "half 2.7.1",
  "serde",
  "thiserror 1.0.69",
  "ug",
@@ -21967,7 +22203,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76daec3c7a32a1b4a0e3307b6b057fa067aa64e750713987410a2c402e5cd731"
 dependencies = [
- "half",
+ "half 2.7.1",
  "metal 0.29.0",
  "objc",
  "serde",
@@ -22129,6 +22365,12 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
+name = "unindent"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "universal-hash"
@@ -22535,7 +22777,7 @@ dependencies = [
  "bytemuck",
  "core-graphics-types 0.1.3",
  "crossbeam-queue",
- "half",
+ "half 2.7.1",
  "heck 0.4.1",
  "indexmap 2.12.0",
  "libloading 0.8.9",
@@ -22802,7 +23044,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "shared-buffer",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "thiserror 1.0.69",
  "wasm-bindgen",
  "wasm-bindgen-downcast",
@@ -22855,7 +23097,7 @@ dependencies = [
  "more-asserts",
  "rayon",
  "smallvec",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "tracing",
  "wasmer-compiler",
  "wasmer-types",
@@ -22885,7 +23127,7 @@ dependencies = [
  "indexmap 1.9.3",
  "more-asserts",
  "rkyv",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "thiserror 1.0.69",
 ]
 
@@ -22971,7 +23213,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "wasm-encoder 0.35.0",
  "wasmparser 0.115.0",
  "wasmtime-cache",
@@ -23052,7 +23294,7 @@ dependencies = [
  "gimli 0.28.1",
  "log",
  "object 0.32.2",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "thiserror 1.0.69",
  "wasmparser 0.115.0",
  "wasmtime-cranelift-shared",
@@ -23072,7 +23314,7 @@ dependencies = [
  "cranelift-native",
  "gimli 0.28.1",
  "object 0.32.2",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "wasmtime-environ",
 ]
 
@@ -23090,7 +23332,7 @@ dependencies = [
  "object 0.32.2",
  "serde",
  "serde_derive",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "thiserror 1.0.69",
  "wasmparser 0.115.0",
  "wasmtime-types",
@@ -23129,7 +23371,7 @@ dependencies = [
  "rustix 0.38.44",
  "serde",
  "serde_derive",
- "target-lexicon",
+ "target-lexicon 0.12.16",
  "wasmtime-environ",
  "wasmtime-jit-debug",
  "wasmtime-jit-icache-coherence",
@@ -23537,7 +23779,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57ffde1dc01240bdf9992e3205668b235e59421fd085e8a317ed98da0178d414"
 dependencies = [
- "phf",
+ "phf 0.11.3",
  "phf_codegen",
  "string_cache",
  "string_cache_codegen",

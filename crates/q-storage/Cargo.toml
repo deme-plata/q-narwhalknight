@@ -21,6 +21,7 @@ bincode = { workspace = true }
 postcard = { workspace = true }
 lz4 = { workspace = true }
 zstd = "0.13"
+rmp-serde = "1.1"  # v0.9.65: MessagePack fallback for cross-version compatibility
 
 # Cryptography for hashing
 blake3 = "1.5"
@@ -36,6 +37,9 @@ lru = "0.12"
 
 # DashMap for concurrent peer trust tracking (v0.9.15-beta)
 dashmap = "5.5"
+
+# Rayon for parallel processing (v0.9.41-beta: parallel decompression)
+rayon = "1.8"
 
 # Q-NarwhalKnight types
 q-types = { path = "../q-types" }
@@ -68,6 +72,10 @@ path = "src/bin/repair_database.rs"
 [[bin]]
 name = "reset-balances"
 path = "src/bin/reset_balances.rs"
+
+[[bin]]
+name = "recover-database"
+path = "src/bin/recover_database.rs"
 
 [dev-dependencies]
 tempfile = "3.8"

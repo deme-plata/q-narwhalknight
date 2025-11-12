@@ -3,7 +3,7 @@ use async_trait::async_trait;
 /// Quantum Random Number Generation for Q-NarwhalKnight Phase 2+
 /// Provides hardware QRNG integration with entropy quality assessment
 use q_types::*;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use sha3::{Digest, Sha3_256};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -277,15 +277,13 @@ impl QuantumRNG {
 
         match self.phase {
             Phase::Phase0 | Phase::Phase1 => {
-                // Classical CSPRNG
-                let mut rng = rand::rngs::OsRng;
-                rng.fill_bytes(&mut bytes);
+                // Classical CSPRNG (rand 0.9 API)
+                rand::rng().fill(&mut bytes[..]);
             }
             _ => {
                 // Enhanced entropy mixing for Phase 2+
-                let mut rng = rand::rngs::OsRng;
                 let mut base_entropy = vec![0u8; count];
-                rng.fill_bytes(&mut base_entropy);
+                rand::rng().fill(&mut base_entropy[..]);
 
                 // Mix with system entropy and timing
                 let mut hasher = Sha3_256::new();
@@ -301,6 +299,7 @@ impl QuantumRNG {
                 // Expand using XOF
                 let seed = hasher.finalize();
                 let mut csprng = rand::rngs::StdRng::from_seed(seed.into());
+                use rand::RngCore as _;  // For fill_bytes
                 csprng.fill_bytes(&mut bytes);
             }
         }

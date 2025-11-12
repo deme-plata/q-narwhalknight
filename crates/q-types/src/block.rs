@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Default values for backwards compatibility with existing blocks
-fn default_phase() -> u8 { 4 }  // Phase 4 is current testnet phase
-fn default_network_id() -> String { "testnet-phase4".to_string() }
+fn default_phase() -> u8 { 5 }  // Phase 5 is current testnet phase
+fn default_network_id() -> String { "testnet-phase5".to_string() }
 
 /// Block hash type (blake3)
 pub type BlockHash = [u8; 32];
@@ -59,8 +59,8 @@ pub struct BlockHeader {
     #[serde(default = "default_phase")]
     pub phase: u8,
 
-    /// Network ID ("testnet-phase1", "testnet-phase4", "mainnet", etc.)
-    /// Optional for backwards compatibility (defaults to "testnet-phase4")
+    /// Network ID ("testnet-phase1", "testnet-phase5", "mainnet", etc.)
+    /// Optional for backwards compatibility (defaults to "testnet-phase5")
     #[serde(default = "default_network_id")]
     pub network_id: String,
 
@@ -541,8 +541,8 @@ mod tests {
         let block = QBlock {
             header: BlockHeader {
                 height: 1,
-                phase: 4,
-                network_id: "testnet-phase4".to_string(),
+                phase: 5,
+                network_id: "testnet-phase5".to_string(),
                 prev_block_hash: [0u8; 32],
                 solutions_root: [0u8; 32],
                 tx_root: [0u8; 32],

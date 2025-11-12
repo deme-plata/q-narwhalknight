@@ -51,7 +51,8 @@ pub struct QNarwhalBehaviour {
     /// Gossipsub for consensus message propagation (Phase 3)
     gossipsub: gossipsub::Behaviour,
     /// Request-response for block synchronization (Phase 3)
-    block_sync: libp2p::request_response::Behaviour<q_storage::sync::BlockSyncCodec>,
+    /// ✅ v0.9.68-beta: Replaced with proper BlockPackCodec for efficient block sync
+    block_sync: libp2p::request_response::Behaviour<q_types::BlockPackCodec>,
 }
 
 #[derive(Debug)]
@@ -62,7 +63,7 @@ pub enum QNarwhalEvent {
     Identify(libp2p::identify::Event),
     Ping(libp2p::ping::Event),
     Gossipsub(gossipsub::Event),
-    BlockSync(libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>),
+    BlockSync(libp2p::request_response::Event<q_types::BlockPackRequest, q_types::BlockPackResponse>),
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -96,8 +97,8 @@ impl From<gossipsub::Event> for QNarwhalEvent {
     }
 }
 
-impl From<libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>> for QNarwhalEvent {
-    fn from(event: libp2p::request_response::Event<q_storage::sync::BlockSyncRequest, q_storage::sync::BlockSyncResponse>) -> Self {
+impl From<libp2p::request_response::Event<q_types::BlockPackRequest, q_types::BlockPackResponse>> for QNarwhalEvent {
+    fn from(event: libp2p::request_response::Event<q_types::BlockPackRequest, q_types::BlockPackResponse>) -> Self {
         QNarwhalEvent::BlockSync(event)
     }
 }
@@ -146,6 +147,12 @@ pub enum NetworkCommand {
         request_bytes: Vec<u8>,
         start_height: u64,
         end_height: u64,
+    },
+    /// Publish peer height announcement (Turbo Sync peer discovery)
+    PublishPeerHeight {
+        topic: String,
+        announcement_bytes: Vec<u8>,
+        height: u64,
     },
     /// Publish an AI message to the distributed AI network
     PublishAIMessage {
@@ -202,6 +209,18 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
     Err(anyhow::anyhow!("Failed to fetch peer ID from HTTP endpoint"))
 }
 
+/// v0.9.73-beta: Peer compatibility tracking for BlockPackCodec protocol
+/// Tracks which peers successfully support the BlockPackCodec request-response protocol
+#[derive(Debug, Clone, Default)]
+pub struct PeerCompatibility {
+    /// Peers that have successfully responded (PeerId → success count)
+    pub successes: HashMap<PeerId, u32>,
+    /// Peers that have failed to respond (PeerId → failure count)
+    pub failures: HashMap<PeerId, u32>,
+    /// Blacklisted peers (incompatible with BlockPackCodec)
+    pub blacklist: HashSet<PeerId>,
+}
+
 /// Simplified Network Manager - Zero-Knowledge Discovery System
 pub struct UnifiedNetworkManager {
     /// libp2p swarm handling all protocols
@@ -233,6 +252,9 @@ pub struct UnifiedNetworkManager {
     gossipsub_stats: Arc<RwLock<HashMap<String, (usize, usize, std::time::Instant, Option<u64>, Option<u64>)>>>, // (count, total_bytes, last_log_time, min_height, max_height)
     /// Channel to forward synced blocks for consensus validation (Phase 3b)
     block_sync_tx: Option<mpsc::UnboundedSender<Vec<q_types::block::QBlock>>>,
+    /// v0.9.73-beta: Peer compatibility tracking for BlockPackCodec protocol
+    /// Tracks which peers successfully support the new request-response protocol
+    peer_compat: Arc<std::sync::RwLock<PeerCompatibility>>,
 }
 
 impl UnifiedNetworkManager {
@@ -323,8 +345,9 @@ impl UnifiedNetworkManager {
                     if let (Some(bootstrap_ip), Some(_)) = (ip, p2p_port) {
                         info!("🔄 Attempting automatic peer ID discovery for {}", bootstrap_ip);
 
-                        // Try to fetch peer ID from HTTP endpoint (port 18080 by default)
-                        match fetch_peer_id_from_http(&bootstrap_ip, 18080).await {
+                        // Try to fetch peer ID from HTTP endpoint (port 8080 for API server)
+                        // v0.9.21-beta FIX: Changed from 18080 to 8080 (Server Beta API port)
+                        match fetch_peer_id_from_http(&bootstrap_ip, 8080).await {
                             Ok(peer_id_str) => {
                                 // Parse peer ID and append to multiaddr
                                 match peer_id_str.parse::<PeerId>() {
@@ -373,15 +396,49 @@ impl UnifiedNetworkManager {
         info!("🌍 Kademlia DHT initialized for clearnet discovery");
 
         // Configure Gossipsub for consensus message propagation (Phase 3)
-        // 🚀 v0.6.5-beta: Increased max_transmit_size to 10MB for large batch sync messages
-        // Batch sync with postcard serialization: ~395 bytes/block → 10MB allows ~25k blocks/batch
+        // 🚀 v0.9.36-beta: Increased max_transmit_size to 50MB for TURBO SYNC block packs
+        // With 500 blocks/chunk × ~20KB/block compressed ≈ 10MB per pack
+        // 50MB limit provides 5x safety margin for compression variance
+        //
+        // ✅ v0.9.64-beta: DECENTRALIZED P2P GAP-FILL
+        // - flood_publish(true): Broadcast to ALL connected peers, not just mesh
+        // - mesh_n_low(1): Allow mesh with just 1 peer (fixes InsufficientPeers)
+        // - mesh_n(2): Target 2 peers in mesh (optimal for small networks)
+        // - mesh_n_high(4): Max 4 peers in mesh (prevents overhead)
+        //
+        // This configuration ensures gossipsub works reliably even with minimal peers,
+        // eliminating the need for centralized HTTP fallback.
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_millis(100)) // Fast propagation
             .validation_mode(ValidationMode::Strict) // Validate messages
-            .max_transmit_size(10 * 1024 * 1024) // 10MB for large batches (was 65KB default)
+            .max_transmit_size(50 * 1024 * 1024) // 50MB for TURBO SYNC packs (was 10MB)
+            .flood_publish(true) // ✅ v0.9.64: Broadcast to ALL peers, not just mesh
+            .mesh_outbound_min(1) // ✅ v0.9.64: Min outbound connections (must be <= mesh_n_low)
+            .mesh_n_low(1) // ✅ v0.9.64: Allow 1-peer mesh (was 4)
+            .mesh_n(2) // ✅ v0.9.64: Target 2 peers (was 6)
+            .mesh_n_high(4) // ✅ v0.9.64: Max 4 peers (was 12)
             .message_id_fn(|message| {
-                // Use message content hash as ID for deduplication
-                MessageId::from(message.data.as_slice())
+                // ✅ v0.9.67-beta: Include sender peer ID in message hash
+                // This prevents echo chamber where our own messages are filtered as duplicates
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+
+                let mut hasher = DefaultHasher::new();
+
+                // Hash sender peer ID (if available)
+                if let Some(source) = &message.source {
+                    source.hash(&mut hasher);
+                }
+
+                // Hash message content
+                message.data.hash(&mut hasher);
+
+                // Hash sequence number for additional uniqueness
+                if let Some(seq) = message.sequence_number {
+                    seq.hash(&mut hasher);
+                }
+
+                MessageId::from(hasher.finish().to_le_bytes().to_vec())
             })
             .build()
             .map_err(|e| anyhow::anyhow!("Gossipsub config error: {}", e))?;
@@ -414,6 +471,27 @@ impl UnifiedNetworkManager {
                   network_config.network_id.as_str(), topic);
         }
 
+        // 🔄 v0.9.60-beta: BACKWARD COMPATIBILITY - Disabled for Phase 6 (fresh network)
+        // Phase 6 is a fresh network launch, no need for Phase 5 compatibility
+        // This was needed for Phase 4→5 migration, but Phase 6 is clean slate
+        if network_config.network_id == q_types::NetworkId::TestnetPhase5 {
+            let phase4_topics = vec![
+                IdentTopic::new("/qnk/testnet-phase4/blocks"),
+                IdentTopic::new("/qnk/testnet-phase4/transactions"),
+                IdentTopic::new("/qnk/testnet-phase4/mining-rewards"),
+                IdentTopic::new("/qnk/testnet-phase4/peer-heights"),
+                IdentTopic::new("/qnk/testnet-phase4/block-pack-requests"),
+                IdentTopic::new("/qnk/testnet-phase4/block-pack-responses"),
+            ];
+
+            for topic in &phase4_topics {
+                gossipsub.subscribe(topic)
+                    .map_err(|e| anyhow::anyhow!("Failed to subscribe to phase4 topic {}: {}", topic, e))?;
+                info!("🔄 [BACKWARD COMPAT] Subscribed to phase4 topic: {}", topic);
+            }
+            info!("✅ Backward compatibility enabled: {} phase4 topics subscribed", phase4_topics.len());
+        }
+
         // Subscribe to distributed AI inference topics
         let ai_topics = DistributedAITopics::new();
         for topic in ai_topics.all_topics() {
@@ -425,17 +503,18 @@ impl UnifiedNetworkManager {
 
         // Configure Request-Response for block synchronization (Phase 3)
         use libp2p::request_response::{self, ProtocolSupport};
-        use q_storage::sync::{BlockSyncCodec, BLOCK_SYNC_PROTOCOL};
+        // ✅ v0.9.68-beta: Initialize BlockPackCodec for efficient block synchronization
+        use q_types::{BlockPackCodec, BlockPackProtocol};
 
-        let block_sync_protocols = std::iter::once((BLOCK_SYNC_PROTOCOL, ProtocolSupport::Full));
+        let block_sync_protocols = std::iter::once((BlockPackProtocol, ProtocolSupport::Full));
         let block_sync_config = request_response::Config::default();
         let block_sync = request_response::Behaviour::with_codec(
-            BlockSyncCodec::default(),
+            BlockPackCodec::default(),
             block_sync_protocols,
             block_sync_config,
         );
 
-        info!("🔗 Block sync request-response protocol initialized");
+        info!("🔗 Block sync request-response protocol initialized (BlockPackCodec)");
 
         // Combine all behaviors
         let behaviour = QNarwhalBehaviour {
@@ -483,6 +562,35 @@ impl UnifiedNetworkManager {
         info!("  • Ping (connection keepalive)");
         info!("  • Gossipsub (consensus messaging, {} topics)", topics.len());
 
+        // 🚀 v0.9.38-beta: PHASE 1.2 - Bootstrap Peer Discovery with Retry Logic
+        // Explicitly dial bootstrap peer if Q_BOOTSTRAP_PEER environment variable is set
+        // This ensures Server Alpha connects to Server Beta for network unification
+        if let Ok(bootstrap_env) = std::env::var("Q_BOOTSTRAP_PEER") {
+            info!("🔍 [BOOTSTRAP] Explicit bootstrap peer configured: {}", bootstrap_env);
+
+            // Parse bootstrap multiaddr
+            if let Ok(bootstrap_addr) = bootstrap_env.parse::<Multiaddr>() {
+                info!("📡 [BOOTSTRAP] Dialing bootstrap peer: {}", bootstrap_addr);
+
+                // Attempt immediate dial
+                match swarm.dial(bootstrap_addr.clone()) {
+                    Ok(_) => {
+                        info!("✅ [BOOTSTRAP] Initiated connection to bootstrap peer");
+                    }
+                    Err(e) => {
+                        warn!("⚠️  [BOOTSTRAP] Initial dial failed: {:?}", e);
+                        warn!("   Will retry automatically in background task");
+                    }
+                }
+            } else {
+                warn!("❌ [BOOTSTRAP] Failed to parse bootstrap peer multiaddr: {}", bootstrap_env);
+                warn!("   Expected format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>");
+            }
+        } else {
+            info!("ℹ️  [BOOTSTRAP] No explicit bootstrap peer configured (Q_BOOTSTRAP_PEER not set)");
+            info!("   Node will rely on mDNS and Kademlia DHT for peer discovery");
+        }
+
         // Create command channel for API operations
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
@@ -501,6 +609,7 @@ impl UnifiedNetworkManager {
             storage: None, // Set via set_storage() after construction
             gossipsub_stats: Arc::new(RwLock::new(HashMap::new())), // v0.6.9-beta: Gossipsub aggregation
             block_sync_tx: None, // Set via set_block_sync_channel() after construction
+            peer_compat: Arc::new(std::sync::RwLock::new(PeerCompatibility::default())), // v0.9.73-beta: Peer compatibility tracking
         })
     }
 
@@ -543,8 +652,32 @@ impl UnifiedNetworkManager {
 
     /// Main event loop - processes all discovery events
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        // 🚀 v0.9.38-beta: PHASE 1.2 - Periodic P2P health monitoring
+        let mut health_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
         loop {
             tokio::select! {
+                // 🩺 Periodic P2P health check (every 30 seconds)
+                _ = health_check_interval.tick() => {
+                    let peer_count = self.discovered_peers.read().await.len();
+
+                    if peer_count == 0 {
+                        warn!("⚠️  [P2P HEALTH] NO CONNECTIONS - Network isolated!");
+                        warn!("   Check bootstrap peer configuration and firewall settings");
+
+                        // If bootstrap peer is configured, attempt reconnection
+                        if let Ok(bootstrap_env) = std::env::var("Q_BOOTSTRAP_PEER") {
+                            if let Ok(bootstrap_addr) = bootstrap_env.parse::<Multiaddr>() {
+                                info!("🔄 [AUTO-RECONNECT] Attempting to reconnect to bootstrap peer...");
+                                if let Err(e) = self.swarm.dial(bootstrap_addr.clone()) {
+                                    error!("❌ [AUTO-RECONNECT] Dial failed: {:?}", e);
+                                }
+                            }
+                        }
+                    } else {
+                        info!("✅ [P2P HEALTH] {} connected peer(s) - Network healthy", peer_count);
+                    }
+                }
                 // Process network commands from API
                 Some(command) = self.command_rx.recv() => {
                     match command {
@@ -623,6 +756,19 @@ impl UnifiedNetworkManager {
                                 }
                                 Err(e) => {
                                     warn!("❌ [TURBO SYNC] Failed to publish block pack request to topic {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        NetworkCommand::PublishPeerHeight { topic, announcement_bytes, height } => {
+                            debug!("📡 [TURBO SYNC] Publishing peer height announcement {} ({} bytes) to topic: {}",
+                                  height, announcement_bytes.len(), topic);
+                            let ident_topic = IdentTopic::new(topic.as_str());
+                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes) {
+                                Ok(_) => {
+                                    debug!("✅ [TURBO SYNC] Successfully announced height {} to P2P network", height);
+                                }
+                                Err(e) => {
+                                    warn!("❌ [TURBO SYNC] Failed to publish peer height to topic {}: {}", topic, e);
                                 }
                             }
                         }
@@ -994,93 +1140,94 @@ impl UnifiedNetworkManager {
                 debug!("📢 Gossipsub event: {:?}", event);
             }
             QNarwhalEvent::BlockSync(block_sync_event) => {
+                // ✅ v0.9.68-beta: Updated to use BlockPackCodec for efficient block sync
                 use libp2p::request_response::{Event, Message};
 
                 match block_sync_event {
                     Event::Message { peer, message } => {
                         match message {
                             Message::Request { request_id, request, channel } => {
-                                info!("📥 [BLOCK-SYNC] Received block sync request from {}", peer);
-                                info!("   Requested: {} blocks from height {}", request.limit, request.start_height);
+                                info!("📥 [BLOCK-PACK] Received block pack request from {}", peer);
+                                info!("   Requested: blocks {}-{} (max {})",
+                                      request.start_height, request.end_height, request.max_blocks);
 
-                                // Phase 3a: Fetch real blocks from storage
+                                // Validate request
+                                if let Err(e) = request.validate() {
+                                    error!("❌ [BLOCK-PACK] Invalid request: {}", e);
+                                    let response = q_types::BlockPackResponse::from_blocks(vec![], request.end_height);
+                                    let _ = self.swarm.behaviour_mut().block_sync.send_response(channel, response);
+                                    return Ok(());
+                                }
+
+                                // Fetch blocks from storage
                                 let response = if let Some(ref storage) = self.storage {
-                                    match storage.get_qblocks_range(request.start_height, request.limit).await {
+                                    let block_count = (request.end_height - request.start_height + 1) as usize;
+                                    let limit = block_count.min(request.max_blocks);
+
+                                    match storage.get_qblocks_range(request.start_height, limit).await {
                                         Ok(blocks) => {
-                                            let latest_height = storage.get_latest_qblock_height().await
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or(0);
+                                            info!("✅ [BLOCK-PACK] Fetched {} blocks from storage (heights {}-{})",
+                                                  blocks.len(),
+                                                  blocks.first().map(|b| b.header.height).unwrap_or(request.start_height),
+                                                  blocks.last().map(|b| b.header.height).unwrap_or(request.start_height));
 
-                                            let block_count = blocks.len() as u64;
-                                            let end_height = if !blocks.is_empty() { blocks.last().unwrap().header.height } else { request.start_height };
-
-                                            info!("✅ [BLOCK-SYNC] Fetched {} blocks from storage (heights {}-{})",
-                                                  block_count, request.start_height, end_height);
-
-                                            q_storage::sync::BlockSyncResponse {
-                                                start_height: request.start_height,
-                                                blocks,
-                                                total_blocks: block_count,
-                                                latest_height,
-                                            }
+                                            q_types::BlockPackResponse::from_blocks(blocks, request.end_height)
                                         }
                                         Err(e) => {
-                                            error!("❌ [BLOCK-SYNC] Failed to fetch blocks from storage: {}", e);
-                                            q_storage::sync::BlockSyncResponse {
-                                                start_height: request.start_height,
-                                                blocks: vec![],
-                                                total_blocks: 0,
-                                                latest_height: 0,
-                                            }
+                                            error!("❌ [BLOCK-PACK] Failed to fetch blocks from storage: {}", e);
+                                            q_types::BlockPackResponse::from_blocks(vec![], request.end_height)
                                         }
                                     }
                                 } else {
-                                    warn!("⚠️ [BLOCK-SYNC] Storage not available, sending empty response");
-                                    q_storage::sync::BlockSyncResponse {
-                                        start_height: request.start_height,
-                                        blocks: vec![],
-                                        total_blocks: 0,
-                                        latest_height: 0,
-                                    }
+                                    warn!("⚠️ [BLOCK-PACK] Storage not available, sending empty response");
+                                    q_types::BlockPackResponse::from_blocks(vec![], request.end_height)
                                 };
 
                                 if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
-                                    error!("❌ [BLOCK-SYNC] Failed to send response: {:?}", e);
+                                    error!("❌ [BLOCK-PACK] Failed to send response: {:?}", e);
                                 } else {
-                                    info!("✅ [BLOCK-SYNC] Sent response to {}", peer);
+                                    info!("✅ [BLOCK-PACK] Sent response to {}", peer);
                                 }
                             }
                             Message::Response { request_id, response } => {
-                                info!("📨 [BLOCK-SYNC] Received block sync response: {} blocks from height {}",
-                                      response.blocks.len(), response.start_height);
-                                info!("   Latest height on peer: {}", response.latest_height);
+                                info!("📨 [BLOCK-PACK] Received block pack response: {} blocks (heights {}-{})",
+                                      response.blocks.len(), response.start_height, response.end_height);
 
-                                // Phase 3b: Forward blocks to consensus for validation
+                                // ✅ v0.9.73-beta: Mark peer as successful (compatible with BlockPackCodec)
+                                self.mark_peer_success(peer);
+
+                                if response.has_more {
+                                    info!("   More blocks available beyond height {}", response.end_height);
+                                }
+
+                                // Forward blocks to consensus for validation
                                 if !response.blocks.is_empty() {
                                     if let Some(ref tx) = self.block_sync_tx {
                                         if let Err(e) = tx.send(response.blocks.clone()) {
-                                            error!("❌ [BLOCK-SYNC] Failed to forward blocks to consensus: {}", e);
+                                            error!("❌ [BLOCK-PACK] Failed to forward blocks to consensus: {}", e);
                                         } else {
-                                            info!("✅ [BLOCK-SYNC] Forwarded {} blocks to consensus for validation", response.blocks.len());
+                                            info!("✅ [BLOCK-PACK] Forwarded {} blocks to consensus for validation", response.blocks.len());
                                         }
                                     } else {
-                                        warn!("⚠️ [BLOCK-SYNC] Block sync channel not configured, blocks not forwarded");
+                                        warn!("⚠️ [BLOCK-PACK] Block sync channel not configured, blocks not forwarded");
                                     }
                                 } else {
-                                    debug!("📭 [BLOCK-SYNC] No blocks in response, nothing to forward");
+                                    debug!("📭 [BLOCK-PACK] No blocks in response, nothing to forward");
                                 }
                             }
                         }
                     }
                     Event::OutboundFailure { peer, request_id, error } => {
-                        warn!("⚠️ [BLOCK-SYNC] Outbound failure to {}: {:?}", peer, error);
+                        warn!("⚠️ [BLOCK-PACK] Outbound failure to {}: {:?}", peer, error);
+
+                        // ✅ v0.9.73-beta: Mark peer as failed (timeout/incompatible)
+                        self.mark_peer_failure(peer);
                     }
                     Event::InboundFailure { peer, error, .. } => {
-                        warn!("⚠️ [BLOCK-SYNC] Inbound failure from {}: {:?}", peer, error);
+                        warn!("⚠️ [BLOCK-PACK] Inbound failure from {}: {:?}", peer, error);
                     }
                     Event::ResponseSent { peer, .. } => {
-                        debug!("✅ [BLOCK-SYNC] Response sent to {}", peer);
+                        debug!("✅ [BLOCK-PACK] Response sent to {}", peer);
                     }
                 }
             }
@@ -1186,6 +1333,7 @@ impl UnifiedNetworkManager {
     }
 
     /// Request blocks from a specific peer via libp2p request-response (Phase 3)
+    /// ✅ v0.9.68-beta: Updated to use BlockPackRequest for efficient block sync
     pub fn request_blocks_from_peer(
         &mut self,
         peer_id: PeerId,
@@ -1194,23 +1342,72 @@ impl UnifiedNetworkManager {
     ) -> anyhow::Result<()> {
         info!("📤 [BLOCK-SYNC] Requesting {} blocks from height {} from peer {}", limit, start_height, peer_id);
 
-        // Convert PeerId to NodeId (32-byte array)
-        let peer_id_bytes = self.local_peer_id.to_bytes();
-        let mut node_id = [0u8; 32];
-        let copy_len = peer_id_bytes.len().min(32);
-        node_id[..copy_len].copy_from_slice(&peer_id_bytes[..copy_len]);
-
-        let request = q_storage::sync::BlockSyncRequest {
-            start_height,
-            limit,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            requester: node_id,
-        };
+        let end_height = start_height + limit as u64 - 1;
+        let request = q_types::BlockPackRequest::new(start_height, end_height);
 
         self.swarm.behaviour_mut().block_sync.send_request(&peer_id, request);
 
         info!("✅ [BLOCK-SYNC] Block sync request sent to {}", peer_id);
         Ok(())
+    }
+
+    /// v0.9.73-beta: Mark peer as successful (responded to BlockPackCodec request)
+    /// This is called when a peer successfully responds with blocks via BlockPackCodec
+    pub fn mark_peer_success(&self, peer_id: PeerId) {
+        let mut compat = self.peer_compat.write().unwrap();
+
+        // Increment success counter
+        *compat.successes.entry(peer_id).or_insert(0) += 1;
+
+        // Remove from failure list (peer is proven working)
+        compat.failures.remove(&peer_id);
+
+        // Remove from blacklist (peer is proven compatible)
+        if compat.blacklist.remove(&peer_id) {
+            info!("✅ [PEER COMPAT] Peer {} removed from blacklist (now responsive)", peer_id);
+        }
+
+        let success_count = compat.successes.get(&peer_id).copied().unwrap_or(0);
+        debug!("✅ [PEER COMPAT] Peer {} marked successful ({} total successes)", peer_id, success_count);
+    }
+
+    /// v0.9.73-beta: Mark peer as failed (timeout/no response to BlockPackCodec request)
+    /// This is called when a peer fails to respond within timeout
+    /// After 3 failures, the peer is blacklisted as incompatible
+    pub fn mark_peer_failure(&self, peer_id: PeerId) {
+        let mut compat = self.peer_compat.write().unwrap();
+
+        // Increment failure counter
+        *compat.failures.entry(peer_id).or_insert(0) += 1;
+        let failure_count = compat.failures.get(&peer_id).copied().unwrap_or(0);
+
+        debug!("⚠️  [PEER COMPAT] Peer {} marked failed ({} failures)", peer_id, failure_count);
+
+        // Blacklist after 3 failures
+        if failure_count >= 3 {
+            compat.blacklist.insert(peer_id);
+            compat.successes.remove(&peer_id); // Remove from successes
+            warn!("🚫 [PEER COMPAT] Peer {} BLACKLISTED (3+ failures - incompatible with BlockPackCodec)", peer_id);
+        }
+    }
+
+    /// v0.9.73-beta: Get list of compatible peers (successfully responded, not blacklisted)
+    /// Used to filter peer selection for fast sync requests
+    pub fn get_compatible_peers(&self) -> Vec<PeerId> {
+        let compat = self.peer_compat.read().unwrap();
+
+        // Return peers that have at least one success and are not blacklisted
+        compat.successes.keys()
+            .filter(|peer_id| !compat.blacklist.contains(peer_id))
+            .cloned()
+            .collect()
+    }
+
+    /// v0.9.75-beta: Get list of blacklisted peers (proven incompatible after 3+ failures)
+    /// Used for OPTIMISTIC peer testing - assume compatible unless blacklisted
+    pub fn get_blacklisted_peers(&self) -> std::collections::HashSet<PeerId> {
+        let compat = self.peer_compat.read().unwrap();
+        compat.blacklist.clone()
     }
 
     /// Auto-detect missing blocks and request from peers (Phase 3c)

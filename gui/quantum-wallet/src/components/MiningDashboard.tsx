@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles } from 'lucide-react';
-import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent } from '../services/api';
+import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent } from '../services/api';
 
 interface MiningStats {
   totalRewards: number;
@@ -26,7 +26,20 @@ export default function MiningDashboard() {
   const [showRewardPopup, setShowRewardPopup] = useState(false);
   const [latestReward, setLatestReward] = useState<MiningRewardEvent | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const walletAddress = localStorage.getItem('walletAddress') || '';
+
+  // Use the same wallet as Dashboard - from localStorage
+  const [walletAddress, setWalletAddress] = useState('');
+
+  // Get wallet address from localStorage (same as Dashboard)
+  useEffect(() => {
+    const storedWallet = localStorage.getItem('walletAddress');
+    if (storedWallet) {
+      setWalletAddress(storedWallet);
+      console.log('✅ Mining Dashboard tracking wallet:', storedWallet);
+    } else {
+      console.warn('⚠️ No wallet found in localStorage - user needs to login/create wallet first');
+    }
+  }, []);
 
   useEffect(() => {
     if (!walletAddress) {
@@ -43,9 +56,11 @@ export default function MiningDashboard() {
         if (balanceResponse.success && balanceResponse.data) {
           const balance = balanceResponse.data.balance_qnk || 0;
           console.log('💰 Loaded initial balance from storage:', balance);
+          // Initialize totalRewards with current balance (accumulated rewards so far)
           setStats(prev => ({
             ...prev,
             currentBalance: balance,
+            totalRewards: balance, // Start with current balance as total accumulated
           }));
         }
       } catch (error) {
@@ -59,7 +74,8 @@ export default function MiningDashboard() {
     const eventSource = qnkAPI.subscribeToMiningRewards(
       walletAddress,
       handleMiningReward,
-      handleBalanceUpdate
+      handleBalanceUpdate,
+      handleMiningStats
     );
 
     console.log('✅ SSE EventSource created:', eventSource.url);
@@ -137,10 +153,78 @@ export default function MiningDashboard() {
       new: update.new_balance,
       reason: update.change_reason
     });
-    setStats(prev => ({
-      ...prev,
-      currentBalance: update.new_balance,
-    }));
+
+    // Check if this is a mining reward or development fee
+    // Backend sends Debug format: "MiningReward" or "DevelopmentFee"
+    const isMiningReward = update.change_reason === 'MiningReward' ||
+                           update.change_reason === 'mining_reward' ||
+                           (update.change_reason && update.change_reason.startsWith('mining_reward_batch_'));
+    const isDevFee = update.change_reason === 'DevelopmentFee' ||
+                     update.change_reason === 'development_fee';
+
+    if (isMiningReward || isDevFee) {
+      // Calculate reward amount from balance change
+      const rewardAmount = update.new_balance - update.old_balance;
+      console.log('⛏️  Mining reward detected! Amount:', rewardAmount);
+
+      // Add to rewards list (for Recent Mining Rewards display)
+      const rewardWithId: RewardWithAnimation = {
+        id: `${update.timestamp}-${Math.random()}`,
+        miner_address: update.wallet_address,
+        reward_qnk: rewardAmount,
+        nonce: 0, // Not available in balance_updated event
+        block_height: 0, // Not available in balance_updated event
+        difficulty: '0', // Not available in balance_updated event
+        hash_rate: 0, // Not available in balance_updated event
+        timestamp: update.timestamp,
+        isNew: true,
+      };
+
+      setRewards(prev => {
+        const updated = [rewardWithId, ...prev].slice(0, 10); // Keep last 10
+        return updated;
+      });
+
+      // Remove animation flag after animation completes
+      setTimeout(() => {
+        setRewards(prev =>
+          prev.map(r => (r.id === rewardWithId.id ? { ...r, isNew: false } : r))
+        );
+      }, 1000);
+
+      // Update stats to include this reward
+      setStats(prev => ({
+        ...prev,
+        currentBalance: update.new_balance,
+        totalRewards: prev.totalRewards + rewardAmount,
+        blocksFound: prev.blocksFound + 1,
+      }));
+    } else {
+      // Non-mining balance update - just update balance
+      setStats(prev => ({
+        ...prev,
+        currentBalance: update.new_balance,
+      }));
+    }
+  };
+
+  const handleMiningStats = (statsUpdate: MiningStatsEvent) => {
+    console.log('📊 Mining stats received:', statsUpdate);
+    console.log('📊 Stats details:', {
+      miner: statsUpdate.miner_address,
+      total_rewards: statsUpdate.total_rewards,
+      blocks_found: statsUpdate.total_blocks_found,
+      balance: statsUpdate.current_balance,
+      hash_rate: statsUpdate.avg_hash_rate
+    });
+
+    // Update all stats from backend
+    setStats({
+      totalRewards: statsUpdate.total_rewards,
+      blocksFound: statsUpdate.total_blocks_found,
+      currentBalance: statsUpdate.current_balance,
+      avgHashRate: statsUpdate.avg_hash_rate,
+    });
   };
 
   const formatHashRate = (hashRate: number) => {
@@ -167,7 +251,7 @@ export default function MiningDashboard() {
     return (
       <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-yellow/30 rounded-xl p-6">
         <p className="text-quantum-yellow">
-          Please connect your wallet to view mining dashboard
+          No mining wallet configured. Please set VITE_DEFAULT_MINING_WALLET in .env or connect your wallet.
         </p>
       </div>
     );

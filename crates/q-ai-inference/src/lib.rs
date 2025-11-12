@@ -45,6 +45,7 @@ pub mod distributed_cache;
 pub mod mistralrs_engine;
 pub mod model_manager;
 pub mod chat_templates;
+pub mod distributed_engine;
 
 // Re-export commonly used types
 pub use types::{
@@ -84,6 +85,7 @@ pub use tokenizer::GgufTokenizer;
 pub use mistralrs_engine::{MistralRsEngine, MistralRsConfig, StreamEvent};
 pub use model_manager::{ModelManager, ModelMetadata};
 pub use chat_templates::{format_chat_prompt, format_conversation};
+pub use distributed_engine::DistributedMistralEngine;
 
 #[cfg(test)]
 mod tests {

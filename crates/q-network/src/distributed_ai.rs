@@ -60,6 +60,12 @@ impl Default for DistributedAITopics {
 /// AI message envelope for Gossipsub with AEGIS-QL authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIGossipsubMessage {
+    /// Protocol version for compatibility checking (v0.9.29+ FIX: Prevents binary incompatibility)
+    /// Version 1: Initial protocol with all current features
+    /// Increment when making breaking changes to message format
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u32,
+
     pub message_id: String,
     pub timestamp: i64,
     pub sender_node_id: String,
@@ -83,6 +89,15 @@ pub struct AIGossipsubMessage {
     pub priority: MessagePriority, // Priority for gossipsub mesh routing
 }
 
+/// Default protocol version for backwards compatibility
+/// v0.9.29+ nodes will use version 1, older nodes default to 0
+fn default_protocol_version() -> u32 {
+    0 // Old binaries without version field will deserialize as version 0
+}
+
+/// Current protocol version - increment when making breaking changes
+pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+
 /// Message priority for gossipsub routing optimization
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MessagePriority {
@@ -100,6 +115,7 @@ impl Default for MessagePriority {
 
 impl AIGossipsubMessage {
     /// Create a new message with automatic sequence numbering
+    /// v0.9.29+ FIX: Now includes protocol version for compatibility checking
     pub fn new(
         sender_node_id: String,
         sender_peer_id: String,
@@ -117,6 +133,7 @@ impl AIGossipsubMessage {
         };
 
         Self {
+            protocol_version: CURRENT_PROTOCOL_VERSION, // v0.9.29+ FIX: Set protocol version
             message_id: Uuid::new_v4().to_string(),
             timestamp: chrono::Utc::now().timestamp(),
             sender_node_id,
@@ -165,7 +182,12 @@ impl AIGossipsubMessage {
     }
 }
 
+/// Distributed AI message payload types
+/// v0.9.29+ FIX: Added explicit discriminants for binary stability
+/// IMPORTANT: Never reorder variants or change discriminants - this will break compatibility!
+/// To add new message types, append to the end with the next sequential number
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[repr(u8)] // Force explicit u8 discriminants for binary stability
 pub enum AIMessagePayload {
     InferenceRequest {
         request_id: String,
@@ -173,47 +195,47 @@ pub enum AIMessagePayload {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
         model: String,
-    },
+    } = 0,
     InferenceResponse {
         request_id: String,
         generated_text: String,
         tokens_generated: usize,
         latency_ms: u64,
         nodes_participated: Vec<String>,
-    },
+    } = 1,
     LayerOutput {
         request_id: String,
         layer_index: usize,
         compressed_data: Vec<u8>,
         shape: Vec<usize>,
-    },
+    } = 2,
     NodeCapability {
         node_id: String,
         peer_id: String,
         capability: NodeCapability,
         available_layers: usize,
-    },
+    } = 3,
     CoordinatorElection {
         node_id: String,
         score: u64,
         uptime_secs: u64,
         inference_count: u64,
-    },
+    } = 4,
     Heartbeat {
         node_id: String,
         active_requests: usize,
         layers_assigned: Option<(usize, usize)>, // (start, end)
-    },
+    } = 5,
     LayerAssignment {
         request_id: String,
         assignments: std::collections::HashMap<String, (usize, usize)>, // node_id -> (start_layer, end_layer)
-    },
+    } = 6,
     KVCacheUpdate {
         request_id: String,
         layer_index: usize,
         cache_data: Vec<u8>,
         sequence_length: usize,
-    },
+    } = 7,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

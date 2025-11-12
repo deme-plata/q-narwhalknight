@@ -19,3 +19,8 @@ postcard = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+# ✅ v0.9.68-beta: Dependencies for BlockPackCodec
+async-trait = { workspace = true }
+futures = { workspace = true }
+libp2p = { workspace = true }
+serde_cbor = "0.11"

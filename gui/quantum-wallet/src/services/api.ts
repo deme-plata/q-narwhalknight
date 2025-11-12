@@ -635,10 +635,11 @@ class QNarwhalKnightAPI {
 
     // Fix: Ensure amount is sent as QNK value, not converted to smallest units
     // If amount looks like it's been unit-converted (> 1,000,000), convert it back
+    // QUG uses 9 decimals (1 QUG = 1,000,000,000 base units)
     let fixedAmount = amount;
     if (amount > 1000000) {
-      console.warn(`⚠️ Detected unit conversion: ${amount} -> ${amount / 100000000} QNK`);
-      fixedAmount = amount / 100000000;
+      console.warn(`⚠️ Detected unit conversion: ${amount} -> ${amount / 1000000000} QNK`);
+      fixedAmount = amount / 1000000000;
     }
 
     console.log('📤 Sending transaction:', { from: fromAddress, to, amount: fixedAmount, memo });
@@ -1258,12 +1259,14 @@ class QNarwhalKnightAPI {
    * @param walletAddress - Miner's wallet address to filter events
    * @param onReward - Callback for mining reward events
    * @param onBalanceUpdate - Callback for balance updates
+   * @param onMiningStats - Callback for mining statistics updates
    * @returns EventSource instance (call .close() to unsubscribe)
    */
   subscribeToMiningRewards(
     walletAddress: string,
     onReward: (event: MiningRewardEvent) => void,
-    onBalanceUpdate: (event: BalanceUpdateEvent) => void
+    onBalanceUpdate: (event: BalanceUpdateEvent) => void,
+    onMiningStats?: (event: MiningStatsEvent) => void
   ): EventSource {
     // Connect to SSE endpoint with wallet_address parameter for filtered events
     const url = `${this.baseURL}/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
@@ -1301,14 +1304,40 @@ class QNarwhalKnightAPI {
         console.log('📨 SSE: Comparing addresses:', { received: data.wallet_address, expected: walletAddress, match: data.wallet_address === walletAddress });
         console.log('📨 SSE: Change reason:', data.change_reason);
         // Backend now sends addresses WITH "qnk" prefix - compare directly
-        if (data.wallet_address === walletAddress && data.change_reason === 'mining_reward') {
-          console.log('✅ SSE: Address matches and reason is mining_reward! Calling onBalanceUpdate callback');
+        // Accept mining_reward, mining_reward_batch_X, and development_fee reasons
+        const isMiningReward = data.change_reason === 'mining_reward' ||
+                               (data.change_reason && data.change_reason.startsWith('mining_reward_batch_'));
+        const isDevFee = data.change_reason === 'development_fee';
+        if (data.wallet_address === walletAddress && (isMiningReward || isDevFee)) {
+          console.log('✅ SSE: Address matches and reason is mining-related! Calling onBalanceUpdate callback');
           onBalanceUpdate(data);
         } else {
-          console.log('❌ SSE: Address mismatch or wrong reason, ignoring event');
+          console.log('❌ SSE: Address mismatch or wrong reason, ignoring event', { reason: data.change_reason });
         }
       } catch (error) {
         console.error('❌ SSE: Failed to parse balance_updated event:', error);
+      }
+    });
+
+    eventSource.addEventListener('mining_stats', (e: MessageEvent) => {
+      console.log('📨 SSE: Received mining_stats event');
+      try {
+        const parsed = JSON.parse(e.data);
+        console.log('📨 SSE: mining_stats parsed:', parsed);
+
+        // Extract the actual data (handle both wrapped and unwrapped formats)
+        const statsData = parsed.data || parsed;
+        console.log('📨 SSE: mining_stats data:', statsData);
+        console.log('📨 SSE: Comparing addresses:', { received: statsData.miner_address, expected: walletAddress, match: statsData.miner_address === walletAddress });
+
+        if (statsData.miner_address === walletAddress && onMiningStats) {
+          console.log('✅ SSE: Address matches! Calling onMiningStats callback');
+          onMiningStats(statsData);
+        } else {
+          console.log('❌ SSE: Address mismatch or no callback, ignoring event');
+        }
+      } catch (error) {
+        console.error('❌ SSE: Failed to parse mining_stats event:', error);
       }
     });
 
@@ -1415,6 +1444,15 @@ export interface BalanceUpdateEvent {
   old_balance: number;
   new_balance: number;
   change_reason: string;
+  timestamp: string;
+}
+
+export interface MiningStatsEvent {
+  miner_address: string;
+  total_rewards: number;
+  total_blocks_found: number;
+  current_balance: number;
+  avg_hash_rate: number;
   timestamp: string;
 }
 

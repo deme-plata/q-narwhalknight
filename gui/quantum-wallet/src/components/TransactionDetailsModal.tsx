@@ -169,10 +169,10 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 ) : (
                   <div>
                     <p className={`text-3xl font-bold ${isReceive ? 'text-green-400' : 'text-red-400'}`}>
-                      {isReceive ? '+' : '-'}{(transaction.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {TICKER_SYMBOL}
+                      {isReceive ? '+' : '-'}{((transaction.amount || 0) / 1e10).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {TICKER_SYMBOL}
                     </p>
                     <p className="text-sm text-amber-300/60 mt-1">
-                      ≈ ${((transaction.amount || 0) * 0.01).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                      ≈ ${(((transaction.amount || 0) / 1e10) * 0.01).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
                     </p>
                   </div>
                 )}

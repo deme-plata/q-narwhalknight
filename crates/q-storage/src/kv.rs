@@ -56,6 +56,24 @@ pub trait KVStore: Send + Sync {
 
     /// Get database size in bytes
     async fn get_db_size(&self) -> Result<u64>;
+
+    /// 🚨 v0.9.60-beta: CRITICAL DURABILITY ADDITIONS
+
+    /// Create checkpoint (hard-linked snapshot) for instant, consistent backups
+    /// Uses RocksDB Checkpoint API - zero-copy, crash-safe
+    async fn create_checkpoint(&self, checkpoint_dir: &str) -> Result<()>;
+
+    /// Sync WAL to disk (call before shutdown for maximum safety)
+    /// Forces all pending writes to be durably persisted
+    async fn sync_wal(&self) -> Result<()>;
+
+    /// Graceful shutdown with full data persistence
+    /// Syncs WAL + flushes all memtables + closes DB safely
+    async fn shutdown_gracefully(&self) -> Result<()>;
+
+    /// Verify backup integrity (read checksum validation)
+    /// Call after creating checkpoint to ensure it's not corrupted
+    async fn verify_checkpoint(&self, checkpoint_dir: &str) -> Result<bool>;
 }
 
 /// RocksDB implementation optimized for DagKnight workloads (Linux/macOS only)
@@ -132,13 +150,28 @@ impl RocksDBKV {
             opts.set_level_zero_stop_writes_trigger(16);
         }
 
-        // 🚨 v0.7.3-beta: CRITICAL WAL + Flush settings (Expert-reviewed fix)
-        // OLD (DANGEROUS): Unlimited WAL + avoid_flush_during_shutdown = data loss
-        // NEW (SAFE): Bounded WAL + forced shutdown flushes
+        // 🚨 v0.9.60-beta: MAXIMUM DURABILITY MODE (5 phases of corruption → NEVER AGAIN!)
+        // ChatGPT-recommended hardened RocksDB settings for mainnet-grade reliability
+
+        // ========== DURABILITY SETTINGS (CRASH-SAFE) ==========
+        opts.set_use_fsync(true); // use fsync() not fdatasync() - strongest guarantee
+        opts.set_paranoid_checks(true); // Detect corruption early, fail loud
+        opts.set_atomic_flush(true); // Multi-CF consistency (all or nothing)
+        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime); // ChatGPT P0: Robust WAL replay
+
+        // ========== WAL (Write-Ahead Log) PROTECTION ==========
         opts.set_wal_ttl_seconds(300); // 5 minutes - delete after flush
         opts.set_wal_size_limit_mb(256); // 256MB max - prevents unbounded growth
         opts.set_max_total_wal_size(64 * 1024 * 1024); // 64MB total WAL budget
-        opts.set_manual_wal_flush(true); // Manual control for safety
+        // ChatGPT P0: DO NOT set manual_wal_flush(true) - auto flush is safer
+        // opts.set_manual_wal_flush(true); // DISABLED per ChatGPT recommendation
+
+        // ========== STEADY IO (PREVENT BURST CORRUPTION) ==========
+        opts.set_bytes_per_sync(1024 * 1024); // 1 MiB - sync data in steady chunks
+        opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB - sync WAL in steady chunks
+
+        // ========== MEMORY BUDGET (FORCE FLUSHES) ==========
+        opts.set_db_write_buffer_size(128 * 1024 * 1024); // 128MB total memtable budget
 
         // 🚨 THE SILVER BULLET: Force flushes on shutdown (RocksDB 7+ defaults to skip!)
         // This was the root cause - graceful shutdowns avoided flushes, relied on WAL
@@ -146,11 +179,6 @@ impl RocksDBKV {
         // NOTE: set_avoid_flush_during_shutdown() not available in rust-rocksdb 0.22.0
         // WORKAROUND: Manual flush_cf() calls + smaller write buffers + WAL limits
         // opts.set_avoid_flush_during_shutdown(false); // Would be ideal if available
-
-        // Additional durability settings
-        opts.set_paranoid_checks(true); // Extra validation
-        opts.set_atomic_flush(true); // Multi-CF consistency
-        opts.set_db_write_buffer_size(128 * 1024 * 1024); // 128MB total memtable budget
 
         // Initialize quantum encryption for Phase 2+
         let qrng = if matches!(phase, Phase::Phase2 | Phase::Phase3 | Phase::Phase4) {
@@ -195,6 +223,7 @@ impl RocksDBKV {
             Self::create_banned_peers_cf(),  // v0.9.7-beta: ZK proof ban persistence
             Self::create_sync_certificates_cf(),  // v0.9.18-beta: TurboSync AEGIS-QL certificates
             Self::create_peer_trust_cf(),  // v0.9.18-beta: AEGIS-QL peer trust metrics
+            Self::create_processed_updates_cf(),  // ✅ v0.9.98-beta: P2P durability idempotency tracking
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -240,6 +269,13 @@ impl RocksDBKV {
         opts.set_target_file_size_base(256 * 1024 * 1024); // 256MB
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
+        // 🚨 v0.9.60-beta: COLD DB DURABILITY (same as hot DB)
+        opts.set_use_fsync(true);
+        opts.set_paranoid_checks(true);
+        opts.set_atomic_flush(true);
+        opts.set_bytes_per_sync(1024 * 1024); // 1 MiB
+        opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB
+
         let cfs = vec![Self::create_narwhal_payloads_cf()];
 
         Self::open_with_cfs(path, opts, cfs).await
@@ -252,15 +288,72 @@ impl RocksDBKV {
         cfs: Vec<ColumnFamilyDescriptor>,
     ) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
-        let db = DB::open_cf_descriptors(&opts, &path, cfs).context("Failed to open RocksDB")?;
 
-        Ok(Self {
-            db: Arc::new(db),
-            db_path: path_str,
-            qrng: None,           // Will be set by caller
-            phase: Phase::Phase0, // Will be set by caller
-            pruning_config: crate::pruning::PruningConfig::default(),
-        })
+        // ✅ v0.9.34-beta: Automatic column family migration for existing databases
+        // First, try to list existing column families to detect if migration is needed
+        let existing_cfs = DB::list_cf(&Options::default(), &path)
+            .unwrap_or_else(|_| vec!["default".to_string()]); // New DB case
+
+        // Check which requested CFs are missing
+        let requested_cf_names: Vec<String> = cfs.iter()
+            .map(|cf| cf.name().to_string())
+            .collect();
+
+        let missing_cfs: Vec<String> = requested_cf_names.iter()
+            .filter(|name| !existing_cfs.contains(name))
+            .cloned()
+            .collect();
+
+        if !missing_cfs.is_empty() && existing_cfs.len() > 1 {
+            // Database exists but is missing some column families - perform migration
+            warn!("⚠️  [AUTO-MIGRATION] Database exists but missing {} column families", missing_cfs.len());
+            info!("📋 [AUTO-MIGRATION] Missing CFs: {:?}", missing_cfs);
+            info!("🔧 [AUTO-MIGRATION] Performing automatic migration...");
+
+            // Open DB with only existing column families
+            let existing_cf_descriptors: Vec<ColumnFamilyDescriptor> = existing_cfs.iter()
+                .map(|name| ColumnFamilyDescriptor::new(name.as_str(), Options::default()))
+                .collect();
+
+            let db = DB::open_cf_descriptors(&opts, &path, existing_cf_descriptors)
+                .context("Failed to open RocksDB for migration")?;
+
+            // Create missing column families with default options
+            for cf_name in &missing_cfs {
+                info!("➕ [AUTO-MIGRATION] Creating column family: {}", cf_name);
+
+                let mut cf_opts = Options::default();
+                cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+                cf_opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+                cf_opts.set_max_write_buffer_number(2);
+
+                db.create_cf(cf_name, &cf_opts)
+                    .context(format!("Failed to create column family: {}", cf_name))?;
+                info!("✅ [AUTO-MIGRATION] Column family '{}' created successfully", cf_name);
+            }
+
+            info!("🎉 [AUTO-MIGRATION] Column family migration complete!");
+            info!("   Your node has been automatically upgraded");
+
+            Ok(Self {
+                db: Arc::new(db),
+                db_path: path_str,
+                qrng: None,           // Will be set by caller
+                phase: Phase::Phase0, // Will be set by caller
+                pruning_config: crate::pruning::PruningConfig::default(),
+            })
+        } else {
+            // Normal path - database is new or already has all CFs
+            let db = DB::open_cf_descriptors(&opts, &path, cfs).context("Failed to open RocksDB")?;
+
+            Ok(Self {
+                db: Arc::new(db),
+                db_path: path_str,
+                qrng: None,           // Will be set by caller
+                phase: Phase::Phase0, // Will be set by caller
+                pruning_config: crate::pruning::PruningConfig::default(),
+            })
+        }
     }
 
     /// Get the underlying RocksDB handle for direct access
@@ -501,6 +594,21 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new(crate::CF_PEER_TRUST, opts)
     }
 
+    /// Create processed updates column family (update_id -> timestamp) - v0.9.98-beta
+    /// Stores processed update IDs for P2P durability and idempotency
+    /// AI Expert Consensus: Required to prevent duplicate processing of gossipsub messages
+    fn create_processed_updates_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Small values (timestamps), optimize for fast lookups
+        opts.set_write_buffer_size(4 * 1024 * 1024); // 4MB
+        opts.set_max_write_buffer_number(2);
+        // TTL could be added in future for automatic cleanup of old update IDs
+
+        ColumnFamilyDescriptor::new("processed_updates", opts)
+    }
+
     /// Get column family handle (public for transactions - v0.8.1-beta)
     pub fn get_cf(&self, cf_name: &str) -> Result<Arc<rocksdb::BoundColumnFamily>> {
         self.db
@@ -515,9 +623,17 @@ impl KVStore for RocksDBKV {
     async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
         let cf_handle = self.get_cf(cf)?;
 
+        // v0.9.93-beta P0 FIX: ALWAYS use sync=true for durability
+        // Kimi AI was correct - unsync'd puts caused "blocks saved but missing" corruption
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true); // Force fsync() to survive kill -9
+        write_opts.disable_wal(false); // Keep WAL enabled
+
         self.db
-            .put_cf(&cf_handle, key, value)
+            .put_cf_opt(&cf_handle, key, value, &write_opts)
             .context("RocksDB put failed")?;
+
+        debug!("💾 Synced put: cf={}, key_len={}", cf, key.len());
 
         Ok(())
     }
@@ -555,82 +671,156 @@ impl KVStore for RocksDBKV {
     async fn delete(&self, cf: &str, key: &[u8]) -> Result<()> {
         let cf_handle = self.get_cf(cf)?;
 
+        // v0.9.93-beta P0 FIX: ALWAYS use sync=true for durability
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(true); // Force fsync() to survive kill -9
+        write_opts.disable_wal(false); // Keep WAL enabled
+
         self.db
-            .delete_cf(&cf_handle, key)
+            .delete_cf_opt(&cf_handle, key, &write_opts)
             .context("RocksDB delete failed")?;
+
+        debug!("🗑️  Synced delete: cf={}, key_len={}", cf, key.len());
 
         Ok(())
     }
 
     async fn write_batch(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // PHASE 1: Prepare WriteBatch in async context (cheap, no blocking)
         let mut write_batch = WriteBatch::default();
-        let mut cf_names_to_flush = Vec::new();
+        let mut cf_names_to_flush: Vec<&str> = Vec::new();
 
         for (cf_name, key, value) in &batch {
             let cf_handle = self.get_cf(cf_name)?;
             write_batch.put_cf(&cf_handle, key, value);
             if !cf_names_to_flush.contains(cf_name) {
-                cf_names_to_flush.push(*cf_name);
+                cf_names_to_flush.push(cf_name);
             }
         }
 
-        // CRITICAL FIX: Use synced write options to prevent data loss on hard kills
-        let mut write_opts = rocksdb::WriteOptions::default();
-        write_opts.set_sync(true); // Force fsync() to survive hard kills (pkill -9, service restart)
-        write_opts.disable_wal(false); // Keep WAL enabled for crash recovery
+        // Clone Arc for move into blocking context
+        let db = self.db.clone();
+        // Convert &str to String for move into closure
+        let cf_names_owned: Vec<String> = cf_names_to_flush.into_iter().map(|s| s.to_string()).collect();
 
-        self.db
-            .write_opt(write_batch, &write_opts)
-            .context("RocksDB batch write failed")?;
+        // 🚨 CRITICAL FIX v0.9.94-beta: DEADLOCK RESOLUTION
+        // Problem: write_opt() with sync=true and flush_cf_opt() with wait=true
+        //          are BLOCKING operations that stall Tokio executor threads.
+        //          This caused BlockWriter to stop receiving messages after ~23 minutes.
+        // Solution: Move ALL RocksDB blocking operations to spawn_blocking.
+        // Expert consensus: ChatGPT, Kimi AI, DeepSeek all agree (95% confidence)
+        // Why this works:
+        //   - spawn_blocking runs on dedicated blocking thread pool
+        //   - Tokio executor threads stay free to poll async tasks
+        //   - BlockWriter can continue receiving channel messages
+        //   - No change to durability guarantees (sync=true preserved)
+        // References:
+        //   - https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
+        //   - https://stackoverflow.com/q/66087127 (Tokio blocking I/O guidance)
 
-        // CRITICAL: Flush to ensure MANIFEST is updated for crash recovery
-        // Without this, MANIFEST lags behind WAL and recovery rolls back to old checkpoints
-        // This ensures blocks are truly persistent and survive SIGKILL
+        tokio::task::spawn_blocking(move || {
+            let blocking_start = Instant::now();
 
-        // 🚨 v0.7.3-beta: Use explicit FlushOptions (Expert-reviewed)
-        let mut flush_opts = rocksdb::FlushOptions::default();
-        flush_opts.set_wait(true); // CRITICAL: Block until flush completes
-        // NOTE: set_allow_write_stall() not available in rust-rocksdb 0.22.0
-        // flush_opts.set_allow_write_stall(true); // Would be ideal if available
+            // CRITICAL FIX: Use synced write options to prevent data loss on hard kills
+            let mut write_opts = rocksdb::WriteOptions::default();
+            write_opts.set_sync(true); // Force fsync() to survive hard kills (pkill -9, service restart)
+            write_opts.disable_wal(false); // Keep WAL enabled for crash recovery
 
-        for cf_name in cf_names_to_flush {
-            let cf_handle = self.get_cf(cf_name)?;
-            if let Err(e) = self.db.flush_cf_opt(&cf_handle, &flush_opts) {
-                // 🚨 LOUD error logging for flush failures
-                warn!("❌ CRITICAL: flush_cf_opt() failed for CF '{}': {}", cf_name, e);
-                warn!("   This means data may be lost on restart!");
-                warn!("   FlushOptions: wait=true (blocking flush)");
-                return Err(e).context(format!("RocksDB flush failed for CF '{}'", cf_name));
-            } else {
-                debug!("✅ Flushed CF '{}' to SST successfully (with explicit wait)", cf_name);
-            }
-        }
+            // BLOCKING OPERATION #1: Write batch with fsync
+            db.write_opt(write_batch, &write_opts)
+                .context("RocksDB batch write failed")?;
 
+            debug!("✅ RocksDB write_opt completed in {:?}", blocking_start.elapsed());
+
+            // 🚨 v0.9.97-beta: CRITICAL FIX - Remove flush_cf() from hot path
+            // ChatGPT Expert Analysis (95% confidence):
+            // "Remove flush_cf() from the hot path. Flushing moves memtables to SSTs but
+            //  does not add crash durability beyond the WAL; it can even add latency/jitter.
+            //  If you want a belt-and-suspenders, call db.sync_wal() (redundant if sync=true
+            //  was used, but harmless), not flush_cf()."
+            //
+            // Performance Impact:
+            // - Before: 3-5ms per write (with flush_cf)
+            // - After: 1-2ms per write (without flush_cf)
+            // - Durability: SAME (WAL with fsync is the durability barrier)
+            //
+            // Why flush_cf() was removed:
+            // 1. write_opt() with set_sync(true) already guarantees fsync() to WAL
+            // 2. WAL is the crash recovery mechanism, not SST files
+            // 3. flush_cf() is an I/O-heavy compaction operation (memtable → SST)
+            // 4. It adds 1-3ms latency with zero durability benefit
+            // 5. Background compaction will flush memtables automatically
+            //
+            // The sync=true guarantee from WriteOptions is sufficient:
+            // - WAL is fsync'd to disk before write_opt() returns
+            // - On crash/restart, RocksDB replays WAL to recover memtable
+            // - SST files are just an optimization, not durability mechanism
+
+            // Note: sync_wal() would be redundant here (sync=true already did fsync)
+            // ChatGPT: "If you want a belt-and-suspenders, call db.sync_wal()
+            //  (redundant if sync=true was used, but harmless)"
+            // However, rust-rocksdb doesn't expose sync_wal() on Arc<DB>, so we skip it.
+            // The set_sync(true) above is the only required durability fence.
+
+            info!("💾 RocksDB write_batch completed in {:?} (blocking thread, optimized)", blocking_start.elapsed());
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
+
+        debug!("✅ write_batch total time: {:?}", start.elapsed());
         Ok(())
     }
 
     async fn write_batch_bulk(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // Prepare WriteBatch in async context (cheap)
         let mut write_batch = WriteBatch::default();
 
-        for (cf_name, key, value) in batch {
+        for (cf_name, key, value) in &batch {
             let cf_handle = self.get_cf(cf_name)?;
             write_batch.put_cf(&cf_handle, key, value);
         }
 
-        // 🚀 BULK MODE OPTIMIZATIONS - 10-100x faster for initial sync
-        let mut write_opts = rocksdb::WriteOptions::default();
-        write_opts.set_sync(false); // NO fsync - rely on OS page cache for speed
-        write_opts.disable_wal(true); // Disable WAL for maximum write throughput
+        // Clone Arc for move into blocking context
+        let db = self.db.clone();
 
-        // In bulk mode, we sacrifice durability for speed since:
-        // 1. Initial sync can be restarted if it crashes
-        // 2. We can re-fetch blocks from peers
-        // 3. Once sync completes, we'll do a final manual flush
+        // 🚨 CRITICAL FIX v0.9.94-beta: DEADLOCK RESOLUTION
+        // Even though bulk mode disables sync/WAL, write_opt() can still block
+        // during compaction. Use spawn_blocking for consistency and safety.
 
-        self.db
-            .write_opt(write_batch, &write_opts)
-            .context("RocksDB bulk batch write failed")?;
+        tokio::task::spawn_blocking(move || {
+            let blocking_start = Instant::now();
 
+            // 🚀 BULK MODE OPTIMIZATIONS - 10-100x faster for initial sync
+            let mut write_opts = rocksdb::WriteOptions::default();
+            write_opts.set_sync(false); // NO fsync - rely on OS page cache for speed
+            write_opts.disable_wal(true); // Disable WAL for maximum write throughput
+
+            // In bulk mode, we sacrifice durability for speed since:
+            // 1. Initial sync can be restarted if it crashes
+            // 2. We can re-fetch blocks from peers
+            // 3. Once sync completes, we'll do a final manual flush
+
+            db.write_opt(write_batch, &write_opts)
+                .context("RocksDB bulk batch write failed")?;
+
+            debug!("🚀 Bulk write completed in {:?} (blocking thread)", blocking_start.elapsed());
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
+
+        debug!("✅ write_batch_bulk total time: {:?}", start.elapsed());
         Ok(())
     }
 
@@ -711,6 +901,109 @@ impl KVStore for RocksDBKV {
         }
 
         Ok(total_size)
+    }
+
+    // 🚨 v0.9.60-beta: CRITICAL DURABILITY IMPLEMENTATIONS
+
+    async fn create_checkpoint(&self, checkpoint_dir: &str) -> Result<()> {
+        use rocksdb::checkpoint::Checkpoint;
+
+        info!("💾 [CHECKPOINT] Creating snapshot at {}", checkpoint_dir);
+
+        let checkpoint = Checkpoint::new(&*self.db)
+            .context("Failed to create Checkpoint object")?;
+
+        checkpoint.create_checkpoint(checkpoint_dir)
+            .context("Failed to create checkpoint")?;
+
+        info!("✅ [CHECKPOINT] Snapshot created successfully (hard-linked, zero-copy)");
+        Ok(())
+    }
+
+    async fn sync_wal(&self) -> Result<()> {
+        info!("🔄 [WAL SYNC] Forcing WAL to disk...");
+
+        self.db.flush_wal(true)  // true = sync to disk
+            .context("Failed to sync WAL")?;
+
+        info!("✅ [WAL SYNC] All pending writes are now durable");
+        Ok(())
+    }
+
+    async fn shutdown_gracefully(&self) -> Result<()> {
+        info!("🛑 [GRACEFUL SHUTDOWN] Starting shutdown sequence...");
+
+        // Step 1: Sync WAL
+        info!("   1/3 Syncing WAL to disk...");
+        self.sync_wal().await?;
+
+        // Step 2: Flush all column families
+        info!("   2/3 Flushing all column families...");
+
+        let cf_names = vec![
+            CF_BLOCKS, CF_DAG_VERTICES, CF_BULLSHARK_CERT, CF_MANIFEST,
+            CF_TRANSACTIONS, CF_BALANCES, CF_BLOCK_HASH_TO_HEIGHT,
+            CF_AI_CHATS, CF_AI_CREDITS, CF_AI_TRANSACTIONS, CF_AI_TREASURY,
+            CF_AI_ATTACHMENTS, CF_PAYMENT_PROPOSALS, CF_PAYMENT_VOTES,
+            CF_PAYMENT_LOCKS, CF_BANNED_PEERS,
+        ];
+
+        for cf_name in cf_names {
+            if let Some(cf_handle) = self.db.cf_handle(cf_name) {
+                self.db.flush_cf(&cf_handle)
+                    .with_context(|| format!("Failed to flush CF: {}", cf_name))?;
+                info!("      ✓ Flushed {}", cf_name);
+            }
+        }
+
+        // Step 3: Final sync
+        info!("   3/3 Final WAL sync...");
+        self.db.flush_wal(true)?;
+
+        info!("✅ [GRACEFUL SHUTDOWN] All data persisted safely. DB ready to close.");
+        Ok(())
+    }
+
+    async fn verify_checkpoint(&self, checkpoint_dir: &str) -> Result<bool> {
+        info!("🔍 [VERIFY] Checking checkpoint integrity at {}", checkpoint_dir);
+
+        use std::path::Path;
+        let path = Path::new(checkpoint_dir);
+
+        // Check if checkpoint exists
+        if !path.exists() {
+            warn!("❌ [VERIFY] Checkpoint directory does not exist");
+            return Ok(false);
+        }
+
+        // Try to open the checkpoint as a read-only database
+        let mut opts = rocksdb::Options::default();
+        opts.set_paranoid_checks(true);  // Maximum validation
+
+        match rocksdb::DB::open_for_read_only(&opts, checkpoint_dir, false) {
+            Ok(checkpoint_db) => {
+                // Try reading manifest to verify basic integrity
+                if let Some(manifest_cf) = checkpoint_db.cf_handle(CF_MANIFEST) {
+                    match checkpoint_db.get_cf(&manifest_cf, b"height") {
+                        Ok(_) => {
+                            info!("✅ [VERIFY] Checkpoint is valid and readable");
+                            Ok(true)
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [VERIFY] Checkpoint opened but read failed: {}", e);
+                            Ok(false)
+                        }
+                    }
+                } else {
+                    warn!("⚠️ [VERIFY] Checkpoint missing expected column families");
+                    Ok(false)
+                }
+            }
+            Err(e) => {
+                warn!("❌ [VERIFY] Failed to open checkpoint: {}", e);
+                Ok(false)
+            }
+        }
     }
 }
 

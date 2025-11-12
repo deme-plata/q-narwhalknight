@@ -1,6 +1,7 @@
 pub mod cuda;
 pub mod opencl;
 pub mod vulkan;
+pub mod multi_gpu;
 
 #[cfg(feature = "cuda-mining")]
 pub use cuda::CudaMiner;
@@ -9,6 +10,7 @@ pub use cuda::CudaMinerStub as CudaMiner;
 
 pub use opencl::OpenClMiner;
 pub use vulkan::VulkanMiner;
+pub use multi_gpu::{MultiGPUMiner, GPUDeviceInfo, LoadBalancingStrategy};
 
 use crate::{MiningAlgorithm, MiningEngine, MiningStats, WorkUnit, Solution, GlobalMiningStats};
 use anyhow::Result;
@@ -36,27 +38,46 @@ pub struct GpuDeviceInfo {
 pub trait GpuMiner: MiningEngine {
     /// Initialize GPU device
     async fn initialize_device(&mut self, device_id: u32) -> Result<()>;
-    
+
     /// Allocate GPU memory for mining
     async fn allocate_memory(&mut self, size: usize) -> Result<()>;
-    
+
     /// Load mining kernel onto GPU
     async fn load_kernel(&mut self, algorithm: Arc<dyn MiningAlgorithm>) -> Result<()>;
-    
+
     /// Submit work to GPU for processing
     async fn submit_work(&mut self, work: WorkUnit) -> Result<()>;
-    
+
     /// Check for completed solutions
     async fn check_solutions(&mut self) -> Result<Vec<Solution>>;
-    
+
     /// Get device temperature
     async fn get_temperature(&self) -> Result<f64>;
-    
+
     /// Get device power usage
     async fn get_power_usage(&self) -> Result<f64>;
-    
+
     /// Get device utilization percentage
     async fn get_utilization(&self) -> Result<f64>;
+}
+
+/// Simplified GPU mining backend for multi-GPU coordination
+#[async_trait]
+pub trait GpuMiningBackend: Send + Sync {
+    /// Get device ID
+    fn device_id(&self) -> usize;
+
+    /// Submit mining work
+    async fn submit_work(&mut self, work: WorkUnit) -> Result<()>;
+
+    /// Check for solutions
+    async fn check_solutions(&mut self) -> Result<Vec<Solution>>;
+
+    /// Get current hash rate
+    async fn get_hash_rate(&self) -> Result<f64>;
+
+    /// Get device stats
+    async fn get_stats(&self) -> Result<crate::DeviceStats>;
 }
 
 /// GPU mining configuration

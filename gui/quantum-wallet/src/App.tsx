@@ -30,14 +30,29 @@ function App() {
     console.log('🎬 Initializing currentScreen to dashboard');
     return 'dashboard';
   });
-  const [nodeData, setNodeData] = useState({
-    balance: 0,
-    nodeId: '',
-    blockHeight: 0,
-    peers: 0,
-    isOnline: false,
-    qci: 0.10, // Quantum Coherence Index - starts low, calculated dynamically
+  // CRITICAL FIX v0.9.44-beta: Initialize balance from cached value for instant display
+  // This prevents balance showing as zero while waiting for API/SSE
+  const [nodeData, setNodeData] = useState(() => {
+    const cachedBalance = localStorage.getItem('cachedBalance');
+    const initialBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
+    console.log('⚡ App.tsx: Initializing balance from cache:', {
+      raw: cachedBalance,
+      parsed: initialBalance,
+      type: typeof initialBalance
+    });
+
+    return {
+      balance: initialBalance,
+      nodeId: '',
+      blockHeight: 0,
+      peers: 0,
+      isOnline: false,
+      qci: 0.10, // Quantum Coherence Index - starts low, calculated dynamically
+    };
   });
+
+  // Debounce balance updates to prevent flickering
+  const [pendingBalanceUpdate, setPendingBalanceUpdate] = useState<number | null>(null);
 
   // Debug: Log whenever currentScreen changes
   useEffect(() => {
@@ -58,6 +73,30 @@ function App() {
     localStorage.setItem('authenticated', String(authenticated));
   }, [authenticated]);
 
+  // Debounce balance updates - only apply after 300ms of stability
+  useEffect(() => {
+    if (pendingBalanceUpdate === null) return;
+
+    console.log('⏱️ [BALANCE DEBUG] Pending balance update queued:', {
+      pendingValue: pendingBalanceUpdate,
+      currentValue: nodeData.balance,
+      willUpdateIn: '300ms'
+    });
+
+    const timer = setTimeout(() => {
+      console.log('✅ [BALANCE DEBUG] Applying debounced balance update:', {
+        oldBalance: nodeData.balance,
+        newBalance: pendingBalanceUpdate,
+        source: 'debounced'
+      });
+      setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
+      localStorage.setItem('cachedBalance', pendingBalanceUpdate.toString());
+      setPendingBalanceUpdate(null);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [pendingBalanceUpdate, nodeData.balance]);
+
   // Fetch initial node data and set up SSE for real-time updates
   useEffect(() => {
     if (!authenticated) return;
@@ -75,73 +114,11 @@ function App() {
         if (!mounted) return;
 
         if (data.success && data.data) {
-          const currentWalletAddress = localStorage.getItem('walletAddress');
-          let walletBalance = 0;
-
-          if (currentWalletAddress) {
-            try {
-              const balanceResponse = await fetch(`/api/v1/wallets/${currentWalletAddress}/balance`);
-              const balanceData = await balanceResponse.json();
-
-              if (balanceData.success && balanceData.data) {
-                walletBalance = balanceData.data.balance_qnk || 0;
-                // Cache balance for use after refresh
-                localStorage.setItem('cachedBalance', walletBalance.toString());
-                console.log('💰 App.tsx: Cached balance from API:', walletBalance);
-              } else {
-                // Authentication failed - calculate from faucet transactions
-                console.warn('⚠️ App.tsx: Balance fetch failed, calculating from transaction history');
-
-                // First try cached balance
-                const cachedBalance = localStorage.getItem('cachedBalance');
-                if (cachedBalance && parseFloat(cachedBalance) > 0) {
-                  walletBalance = parseFloat(cachedBalance);
-                  console.log('💰 App.tsx: Using cached balance:', walletBalance);
-                } else {
-                  // Calculate from faucet transactions as fallback
-                  try {
-                    const storedTxs = localStorage.getItem('faucetTransactions');
-                    if (storedTxs) {
-                      const transactions = JSON.parse(storedTxs);
-                      walletBalance = transactions.reduce((total: number, tx: any) => {
-                        return total + (tx.type === 'receive' ? tx.amount : 0);
-                      }, 0);
-                      console.log('💰 App.tsx: Calculated balance from faucet transactions:', walletBalance, 'QNK');
-                      // Cache the calculated balance
-                      localStorage.setItem('cachedBalance', walletBalance.toString());
-                    }
-                  } catch (txErr) {
-                    console.error('Failed to calculate balance from transactions:', txErr);
-                  }
-                }
-              }
-            } catch (balanceErr) {
-              console.warn('Failed to fetch wallet balance:', balanceErr);
-
-              // Fallback 1: use cached balance from localStorage
-              const cachedBalance = localStorage.getItem('cachedBalance');
-              if (cachedBalance && parseFloat(cachedBalance) > 0) {
-                walletBalance = parseFloat(cachedBalance);
-                console.log('💰 App.tsx: Using cached balance (error fallback):', walletBalance);
-              } else {
-                // Fallback 2: calculate from faucet transactions
-                try {
-                  const storedTxs = localStorage.getItem('faucetTransactions');
-                  if (storedTxs) {
-                    const transactions = JSON.parse(storedTxs);
-                    walletBalance = transactions.reduce((total: number, tx: any) => {
-                      return total + (tx.type === 'receive' ? tx.amount : 0);
-                    }, 0);
-                    console.log('💰 App.tsx: Calculated balance from faucet transactions (error fallback):', walletBalance, 'QNK');
-                    // Cache the calculated balance
-                    localStorage.setItem('cachedBalance', walletBalance.toString());
-                  }
-                } catch (txErr) {
-                  console.error('Failed to calculate balance from transactions:', txErr);
-                }
-              }
-            }
-          }
+          // Don't fetch balance here - SSE will provide it
+          // Using cached balance prevents flickering between API (RocksDB) and SSE (in-memory) values
+          const cachedBalance = localStorage.getItem('cachedBalance');
+          let walletBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
+          console.log('💰 App.tsx: Using cached balance (SSE will update):', walletBalance);
 
           if (mounted) {
             // Calculate dynamic Quantum Coherence Index (QCI)
@@ -162,14 +139,21 @@ function App() {
             // Calculate total QCI (0.0 to 1.0)
             const calculatedQCI = peerScore + blockScore + healthScore;
 
-            setNodeData({
+            // CRITICAL FIX v0.9.46-beta: Update balance from API fetch above
+            console.log('🔵 [BALANCE DEBUG] Setting initial node data:', {
+              balance: walletBalance,
+              source: 'fetchNodeStatus',
+              blockHeight: blockHeight
+            });
+            setNodeData(prev => ({
+              ...prev,
               balance: walletBalance,
               nodeId: data.data.node_id || '',
               blockHeight: blockHeight,
               peers: peers,
               isOnline: isHealthy,
               qci: calculatedQCI
-            });
+            }));
           }
         }
       } catch (err) {
@@ -180,15 +164,57 @@ function App() {
     // Initial fetch
     fetchNodeStatus();
 
-    // Listen for custom balance update events from Dashboard
+    // Listen for custom balance update events from Dashboard (e.g., after transactions)
     const handleBalanceUpdate = (event: Event) => {
       const customEvent = event as CustomEvent;
       console.log('💰 App.tsx: Received custom balance-update event:', customEvent.detail);
+
       if (customEvent.detail?.balance !== undefined) {
-        setNodeData(prev => ({ ...prev, balance: customEvent.detail.balance }));
+        const newBalance = customEvent.detail.balance;
+        console.log('🟡 [BALANCE DEBUG] Custom balance-update event:', {
+          newBalance: newBalance,
+          currentBalance: nodeData.balance,
+          source: 'custom-event'
+        });
+
+        // Use debounced update to prevent flickering
+        setPendingBalanceUpdate(newBalance);
+        console.log('⏱️ [BALANCE DEBUG] Balance update queued from custom event (debounced):', newBalance);
       } else {
-        // If no balance in event, refresh from API
-        fetchNodeStatus();
+        // If no balance in event, refresh from API (will fetch and cache fresh balance)
+        console.log('🔄 App.tsx: No balance in event, fetching from API');
+
+        // Fetch fresh balance from API after transaction
+        (async () => {
+          try {
+            const { walletSession } = await import('./services/walletAuth');
+            const session = walletSession.getSession();
+
+            if (!session) {
+              console.warn('⚠️ App.tsx: No session for balance refresh after transaction');
+              return;
+            }
+
+            const { qnkAPI } = await import('./services/api');
+            const walletAddress = localStorage.getItem('walletAddress');
+            if (!walletAddress) {
+              console.warn('⚠️ App.tsx: No wallet address for balance refresh');
+              return;
+            }
+
+            const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
+            if (balanceResponse.success && balanceResponse.data) {
+              const freshBalance = balanceResponse.data.balance_qnk || 0;
+              console.log('💰 App.tsx: Fresh balance after transaction:', freshBalance);
+
+              // Use debounced update to prevent flickering
+              setPendingBalanceUpdate(freshBalance);
+              console.log('⏱️ App.tsx: Balance update queued from API fetch (debounced):', freshBalance);
+            }
+          } catch (err) {
+            console.error('❌ App.tsx: Failed to fetch balance after transaction:', err);
+          }
+        })();
       }
     };
 
@@ -303,17 +329,16 @@ function App() {
 
               // Only update if this balance event is for the current wallet
               if (currentHex && eventHex === currentHex) {
-                console.log('✅ App.tsx: BALANCE UPDATE APPLIED!', {
+                console.log('🟢 [BALANCE DEBUG] SSE balance-updated event:', {
                   oldBalance: balanceData.old_balance,
                   newBalance: balanceData.new_balance,
-                  currentNodeDataBalance: nodeData.balance
+                  currentNodeDataBalance: nodeData.balance,
+                  reason: balanceData.change_reason,
+                  source: 'SSE'
                 });
-                setNodeData(prev => {
-                  console.log('💰 App.tsx: setNodeData called, prev balance:', prev.balance, '-> new balance:', balanceData.new_balance);
-                  return { ...prev, balance: balanceData.new_balance };
-                });
-                // Also update cached balance
-                localStorage.setItem('cachedBalance', balanceData.new_balance.toString());
+                // Use debounced update to prevent flickering
+                setPendingBalanceUpdate(balanceData.new_balance);
+                console.log('⏱️ [BALANCE DEBUG] Balance update queued (debounced):', balanceData.new_balance);
 
                 // Dispatch custom event for Dashboard to update wallet balances
                 window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
@@ -485,7 +510,7 @@ function App() {
 
           <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
             {currentScreen === 'dashboard' && <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} />}
-            {currentScreen === 'transactions' && <TransactionScreenV2 />}
+            {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
             {currentScreen === 'dex' && <DexScreen />}
             {currentScreen === 'explorer' && <ExplorerScreen />}
             {currentScreen === 'mining' && <MiningScreen />}

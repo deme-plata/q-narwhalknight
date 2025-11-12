@@ -101,11 +101,11 @@ impl QRNGInterface {
     /// Generate quantum entropy (Phase 0: simulated)
     pub async fn generate_entropy(&mut self, bytes: usize) -> Result<Vec<u8>> {
         // Phase 0 implementation: use cryptographically secure PRNG
-        use rand::{RngCore, SeedableRng};
+        use rand::{TryRngCore as _, SeedableRng};  // TryRngCore for rand 0.9
 
         let mut rng = rand::rngs::OsRng;
         let mut entropy = vec![0u8; bytes];
-        rng.fill_bytes(&mut entropy);
+        rng.try_fill_bytes(&mut entropy).unwrap();
 
         // TODO: In Phase 2+, interface with actual QRNG hardware
         // This would involve reading from quantum hardware devices
@@ -313,9 +313,10 @@ impl QuantumBeacon {
         hasher.update(&round.to_be_bytes());
 
         // System entropy
+        use rand::TryRngCore as _;  // For try_fill_bytes (rand 0.9)
         let mut rng = rand::rngs::OsRng;
         let mut system_entropy = [0u8; 32];
-        rng.fill_bytes(&mut system_entropy);
+        rng.try_fill_bytes(&mut system_entropy).unwrap();
         hasher.update(&system_entropy);
 
         // Process entropy through multiple iterations

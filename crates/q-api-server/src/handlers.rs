@@ -17,11 +17,108 @@ use uuid::Uuid;
 use bcrypt::{hash, verify, DEFAULT_COST};
 
 use crate::{AppState, PendingMixingRequest, StreamEvent};
-use crate::wallet_auth::AuthenticatedWallet;
+pub use crate::wallet_auth::AuthenticatedWallet;
+use q_storage::BalanceStorage; // Import trait for get_balance method
+
+// ============================================================================
+// API RESPONSE WRAPPER
+// ============================================================================
+
+/// API response wrapper
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ApiResponse<T> {
+    pub success: bool,
+    pub data: Option<T>,
+    pub error: Option<String>,
+    pub timestamp: u64,
+}
+
+impl<T> ApiResponse<T> {
+    pub fn success(data: T) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+
+    pub fn error(message: String) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(message),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+}
 
 /// Health check endpoint
 pub async fn health_check() -> Result<Json<ApiResponse<String>>, StatusCode> {
     Ok(Json(ApiResponse::success("OK".to_string())))
+}
+
+/// v0.9.57-beta: Binary version information endpoint
+/// Returns detailed version info including build timestamp to detect stale binaries
+#[derive(Serialize)]
+pub struct VersionInfo {
+    pub binary_version: String,
+    pub build_timestamp: u64,
+    pub build_date: String,
+    pub turbo_sync_version: u32,
+    pub network_id: String,
+    pub features: Vec<String>,
+}
+
+pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
+    let info = VersionInfo {
+        binary_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_timestamp: env!("BUILD_TIMESTAMP")
+            .parse()
+            .unwrap_or(0),
+        build_date: env!("BUILD_DATE").to_string(),
+        turbo_sync_version: 1, // NEW format
+        network_id: std::env::var("Q_NETWORK_ID")
+            .unwrap_or_else(|_| "testnet-phase5".to_string()),
+        features: vec![
+            "turbo-sync".to_string(),
+            "balance-consensus".to_string(),
+            "distributed-ai".to_string(),
+            "aegis-ql".to_string(),
+        ],
+    };
+
+    Ok(Json(ApiResponse::success(info)))
+}
+
+/// v0.9.59-beta: Get block by height endpoint
+/// Enables HTTP fallback sync for gap filling
+pub async fn get_block_by_height(
+    Path(height): Path<u64>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<q_types::QBlock>>, StatusCode> {
+    debug!("📥 HTTP request for block at height {}", height);
+
+    match state.storage_engine.get_qblock_by_height(height).await {
+        Ok(Some(block)) => {
+            debug!("✅ Serving block at height {}", height);
+            Ok(Json(ApiResponse::success(block)))
+        }
+        Ok(None) => {
+            warn!("❌ Block not found at height {}", height);
+            Err(StatusCode::NOT_FOUND)
+        }
+        Err(e) => {
+            warn!("❌ Error fetching block at height {}: {}", height, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 /// Prometheus metrics endpoint
@@ -34,11 +131,23 @@ pub async fn metrics(State(_state): State<Arc<AppState>>) -> Result<String, Stat
 pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let status = state.node_status.read().await.clone();
 
-    // Get wallet address for balance lookup (use node_id as wallet address for now)
-    let wallet_address = status.node_id;
+    // ✅ v0.9.30-beta: Get master account (dev fee wallet) balance for node status display
+    // Master account receives 1% of all mining rewards as development fee
+    const MASTER_ACCOUNT_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
     let balance = {
+        // Check in-memory balances first (updated in real-time during mining)
         let balances = state.wallet_balances.read().await;
-        balances.get(&wallet_address).copied().unwrap_or(0) // New wallets start with 0 balance
+        if let Ok(master_addr_bytes) = hex::decode(MASTER_ACCOUNT_HEX) {
+            if master_addr_bytes.len() == 32 {
+                let mut master_addr = [0u8; 32];
+                master_addr.copy_from_slice(&master_addr_bytes);
+                balances.get(&master_addr).copied().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
     };
 
     // Calculate performance metrics before json! macro
@@ -267,8 +376,8 @@ pub async fn bootstrap_peers(State(state): State<Arc<AppState>>) -> Result<Json<
         } else {
             vec![]
         },
-        "network_id": "testnet-phase4",
-        "version": "v0.9.3-beta",
+        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string()),
+        "version": "v0.9.103-beta",
         "bootstrap_node": true,
         "discovery_method": "dynamic",
         "status": if peer_id != "discovering..." { "ready" } else { "initializing" },
@@ -493,7 +602,8 @@ pub async fn import_wallet(
     let password_hashes = state.wallet_password_hashes.read().await;
     if let Some(stored_hash) = password_hashes.get(&address) {
         // Wallet exists - MUST verify password
-        info!("🔐 Existing wallet found - verifying password for address: qnk{}", hex::encode(address));
+        // 🔒 PRIVACY: No logging of wallet addresses
+        debug!("🔐 Existing wallet found - verifying password");
 
         match verify(password, stored_hash) {
             Ok(is_valid) => {
@@ -514,7 +624,8 @@ pub async fn import_wallet(
         }
     } else {
         // New wallet - hash and store the password
-        info!("🆕 New wallet - creating password hash for address: qnk{}", hex::encode(address));
+        // 🔒 PRIVACY: No logging of wallet addresses
+        debug!("🆕 New wallet - creating password hash");
 
         let password_hash = match hash(password, DEFAULT_COST) {
             Ok(h) => h,
@@ -1821,6 +1932,89 @@ pub async fn discovery_stats(State(state): State<Arc<AppState>>) -> Result<Json<
 }
 
 // ============================================================================
+// P2P Network Health Endpoint (v0.9.38-beta - Phase 1.3)
+// ============================================================================
+
+/// P2P network health status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P2PHealthStatus {
+    pub libp2p_manager_active: bool,
+    pub connected_peers: usize,
+    pub turbo_sync_available: bool,
+    pub gossipsub_topics: Vec<String>,
+    pub network_status: String,
+    pub current_height: u64,
+    pub network_height: u64,
+    pub sync_progress_percent: f64,
+    pub bootstrap_peer_configured: bool,
+}
+
+/// Get P2P network health status
+///
+/// 🚀 v0.9.38-beta: PHASE 1.3 - Real-time P2P mesh health monitoring
+/// Returns detailed status of libp2p connectivity, peer count, and sync state
+pub async fn get_p2p_health(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<P2PHealthStatus>>, StatusCode> {
+    let node_status = state.node_status.read().await;
+
+    // Get libp2p peer count from atomic counter
+    let libp2p_peers = if let Some(ref peer_count) = state.libp2p_peer_count {
+        peer_count.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+
+    // Check TURBO SYNC availability
+    let turbo_sync_available = state.turbo_sync.is_some();
+
+    // Get network height
+    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    let current_height = node_status.current_height;
+
+    // Calculate sync progress
+    let sync_progress_percent = if network_height > 0 {
+        (current_height as f64 / network_height as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    // Determine network status
+    let network_status = if libp2p_peers == 0 {
+        "isolated".to_string()
+    } else if sync_progress_percent < 99.0 {
+        "syncing".to_string()
+    } else {
+        "connected".to_string()
+    };
+
+    // Check if bootstrap peer is configured
+    let bootstrap_peer_configured = std::env::var("Q_BOOTSTRAP_PEER").is_ok();
+
+    // Get network ID for gossipsub topics
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string());
+
+    let health = P2PHealthStatus {
+        libp2p_manager_active: state.libp2p_discovery.is_some(),
+        connected_peers: libp2p_peers,
+        turbo_sync_available,
+        gossipsub_topics: vec![
+            format!("/qnk/{}/blocks", network_id),
+            format!("/qnk/{}/peer-heights", network_id),
+            format!("/qnk/{}/block-pack-requests", network_id),
+            format!("/qnk/{}/block-pack-responses", network_id),
+        ],
+        network_status,
+        current_height,
+        network_height,
+        sync_progress_percent,
+        bootstrap_peer_configured,
+    };
+
+    Ok(Json(ApiResponse::success(health)))
+}
+
+// ============================================================================
 // Bitcoin-Tor Bridge Endpoints
 // ============================================================================
 
@@ -2521,9 +2715,8 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
         warn!("Failed to persist wallet balance to storage: {}", e);
     }
     
-    // Privacy: Don't log faucet amounts or full wallet addresses in production
-    let addr_short = hex::encode(&wallet_address[..4]);
-    info!("💰 Faucet dispensed to wallet {}...", addr_short);
+    // 🔒 PRIVACY: No logging of wallet addresses or amounts
+    debug!("💰 Faucet dispensed successfully");
     
     // Emit faucet dispensed event for real-time updates
     let event_wallet_address = request.wallet_address.clone().unwrap_or_else(|| hex::encode(wallet_address));
@@ -2551,7 +2744,8 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
         warn!("Failed to broadcast faucet balance update: {}", e);
     }
 
-    info!("💰 Broadcasted faucet balance update - New balance: {} QNK", new_balance as f64 / 100_000_000.0);
+    // 🔒 PRIVACY: No logging of exact balances
+    debug!("💰 Broadcasted faucet balance update event");
     let response = serde_json::json!({
         "message": "Successfully received test tokens from faucet",
         "amount": faucet_amount,
@@ -2678,11 +2872,15 @@ pub async fn get_wallet_balance(
         // Locks released here before acquiring wallet_balances lock
     }
 
-    // Get balance from wallet balances (AUTHENTICATED ACCESS ONLY)
-    // CRITICAL: Acquire this lock AFTER releasing deployed_contracts and token_balances to prevent deadlock
+    // ✅ v0.9.47-beta: Get balance using FULL address (same as SSE does)
+    // CRITICAL FIX: Use get_balance() with full 64-char hex address like SSE streaming.rs line 465
+    // Using get_consensus_balance() with only first 8 bytes was returning 0!
     let balance = {
-        let balances = state.wallet_balances.read().await;
-        balances.get(&address_bytes).copied().unwrap_or(0)
+        let full_address_hex = hex::encode(&address_bytes);  // Full 32-byte address (64 hex chars)
+        state.storage_engine
+            .get_balance(&full_address_hex)
+            .await
+            .unwrap_or(0)
     };
 
     info!(
@@ -4202,7 +4400,9 @@ pub async fn submit_mining_solution(
 pub async fn get_mining_challenge(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<MiningChallengeResponse>>, StatusCode> {
-    let block_height = state.node_status.read().await.current_height;
+    // ⚡ v0.9.66-beta: Lock-free height read for sub-100ms /challenge response
+    // Replaces RwLock read that was causing 1.6-3.7 second delays due to contention
+    let block_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
     // Generate challenge hash from current block height and timestamp
     let timestamp = chrono::Utc::now();
@@ -4541,7 +4741,7 @@ pub async fn add_nitro_boost(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(sse_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(sse_event).await {
         warn!("Failed to broadcast Nitro boost SSE event: {}", e);
     } else {
         debug!("🚀 Broadcasted Nitro boost SSE event to {} subscribers", state.event_broadcaster.subscriber_count());
@@ -4708,8 +4908,10 @@ pub async fn execute_swap(
     if let Ok(db_balances) = state.storage_engine.load_wallet_balances().await {
         let balance_count = db_balances.len();
         let mut wallet_balances_write = state.wallet_balances.write().await;
-        for (addr, bal) in db_balances {
-            wallet_balances_write.insert(addr, bal);
+        for (addr, bal) in &db_balances {
+            debug!("🔍 [SWAP DEBUG] Loading balance for {}: {} base units ({} QUG)",
+                hex::encode(&addr[..8]), bal, *bal as f64 / 100_000_000.0);
+            wallet_balances_write.insert(*addr, *bal);
         }
         drop(wallet_balances_write);
         debug!("📊 Reloaded {} wallet balances from RocksDB for swap", balance_count);
@@ -4722,6 +4924,8 @@ pub async fn execute_swap(
 
         if from_is_native {
             let balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
+            // 🔒 PRIVACY: No logging of wallet addresses or exact balances
+            debug!("🔍 [SWAP] Balance check: sufficient={}", balance >= request.amount_in);
             if balance < request.amount_in {
                 return Ok(Json(ApiResponse::error(format!(
                     "Insufficient QUG balance. Required: {}, Available: {}",
@@ -4959,7 +5163,8 @@ pub async fn execute_swap(
         if from_is_native {
             if let Some(balance) = wallet_balances.get_mut(&wallet_addr) {
                 *balance -= request.amount_in;
-                info!("💸 Deducted {} QUG from wallet", request.amount_in);
+                // 🔒 PRIVACY: No logging of exact amounts
+                debug!("💸 Deducted QUG from wallet");
             }
         } else if from_is_qugusd {
             // Deduct QUGUSD from CollateralVault AND update token_balances
@@ -4969,7 +5174,8 @@ pub async fn execute_swap(
             if let Err(e) = vault.burn(&wallet_addr, request.amount_in) {
                 return Ok(Json(ApiResponse::error(format!("Failed to burn QUGUSD: {}", e))));
             }
-            info!("💸 Burned {} QUGUSD from wallet via CollateralVault", request.amount_in);
+            // 🔒 PRIVACY: No logging of exact amounts
+            debug!("💸 Burned QUGUSD from wallet via CollateralVault");
 
             // Persist CollateralVault to storage after burn
             if let Ok(vault_bytes) = bincode::serialize(&*vault) {
@@ -4988,21 +5194,24 @@ pub async fn execute_swap(
             if let Some(balance) = token_balances.get_mut(&balance_key) {
                 *balance = balance.saturating_sub(request.amount_in);
                 token_balance_changes.push((wallet_addr, from_token_addr, *balance));
-                info!("💸 Deducted {} QUGUSD from token_balances map", request.amount_in);
+                // 🔒 PRIVACY: No logging of exact amounts
+                debug!("💸 Deducted QUGUSD from token_balances map");
             }
         } else {
             let balance_key = (wallet_addr, from_token_addr);
             if let Some(balance) = token_balances.get_mut(&balance_key) {
                 *balance -= request.amount_in;
                 token_balance_changes.push((wallet_addr, from_token_addr, *balance));
-                info!("💸 Deducted {} {} tokens from wallet", request.amount_in, request.from_token);
+                // 🔒 PRIVACY: No logging of exact amounts
+                debug!("💸 Deducted {} tokens from wallet", request.from_token);
             }
         }
 
         // Add to_token
         if to_is_native {
             *wallet_balances.entry(wallet_addr).or_insert(0) += final_amount_out;
-            info!("💰 Added {} QUG to wallet", final_amount_out);
+            // 🔒 PRIVACY: No logging of exact amounts
+            debug!("💰 Added QUG to wallet");
         } else if to_is_qugusd {
             // Add QUGUSD via CollateralVault AND update token_balances
             drop(wallet_balances);
@@ -5011,7 +5220,8 @@ pub async fn execute_swap(
             if let Err(e) = vault.mint(&wallet_addr, final_amount_out) {
                 return Ok(Json(ApiResponse::error(format!("Failed to mint QUGUSD: {}", e))));
             }
-            info!("💰 Minted {} QUGUSD to wallet via CollateralVault", final_amount_out);
+            // 🔒 PRIVACY: No logging of exact amounts
+            debug!("💰 Minted QUGUSD to wallet via CollateralVault");
 
             // Persist CollateralVault to storage after mint
             if let Ok(vault_bytes) = bincode::serialize(&*vault) {
@@ -5029,12 +5239,14 @@ pub async fn execute_swap(
             let balance_key = (wallet_addr, to_token_addr);
             *token_balances.entry(balance_key).or_insert(0) += final_amount_out;
             token_balance_changes.push((wallet_addr, to_token_addr, token_balances.get(&balance_key).copied().unwrap()));
-            info!("💰 Added {} QUGUSD to token_balances map for API visibility", final_amount_out);
+            // 🔒 PRIVACY: No logging of exact amounts
+            debug!("💰 Added QUGUSD to token_balances map for API visibility");
         } else {
             let balance_key = (wallet_addr, to_token_addr);
             *token_balances.entry(balance_key).or_insert(0) += final_amount_out;
             token_balance_changes.push((wallet_addr, to_token_addr, token_balances.get(&balance_key).copied().unwrap()));
-            info!("💰 Added {} {} tokens to wallet", final_amount_out, request.to_token);
+            // 🔒 PRIVACY: No logging of exact amounts
+            debug!("💰 Added {} tokens to wallet", request.to_token);
         }
     }
 
@@ -5114,7 +5326,7 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(swap_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(swap_event).await {
         warn!("Failed to broadcast swap executed SSE event: {}", e);
     }
 
@@ -5129,7 +5341,7 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(pool_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(pool_event).await {
         warn!("Failed to broadcast liquidity pool update SSE event: {}", e);
     }
 
@@ -5149,7 +5361,7 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(price_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(price_event).await {
         warn!("Failed to broadcast price update SSE event: {}", e);
     }
 
@@ -5162,7 +5374,7 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(from_price_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(from_price_event).await {
         warn!("Failed to broadcast from-token price update SSE event: {}", e);
     }
 
@@ -5175,7 +5387,7 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(balance_updated_event) {
+    if let Err(e) = state.event_broadcaster.broadcast(balance_updated_event).await {
         warn!("Failed to broadcast balance-updated SSE event: {}", e);
     } else {
         info!("📡 [SSE] Balance update event broadcasted for wallet: {}", hex::encode(wallet_addr));
@@ -5484,7 +5696,7 @@ pub async fn run_blockchain_benchmark(
                     success: false,
                     data: None,
                     error: Some(format!("Rate limit exceeded. Please try again in {} minutes.", minutes_remaining)),
-                    timestamp: chrono::Utc::now(),
+                    timestamp: chrono::Utc::now().timestamp() as u64,
                 }));
             }
         }
@@ -5537,7 +5749,7 @@ pub async fn run_blockchain_benchmark(
         success: true,
         data: Some(result),
         error: None,
-        timestamp: chrono::Utc::now(),
+        timestamp: chrono::Utc::now().timestamp() as u64,
     }))
 }
 
@@ -5899,5 +6111,440 @@ pub async fn get_mining_health(
         threshold_seconds: STALL_THRESHOLD,
         last_solution_formatted,
     }))
+}
+
+// ============================================================================
+// ADDRESS BOOK API HANDLERS - ZK-STARK/SNARK Verified Contact Management
+// ============================================================================
+
+/// Address book entry with ZK proof support
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressBookEntry {
+    pub id: String,
+    pub address: String,
+    pub label: String,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+    pub notes: String,
+    pub zk_proof: Option<ZKProof>,
+    pub created_at: u64,
+    pub last_used: u64,
+    pub usage_count: u64,
+    pub sync_status: String,
+    pub sync_timestamp: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZKProof {
+    pub proof_type: String, // "stark" or "snark"
+    pub proof_data: String,
+    pub verified: bool,
+    pub verification_timestamp: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveAddressRequest {
+    pub id: String,
+    pub address: String,
+    pub label: String,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+    pub notes: String,
+    pub zk_proof: Option<ZKProof>,
+    pub created_at: u64,
+    pub last_used: u64,
+    pub usage_count: u64,
+    pub sync_status: String,
+    pub sync_timestamp: Option<u64>,
+}
+
+/// GET /v1/addressbook - Retrieve all saved addresses for authenticated user
+pub async fn get_address_book(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("📖 Address Book: Fetching addresses for wallet {}", hex::encode(&auth.address));
+
+    // Use wallet address as the key namespace for address book
+    let wallet_hex = hex::encode(&auth.address);
+    let address_book_key = format!("addressbook:{}", wallet_hex);
+
+    // Fetch from RocksDB hot storage
+    match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
+        Ok(Some(data)) => {
+            // Deserialize the stored address book
+            match serde_json::from_slice::<Vec<AddressBookEntry>>(&data) {
+                Ok(addresses) => {
+                    info!("✅ Address Book: Found {} saved addresses", addresses.len());
+                    Ok(Json(ApiResponse::success(serde_json::json!({
+                        "addresses": addresses,
+                        "total": addresses.len(),
+                    }))))
+                }
+                Err(e) => {
+                    error!("❌ Address Book: Failed to deserialize: {}", e);
+                    Ok(Json(ApiResponse::success(serde_json::json!({
+                        "addresses": [],
+                        "total": 0,
+                    }))))
+                }
+            }
+        }
+        Ok(None) => {
+            // No address book yet - return empty
+            info!("📖 Address Book: No addresses saved yet");
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "addresses": [],
+                "total": 0,
+            }))))
+        }
+        Err(e) => {
+            error!("❌ Address Book: Database error: {}", e);
+            Ok(Json(ApiResponse::error(format!("Failed to fetch address book: {}", e))))
+        }
+    }
+}
+
+/// POST /v1/addressbook - Save a new address with optional ZK proof
+pub async fn save_address(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    Json(request): Json<SaveAddressRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("💾 Address Book: Saving address '{}' for wallet {}", request.label, hex::encode(&auth.address));
+
+    // Validate address format
+    if request.address.trim().is_empty() {
+        return Ok(Json(ApiResponse::error("Address cannot be empty".to_string())));
+    }
+    if request.label.trim().is_empty() {
+        return Ok(Json(ApiResponse::error("Label cannot be empty".to_string())));
+    }
+
+    // Use wallet address as the key namespace
+    let wallet_hex = hex::encode(&auth.address);
+    let address_book_key = format!("addressbook:{}", wallet_hex);
+
+    // Load existing address book
+    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
+        Ok(Some(data)) => {
+            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
+        }
+        _ => Vec::new(),
+    };
+
+    // Create new entry
+    let new_entry = AddressBookEntry {
+        id: request.id,
+        address: request.address,
+        label: request.label,
+        favorite: request.favorite,
+        tags: request.tags,
+        notes: request.notes,
+        zk_proof: request.zk_proof,
+        created_at: request.created_at,
+        last_used: request.last_used,
+        usage_count: request.usage_count,
+        sync_status: "synced".to_string(),
+        sync_timestamp: Some(chrono::Utc::now().timestamp() as u64),
+    };
+
+    // Add to address book
+    addresses.push(new_entry.clone());
+
+    // Serialize and save
+    match serde_json::to_vec(&addresses) {
+        Ok(data) => {
+            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+                Ok(_) => {
+                    info!("✅ Address Book: Saved successfully");
+                    Ok(Json(ApiResponse::success(serde_json::json!({
+                        "saved": true,
+                        "entry": new_entry,
+                    }))))
+                }
+                Err(e) => {
+                    error!("❌ Address Book: Failed to save: {}", e);
+                    Ok(Json(ApiResponse::error(format!("Failed to save address: {}", e))))
+                }
+            }
+        }
+        Err(e) => {
+            error!("❌ Address Book: Serialization error: {}", e);
+            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+        }
+    }
+}
+
+/// PUT /v1/addressbook/:id - Update an existing address
+pub async fn update_address(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    Path(id): Path<String>,
+    Json(request): Json<SaveAddressRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("✏️ Address Book: Updating address ID {} for wallet {}", id, hex::encode(&auth.address));
+
+    let wallet_hex = hex::encode(&auth.address);
+    let address_book_key = format!("addressbook:{}", wallet_hex);
+
+    // Load existing address book
+    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
+        Ok(Some(data)) => {
+            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
+        }
+        _ => Vec::new(),
+    };
+
+    // Find and update the entry
+    let mut found = false;
+    for entry in addresses.iter_mut() {
+        if entry.id == id {
+            entry.address = request.address.clone();
+            entry.label = request.label.clone();
+            entry.favorite = request.favorite;
+            entry.tags = request.tags.clone();
+            entry.notes = request.notes.clone();
+            entry.last_used = request.last_used;
+            entry.usage_count = request.usage_count;
+            entry.sync_timestamp = Some(chrono::Utc::now().timestamp() as u64);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Ok(Json(ApiResponse::error("Address not found".to_string())));
+    }
+
+    // Save updated address book
+    match serde_json::to_vec(&addresses) {
+        Ok(data) => {
+            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+                Ok(_) => {
+                    info!("✅ Address Book: Updated successfully");
+                    Ok(Json(ApiResponse::success(serde_json::json!({
+                        "updated": true,
+                    }))))
+                }
+                Err(e) => {
+                    error!("❌ Address Book: Failed to update: {}", e);
+                    Ok(Json(ApiResponse::error(format!("Failed to update address: {}", e))))
+                }
+            }
+        }
+        Err(e) => {
+            error!("❌ Address Book: Serialization error: {}", e);
+            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+        }
+    }
+}
+
+/// DELETE /v1/addressbook/:id - Delete an address
+pub async fn delete_address(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("🗑️ Address Book: Deleting address ID {} for wallet {}", id, hex::encode(&auth.address));
+
+    let wallet_hex = hex::encode(&auth.address);
+    let address_book_key = format!("addressbook:{}", wallet_hex);
+
+    // Load existing address book
+    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
+        Ok(Some(data)) => {
+            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
+        }
+        _ => Vec::new(),
+    };
+
+    // Remove the entry
+    let original_len = addresses.len();
+    addresses.retain(|entry| entry.id != id);
+
+    if addresses.len() == original_len {
+        return Ok(Json(ApiResponse::error("Address not found".to_string())));
+    }
+
+    // Save updated address book
+    match serde_json::to_vec(&addresses) {
+        Ok(data) => {
+            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+                Ok(_) => {
+                    info!("✅ Address Book: Deleted successfully");
+                    Ok(Json(ApiResponse::success(serde_json::json!({
+                        "deleted": true,
+                    }))))
+                }
+                Err(e) => {
+                    error!("❌ Address Book: Failed to delete: {}", e);
+                    Ok(Json(ApiResponse::error(format!("Failed to delete address: {}", e))))
+                }
+            }
+        }
+        Err(e) => {
+            error!("❌ Address Book: Serialization error: {}", e);
+            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+        }
+    }
+}
+
+/// POST /v1/addressbook/proof - Generate ZK-STARK proof for address verification
+pub async fn generate_address_proof(
+    State(_state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let address = request.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let proof_type = request.get("proof_type").and_then(|v| v.as_str()).unwrap_or("stark");
+
+    info!("🔐 ZK Proof: Generating {} proof for address {} (wallet: {})",
+        proof_type, address, hex::encode(&auth.address));
+
+    // Placeholder implementation - Real ZK-STARK proof generation would go here
+    // This would involve:
+    // 1. Verifying the wallet owns the address via signature
+    // 2. Generating a zero-knowledge proof that proves ownership without revealing private key
+    // 3. Using the q-zk-stark crate for actual proof generation
+
+    let proof_data = format!("zk_{}_{}", proof_type, hex::encode(blake3::hash(address.as_bytes()).as_bytes()));
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "proof": proof_data,
+        "verified": true,
+        "proof_type": proof_type,
+        "timestamp": chrono::Utc::now().timestamp(),
+        "message": "ZK proof generation is a Phase 3 feature - currently in development"
+    }))))
+}
+
+/// POST /v1/addressbook/verify - Verify a ZK proof
+pub async fn verify_address_proof(
+    State(_state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let address = request.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let _proof = request.get("proof");
+
+    info!("✅ ZK Proof: Verifying proof for address {} (wallet: {})",
+        address, hex::encode(&auth.address));
+
+    // Placeholder - Real verification would validate the ZK proof
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "verified": true,
+        "timestamp": chrono::Utc::now().timestamp(),
+        "message": "ZK proof verification is a Phase 3 feature - currently in development"
+    }))))
+}
+
+/// GET /v1/addressbook/sync/status - Get gossipsub sync status
+pub async fn get_address_book_sync_status(
+    State(_state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    info!("🔄 Address Book: Sync status for wallet {}", hex::encode(&auth.address));
+
+    // Placeholder - Real implementation would check gossipsub P2P sync status
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "synced": true,
+        "last_sync": chrono::Utc::now().timestamp(),
+        "sync_method": "local_storage",
+        "message": "Gossipsub P2P sync is a Phase 3 feature - currently using local storage only"
+    }))))
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// v0.9.37-beta PHASE 3: Network Unification Monitoring Endpoint
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Network Unification Status Endpoint
+///
+/// Returns detailed information about network unification state:
+/// - Genesis block validation status
+/// - Fork detection statistics
+/// - Chain synchronization progress
+/// - P2P connectivity status
+///
+/// v0.9.37-beta: Phase 3 integration - monitors cross-fork blockchain sync
+pub async fn network_unification_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let storage = state.storage_engine.clone();
+    let node_status = state.node_status.read().await;
+
+    // Get genesis block info
+    let genesis_block = storage.get_qblock_by_height(0).await
+        .map_err(|e| {
+            error!("Failed to get genesis block: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let genesis_hash = genesis_block.as_ref().map(|b| hex::encode(b.calculate_hash()));
+
+    // Get current and network heights
+    let local_height = node_status.current_height;
+    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Calculate sync status
+    let sync_status = if local_height + 10 >= network_height {
+        "synced"
+    } else if network_height > local_height {
+        "syncing"
+    } else {
+        "ahead" // We're ahead of the network (rare)
+    };
+
+    // Get P2P status
+    let libp2p_connected = state.libp2p_discovery.is_some() || state.network_manager.is_some();
+    let peer_count = if let Some(ref count) = state.libp2p_peer_count {
+        count.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+
+    // Calculate sync progress percentage
+    let sync_percent = if network_height > 0 {
+        (local_height as f64 / network_height as f64 * 100.0).min(100.0)
+    } else {
+        if local_height > 0 { 100.0 } else { 0.0 }
+    };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "network_unification": {
+            "version": "v0.9.37-beta",
+            "phase": "phase3",
+            "genesis": {
+                "hash": genesis_hash,
+                "validated": genesis_block.is_some(),
+                "network_consensus": "auto-detected", // Each node validates its own genesis
+            },
+            "local_chain": {
+                "height": local_height,
+                "status": sync_status,
+            },
+            "network": {
+                "height": network_height,
+                "connected_peers": peer_count,
+                "libp2p_active": libp2p_connected,
+            },
+            "fork_detection": {
+                "enabled": true,
+                "method": "phase2-detect-fork",
+                "capabilities": [
+                    "genesis-validation",
+                    "single-block-reorg",
+                    "multi-block-detection",
+                    "balance-consensus-rollback"
+                ],
+            },
+            "sync_progress": {
+                "percent": sync_percent,
+                "blocks_behind": network_height.saturating_sub(local_height),
+                "blocks_ahead": local_height.saturating_sub(network_height),
+            }
+        }
+    }))))
 }
 

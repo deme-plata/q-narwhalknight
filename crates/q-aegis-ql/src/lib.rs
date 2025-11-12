@@ -7,9 +7,9 @@
 //!
 //! Based on sparse Ring-LWE with optimized NTT operations.
 
-use rand::{CryptoRng, RngCore};
+use rand::CryptoRng;
 use rand_chacha::ChaCha20Rng;
-use rand::SeedableRng;
+use rand_chacha::rand_core::{RngCore, SeedableRng}; // Use version compatible with ChaCha20Rng
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256, Sha3_512};
 use std::sync::Arc;

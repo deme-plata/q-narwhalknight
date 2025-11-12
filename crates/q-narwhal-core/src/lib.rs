@@ -76,12 +76,12 @@ impl NarwhalCore {
     fn create_default_validator_set() -> ValidatorSet {
         use crate::validator_set::ValidatorInfo;
         use ed25519_dalek::SigningKey;
-        use rand::{rngs::OsRng, RngCore};
+        use rand::{rngs::OsRng, TryRngCore as _};  // TryRngCore for rand 0.9
 
         let mut validators = Vec::new();
         for _ in 0..4 {
             let mut secret_bytes = [0u8; 32];
-            OsRng.fill_bytes(&mut secret_bytes);
+            OsRng.try_fill_bytes(&mut secret_bytes).unwrap();
             let signing_key = SigningKey::from_bytes(&secret_bytes);
             let public_key = signing_key.verifying_key();
 

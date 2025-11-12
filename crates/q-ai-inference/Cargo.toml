@@ -12,8 +12,10 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
-# Mistral.rs - High-performance GGUF inference engine (CPU-only for now)
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", default-features = false }
+# Mistral.rs - High-performance GGUF inference engine (LOCAL MODIFIED VERSION)
+# Using local path to enable per-layer execution for distributed inference
+mistralrs = { workspace = true, default-features = false }
+mistralrs-core = { workspace = true, default-features = false }
 
 # Candle for tensor operations (using same revision as mistral.rs)
 candle-core = { git = "https://github.com/EricLBuehler/candle.git", version = "0.9.1", rev = "7511e510" }
@@ -64,7 +66,7 @@ flate2 = "1.0"
 
 # Q-NarwhalKnight internal crates
 q-types = { path = "../q-types" }
-q-network = { path = "../q-network" }
+# q-network = { path = "../q-network" }  # Removed to break cyclic dependency
 q-aegis-ql = { path = "../q-aegis-ql" }
 q-zk-stark = { path = "../q-zk-stark" }
 

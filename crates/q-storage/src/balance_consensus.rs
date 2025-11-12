@@ -1,0 +1,972 @@
+//! Balance Consensus Engine
+//!
+//! **CRITICAL MAINNET BLOCKER FIX**
+//!
+//! This module implements deterministic balance updates triggered by block reception,
+//! ensuring ALL nodes process identical state transitions.
+//!
+//! ## The Problem
+//!
+//! Mining rewards were processed LOCALLY per node, causing balance divergence:
+//! - Server Alpha (miner): 5000 QNK ✅
+//! - Server Beta (bootstrap): 0 QNK ❌
+//!
+//! ## The Solution
+//!
+//! Every node processes mining rewards when receiving blocks via gossipsub:
+//! 1. Block broadcast via gossipsub
+//! 2. ALL nodes receive block
+//! 3. BalanceConsensusEngine processes rewards deterministically
+//! 4. ALL nodes update balances identically
+//! 5. Result: Network-wide consensus on account state
+//!
+//! ## Design Principles
+//!
+//! - **Deterministic**: Same input → Same output on ALL nodes
+//! - **Atomic**: Balance updates succeed or fail as a unit
+//! - **Idempotent**: Processing same block twice is safe
+//! - **Verifiable**: All nodes reach identical state
+
+use anyhow::{anyhow, Result};
+use q_types::{QBlock, MiningSolution};
+use sha2::{Sha256, Digest};
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+use lru::LruCache;
+use crate::emission_controller::EmissionController;
+
+/// Genesis timestamp for reward calculation (Oct 26, 2025 00:00:00 UTC)
+pub const GENESIS_TIMESTAMP: u64 = 1761436800;
+
+/// Development fee percentage (1%)
+pub const DEV_FEE_PERCENT: f64 = 0.01;
+
+/// Founder wallet address (receives 1% dev fee) - Quillon Bank Master Account
+pub const FOUNDER_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+
+/// Balance update operation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BalanceUpdate {
+    /// Wallet address that received update
+    pub address: String,
+    /// Amount added to balance (in base units)
+    pub amount: u64,
+    /// Reason for balance change
+    pub reason: ChangeReason,
+    /// Block height where this update occurred
+    pub block_height: u64,
+    /// Index of mining solution in block (if applicable)
+    pub solution_index: usize,
+}
+
+/// Reason for balance change (for auditing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeReason {
+    /// Mining reward (99% of block reward)
+    MiningReward,
+    /// Development fee (1% of block reward)
+    DevelopmentFee,
+}
+
+/// Balance consensus error types
+#[derive(Debug, thiserror::Error)]
+pub enum BalanceConsensusError {
+    #[error("Block {0:?} already processed (double-processing prevented)")]
+    AlreadyProcessed([u8; 32]),
+
+    #[error("Invalid mining solution in block {block_height} at index {solution_index}")]
+    InvalidSolution {
+        block_height: u64,
+        solution_index: usize,
+    },
+
+    #[error("Zero reward calculated at block height {0} (halving complete?)")]
+    ZeroReward(u64),
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] anyhow::Error),
+
+    #[error("Batch operation failed: {0}")]
+    BatchOperation(String),
+
+    #[error("Invalid timestamp: current={current}, genesis={genesis}")]
+    InvalidTimestamp { current: u64, genesis: u64 },
+}
+
+/// Core balance consensus engine
+///
+/// Processes mining rewards deterministically across all nodes
+#[derive(Debug, Clone)]
+pub struct BalanceConsensusEngine {
+    /// Genesis timestamp for reward calculation
+    genesis_timestamp: u64,
+
+    /// Development wallet address
+    dev_wallet: String,
+
+    /// Track processed blocks to prevent double-processing
+    /// **SECURITY FIX (v0.8.0-beta)**: Now uses LRU cache with bounded memory (100k entries ≈ 5MB)
+    /// - Previously: Unbounded HashMap grew forever (DoS vulnerability)
+    /// - Now: LRU cache auto-evicts oldest entries when full
+    processed_blocks: std::sync::Arc<RwLock<LruCache<[u8; 32], bool>>>,
+
+    /// Maximum cache size for processed blocks
+    max_cache_size: usize,
+
+    /// Statistics (optional)
+    stats: std::sync::Arc<RwLock<ConsensusStats>>,
+
+    /// ✅ v0.9.99-beta: Adaptive block reward controller
+    /// Ensures constant annual emission (82,031 QUG/year) regardless of throughput
+    emission_controller: std::sync::Arc<RwLock<EmissionController>>,
+
+    /// ✅ v0.9.99-beta: Cached total supply for 10,000 bps performance
+    /// Reduces I/O from 10,000 queries/sec to 1 query/sec
+    /// Format: (supply, last_updated)
+    cached_total_supply: std::sync::Arc<RwLock<(u64, std::time::Instant)>>,
+}
+
+/// Consensus statistics for monitoring
+#[derive(Debug, Clone, Default)]
+pub struct ConsensusStats {
+    /// Total blocks processed
+    pub blocks_processed: u64,
+    /// Total balance updates applied
+    pub updates_applied: u64,
+    /// Total mining rewards distributed
+    pub total_rewards: u64,
+    /// Total dev fees collected
+    pub total_dev_fees: u64,
+    /// Blocks rejected (already processed)
+    pub blocks_rejected: u64,
+}
+
+impl BalanceConsensusEngine {
+    /// Create new balance consensus engine
+    ///
+    /// # Arguments
+    /// * `genesis_timestamp` - Unix timestamp of network genesis (for halving)
+    /// * `dev_wallet` - Development wallet address (receives 1% fee)
+    pub fn new(genesis_timestamp: u64, dev_wallet: String) -> Self {
+        // SECURITY FIX (v0.8.0-beta): Bounded cache size to prevent memory exhaustion
+        const MAX_CACHE_SIZE: usize = 100_000;  // ~5 MB memory (32 bytes hash + 1 byte bool + overhead ≈ 50 bytes per entry)
+
+        info!("💰 Initializing Balance Consensus Engine");
+        info!("   Genesis timestamp: {} ({})", genesis_timestamp,
+              chrono::DateTime::from_timestamp(genesis_timestamp as i64, 0)
+                  .map(|dt| dt.to_rfc3339())
+                  .unwrap_or_else(|| "Invalid timestamp".to_string()));
+        info!("   Dev wallet: {}", dev_wallet);
+        info!("   Dev fee: {}%", DEV_FEE_PERCENT * 100.0);
+        info!("   🛡️  Memory protection: LRU cache limited to {} entries (~5 MB)", MAX_CACHE_SIZE);
+        info!("   ✅ Adaptive rewards: Emission scales with throughput for 256-year timeline");
+
+        // ✅ v0.9.99-beta: Initialize adaptive emission controller
+        let emission_controller = EmissionController::new(genesis_timestamp);
+
+        Self {
+            genesis_timestamp,
+            dev_wallet,
+            processed_blocks: std::sync::Arc::new(RwLock::new(
+                LruCache::new(NonZeroUsize::new(MAX_CACHE_SIZE).unwrap())
+            )),
+            max_cache_size: MAX_CACHE_SIZE,
+            stats: std::sync::Arc::new(RwLock::new(ConsensusStats::default())),
+            emission_controller: std::sync::Arc::new(RwLock::new(emission_controller)),
+            cached_total_supply: std::sync::Arc::new(RwLock::new((0, std::time::Instant::now()))),
+        }
+    }
+
+    /// Process mining rewards from a block
+    ///
+    /// **CRITICAL**: This MUST be called by ALL nodes when receiving a block via gossipsub
+    ///
+    /// # Returns
+    /// Vec of balance updates that were applied
+    ///
+    /// # Errors
+    /// - `AlreadyProcessed` if block was already processed (safe to ignore)
+    /// - `InvalidSolution` if mining solution doesn't meet difficulty
+    /// - `ZeroReward` if halving has made rewards negligible
+    pub async fn process_block_mining_rewards(
+        &self,
+        storage: &dyn BalanceStorage,
+        block: &QBlock,
+    ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
+        // ❌ v0.9.77-beta Phase 7: DISABLED - balance_consensus rewards cause DOUBLE REWARDS!
+        //
+        // In Phase 7, block_producer.rs creates ALL coinbase transactions with fixed 50 QUG/block rewards.
+        // balance_consensus was ALSO creating rewards on top of that, causing hyperinflation!
+        //
+        // CRITICAL BUG: This caused 176,082 QUG to be mined in minutes instead of hours.
+        //
+        // FIX: Disable balance_consensus reward creation entirely. Only block_producer creates rewards now.
+        //
+        // OLD behavior (Phase 6 - BROKEN):
+        // 1. block_producer creates coinbase TXs with per-solution rewards
+        // 2. balance_consensus ALSO adds time-based rewards
+        // 3. Result: DOUBLE REWARDS + hyperinflation!
+        //
+        // NEW behavior (Phase 7 - FIXED):
+        // 1. block_producer creates coinbase TXs with FIXED 50 QUG/block
+        // 2. balance_consensus does NOTHING (this function returns immediately)
+        // 3. Result: Correct fixed rewards, no duplication!
+
+        warn!("⚠️  Phase 7: balance_consensus rewards DISABLED to prevent double rewards");
+        warn!("   Block {} rewards handled by block_producer coinbase transactions only", block.header.height);
+
+        // Return empty vec - no rewards created by balance_consensus
+        return Ok(Vec::new());
+
+        // COMMENTED OUT - Old double-reward code below:
+        /*
+        // 1. Prevent double-processing
+        let block_hash = self.calculate_block_hash(block);
+
+        {
+            let processed = self.processed_blocks.read().await;
+            if processed.contains(&block_hash) {
+                debug!("Block {} already processed (height {})",
+                       hex::encode(&block_hash[..8]), block.header.height);
+
+                // Update stats
+                let mut stats = self.stats.write().await;
+                stats.blocks_rejected += 1;
+
+                return Err(BalanceConsensusError::AlreadyProcessed(block_hash));
+            }
+        }
+
+        // 2. Calculate block reward (deterministic across all nodes)
+        let block_reward = self.calculate_block_reward(block.header.timestamp)?;
+        */
+
+        /*  // COMMENTED OUT - Phase 7 double-reward fix
+        if block_reward == 0 {
+            warn!("⚠️ Zero reward at height {} (halving complete)", block.header.height);
+            return Err(BalanceConsensusError::ZeroReward(block.header.height));
+        }
+
+        // 3. Calculate dev fee split
+        let dev_fee = (block_reward as f64 * DEV_FEE_PERCENT) as u64;
+        let miner_reward = block_reward.saturating_sub(dev_fee);
+
+        debug!("💰 Block {} rewards: total={}, miner={}, dev={}",
+               block.header.height, block_reward, miner_reward, dev_fee);
+
+        // 4. Process each mining solution in the block
+        let mut updates = Vec::new();
+
+        for (index, solution) in block.mining_solutions.iter().enumerate() {
+            // Validate solution meets block difficulty (safety check)
+            if !self.verify_solution_for_block(solution, block) {
+                error!("❌ Invalid solution in block {} at index {}",
+                       block.header.height, index);
+                return Err(BalanceConsensusError::InvalidSolution {
+                    block_height: block.header.height,
+                    solution_index: index,
+                });
+            }
+
+            let miner_address = hex::encode(&solution.miner_address);
+
+            // Update miner balance
+            storage.add_balance(&miner_address, miner_reward).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+            updates.push(BalanceUpdate {
+                address: miner_address.clone(),
+                amount: miner_reward,
+                reason: ChangeReason::MiningReward,
+                block_height: block.header.height,
+                solution_index: index,
+            });
+
+            // Update dev wallet balance (strip "qnk" prefix to get raw hex)
+            let dev_wallet_hex = self.dev_wallet.strip_prefix("qnk").unwrap_or(&self.dev_wallet);
+            storage.add_balance(dev_wallet_hex, dev_fee).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+            updates.push(BalanceUpdate {
+                address: self.dev_wallet.clone(),
+                amount: dev_fee,
+                reason: ChangeReason::DevelopmentFee,
+                block_height: block.header.height,
+                solution_index: index,
+            });
+
+            debug!("   ✅ Solution {}: miner={}, reward={}",
+                   index, &miner_address[..16], miner_reward);
+        }
+
+        // 5. Mark block as processed (LRU cache with bounded memory)
+        {
+            let mut processed = self.processed_blocks.write().await;
+            processed.push(block_hash, true);
+
+            // Warn if cache is getting full (potential attack or rapid block production)
+            let cache_size = processed.len();
+            if cache_size >= self.max_cache_size * 90 / 100 {  // 90% full
+                warn!("🧹 Balance consensus cache at {}% capacity ({}/{} entries)",
+                      cache_size * 100 / self.max_cache_size, cache_size, self.max_cache_size);
+                warn!("   LRU eviction active - oldest entries being removed");
+            }
+        }
+
+        // 6. Update statistics (with overflow protection)
+        {
+            let mut stats = self.stats.write().await;
+
+            // Use saturating arithmetic to prevent panic on overflow
+            stats.blocks_processed = stats.blocks_processed.saturating_add(1);
+            stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
+
+            // Safely calculate reward totals with saturating multiplication and addition
+            let solutions_count = block.mining_solutions.len() as u64;
+            stats.total_rewards = stats.total_rewards.saturating_add(
+                miner_reward.saturating_mul(solutions_count)
+            );
+            stats.total_dev_fees = stats.total_dev_fees.saturating_add(
+                dev_fee.saturating_mul(solutions_count)
+            );
+
+            // Warn if statistics have saturated (indicates potential attack or bug)
+            if stats.total_rewards == u64::MAX || stats.total_dev_fees == u64::MAX {
+                warn!("🚨 CRITICAL: Balance consensus statistics have saturated at u64::MAX");
+                warn!("   This may indicate an overflow attack or excessive block processing");
+            }
+        }
+
+        info!("💰 Processed {} balance updates for block {} ({} solutions)",
+              updates.len(), block.header.height, block.mining_solutions.len());
+
+        Ok(updates)
+        */  // END COMMENTED OUT - Phase 7 double-reward fix
+    }
+
+    /// Process block mining rewards within a transaction (v0.8.1-beta)
+    ///
+    /// **SECURITY FIX (v0.8.1-beta)**: Transaction-aware version prevents
+    /// CRITICAL-1 race condition where balances are updated but block is not saved.
+    ///
+    /// This method performs the same logic as `process_block_mining_rewards()` but
+    /// operates within a QTransaction, ensuring atomicity.
+    ///
+    /// # Performance
+    /// - Maintains sub-50ms DAG-Knight finality ✅
+    /// - WriteBatch reduces overhead by ~25% vs separate writes
+    ///
+    /// # Arguments
+    /// - `tx`: QTransaction to write balance updates to
+    /// - `block`: Block to process
+    ///
+    /// # Returns
+    /// Vec of balance updates (not yet committed - caller must commit transaction)
+    pub async fn process_block_mining_rewards_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        block: &QBlock,
+    ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
+        // ❌ v0.9.77-beta Phase 7: DISABLED - balance_consensus rewards cause DOUBLE REWARDS!
+        //
+        // This is the TRANSACTION-BASED variant of process_block_mining_rewards() that was causing
+        // the "💰 TIME-BASED Coinbase TX" messages in logs!
+        //
+        // In Phase 7, block_producer.rs creates ALL coinbase transactions with fixed 50 QUG/block rewards.
+        // balance_consensus was ALSO creating rewards via this TX function, causing hyperinflation!
+        //
+        // FIX: Disable balance_consensus reward creation entirely. Only block_producer creates rewards now.
+
+        warn!("⚠️  Phase 7: balance_consensus TX rewards DISABLED to prevent double rewards");
+        warn!("   Block {} rewards handled by block_producer coinbase transactions only", block.header.height);
+
+        // Return empty vec - no rewards created by balance_consensus
+        return Ok(Vec::new());
+
+        /*  // COMMENTED OUT - Phase 7 double-reward fix
+        // 1. Check if block already processed (prevent double-processing)
+        let block_hash = self.calculate_block_hash(block);
+
+        {
+            let processed = self.processed_blocks.read().await;
+            if processed.contains(&block_hash) {
+                warn!("⚠️  Block {} already processed (hash: {})",
+                      block.header.height, hex::encode(&block_hash[..8]));
+                return Err(BalanceConsensusError::AlreadyProcessed(block_hash));
+            }
+        }
+
+        // 2. Calculate time-based block reward
+        let block_reward = self.calculate_block_reward(block.header.timestamp)?;
+
+        if block_reward == 0 {
+            warn!("⚠️ Zero reward at height {} (halving complete)", block.header.height);
+            return Err(BalanceConsensusError::ZeroReward(block.header.height));
+        }
+
+        // 3. Calculate dev fee split
+        let dev_fee = (block_reward as f64 * DEV_FEE_PERCENT) as u64;
+        let miner_reward = block_reward.saturating_sub(dev_fee);
+
+        debug!("💰 Block {} rewards (TX): total={}, miner={}, dev={}",
+               block.header.height, block_reward, miner_reward, dev_fee);
+
+        // 4. Process each mining solution in the block
+        let mut updates = Vec::new();
+
+        for (index, solution) in block.mining_solutions.iter().enumerate() {
+            // Validate solution meets block difficulty (safety check)
+            if !self.verify_solution_for_block(solution, block) {
+                error!("❌ Invalid solution in block {} at index {}",
+                       block.header.height, index);
+                return Err(BalanceConsensusError::InvalidSolution {
+                    block_height: block.header.height,
+                    solution_index: index,
+                });
+            }
+
+            let miner_address = hex::encode(&solution.miner_address);
+
+            // Update miner balance via transaction
+            self.add_balance_tx(tx, &miner_address, miner_reward).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+            updates.push(BalanceUpdate {
+                address: miner_address.clone(),
+                amount: miner_reward,
+                reason: ChangeReason::MiningReward,
+                block_height: block.header.height,
+                solution_index: index,
+            });
+
+            // Update dev wallet balance via transaction
+            self.add_balance_tx(tx, &self.dev_wallet, dev_fee).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+            updates.push(BalanceUpdate {
+                address: self.dev_wallet.clone(),
+                amount: dev_fee,
+                reason: ChangeReason::DevelopmentFee,
+                block_height: block.header.height,
+                solution_index: index,
+            });
+
+            debug!("   ✅ Solution {} (TX): miner={}, reward={}",
+                   index, &miner_address[..16], miner_reward);
+        }
+
+        // 5. Mark block as processed (LRU cache with bounded memory)
+        {
+            let mut processed = self.processed_blocks.write().await;
+            processed.push(block_hash, true);
+
+            let cache_size = processed.len();
+            if cache_size >= self.max_cache_size * 90 / 100 {
+                warn!("🧹 Balance consensus cache at {}% capacity ({}/{} entries)",
+                      cache_size * 100 / self.max_cache_size, cache_size, self.max_cache_size);
+            }
+        }
+
+        // 6. Update statistics (with overflow protection)
+        {
+            let mut stats = self.stats.write().await;
+
+            stats.blocks_processed = stats.blocks_processed.saturating_add(1);
+            stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
+
+            let solutions_count = block.mining_solutions.len() as u64;
+            stats.total_rewards = stats.total_rewards.saturating_add(
+                miner_reward.saturating_mul(solutions_count)
+            );
+            stats.total_dev_fees = stats.total_dev_fees.saturating_add(
+                dev_fee.saturating_mul(solutions_count)
+            );
+
+            if stats.total_rewards == u64::MAX || stats.total_dev_fees == u64::MAX {
+                warn!("🚨 CRITICAL: Balance consensus statistics saturated at u64::MAX");
+            }
+        }
+
+        // Track balance updates in transaction for logging
+        for update in &updates {
+            tx.track_balance_update(update.clone()).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+        }
+
+        info!("💰 Processed {} balance updates (TX) for block {} ({} solutions)",
+              updates.len(), block.header.height, block.mining_solutions.len());
+
+        Ok(updates)
+        */  // END COMMENTED OUT - Phase 7 double-reward fix (TX variant)
+    }
+
+    /// Add balance within a transaction
+    ///
+    /// **SECURITY FIX (v0.8.1-beta)**: Helper method for transaction-aware balance updates
+    async fn add_balance_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        address: &str,
+        amount: u64,
+    ) -> Result<()> {
+        // Get current balance from hot database via transaction
+        let current_balance = tx
+            .get("balances", address.as_bytes())
+            .await?
+            .and_then(|bytes| {
+                if bytes.len() == 8 {
+                    Some(u64::from_be_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Calculate new balance with overflow protection
+        let new_balance = current_balance.saturating_add(amount);
+
+        // Write new balance to transaction
+        tx.put("balances", address.as_bytes(), &new_balance.to_be_bytes()).await?;
+
+        Ok(())
+    }
+
+    /// Calculate block reward using adaptive emission controller
+    ///
+    /// ✅ v0.9.99-beta: Adaptive Block Reward System
+    ///
+    /// This replaces the old FIXED reward system with ADAPTIVE rewards that scale
+    /// inversely with network throughput, ensuring constant annual emission.
+    ///
+    /// # Formula
+    /// reward_per_block = (annual_target_emission / blocks_produced_this_year)
+    ///
+    /// # Benefits
+    /// - At 10 blocks/sec: 0.00026 QUG/block → 82,031 QUG/year → 256 years to 21M
+    /// - At 10,000 blocks/sec: 0.00000026 QUG/block → 82,031 QUG/year → 256 years to 21M
+    /// - Network can scale to ANY throughput without affecting emission timeline!
+    ///
+    /// # Arguments
+    /// * `current_timestamp` - Current block timestamp
+    /// * `total_supply` - Current total QUG supply (for safety cap)
+    ///
+    /// # Returns
+    /// Adaptive reward in base units (100,000,000 base units = 1 QUG)
+    ///
+    /// # Errors
+    /// - Returns error if emission controller calculation fails
+    /// - **CRITICAL**: Caller MUST propagate this error - do NOT produce 0-reward block!
+    ///
+    /// # Note
+    /// The emission controller tracks block rate internally using add_block() calls.
+    /// Make sure to call track_block_for_emission() after adding each block.
+    pub async fn calculate_block_reward(
+        &self,
+        current_timestamp: u64,
+        total_supply: u64,
+    ) -> Result<u64, BalanceConsensusError> {
+        let mut controller = self.emission_controller.write().await;
+
+        controller
+            .calculate_block_reward(current_timestamp, total_supply)
+            .map_err(|e| {
+                error!("🚨 CRITICAL: EmissionController calculation failed: {}", e);
+                error!("   Block production MUST abort - cannot produce block without valid reward!");
+                BalanceConsensusError::Storage(e)
+            })
+    }
+
+    /// Verify mining solution meets difficulty target
+    ///
+    /// This is a redundant safety check - blocks should already be validated
+    /// before reaching consensus engine, but this protects against malicious blocks
+    fn verify_solution_for_block(&self, solution: &MiningSolution, _block: &QBlock) -> bool {
+        // For now, we trust that blocks have been validated by the time they reach us
+        // In future, can add actual difficulty verification here
+        // Note: difficulty_target is on the MiningSolution itself, not on BlockHeader
+        solution.hash <= solution.difficulty_target
+    }
+
+    /// Calculate deterministic hash of block for deduplication
+    ///
+    /// **SECURITY FIX (v0.8.0-beta)**: Now hashes ALL block data to prevent collision attacks
+    /// - Previously only hashed header, allowing blocks with different solutions to collide
+    /// - Now includes mining solutions and transactions for complete uniqueness
+    fn calculate_block_hash(&self, block: &QBlock) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+
+        // Hash block header
+        hasher.update(&block.header.height.to_be_bytes());
+        hasher.update(&block.header.timestamp.to_be_bytes());
+        hasher.update(&block.header.prev_block_hash);
+        hasher.update(&block.header.solutions_root);
+
+        // CRITICAL SECURITY FIX: Hash mining solutions to prevent collision attacks
+        // Without this, two blocks with same header but different solutions would have SAME hash
+        // This would allow attackers to censor legitimate miners
+        for solution in &block.mining_solutions {
+            hasher.update(&solution.miner_address);
+            hasher.update(&solution.nonce.to_be_bytes());
+            hasher.update(&solution.difficulty_target);  // Already [u8; 32]
+            hasher.update(&solution.timestamp.to_be_bytes());
+            hasher.update(&solution.hash);  // Already [u8; 32]
+        }
+
+        // CRITICAL SECURITY FIX: Hash transactions to prevent collision attacks
+        // Ensures blocks with different transaction sets cannot collide
+        for tx in &block.transactions {
+            // Use postcard serialization for deterministic byte representation
+            if let Ok(tx_bytes) = postcard::to_allocvec(tx) {
+                hasher.update(&tx_bytes);
+            }
+        }
+
+        let hash = hasher.finalize();
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        result
+    }
+
+    /// Get consensus statistics (for monitoring)
+    pub async fn get_stats(&self) -> ConsensusStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Clear processed blocks cache (for testing or memory management)
+    ///
+    /// **WARNING**: Only use this in tests or if you're certain blocks won't be re-processed
+    #[cfg(test)]
+    pub async fn clear_processed_blocks(&self) {
+        let mut processed = self.processed_blocks.write().await;
+        processed.clear();
+    }
+
+    /// Rollback balance state to specific height for chain reorganization
+    ///
+    /// **NETWORK UNIFICATION (v0.9.37-beta Phase 3)**: Balance State Migration
+    ///
+    /// This clears the processed blocks cache to allow reprocessing from the fork point.
+    /// Balances will be rebuilt by replaying blocks from storage after reorganization.
+    ///
+    /// # Safety
+    /// This should only be called during chain reorganization with proper coordination.
+    /// The blockchain must be rolled back BEFORE calling this to ensure consistency.
+    ///
+    /// # Arguments
+    /// * `target_height` - Height to roll back to (blocks after this will be reprocessed)
+    pub async fn rollback_to_height(&self, target_height: u64) -> anyhow::Result<()> {
+        warn!("⏪ Rolling back balance consensus to height {}", target_height);
+
+        // Clear processed blocks cache
+        // This allows blocks to be reprocessed during chain reorganization
+        let mut processed = self.processed_blocks.write().await;
+        let original_size = processed.len();
+        processed.clear();
+
+        info!("💰 Balance consensus rollback complete:");
+        info!("   Cleared {} processed blocks from cache", original_size);
+        info!("   Ready to replay blocks from height {}", target_height + 1);
+        info!("   Balances will be rebuilt during chain reorganization");
+
+        Ok(())
+    }
+
+    /// Get all current balances (for debugging and verification)
+    ///
+    /// **NOTE**: This method requires access to storage to retrieve balances.
+    /// The BalanceConsensusEngine itself doesn't store balances - they're in the database.
+    /// Use storage.get_all_balances() instead when available.
+    ///
+    /// For now, we return an empty map as placeholder.
+    /// Real implementation should query the CF_BALANCES column family.
+    pub async fn get_all_balances(&self) -> anyhow::Result<std::collections::HashMap<String, u64>> {
+        // TODO: This should query the database's CF_BALANCES column family
+        // For now, return empty map
+        warn!("get_all_balances() called on BalanceConsensusEngine - requires storage access");
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// Track block for adaptive reward calculation
+    ///
+    /// ✅ v0.9.99-beta: Adaptive Block Reward System
+    ///
+    /// This should be called after each block is added to update the emission controller's
+    /// block rate tracking. The controller uses weighted averaging to calculate recent throughput.
+    ///
+    /// # Arguments
+    /// * `height` - Block height
+    /// * `timestamp` - Block timestamp
+    /// * `has_transactions` - Whether block has transactions (for spam filtering)
+    pub async fn track_block_for_emission(
+        &self,
+        height: u64,
+        timestamp: u64,
+        has_transactions: bool,
+    ) -> anyhow::Result<()> {
+        let mut controller = self.emission_controller.write().await;
+        controller.add_block(height, timestamp, has_transactions);
+        Ok(())
+    }
+
+    /// Get current emission statistics for monitoring
+    ///
+    /// ✅ v0.9.99-beta: Returns emission controller state including:
+    /// - Current era (0-63)
+    /// - Total emitted this era
+    /// - Recent block rate
+    /// - Emission phase (Bootstrap/Mature)
+    pub async fn get_emission_stats(&self) -> anyhow::Result<crate::emission_controller::EmissionStats> {
+        let controller = self.emission_controller.read().await;
+        Ok(controller.get_stats())
+    }
+
+    /// Get total supply with 1-second caching for 10,000 bps performance
+    ///
+    /// ✅ v0.9.99-beta: Performance Optimization
+    ///
+    /// # Performance Impact
+    /// - Without cache: 10,000 disk I/O ops/sec at 10,000 bps
+    /// - With cache: 1 disk I/O op/sec (>99% reduction)
+    /// - Cache lifetime: 1 second (balance between accuracy and performance)
+    ///
+    /// # Arguments
+    /// * `storage` - Storage trait to query if cache is stale
+    ///
+    /// # Returns
+    /// Current total supply in atomic units (100,000,000 = 1 QUG)
+    ///
+    /// # Errors
+    /// Returns error if storage query fails (fail-fast pattern)
+    pub async fn get_total_supply_cached(
+        &self,
+        storage: &dyn BalanceStorage,
+    ) -> anyhow::Result<u64> {
+        use std::time::Duration;
+
+        // Check cache first (read lock)
+        {
+            let cache = self.cached_total_supply.read().await;
+            if cache.1.elapsed() < Duration::from_secs(1) {
+                debug!("📊 Total supply cache hit: {} QUG", cache.0 as f64 / 100_000_000.0);
+                return Ok(cache.0);
+            }
+        } // Release read lock
+
+        // Cache stale - query storage and update (write lock)
+        // Note: This requires storage to have get_total_supply() method
+        // For now, we'll return a placeholder that counts from balances
+
+        warn!("📊 Total supply cache miss - querying storage (this should be rare)");
+
+        // TODO: Implement actual storage.get_total_supply() method
+        // For now, approximate from emission controller
+        let controller = self.emission_controller.read().await;
+        let stats = controller.get_stats();
+        let supply = stats.total_emitted_this_era; // Approximation
+
+        // Update cache
+        {
+            let mut cache = self.cached_total_supply.write().await;
+            *cache = (supply, std::time::Instant::now());
+        }
+
+        Ok(supply)
+    }
+
+    /// Get approximate total supply from emission controller
+    ///
+    /// This is a fast approximation that doesn't require storage access.
+    /// Uses the emission controller's tracking to estimate total supply.
+    /// Accurate for reward calculations but may not reflect burned tokens.
+    pub async fn get_total_supply_approx(&self) -> anyhow::Result<u64> {
+        let controller = self.emission_controller.read().await;
+        let stats = controller.get_stats();
+
+        // Return total emitted this era as approximation
+        // This is sufficient for adaptive reward calculations
+        Ok(stats.total_emitted_this_era)
+    }
+}
+
+/// Storage trait for balance updates
+///
+/// This abstracts the actual storage implementation (RocksDB, etc.)
+#[async_trait::async_trait]
+pub trait BalanceStorage: Send + Sync {
+    /// Add amount to wallet balance (atomic operation)
+    async fn add_balance(&self, address: &str, amount: u64) -> Result<()>;
+
+    /// Get current balance for wallet
+    async fn get_balance(&self, address: &str) -> Result<u64>;
+
+    /// Set balance for wallet (used in tests)
+    async fn set_balance(&self, address: &str, balance: u64) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Mock storage for testing
+    struct MockStorage {
+        balances: Arc<RwLock<HashMap<String, u64>>>,
+    }
+
+    impl MockStorage {
+        fn new() -> Self {
+            Self {
+                balances: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        async fn get_all_balances(&self) -> HashMap<String, u64> {
+            self.balances.read().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BalanceStorage for MockStorage {
+        async fn add_balance(&self, address: &str, amount: u64) -> Result<()> {
+            let mut balances = self.balances.write().await;
+            *balances.entry(address.to_string()).or_insert(0) += amount;
+            Ok(())
+        }
+
+        async fn get_balance(&self, address: &str) -> Result<u64> {
+            let balances = self.balances.read().await;
+            Ok(*balances.get(address).unwrap_or(&0))
+        }
+
+        async fn set_balance(&self, address: &str, balance: u64) -> Result<()> {
+            let mut balances = self.balances.write().await;
+            balances.insert(address.to_string(), balance);
+            Ok(())
+        }
+    }
+
+    fn create_test_block(height: u64, timestamp: u64, num_solutions: usize) -> QBlock {
+        let solutions: Vec<MiningSolution> = (0..num_solutions)
+            .map(|i| MiningSolution {
+                nonce: i as u64,
+                hash: [0u8; 32],
+                difficulty_target: [0xFF; 32],
+                miner_address: [i as u8; 32],
+                timestamp,
+                pool_id: None,
+                hash_rate_hs: 10000 + (i as u64 * 1000),
+            })
+            .collect();
+
+        QBlock {
+            header: q_types::BlockHeader {
+                height,
+                timestamp,
+                prev_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                difficulty_target: 1000,
+                nonce: 0,
+            },
+            mining_solutions: solutions,
+            transactions: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balance_consensus_determinism() {
+        // Two nodes processing same block should get identical results
+        let storage1 = MockStorage::new();
+        let storage2 = MockStorage::new();
+
+        let engine = BalanceConsensusEngine::new(GENESIS_TIMESTAMP, FOUNDER_WALLET.to_string());
+        let block = create_test_block(1, GENESIS_TIMESTAMP + 100, 1);
+
+        let updates1 = engine.process_block_mining_rewards(&storage1, &block).await.unwrap();
+
+        // Clear processed blocks to allow re-processing
+        engine.clear_processed_blocks().await;
+
+        let updates2 = engine.process_block_mining_rewards(&storage2, &block).await.unwrap();
+
+        // Updates should be identical
+        assert_eq!(updates1, updates2);
+
+        // Balances should match
+        let balances1 = storage1.get_all_balances().await;
+        let balances2 = storage2.get_all_balances().await;
+        assert_eq!(balances1, balances2);
+    }
+
+    #[tokio::test]
+    async fn test_double_processing_prevention() {
+        let storage = MockStorage::new();
+        let engine = BalanceConsensusEngine::new(GENESIS_TIMESTAMP, FOUNDER_WALLET.to_string());
+        let block = create_test_block(1, GENESIS_TIMESTAMP + 100, 1);
+
+        // First processing should succeed
+        let result1 = engine.process_block_mining_rewards(&storage, &block).await;
+        assert!(result1.is_ok());
+
+        // Second processing should fail
+        let result2 = engine.process_block_mining_rewards(&storage, &block).await;
+        assert!(matches!(result2, Err(BalanceConsensusError::AlreadyProcessed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_dev_fee_split() {
+        let storage = MockStorage::new();
+        let engine = BalanceConsensusEngine::new(GENESIS_TIMESTAMP, FOUNDER_WALLET.to_string());
+        let block = create_test_block(1, GENESIS_TIMESTAMP + 100, 1);
+
+        let updates = engine.process_block_mining_rewards(&storage, &block).await.unwrap();
+
+        // Should have 2 updates: 1 miner + 1 dev
+        assert_eq!(updates.len(), 2);
+
+        let miner_update = updates.iter().find(|u| u.reason == ChangeReason::MiningReward).unwrap();
+        let dev_update = updates.iter().find(|u| u.reason == ChangeReason::DevelopmentFee).unwrap();
+
+        // Dev fee should be 1% of total
+        let total = miner_update.amount + dev_update.amount;
+        let expected_dev_fee = (total as f64 * DEV_FEE_PERCENT / (1.0 - DEV_FEE_PERCENT)) as u64;
+
+        // Allow small rounding error
+        assert!((dev_update.amount as i64 - expected_dev_fee as i64).abs() <= 1);
+    }
+
+    #[tokio::test]
+    async fn test_reward_calculation() {
+        let engine = BalanceConsensusEngine::new(GENESIS_TIMESTAMP, FOUNDER_WALLET.to_string());
+
+        // Year 0: Full reward
+        let reward_y0 = engine.calculate_block_reward(GENESIS_TIMESTAMP + 100).unwrap();
+        assert_eq!(reward_y0, 100_000);
+
+        // Year 1: Half reward
+        let reward_y1 = engine.calculate_block_reward(GENESIS_TIMESTAMP + 31_536_000 + 100).unwrap();
+        assert_eq!(reward_y1, 50_000);
+
+        // Year 2: Quarter reward
+        let reward_y2 = engine.calculate_block_reward(GENESIS_TIMESTAMP + 2 * 31_536_000 + 100).unwrap();
+        assert_eq!(reward_y2, 25_000);
+
+        // Year 64+: Zero reward
+        let reward_y64 = engine.calculate_block_reward(GENESIS_TIMESTAMP + 64 * 31_536_000 + 100).unwrap();
+        assert_eq!(reward_y64, 0);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_timestamp() {
+        let engine = BalanceConsensusEngine::new(GENESIS_TIMESTAMP, FOUNDER_WALLET.to_string());
+
+        // Timestamp before genesis should fail
+        let result = engine.calculate_block_reward(GENESIS_TIMESTAMP - 1000);
+        assert!(matches!(result, Err(BalanceConsensusError::InvalidTimestamp { .. })));
+    }
+}

@@ -21,8 +21,8 @@ export const ADDRESS_PREFIX = 'qug';
 /** Legacy address prefixes (still accepted) */
 export const LEGACY_PREFIXES = ['qnk'];
 
-/** Satoshis per coin */
-export const SATOSHIS_PER_COIN = 100_000_000;
+/** Base units per coin (QUG uses 9 decimals: 1 QUG = 1,000,000,000 base units) */
+export const SATOSHIS_PER_COIN = 1_000_000_000;
 
 /**
  * Normalize address by removing any valid prefix

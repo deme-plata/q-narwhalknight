@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use nalgebra::{DMatrix, DVector};
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
-use rand::RngCore;
+use rand::TryRngCore as _;  // For try_fill_bytes and try_next_u64 (rand 0.9)
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::convert::TryInto;
@@ -102,7 +102,7 @@ impl LatticeParameters {
         for i in 0..dimension {
             for j in 0..dimension {
                 let mut bytes = [0u8; 8];
-                rng.fill_bytes(&mut bytes);
+                rng.try_fill_bytes(&mut bytes).unwrap();
                 let value = i64::from_be_bytes(bytes);
                 matrix[(i, j)] = value.rem_euclid(modulus_i64);
             }
@@ -123,10 +123,10 @@ impl LatticeParameters {
 
         for i in 0..self.dimension {
             // Box-Muller transform for Gaussian sampling
-            let u1: f64 = (rng.next_u64() as f64) / (u64::MAX as f64);
-            let u2: f64 = (rng.next_u64() as f64) / (u64::MAX as f64);
+            let u1: f64 = (rng.try_next_u64().unwrap() as f64) / (u64::MAX as f64);
+            let u2: f64 = (rng.try_next_u64().unwrap() as f64) / (u64::MAX as f64);
 
-            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            let z = (-2.0_f64 * u1.ln()).sqrt() * (2.0_f64 * std::f64::consts::PI * u2).cos();
             let gaussian_sample = (z * self.gaussian_parameter).round() as i64;
 
             sample[i] = gaussian_sample;
@@ -147,7 +147,7 @@ impl LatticeParameters {
 
         for i in 0..self.dimension {
             let mut bytes = [0u8; 8];
-            rng.fill_bytes(&mut bytes);
+            rng.try_fill_bytes(&mut bytes).unwrap();
             let value = i64::from_be_bytes(bytes);
             sample[i] = value.rem_euclid(modulus_i64);
         }

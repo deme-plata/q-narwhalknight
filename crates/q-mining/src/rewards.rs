@@ -96,13 +96,30 @@ pub enum RewardValidationError {
 
 impl Default for RewardConfig {
     fn default() -> Self {
+        // ✅ v0.9.60-beta Phase 6: AUSTRIAN ECONOMICS - TRUE SCARCITY
+        //
+        // Phase 5 Problem: 998,663 QNK mined in days = HYPERINFLATION
+        // Phase 6 Solution: 0.5 QNK per block = 100x MORE SCARCE
+        //
+        // Emission Schedule (Bitcoin-inspired):
+        // - Epoch 1 (0-210k): 0.5 QNK/block → 105,000 QNK
+        // - Epoch 2 (210k-420k): 0.25 QNK/block → 52,500 QNK
+        // - Epoch 3 (420k-630k): 0.125 QNK/block → 26,250 QNK
+        // - Epoch 4 (630k-840k): 0.0625 QNK/block → 13,125 QNK
+        // - Epoch 5+ (840k+): 0.03125 QNK/block (tail emission)
+        //
+        // Max Supply: ~200,000 QNK (vs Phase 5's million in days!)
+        // Inflation Year 4+: <1% (sound money, comparable to gold)
+        //
+        // See PHASE6_AUSTRIAN_ECONOMICS.md for full analysis
         Self {
-            base_reward: 2_000_000_000, // 2.0 QNK in smallest units
-            halving_interval: 1_000_000, // 1M blocks
-            max_supply: 21_000_000_000_000_000, // 21M QNK
-            quantum_bonus_percent: 10, // 10% max bonus
-            burn_rate_percent: 25, // 25% burn rate
-            min_quantum_quality: 0.9, // 90% quality for bonus
+            base_reward: 50_000_000, // 0.5 QNK (8 decimals) - 100x less than Phase 5!
+            halving_interval: 210_000, // Bitcoin-style 210k blocks (~146 days)
+            max_supply: 200_000_000_000_000, // 200k QNK total (asymptotic)
+            quantum_bonus_percent: 10, // 10% max bonus for high-quality quantum randomness
+            burn_rate_percent: 0, // NO BURN in Phase 6 (scarcity via low emission)
+            min_quantum_quality: 0.9, // 90% entropy quality required for bonus
+            gas_costs: GasCosts::default(),
         }
     }
 }

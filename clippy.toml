@@ -1,0 +1,35 @@
+# v0.9.93-beta P0: Compile-time enforcement of safe database write paths
+# Recommended by ChatGPT and Kimi AI to prevent accidental unsafe writes
+#
+# CRITICAL: ALL writes must go through our safe KVStore trait methods
+# which enforce sync=true to prevent "blocks saved but missing" corruption
+
+# Disallow ALL direct RocksDB write operations
+disallowed-methods = [
+  # Basic DB writes
+  "rocksdb::DB::put",
+  "rocksdb::DB::delete",
+  "rocksdb::DB::merge",
+  "rocksdb::DB::write",
+  "rocksdb::DB::put_cf",
+  "rocksdb::DB::delete_cf",
+  "rocksdb::DB::merge_cf",
+
+  # Range operations (can cause catastrophic data loss)
+  "rocksdb::DB::delete_range",
+  "rocksdb::DB::delete_range_cf",
+  "rocksdb::DB::compact_range",
+  "rocksdb::DB::compact_range_cf",
+
+  # Transaction DB variants
+  "rocksdb::OptimisticTransactionDB::put",
+  "rocksdb::OptimisticTransactionDB::delete",
+  "rocksdb::TransactionDB::put",
+  "rocksdb::TransactionDB::delete",
+
+  # WriteBatch direct operations (must use write_batch() wrapper)
+  "rocksdb::WriteBatch::delete",
+  "rocksdb::WriteBatch::delete_cf",
+  "rocksdb::WriteBatch::delete_range",
+  "rocksdb::WriteBatch::delete_range_cf",
+]

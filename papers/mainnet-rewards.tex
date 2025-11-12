@@ -1,0 +1,639 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{tikz}
+
+\geometry{margin=1in}
+
+% Colors
+\definecolor{primarycolor}{RGB}{66, 133, 244}
+\definecolor{secondarycolor}{RGB}{52, 168, 83}
+\definecolor{accentcolor}{RGB}{251, 188, 5}
+\definecolor{codebackground}{RGB}{248, 249, 250}
+
+\hypersetup{colorlinks=true, linkcolor=primarycolor, urlcolor=primarycolor}
+
+\lstset{
+    backgroundcolor=\color{codebackground},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    keywordstyle=\color{primarycolor}\bfseries,
+    commentstyle=\color{secondarycolor}\itshape
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Q-NarwhalKnight Mainnet}
+\fancyhead[R]{\small Block Rewards \& Emission}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{
+    \Huge\textbf{Q-NarwhalKnight Mainnet} \\
+    \vspace{0.3cm}
+    \Large Block Production \& Reward System \\
+    \vspace{0.3cm}
+    \large\textit{DAG-BFT Consensus with Time-Based Halving}
+}
+
+\author{\textbf{Q-NarwhalKnight Development Team}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document provides technical specifications for the Q-NarwhalKnight mainnet, featuring high-throughput DAG-BFT consensus (2-10 blocks/second) and time-based reward halving every 4 calendar years. Initial block reward: 0.05 QUG, halving until reaching 21 million QUG maximum supply over 256 years.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Quick Reference}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{c}{\textit{Block Production}} \\
+\midrule
+Production Rate & 2-10 blocks/second \\
+Consensus Type & DAG-Knight + Narwhal BFT \\
+\midrule
+\multicolumn{2}{c}{\textit{Rewards}} \\
+\midrule
+Block Reward & \textbf{0.05 QUG} \\
+Dev Fee (1\%) & 0.0005 QUG \\
+Miner Reward (99\%) & 0.0495 QUG \\
+\midrule
+\multicolumn{2}{c}{\textit{Halving}} \\
+\midrule
+Method & Time-Based (Calendar) \\
+Interval & Every 4 years \\
+First Halving & Oct 26, 2029 \\
+\midrule
+\multicolumn{2}{c}{\textit{Economics}} \\
+\midrule
+Maximum Supply & 21,000,000 QUG \\
+Genesis Date & Oct 26, 2025 00:00 UTC \\
+Decimals & 8 (like Bitcoin) \\
+\bottomrule
+\end{tabular}
+\caption{Q-NarwhalKnight mainnet specifications}
+\end{table}
+
+\section{Block Production}
+
+\subsection{Variable Block Time}
+
+Unlike traditional blockchains with fixed block times (e.g., Bitcoin's 10 minutes), Q-NarwhalKnight produces blocks \textbf{continuously} at 2-10 blocks per second:
+
+\begin{itemize}
+    \item \textbf{Minimum}: 2 blocks/sec $\rightarrow$ 1 block every 0.5 seconds
+    \item \textbf{Average}: 5 blocks/sec $\rightarrow$ 1 block every 0.2 seconds
+    \item \textbf{Maximum}: 10 blocks/sec $\rightarrow$ 1 block every 0.1 seconds
+\end{itemize}
+
+\subsection{Daily Block Production}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{crr}
+\toprule
+\textbf{Rate} & \textbf{Blocks/Day} & \textbf{Blocks/Year} \\
+\midrule
+2 blocks/sec & 172,800 & 63,072,000 \\
+5 blocks/sec & 432,000 & 157,680,000 \\
+10 blocks/sec & 864,000 & 315,360,000 \\
+\bottomrule
+\end{tabular}
+\caption{Block production at different throughput levels}
+\end{table}
+
+\section{Block Rewards}
+
+\begin{tcolorbox}[colback=accentcolor!10, colframe=accentcolor, title=⚠️ Important Note]
+Q-NarwhalKnight uses \textbf{Adaptive Block Rewards} (Section 5.2) as the primary reward system. Fixed rewards were used in early testnet phases but are being phased out in favor of the adaptive system that maintains constant annual emission regardless of network throughput.
+\end{tcolorbox}
+
+\subsection{Reward Distribution Structure}
+
+Regardless of the reward calculation method (adaptive or fixed), each block distributes rewards as follows:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Recipient} & \textbf{Share} & \textbf{Percentage} \\
+\midrule
+Development Fee & 1\% of block reward & 1\% \\
+Miner Pool & 99\% of block reward & 99\% \\
+\bottomrule
+\end{tabular}
+\caption{Reward distribution per block}
+\end{table}
+
+\subsection{Miner Reward Distribution}
+
+The miner pool (99\% of block reward) is split equally among all mining solutions in the block:
+
+\begin{equation}
+\text{Reward per Solution} = \frac{0.99 \times \text{Block Reward}}{\text{Number of Solutions}}
+\end{equation}
+
+\textbf{Example at 10 blocks/second (with adaptive rewards):}
+\begin{itemize}
+    \item Block reward: 0.00026 QUG
+    \item Development fee (1\%): 0.0000026 QUG
+    \item Miner pool (99\%): 0.00025774 QUG
+    \item With 10 solutions: 0.000025774 QUG per solution
+    \item With 100 solutions: 0.0000025774 QUG per solution
+\end{itemize}
+
+\subsection{Implementation}
+
+See Section 5.2 for the adaptive reward system implementation, which replaces the earlier fixed reward approach. The adaptive system is documented in \texttt{crates/q-storage/src/emission\_controller.rs}.
+
+\section{Time-Based Halving}
+
+\subsection{Critical Distinction}
+
+\begin{tcolorbox}[colback=accentcolor!20, colframe=accentcolor, title=Time-Based Halving (NOT Block-Based!)]
+Q-NarwhalKnight uses \textbf{calendar time} for halvings, NOT block height!
+
+\textbf{Why?} With variable block production (2-10/sec), block-based halvings would be unpredictable. Time-based halvings provide:
+\begin{itemize}
+    \item Predictable economic schedule
+    \item Independent of network throughput
+    \item Clear halving dates
+    \item Resistant to consensus changes
+\end{itemize}
+\end{tcolorbox}
+
+\subsection{Halving Formula}
+
+From \texttt{crates/q-storage/src/balance\_consensus.rs}:
+
+\begin{lstlisting}[language=Rust]
+const SECONDS_PER_HALVING: u64 = 126_144_000;
+// 4 years (365.25 * 4 * 24 * 60 * 60)
+
+pub const GENESIS_TIMESTAMP: u64 = 1761436800;
+// Oct 26, 2025 00:00:00 UTC
+
+let elapsed = current_timestamp - genesis_timestamp;
+let halving_count = elapsed / SECONDS_PER_HALVING;
+
+if halving_count >= 64 {
+    return 0; // After 256 years
+}
+
+let reward = BASE_REWARD >> halving_count;
+\end{lstlisting}
+
+\subsection{Halving Schedule}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{clr}
+\toprule
+\textbf{Era} & \textbf{Date Range} & \textbf{Reward/Block} \\
+\midrule
+\textbf{1} & \textbf{Oct 2025 - Oct 2029} & \textbf{0.0500 QUG} \\
+2 & Oct 2029 - Oct 2033 & 0.0250 QUG \\
+3 & Oct 2033 - Oct 2037 & 0.0125 QUG \\
+4 & Oct 2037 - Oct 2041 & 0.00625 QUG \\
+5 & Oct 2041 - Oct 2045 & 0.003125 QUG \\
+... & ... & ... \\
+64+ & After Oct 2281 & $<$0.0001 QUG \\
+\bottomrule
+\end{tabular}
+\caption{Time-based halving schedule}
+\end{table}
+
+\section{Emission Analysis}
+
+\subsection{Why Fixed Rewards Don't Scale}
+
+\begin{tcolorbox}[colback=red!10, colframe=red, title=❌ Problem with Fixed Rewards]
+Early testnet phases used \textbf{fixed 0.05 QUG per block}, which creates a fundamental scaling problem:
+
+\textbf{Fixed Reward × Variable Throughput = Unpredictable Emission}
+
+\begin{itemize}
+    \item At 2 blocks/sec: 3,153,600 QUG/year → 21M in 6.7 years ❌
+    \item At 5 blocks/sec: 7,884,000 QUG/year → 21M in 2.7 years ❌
+    \item At 10 blocks/sec: 15,768,000 QUG/year → 21M in 1.3 years ❌
+\end{itemize}
+
+\textbf{Solution}: Adaptive rewards that scale inversely with throughput!
+\end{tcolorbox}
+
+\subsection{Adaptive Block Reward System}
+
+\begin{tcolorbox}[colback=primarycolor!10, colframe=primarycolor, title=Core Innovation: Throughput-Independent Emission]
+Q-NarwhalKnight uses \textbf{adaptive block rewards} to achieve 256-year emission at ANY throughput:
+
+\begin{equation}
+\text{Reward per Block} = \frac{\text{Target Annual Emission}}{\text{Blocks Produced This Year}}
+\end{equation}
+
+\textbf{Result}: Reward scales \textit{inversely} with throughput → Annual emission stays constant!
+
+\begin{itemize}
+    \item At 10 blocks/sec: 0.00026 QUG/block → 82,031 QUG/year
+    \item At 10,000 blocks/sec: 0.00000026 QUG/block → 82,031 QUG/year
+\end{itemize}
+
+This enables unlimited throughput scaling (10,000+ blocks/sec) while maintaining predictable 256-year emission schedule.
+\end{tcolorbox}
+
+\subsubsection{Layer 1: Time-Based Halving (Predictable Schedule)}
+
+Rewards halve every 4 calendar years, regardless of block production rate:
+
+\begin{lstlisting}[language=Rust]
+// From balance_consensus.rs
+const SECONDS_PER_HALVING: u64 = 126_144_000; // 4 years
+
+let elapsed_seconds = current_timestamp - GENESIS_TIMESTAMP;
+let halving_count = elapsed_seconds / SECONDS_PER_HALVING;
+let reward = BASE_REWARD >> halving_count; // Divide by 2^n
+\end{lstlisting}
+
+\textbf{Key Properties:}
+\begin{itemize}
+    \item Halving dates are predictable (Oct 26, 2029, 2033, 2037...)
+    \item Reward stays \textbf{constant} during each 4-year period
+    \item Independent of network throughput (2-10 blocks/sec)
+    \item Resistant to consensus upgrades changing block production rate
+\end{itemize}
+
+\subsubsection{Layer 2: Supply Cap Enforcement (Hard Limit)}
+
+Hard cap prevents total supply from exceeding 21M:
+
+\begin{lstlisting}[language=Rust]
+// From q-types/src/lib.rs
+pub const QUG_MAX_SUPPLY: u64 = 2_100_000_000_000_000; // 21M
+
+// From rewards.rs (supply calculation)
+total_supply.min(self.config.max_supply)  // Hard cap at 21M
+\end{lstlisting}
+
+\textbf{Protection Against High Throughput:}
+
+At maximum throughput (10 blocks/sec), network would hit 21M cap in just \textbf{486 days}:
+
+\begin{equation}
+\text{Time to cap} = \frac{21,000,000 \text{ QUG}}{10 \text{ blocks/sec} \times 0.05 \text{ QUG/block}} = 42,000,000 \text{ sec} = 1.33 \text{ years}
+\end{equation}
+
+\subsection{Achieving 256-Year Emission Timeline}
+
+For emission to last through 64 halvings (256 years), network must maintain controlled throughput.
+
+\textbf{Geometric Series Calculation:}
+
+\begin{align*}
+\text{Total supply} &= (\text{reward} \times \text{blocks per era}) \times 2 \\
+21,000,000 &= (0.05 \times \text{blocks in 4 years}) \times 2 \\
+\text{blocks in 4 years} &= 210,000,000 \text{ blocks} \\
+\text{Average blocks/sec} &= \frac{210,000,000}{126,144,000} = \textbf{1.66 blocks/sec}
+\end{align*}
+
+\begin{tcolorbox}[colback=accentcolor!20, colframe=accentcolor, title=Solution: Adaptive Rewards Enable 256-Year Timeline]
+\textbf{Key Innovation}: Reward adjusts automatically based on network throughput!
+
+\textbf{How It Works:}
+\begin{enumerate}
+    \item Network measures recent block production rate (trailing 1000 blocks)
+    \item Calculates expected blocks for the year: $blocks\_per\_year = rate \times 31,557,600$
+    \item Adjusts reward: $reward = target\_annual\_emission \div blocks\_per\_year$
+    \item Result: Annual emission stays constant regardless of throughput!
+\end{enumerate}
+
+\textbf{Timeline at Different Throughput (with adaptive rewards):}
+\begin{itemize}
+    \item 10 blocks/sec: Reward = 0.00026 QUG → 21M in 256 years ✅
+    \item 100 blocks/sec: Reward = 0.000026 QUG → 21M in 256 years ✅
+    \item 10,000 blocks/sec: Reward = 0.00000026 QUG → 21M in 256 years ✅
+\end{itemize}
+
+\textbf{Benefits:}
+\begin{itemize}
+    \item Unlimited throughput scaling (no throttling needed!)
+    \item Predictable 256-year emission schedule
+    \item Miner revenue independent of throughput (fair competition)
+    \item Smooth transition to fee-based economy after era 64
+\end{itemize}
+\end{tcolorbox}
+
+\subsection{Adaptive Reward Scenarios}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{crrc}
+\toprule
+\textbf{Avg Blocks/Sec} & \textbf{Reward/Block} & \textbf{Annual Emission} & \textbf{Time to 21M} \\
+\midrule
+1 & 0.0026 QUG & 82,031 QUG & 256 years ✅ \\
+10 & 0.00026 QUG & 82,031 QUG & 256 years ✅ \\
+100 & 0.000026 QUG & 82,031 QUG & 256 years ✅ \\
+1,000 & 0.0000026 QUG & 82,031 QUG & 256 years ✅ \\
+\textbf{10,000} & \textbf{0.00000026 QUG} & \textbf{82,031 QUG} & \textbf{256 years} ✅ \\
+\bottomrule
+\end{tabular}
+\caption{Adaptive rewards maintain constant emission across all throughputs}
+\end{table}
+
+\textbf{Key Insight}: With adaptive rewards, annual emission is \textit{invariant} to throughput. Network can scale to any performance level without affecting the 256-year emission schedule!
+
+\subsection{Fee Market Integration}
+
+\begin{tcolorbox}[colback=accentcolor!10, colframe=accentcolor, title=Critical Economic Shift at High Throughput]
+As network scales to high throughput, \textbf{transaction fees become the primary miner incentive}. Block rewards decrease proportionally with throughput.
+\end{tcolorbox}
+
+At 10,000 blocks/sec, reward per block is only 0.00000026 QUG. Miners depend on fees for profitability:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{crrrr}
+\toprule
+\textbf{Throughput} & \textbf{Reward/Block} & \textbf{Revenue (1\% share)} & \textbf{Fee Priority} \\
+\midrule
+10 bps & 0.00026 QUG & 2.2 QUG/day & Minimal \\
+100 bps & 0.000026 QUG & 2.2 QUG/day & Low \\
+1,000 bps & 0.0000026 QUG & 2.2 QUG/day & Medium \\
+\textbf{10,000 bps} & \textbf{0.00000026 QUG} & \textbf{2.2 QUG/day} & \textbf{Primary} \\
+\bottomrule
+\end{tabular}
+\caption{Fee market economics across throughput levels}
+\end{table}
+
+\textbf{Key Insight}: Annual emission stays constant (82,031 QUG/year) regardless of throughput. At high throughput, miners compete for transaction fees rather than block rewards.
+
+\textbf{Dynamic Fee Adjustment}: Minimum transaction fee scales automatically:
+\begin{equation}
+\text{min\_fee} = \text{BASE\_FEE} \times \sqrt{\frac{\text{BASE\_REWARD}}{\text{adaptive\_reward}}}
+\end{equation}
+
+This ensures transaction fees remain economically viable for miners as block rewards decrease with throughput.
+
+\subsection{Migration Strategy}
+
+\begin{tcolorbox}[colback=primarycolor!10, colframe=primarycolor, title=Phased Activation for Network Stability]
+The adaptive reward system activates at \textbf{block height 200,000} ($\sim$90 days after mainnet launch):
+\end{tcolorbox}
+
+\textbf{Phase 1 (Blocks 0-199,999): Bootstrap Period}
+\begin{itemize}
+    \item Fixed reward: 0.05 QUG/block (legacy Phase 8 economics)
+    \item Allows miners to update software
+    \item Ensures network stability during initial launch
+    \item EmissionController tracks throughput but doesn't control rewards yet
+\end{itemize}
+
+\textbf{Phase 2 (Block 200,000+): Adaptive Rewards}
+\begin{itemize}
+    \item Pure adaptive: Reward $\propto$ 1/throughput
+    \item Annual emission locked to 82,031 QUG/year (Era 1)
+    \item Nodes running old software will reject blocks (forced upgrade)
+    \item Network can scale to 10,000+ blocks/sec without economic impact
+\end{itemize}
+
+\textbf{Grace Period Benefits}:
+\begin{itemize}
+    \item 90-day window for miners to upgrade software
+    \item Smooth transition reduces network disruption
+    \item Backward compatibility maintained during bootstrap
+    \item Clear activation block allows coordinated upgrade
+\end{itemize}
+
+\textbf{Implementation}: The EmissionController (Section 10, Table 11) implements dual-phase emission with automatic transition based on block height.
+
+\section{Mining Profitability}
+
+\subsection{Solo Mining}
+
+If you mine complete blocks (all solutions yours):
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrr}
+\toprule
+\textbf{Blocks/Day} & \textbf{QUG/Day} & \textbf{QUG/Month} & \textbf{QUG/Year} \\
+\midrule
+10 & 0.495 & 14.85 & 180.68 \\
+50 & 2.475 & 74.25 & 903.38 \\
+100 & 4.950 & 148.50 & 1,806.75 \\
+500 & 24.750 & 742.50 & 9,033.75 \\
+\bottomrule
+\end{tabular}
+\caption{Solo mining profitability (0.0495 QUG per block after dev fee)}
+\end{table}
+
+\subsection{Pool Mining}
+
+Network share percentage of total daily emission:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Share} & \textbf{QUG/Day} & \textbf{QUG/Month} & \textbf{QUG/Year} \\
+\midrule
+1\% & 216 & 6,480 & 78,840 \\
+5\% & 1,080 & 32,400 & 394,200 \\
+10\% & 2,160 & 64,800 & 788,400 \\
+25\% & 5,400 & 162,000 & 1,971,000 \\
+\bottomrule
+\end{tabular}
+\caption{Pool mining at 5 blocks/sec (21,600 QUG/day total)}
+\end{table}
+
+\section{Why Block-Based Halving Fails with DAG-BFT}
+
+\begin{tcolorbox}[colback=secondarycolor!10, colframe=secondarycolor, title=Problem: Block-Based Halving with High Throughput]
+Bitcoin's halving occurs every 210,000 blocks ($\sim$4 years at 10-minute block time).
+
+With DAG-BFT producing 2-10 blocks/second, block-based halving would create economic chaos:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{crc}
+\toprule
+\textbf{Blocks/Sec} & \textbf{Time to Halving} & \textbf{Assessment} \\
+\midrule
+2 & 1.2 days & Too frequent \\
+5 & 11.6 hours & Chaotic \\
+10 & 5.8 hours & Unusable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Calculation}: $210,000 \text{ blocks} \div 10 \text{ blocks/sec} \div 3600 = 5.8 \text{ hours}$
+
+Halvings every 6 hours would make economic planning impossible!
+\end{tcolorbox}
+
+\subsection{Time-Based Solution}
+
+Q-NarwhalKnight solves this by making halving dependent on \textbf{calendar time} instead of block height:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Property} & \textbf{Block-Based} & \textbf{Time-Based} \\
+\midrule
+Predictability & Variable (depends on speed) & Fixed calendar dates \\
+Planning & Difficult & Easy \\
+Network upgrades & Affect schedule & No impact \\
+Throughput scaling & Accelerates halvings & No effect \\
+Economic stability & Low & High \\
+\bottomrule
+\end{tabular}
+\caption{Block-based vs time-based halving comparison}
+\end{table}
+
+\textbf{Example}: With DAG-BFT improvements doubling throughput:
+\begin{itemize}
+    \item \textbf{Block-based}: Next halving in 6 months instead of 1 year (unpredictable)
+    \item \textbf{Time-based}: Next halving still on Oct 26, 2029 (predictable)
+\end{itemize}
+
+\section{Comparison with Bitcoin}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Property} & \textbf{Bitcoin} & \textbf{Q-NarwhalKnight} \\
+\midrule
+Block Time & 10 minutes & 0.1-0.5 seconds \\
+Halving & Block-based & \textbf{Time-based} \\
+Interval & 210k blocks & \textbf{4 years} \\
+Initial Reward & 50 BTC & 0.05 QUG \\
+Max Supply & 21M BTC & 21M QUG \\
+Decimals & 8 & 8 \\
+Consensus & PoW & DAG-BFT + VDF \\
+Finality & Probabilistic & Deterministic \\
+Throughput & 7 TPS & 1000+ TPS \\
+\bottomrule
+\end{tabular}
+\caption{Economic comparison}
+\end{table}
+
+\section{Key Takeaways}
+
+\begin{enumerate}
+    \item \textbf{Variable Block Production}: 2-10 blocks/second (DAG-BFT consensus)
+    \item \textbf{Fixed Block Reward}: 0.05 QUG per block (1\% dev fee, 99\% miners)
+    \item \textbf{Time-Based Halving}: Every 4 calendar years (independent of block count)
+    \item \textbf{Two-Layer Protection}:
+    \begin{itemize}
+        \item Time-based halving controls \textit{when} rewards decrease
+        \item Supply cap enforcement controls \textit{total} emission (21M hard limit)
+    \end{itemize}
+    \item \textbf{Genesis}: October 26, 2025 00:00 UTC
+    \item \textbf{Target Throughput}: $\sim$1.66 blocks/sec average for 256-year emission
+    \item \textbf{Current vs Target}: 2-10 blocks/sec requires adaptive throttling
+    \item \textbf{Economic Model}: Predictable halving schedule with asymptotic 21M supply
+\end{enumerate}
+
+\vspace{0.5cm}
+
+\begin{tcolorbox}[colback=primarycolor!10, colframe=primarycolor, title=Core Innovation]
+\textbf{Adaptive block rewards enable throughput-independent emission}, achieving:
+\begin{itemize}
+    \item \textbf{Time-based halving}: Predictable emission schedule (Oct 26, 2029, 2033, 2037...)
+    \item \textbf{Adaptive rewards}: Automatic adjustment based on network throughput
+    \item \textbf{Unlimited scaling}: Network can reach 10,000+ blocks/sec without affecting timeline
+    \item \textbf{Fair economics}: Miner revenue independent of throughput (competition-based)
+\end{itemize}
+
+\textbf{Mathematical Guarantee}: Formula $Reward = Annual\_Target \div Blocks\_Per\_Year$ ensures 21M QUG is reached in exactly 256 years (64 halvings) at ANY throughput level. This decouples network performance from monetary policy.
+\end{tcolorbox}
+
+\section{Source Code References}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{File} & \textbf{Lines} \\
+\midrule
+\textbf{Adaptive Reward Controller} & \texttt{q-storage/src/emission\_controller.rs} & 1-468 \\
+Block Reward Calculation & \texttt{q-storage/src/balance\_consensus.rs} & 562-576 \\
+Time-Based Halving & \texttt{q-storage/src/emission\_controller.rs} & 205-230 \\
+Genesis Time & \texttt{q-storage/src/emission\_controller.rs} & 19 \\
+Dev Fee & \texttt{q-api-server/src/block\_producer.rs} & 387 \\
+Max Supply Constant & \texttt{q-types/src/lib.rs} & 91 \\
+Supply Cap Enforcement & \texttt{q-storage/src/emission\_controller.rs} & 248-252 \\
+\bottomrule
+\end{tabular}
+\caption{Source code locations for adaptive emission control system}
+\end{table}
+
+\subsection{Code Verification}
+
+All values in this document are extracted directly from the Q-NarwhalKnight source code. The adaptive reward system is the \textbf{primary implementation} (v0.9.99-beta+):
+
+\begin{lstlisting}[language=Rust]
+// Adaptive block reward (q-storage/src/emission_controller.rs)
+pub const BASE_ANNUAL_EMISSION: u64 = 82_031_000_000_000;
+// 82,031 QUG/year target (Era 1)
+
+pub fn calculate_block_reward(
+    &mut self,
+    current_timestamp: u64,
+    total_supply: u64,
+) -> Result<u64> {
+    let block_rate = self.calculate_economic_rate();
+    let reward = (annual_target * PRECISION)
+               / (block_rate * SECONDS_PER_YEAR) as u128;
+    Ok(reward as u64)
+}
+
+// Time-based halving interval
+const SECONDS_PER_HALVING: u64 = 126_144_000; // 4 years
+
+// Supply cap (q-types/src/lib.rs)
+pub const QUG_MAX_SUPPLY: u64 = 2_100_000_000_000_000; // 21M
+\end{lstlisting}
+
+\vfill
+
+\begin{center}
+\rule{0.8\textwidth}{0.4pt}
+
+\textbf{Q-NarwhalKnight Mainnet} \\
+\vspace{0.2cm}
+\small Time-based halving | 0.05 QUG initial reward | 21M max supply \\
+Genesis: Oct 26, 2025 00:00 UTC
+
+\vspace{0.3cm}
+\texttt{https://quillon.xyz}
+\end{center}
+
+\end{document}

@@ -16,7 +16,7 @@ tracing = "0.1"
 nalgebra = "0.32"
 ndarray = { version = "0.15", features = ["rayon"] }
 num-complex = "0.4"
-statrs = "0.16"
+statrs = { workspace = true }
 rand = "0.8"
 rand_distr = "0.4"
 

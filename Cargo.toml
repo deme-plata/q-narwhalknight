@@ -58,7 +58,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference"]
 
 [workspace.package]
-version = "0.9.90-beta"
+version = "1.0.0-beta"
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
@@ -216,6 +216,8 @@ config = "0.13"
 
 # CLI/TUI utilities
 console = "0.15"
+ratatui = "0.28"
+crossterm = "0.28"
 
 # Testing
 proptest = "1.0"

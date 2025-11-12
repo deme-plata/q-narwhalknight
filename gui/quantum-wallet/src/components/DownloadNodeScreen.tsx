@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-full">
           <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-red-400">v0.9.1-beta CRITICAL - Pruning Bug Fixed + Phase 4</span>
+          <span className="text-sm font-bold text-red-400">v0.9.1-beta CRITICAL - Pruning Bug Fixed + Phase 5</span>
         </div>
       </motion.div>
 
@@ -81,7 +81,7 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Phase 4 Network - Clean Start for Everyone</p>
+                <p className="text-white font-medium">Phase 5 Network - Clean Start for Everyone</p>
                 <p className="text-sm text-gray-400">Network reset with pruning disabled by default + enhanced security guarantees</p>
               </div>
             </div>
@@ -104,7 +104,7 @@ export default function DownloadNodeScreen() {
               <p className="text-gray-300 text-xs">
                 v0.9.1-beta fixes the catastrophic Adaptive Pruning bug that was deleting all blocks every hour.
                 Blocks are now NEVER deleted (pruning disabled by default). Height monotonicity protection prevents
-                height regression. Network reset to Phase 4 for clean start. All testnet nodes must upgrade immediately.
+                height regression. Network reset to Phase 5 for clean start. All testnet nodes must upgrade immediately.
                 Your old blocks were being intentionally deleted by pruning - this is now fixed permanently.
               </p>
             </div>

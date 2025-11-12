@@ -1,7 +1,7 @@
 import { useState, useEffect, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send } from 'lucide-react';
-import { qnkAPI, type NodeStatus, debounce } from '../services/api';
+import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
 import TransactionDetailsModal from './TransactionDetailsModal';
 import QRCodeModal from './QRCodeModal';
 import StripeCheckout from './StripeCheckout';
@@ -125,9 +125,9 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
 
   // Phase transition modal state
   const [showPhaseModal, setShowPhaseModal] = useState(() => {
-    // Check if user has already seen the v0.9.18-beta announcement
-    const hasSeenV0918 = localStorage.getItem('v0918betaModalSeen');
-    return !hasSeenV0918; // Show if they haven't seen v0.9.18-beta announcement yet
+    // Check if user has already seen the Phase 11 Data Loss FIX announcement
+    const hasSeenPhase11 = localStorage.getItem('phase11DataLossFixModalSeen');
+    return !hasSeenPhase11; // Show if they haven't seen Phase 11 announcement yet
   });
 
   // Generate AI Report
@@ -244,7 +244,7 @@ Provide a brief analysis (under 250 tokens) covering:
   // Fetch real data from Q-NarwhalKnight API
   useEffect(() => {
     let mounted = true;
-    let eventSource: EventSource | null = null;
+    // let eventSource: EventSource | null = null; // Disabled - App.tsx handles SSE
 
     // Create debounced versions of fetch functions to prevent request storms
     // These will delay execution by 1.5s after the last call
@@ -611,9 +611,9 @@ Provide a brief analysis (under 250 tokens) covering:
                 ? new Date(tx.timestamp * 1000).toISOString()
                 : tx.timestamp;
 
-              // Convert amount from smallest units to QNK (divide by 100,000,000)
+              // Convert amount from smallest units to QNK (divide by 1,000,000,000 - 9 decimals)
               const amount = typeof tx.amount === 'number'
-                ? tx.amount / 100000000
+                ? tx.amount / 1000000000
                 : tx.amount;
 
               // Label burn address as "Nitro Points Purchase"
@@ -725,17 +725,12 @@ Provide a brief analysis (under 250 tokens) covering:
     };
 
     // ============================================
-    // DEBOUNCED WRAPPERS - CRITICAL FIX FOR ERR_INSUFFICIENT_RESOURCES
+    // DEBOUNCED WRAPPERS - DISABLED (SSE in App.tsx)
     // ============================================
-    // SSE events were triggering fetchNodeStatus and fetchRecentTransactions
-    // hundreds of times per second, exhausting browser network resources.
-    // Debouncing delays execution until 200ms after the last call, preventing request storms
-    // while keeping the UI responsive.
-
-    const fetchNodeStatus = debounce(fetchNodeStatusCore, 200);
-    const fetchRecentTransactions = debounce(fetchRecentTransactionsCore, 200);
-
-    console.log('✅ [DEBOUNCE PROTECTION] Fetch functions debounced with 200ms delay');
+    // SSE connection moved to App.tsx, so Dashboard no longer needs these
+    // const fetchNodeStatus = debounce(fetchNodeStatusCore, 200);
+    // const fetchRecentTransactions = debounce(fetchRecentTransactionsCore, 200);
+    console.log('ℹ️  [SSE DISABLED] Dashboard no longer uses local SSE - App.tsx handles it');
     // ============================================
 
     const loadData = async () => {
@@ -764,11 +759,26 @@ Provide a brief analysis (under 250 tokens) covering:
 
     // Set up SSE for real-time balance updates
     // CRITICAL: Pass wallet_address parameter for privacy-filtered SSE
-    const currentWalletForSSE = localStorage.getItem('walletAddress') || '';
-    const sseUrl = import.meta.env.VITE_API_URL ?
-      `${import.meta.env.VITE_API_URL}/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}` :
-      `/api/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}`;
+    // const currentWalletForSSE = localStorage.getItem('walletAddress') || ''; // Disabled - App.tsx handles SSE
+    // SSE URL construction disabled - App.tsx handles SSE
+    // const sseUrl = import.meta.env.VITE_API_URL ?
+    //   `${import.meta.env.VITE_API_URL}/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}` :
+    //   `/api/v1/events?wallet_address=${encodeURIComponent(currentWalletForSSE)}`;
 
+    // CRITICAL FIX: Dashboard's SSE connection is DISABLED
+    // App.tsx already has an SSE connection that handles balance updates
+    // Having two SSE connections causes duplicate events and flickering
+    // Dashboard will receive balance updates via App.tsx's SSE connection
+    console.log('ℹ️  Dashboard SSE disabled - using App.tsx SSE connection instead');
+
+    // Mark as "connected" immediately since App.tsx handles SSE
+    if (mounted) {
+      setSseConnected(true);
+    }
+
+    // Early return - skip all SSE setup since App.tsx handles it
+    // The cleanup function below will still run on unmount
+    /*
     console.log('📡 Attempting SSE connection to:', sseUrl);
     console.log('📡 SSE wallet filter:', currentWalletForSSE);
 
@@ -881,10 +891,7 @@ Provide a brief analysis (under 250 tokens) covering:
                 return prev ? { ...prev, balance: newBalance } : prev;
               });
 
-              // Dispatch custom event to trigger App.tsx balance refresh
-              window.dispatchEvent(new CustomEvent('balance-update', {
-                detail: { balance: newBalance }
-              }));
+              // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
 
               // Refresh recent transactions to show new activity
               console.log('🔄 Refreshing recent transactions after balance update');
@@ -932,8 +939,7 @@ Provide a brief analysis (under 250 tokens) covering:
               // Refresh balance immediately
               fetchNodeStatus();
 
-              // Dispatch custom event to trigger App.tsx balance refresh
-              window.dispatchEvent(new CustomEvent('balance-update-refresh'));
+              // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
 
               // Add mining transaction to recent activity
               const miningTx: Transaction = {
@@ -986,10 +992,7 @@ Provide a brief analysis (under 250 tokens) covering:
               if (data.current_balance !== undefined) {
                 setNodeStatus(prev => prev ? { ...prev, balance: data.current_balance } : prev);
 
-                // Dispatch custom event to trigger App.tsx balance refresh
-                window.dispatchEvent(new CustomEvent('balance-update', {
-                  detail: { balance: data.current_balance }
-                }));
+                // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
               }
             } else {
               console.log('ℹ️ Mining stats for different wallet, ignoring', {
@@ -1048,10 +1051,7 @@ Provide a brief analysis (under 250 tokens) covering:
               console.log('✅ Dashboard: Balance update applied (onmessage):', data.data.new_balance);
               setNodeStatus(prev => prev ? { ...prev, balance: data.data.new_balance } : prev);
 
-              // Dispatch custom event to trigger App.tsx balance refresh
-              window.dispatchEvent(new CustomEvent('balance-update', {
-                detail: { balance: data.data.new_balance }
-              }));
+              // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
 
               // Refresh recent transactions to show new activity
               console.log('🔄 Refreshing recent transactions after balance update (onmessage)');
@@ -1104,10 +1104,7 @@ Provide a brief analysis (under 250 tokens) covering:
               // Update balance immediately
               setNodeStatus(prev => prev ? { ...prev, balance: rewardData.new_balance_qnk } : prev);
 
-              // Dispatch custom event to trigger App.tsx balance refresh
-              window.dispatchEvent(new CustomEvent('balance-update', {
-                detail: { balance: rewardData.new_balance_qnk }
-              }));
+              // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
 
               // Add mining transaction to recent activity
               const miningTx: Transaction = {
@@ -1186,11 +1183,10 @@ Provide a brief analysis (under 250 tokens) covering:
 
     return () => {
       mounted = false;
-      if (eventSource) {
-        eventSource.close();
-      }
+      // eventSource cleanup not needed - SSE disabled, App.tsx handles it
       window.removeEventListener('cdp-mint', handleCDPMint);
     };
+    */
   }, []);
 
   // Listen for real-time balance updates from SSE (via App.tsx custom event)
@@ -1492,10 +1488,7 @@ Provide a brief analysis (under 250 tokens) covering:
           setNodeStatus(prev => prev ? {...prev, balance: result.data.new_balance_qnk} : prev);
         }
 
-        // Dispatch custom event to trigger App.tsx balance refresh
-        window.dispatchEvent(new CustomEvent('balance-update', {
-          detail: { balance: result.data?.new_balance_qnk || receivedAmount }
-        }));
+        // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
 
         // Add faucet transaction to recent activity
         const faucetTransaction: Transaction = {
@@ -1641,12 +1634,12 @@ Provide a brief analysis (under 250 tokens) covering:
 
   return (
     <div className="space-y-8">
-      {/* Phase 4 Transition Modal */}
+      {/* Phase 8 Transition Modal */}
       {showPhaseModal && (
         <PhaseTransitionModal
           onClose={() => {
             setShowPhaseModal(false);
-            localStorage.setItem('v0918betaModalSeen', 'true');
+            localStorage.setItem('v0978betaModalSeen', 'true');
           }}
         />
       )}

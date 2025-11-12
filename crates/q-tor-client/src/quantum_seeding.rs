@@ -2,8 +2,7 @@
 /// Provides quantum-enhanced entropy for circuit creation and timing obfuscation
 use anyhow::{Context, Result};
 use q_quantum_rng::{QRNGConfig, QuantumRNG, QuantumRandomness};
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaChaRng;
+use rand_chacha::{ChaChaRng, rand_core::{RngCore, SeedableRng}};  // Use compatible trait versions
 use serde::{Deserialize, Serialize};
 use std::{
     sync::Arc,

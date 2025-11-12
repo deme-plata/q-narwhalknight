@@ -45,7 +45,7 @@ priority-queue = "1.3"
 
 # Statistical analysis
 rand = { workspace = true }
-statrs = "0.16"
+statrs = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

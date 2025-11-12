@@ -27,7 +27,11 @@ interface TransactionState {
   starkProof: any;
 }
 
-export default function TransactionScreenV2() {
+interface TransactionScreenV2Props {
+  currentBalance: number;
+}
+
+export default function TransactionScreenV2({ currentBalance }: TransactionScreenV2Props) {
   // Get pre-selected coin from localStorage (set by Dashboard)
   const [selectedCoin, setSelectedCoin] = useState<string>(() => {
     const stored = localStorage.getItem('selectedCoinForSend');
@@ -122,27 +126,26 @@ export default function TransactionScreenV2() {
 
   // Fetch wallet balances to display the selected coin's wallet card
   useEffect(() => {
-    const fetchBalances = async () => {
-      const currentWalletAddress = localStorage.getItem('walletAddress');
-      if (!currentWalletAddress) return;
+    const currentWalletAddress = localStorage.getItem('walletAddress');
+    if (!currentWalletAddress) {
+      console.warn('⚠️ TransactionScreenV2: No wallet address found in localStorage');
+      return;
+    }
 
+    console.log('🔄 TransactionScreenV2: Using balance from App.tsx:', currentBalance);
+
+    const fetchBalances = async () => {
       const balances: WalletBalance[] = [];
 
-      // Fetch QUG balance
-      try {
-        const balanceResponse = await qnkAPI.getWalletBalance(currentWalletAddress);
-        if (balanceResponse.success && balanceResponse.data) {
-          balances.push({
-            symbol: 'QUG',
-            name: 'Quillon Graph',
-            balance: balanceResponse.data.balance_qnk || 0,
-            icon: 'qug',
-            color: 'from-amber-400 to-yellow-500',
-          });
-        }
-      } catch (error) {
-        console.warn('Failed to fetch QUG balance:', error);
-      }
+      // Use balance from App.tsx (same as TopBar) for immediate display
+      console.log('✅ TransactionScreenV2: QUG balance from prop:', currentBalance);
+      balances.push({
+        symbol: 'QUG',
+        name: 'Quillon Graph',
+        balance: currentBalance,
+        icon: 'qug',
+        color: 'from-amber-400 to-yellow-500',
+      });
 
       // Fetch QUGUSD balance
       try {
@@ -190,11 +193,36 @@ export default function TransactionScreenV2() {
         console.warn('Failed to fetch USD balance:', error);
       }
 
+      console.log('💾 TransactionScreenV2: Setting walletBalances state:', balances);
       setWalletBalances(balances);
     };
 
     fetchBalances();
-  }, []);
+
+    // Subscribe to SSE balance updates for real-time updates
+    console.log('📡 TransactionScreenV2: Setting up SSE subscription for:', currentWalletAddress);
+    const eventSource = qnkAPI.subscribeToMiningRewards(
+      currentWalletAddress,
+      () => {}, // No mining rewards needed here
+      (update) => {
+        // Update QUG balance in real-time
+        console.log('📡 TransactionScreenV2: SSE balance update received:', update);
+        setWalletBalances(prev => {
+          const updated = prev.map(wallet =>
+            wallet.symbol === 'QUG'
+              ? { ...wallet, balance: update.new_balance }
+              : wallet
+          );
+          console.log('💾 TransactionScreenV2: Updated walletBalances via SSE:', updated);
+          return updated;
+        });
+      }
+    );
+
+    return () => {
+      eventSource.close();
+    };
+  }, [currentBalance]);
 
   const validateTransaction = (): { valid: boolean; error?: string } => {
     console.log('💰 TransactionScreenV2: validateTransaction called');
