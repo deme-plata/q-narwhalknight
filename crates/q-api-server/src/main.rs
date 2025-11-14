@@ -4456,10 +4456,10 @@ async fn main() -> anyhow::Result<()> {
                             // Only advance height if save succeeded
                             if save_succeeded {
                                 // ✅ v1.0.8-beta CRITICAL FIX: NOW advance producer height (write-first, advance-second)
-                                // Fixed: Use new advance_producer_height() method to properly acquire write lock
+                                // Fixed: Use new advance_producer_height() method which sends command via channel
                                 // Old code: producer_ref.advance_height(block_hash) <- Won't compile (immutable ref)
-                                // New code: Calls method that acquires write lock internally
-                                app_state_mining.block_producer_pool.advance_producer_height(producer_id, block_hash).await;
+                                // New code: Calls pool method that forwards to correct producer via lock-free channel
+                                app_state_mining.block_producer_pool.advance_producer_height(producer_id, block_hash);
 
                                 // 🔧 v1.0.3-beta: Update atomic height for mining API
                                 app_state_mining.current_height_atomic.store(

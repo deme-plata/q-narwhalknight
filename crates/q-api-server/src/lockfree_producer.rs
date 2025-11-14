@@ -835,6 +835,31 @@ impl LockFreeProducerPool {
         Ok(())
     }
 
+    /// ✅ v1.0.8-beta CRITICAL FIX: Advance producer height after block save succeeds
+    ///
+    /// **CRITICAL**: This MUST only be called AFTER save_qblock() succeeds!
+    /// Calling this before storage confirmation will cause catastrophic data loss.
+    ///
+    /// # Arguments
+    /// * `producer_id` - Index of the producer that created the block
+    /// * `block_hash` - Hash of the block that was just saved to storage
+    ///
+    /// # Safety
+    /// This method does NOT verify that the block exists on disk.
+    /// The caller MUST ensure save_qblock() returned Ok() before calling this.
+    ///
+    /// # Root Cause Fixed
+    /// User nodes were stuck at height 1 because advance_height() was never called
+    /// after block production. This method sends the AdvanceHeight command to the
+    /// appropriate producer via the lock-free channel.
+    pub fn advance_producer_height(&self, producer_id: usize, block_hash: BlockHash) {
+        let producer_index = producer_id % self.num_producers;
+        self.producers[producer_index].advance_height(block_hash);
+
+        info!("✅ [v1.0.8-beta FIX] Pool: Producer #{} height advance command sent AFTER storage confirmation",
+              producer_id);
+    }
+
     /// Shutdown all producers gracefully
     pub fn shutdown(&self) {
         info!("🛑 Shutting down lock-free producer pool...");
