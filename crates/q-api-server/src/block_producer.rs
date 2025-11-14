@@ -1198,6 +1198,35 @@ impl ParallelBlockProducerPool {
         self.producers[index % self.num_producers].read().await
     }
 
+    /// ✅ v1.0.8-beta CRITICAL FIX: Advance producer height after block save succeeds
+    ///
+    /// **CRITICAL**: This MUST only be called AFTER save_qblock() succeeds!
+    /// Calling this before storage confirmation will cause catastrophic data loss.
+    ///
+    /// # Arguments
+    /// * `producer_id` - Index of the producer that created the block
+    /// * `block_hash` - Hash of the block that was just saved to storage
+    ///
+    /// # Safety
+    /// This method does NOT verify that the block exists on disk.
+    /// The caller MUST ensure save_qblock() returned Ok() before calling this.
+    ///
+    /// # Root Cause Fixed
+    /// User nodes were stuck at height 1 because the old code at main.rs:4460 tried to:
+    /// ```ignore
+    /// let producer_ref = self.get_producer(producer_id);  // Returns RwLockReadGuard (immutable!)
+    /// producer_ref.advance_height(block_hash);  // ❌ Won't compile - needs &mut self
+    /// ```
+    ///
+    /// This new method properly acquires a write lock to call advance_height().
+    pub async fn advance_producer_height(&self, producer_id: usize, block_hash: BlockHash) {
+        let mut producer = self.producers[producer_id % self.num_producers].write().await;
+        producer.advance_height(block_hash);
+
+        info!("✅ [v1.0.8-beta FIX] Producer #{} height advanced to {} AFTER storage confirmation",
+              producer_id, producer.get_height());
+    }
+
     /// Synchronize all producers' blockchain state from storage after sync events
     ///
     /// **v0.9.7-beta CRITICAL FIX**: After turbo sync or HTTP sync completes,
