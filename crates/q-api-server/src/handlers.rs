@@ -4431,38 +4431,48 @@ pub async fn get_mining_challenge(
     // ✅ P0 HOTFIX: Validate sync health BEFORE cache lookup or challenge generation
     // This prevents all stale-height scenarios by blocking mining when node is unhealthy
     {
-        let node_status = state.node_status.read().await;
-
         // Check 1: Do we have any peers? (offline detection)
-        if node_status.peer_count == 0 {
+        // Use libp2p_peer_count from AppState (atomic, lock-free)
+        let peer_count = if let Some(ref peer_count_atomic) = state.libp2p_peer_count {
+            peer_count_atomic.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            // Fallback to connected_peers from node_status if libp2p_peer_count not initialized
+            let node_status = state.node_status.read().await;
+            node_status.connected_peers as usize
+        };
+
+        if peer_count == 0 {
             return Ok(Json(ApiResponse::error(
-                "Node has no connected peers. Mining is disabled until at least one peer is connected. Check firewall (port 9001) and bootstrap configuration."
+                "Node has no connected peers. Mining is disabled until at least one peer is connected. Check firewall (port 9001) and bootstrap configuration.".to_string()
             )));
         }
 
         // Check 2: Is network height known? (discovery phase)
-        if node_status.network_height == 0 {
+        // Use highest_network_height from AppState (atomic, tracks highest seen from peers)
+        let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Acquire);
+
+        if network_height == 0 {
             return Ok(Json(ApiResponse::error(
-                "Network height unknown. Node is still discovering peers. Try again in 30 seconds."
+                "Network height unknown. Node is still discovering peers. Try again in 30 seconds.".to_string()
             )));
         }
 
         // Check 3: Are we synced? (sync validation)
-        let blocks_behind = node_status.network_height.saturating_sub(local_height);
+        let blocks_behind = network_height.saturating_sub(local_height);
 
         if blocks_behind > 100 {
             return Ok(Json(ApiResponse::error(format!(
                 "Node is syncing: {} blocks behind network. Mining will resume after sync completes. Current: {}, Network: {}",
-                blocks_behind, local_height, node_status.network_height
+                blocks_behind, local_height, network_height
             ))));
         }
 
         // Check 4: Safety check for implausibly low heights (corrupted database detection)
         // If local height is very low but network is high, database may be corrupted
-        if local_height < 50_000 && node_status.network_height > 50_000 {
+        if local_height < 50_000 && network_height > 50_000 {
             return Ok(Json(ApiResponse::error(format!(
                 "Node height {} is implausibly low compared to network height {}. Database may be corrupted. Please delete data/ folder and resync.",
-                local_height, node_status.network_height
+                local_height, network_height
             ))));
         }
     }
