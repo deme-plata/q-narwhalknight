@@ -127,7 +127,13 @@ impl AIGossipsubMessage {
         let priority = match &payload {
             AIMessagePayload::CoordinatorElection { .. } => MessagePriority::Critical,
             AIMessagePayload::LayerOutput { .. } | AIMessagePayload::KVCacheUpdate { .. } => MessagePriority::High,
+            AIMessagePayload::TokenChunk { .. } => MessagePriority::High, // Streaming tokens need priority
+            AIMessagePayload::InferenceStarted { .. } => MessagePriority::High, // Start acknowledgment
+            AIMessagePayload::InferenceComplete { .. } => MessagePriority::High, // Completion signal
+            AIMessagePayload::InferenceError { .. } => MessagePriority::High, // Errors need fast routing
             AIMessagePayload::InferenceRequest { .. } | AIMessagePayload::InferenceResponse { .. } => MessagePriority::Normal,
+            AIMessagePayload::TargetedInferenceRequest { .. } => MessagePriority::Normal, // Data parallel requests
+            AIMessagePayload::CancelInference { .. } => MessagePriority::Normal, // Cancellation requests
             AIMessagePayload::Heartbeat { .. } | AIMessagePayload::NodeCapability { .. } => MessagePriority::Low,
             _ => MessagePriority::Normal,
         };
@@ -236,6 +242,54 @@ pub enum AIMessagePayload {
         cache_data: Vec<u8>,
         sequence_length: usize,
     } = 7,
+    /// NEW v1.0: Targeted inference request for data parallelism
+    /// Only the specified target node processes this request (load balanced)
+    TargetedInferenceRequest {
+        request_id: String,
+        target_node_id: String, // Only this node should process
+        prompt: String,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        model: String,
+    } = 8,
+    /// NEW v1.0: Token chunk for streaming responses
+    /// Sent from worker to coordinator during generation
+    TokenChunk {
+        request_id: String,
+        token: String,
+        token_index: usize,
+    } = 9,
+    /// NEW v1.0: Worker acknowledges it accepted the targeted request
+    /// Allows coordinator to detect if worker is unresponsive (timeout re-route)
+    InferenceStarted {
+        request_id: String,
+        worker_node_id: String,
+        model: String,
+        started_at_ms: u64,
+    } = 10,
+    /// NEW v1.0: Worker signals completion
+    /// finish_reason: "eos", "length", "stop", "cancelled", "error"
+    InferenceComplete {
+        request_id: String,
+        worker_node_id: String,
+        finish_reason: String,
+        tokens_generated: usize,
+        total_time_ms: u64,
+    } = 11,
+    /// NEW v1.0: Cancel inference (client disconnect or timeout)
+    /// Cooperative cancellation - worker should stop generation
+    CancelInference {
+        request_id: String,
+        target_node_id: String,
+        reason: String, // "client_closed", "timeout", "reassign"
+    } = 12,
+    /// NEW v1.0: Inference error from worker
+    InferenceError {
+        request_id: String,
+        worker_node_id: String,
+        code: String,    // "engine_error", "model_load_failed", etc.
+        message: String,
+    } = 13,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

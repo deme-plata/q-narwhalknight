@@ -122,9 +122,32 @@ pub async fn get_block_by_height(
 }
 
 /// Prometheus metrics endpoint
-pub async fn metrics(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
-    // TODO: Implement proper Prometheus metrics
-    Ok("# Q-NarwhalKnight metrics\n# Coming soon...".to_string())
+pub async fn metrics(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+    let mut metrics = String::new();
+
+    // Basic node metrics
+    metrics.push_str("# HELP qnk_node_height Current blockchain height\n");
+    metrics.push_str("# TYPE qnk_node_height gauge\n");
+
+    let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    metrics.push_str(&format!("qnk_node_height {}\n", current_height));
+
+    // ✅ v1.0.7-beta: AsyncStorageEngine metrics
+    if let Some(async_storage) = &state.async_storage {
+        let queue_depth = async_storage.queue_depth();
+        let is_congested = async_storage.is_congested();
+
+        metrics.push_str("\n# AsyncStorageEngine metrics\n");
+        metrics.push_str("# HELP qnk_storage_queue_depth Number of pending storage commands\n");
+        metrics.push_str("# TYPE qnk_storage_queue_depth gauge\n");
+        metrics.push_str(&format!("qnk_storage_queue_depth {}\n", queue_depth));
+
+        metrics.push_str("# HELP qnk_storage_congested Storage queue congestion status (1=congested, 0=normal)\n");
+        metrics.push_str("# TYPE qnk_storage_congested gauge\n");
+        metrics.push_str(&format!("qnk_storage_congested {}\n", if is_congested { 1 } else { 0 }));
+    }
+
+    Ok(metrics)
 }
 
 /// Node status endpoint
@@ -4343,10 +4366,11 @@ pub async fn submit_mining_solution(
             difficulty_target,
             miner_address,
             miner_address_str: request.miner_address.clone(),
-            hash_rate: 0.0, // Hash rate calculated based on submission frequency
+            hash_rate: request.hash_rate.unwrap_or(0.0), // Use miner-reported hash rate (KH/s)
         };
 
-        match tx.send(submission) {
+        // ✅ v1.0.2-beta Layer 3 FIX: Bounded channel send is async and requires await
+        match tx.send(submission).await {
             Ok(_) => {
                 info!("⚡ Mining submission queued (non-blocking): Miner: {}, Nonce: {}",
                       &request.miner_address[..16], nonce);
@@ -4363,7 +4387,7 @@ pub async fn submit_mining_solution(
                 }
             }
             Err(e) => {
-                warn!("❌ Failed to queue mining submission: {:?}", e);
+                warn!("❌ Failed to queue mining submission (backpressure or channel closed): {:?}", e);
                 return Ok(Json(ApiResponse::error("Mining queue temporarily unavailable".to_string())));
             }
         }
@@ -4396,44 +4420,161 @@ pub async fn submit_mining_solution(
     })))
 }
 
-/// Get current mining challenge
+/// Get current mining challenge (v1.0.8-beta: P0 HOTFIX - sync health validation)
 pub async fn get_mining_challenge(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<MiningChallengeResponse>>, StatusCode> {
-    // ⚡ v0.9.66-beta: Lock-free height read for sub-100ms /challenge response
-    // Replaces RwLock read that was causing 1.6-3.7 second delays due to contention
-    let block_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    // ✅ P0 HOTFIX: Load height once at the top with proper memory ordering
+    // Using Acquire ordering ensures visibility of all state updates that happened-before the height write
+    let local_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
 
-    // Generate challenge hash from current block height and timestamp
-    let timestamp = chrono::Utc::now();
-    let challenge_data = format!("block_{}_time_{}", block_height, timestamp.timestamp());
-    let challenge_hash = blake3::hash(challenge_data.as_bytes());
+    // ✅ P0 HOTFIX: Validate sync health BEFORE cache lookup or challenge generation
+    // This prevents all stale-height scenarios by blocking mining when node is unhealthy
+    {
+        let node_status = state.node_status.read().await;
 
-    // Set difficulty target (easier for testing - more zeros = harder)
-    // Current: 0x0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-    // This requires first 2 bytes to be 0x0000 or less
+        // Check 1: Do we have any peers? (offline detection)
+        if node_status.peer_count == 0 {
+            return Ok(Json(ApiResponse::error(
+                "Node has no connected peers. Mining is disabled until at least one peer is connected. Check firewall (port 9001) and bootstrap configuration."
+            )));
+        }
+
+        // Check 2: Is network height known? (discovery phase)
+        if node_status.network_height == 0 {
+            return Ok(Json(ApiResponse::error(
+                "Network height unknown. Node is still discovering peers. Try again in 30 seconds."
+            )));
+        }
+
+        // Check 3: Are we synced? (sync validation)
+        let blocks_behind = node_status.network_height.saturating_sub(local_height);
+
+        if blocks_behind > 100 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Node is syncing: {} blocks behind network. Mining will resume after sync completes. Current: {}, Network: {}",
+                blocks_behind, local_height, node_status.network_height
+            ))));
+        }
+
+        // Check 4: Safety check for implausibly low heights (corrupted database detection)
+        // If local height is very low but network is high, database may be corrupted
+        if local_height < 50_000 && node_status.network_height > 50_000 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Node height {} is implausibly low compared to network height {}. Database may be corrupted. Please delete data/ folder and resync.",
+                local_height, node_status.network_height
+            ))));
+        }
+    }
+
+    // NOW safe to proceed with cache check and challenge generation
+    // Reuse local_height loaded at the top for consistency
+    let block_height = local_height;
+
+    // 🔧 v1.0.5-beta: Check if we have a cached challenge for current height (with grace period)
+    {
+        let cached = state.current_challenge.read().await;
+        if let Some(challenge) = cached.as_ref() {
+            // Challenge matches current height - check age-based expiry with grace period
+            if challenge.block_height == block_height {
+                let age_seconds = (chrono::Utc::now() - challenge.issued_at).num_seconds();
+
+                if age_seconds < 120 {
+                    // Normal cache hit - challenge is fresh
+                    return Ok(Json(ApiResponse::success(MiningChallengeResponse {
+                        challenge_hash: challenge.challenge_hash.clone(),
+                        difficulty_target: challenge.difficulty_target.clone(),
+                        block_height: challenge.block_height,
+                        vdf_iterations: challenge.vdf_iterations,
+                        block_reward: challenge.block_reward,
+                        expires_at: challenge.expires_at,
+                    })));
+                } else if age_seconds < 150 {
+                    // Grace period (120-150s): Warn but still return cached challenge
+                    // This prevents hash regeneration during temporary stalls
+                    warn!(
+                        "⚠️  Mining challenge for height {} is {} seconds old (expired {}s ago), returning cached anyway (grace period)",
+                        block_height, age_seconds, age_seconds - 120
+                    );
+                    return Ok(Json(ApiResponse::success(MiningChallengeResponse {
+                        challenge_hash: challenge.challenge_hash.clone(),
+                        difficulty_target: challenge.difficulty_target.clone(),
+                        block_height: challenge.block_height,
+                        vdf_iterations: challenge.vdf_iterations,
+                        block_reward: challenge.block_reward,
+                        expires_at: challenge.expires_at,
+                    })));
+                } else {
+                    // Challenge is too old (>150s) - force regeneration
+                    warn!(
+                        "🔄 Mining challenge for height {} is {} seconds old - forcing regeneration",
+                        block_height, age_seconds
+                    );
+                    // Drop the cached reference and fall through to regeneration
+                    drop(cached);
+                }
+            }
+        }
+    }
+
+    // No cached challenge or it's expired/wrong height - generate new one
+    info!("🎯 Generating fresh mining challenge for height {}", block_height);
+
+    let issued_at = chrono::Utc::now();
+
+    // 🔧 v1.0.5-beta Phase 2: Consensus-bound challenge generation
+    // Generate deterministic challenge based on consensus inputs (height, difficulty, vdf_iters, version)
+    // Eliminates timestamp-based non-determinism - all nodes generate identical challenges
+    let version = b"QNK/1.0.5";
+
     let mut difficulty_target = [0xffu8; 32];
     difficulty_target[0] = 0x00;
     difficulty_target[1] = 0x00;
 
-    // VDF iterations based on block height (increases difficulty over time)
     let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
 
-    // Block reward calculated dynamically based on TIME (not block height)
+    let mut h = blake3::Hasher::new();
+    h.update(version);
+    h.update(&block_height.to_le_bytes());
+    h.update(&difficulty_target);
+    h.update(&vdf_iterations.to_le_bytes());
+
+    let challenge_hash = h.finalize().as_bytes().clone();
+
+    info!("✅ Generated consensus-bound challenge for height {} (deterministic, no timestamp)",
+          block_height);
+
+    // VDF iterations
+    let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
+
+    // Block reward
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
     let block_reward_base_units = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
     let block_reward = block_reward_base_units as f64 / 100_000_000.0;
 
-    // Challenge expires in 60 seconds
-    let expires_at = timestamp + chrono::Duration::seconds(60);
+    // Challenge expires in 120 seconds (increased from 60 for stability)
+    let expires_at = issued_at + chrono::Duration::seconds(120);
 
-    Ok(Json(ApiResponse::success(MiningChallengeResponse {
-        challenge_hash: hex::encode(challenge_hash.as_bytes()),
+    // 🔧 v1.0.4-beta: Cache the challenge
+    let cached_challenge = crate::CachedChallenge {
+        challenge_hash: hex::encode(&challenge_hash),
         difficulty_target: hex::encode(difficulty_target),
         block_height,
         vdf_iterations,
         block_reward,
+        issued_at,
         expires_at,
+    };
+
+    *state.current_challenge.write().await = Some(cached_challenge.clone());
+
+    Ok(Json(ApiResponse::success(MiningChallengeResponse {
+        challenge_hash: cached_challenge.challenge_hash,
+        difficulty_target: cached_challenge.difficulty_target,
+        block_height: cached_challenge.block_height,
+        vdf_iterations: cached_challenge.vdf_iterations,
+        block_reward: cached_challenge.block_reward,
+        expires_at: cached_challenge.expires_at,
     })))
 }
 

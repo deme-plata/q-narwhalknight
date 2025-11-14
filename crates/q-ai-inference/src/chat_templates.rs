@@ -23,7 +23,15 @@ use tracing::debug;
 /// ```
 pub fn format_chat_prompt(model_name: &str, user_message: &str) -> String {
     // Detect model family and apply appropriate template
-    if model_name.contains("Mistral-Small") || model_name.contains("Mistral-3.2") {
+    if model_name.contains("Kimi-K2") || model_name.contains("kimi-k2") {
+        // Kimi K2 Thinking model format
+        // Uses simple instruction format with <think> tag support
+        debug!("Using Kimi K2 Thinking chat template");
+        format!(
+            "<|system|>\nYou are Kimi K2, an advanced AI assistant with reasoning capabilities. Show your thinking process using <think> tags before providing your final answer.<|end|>\n<|user|>\n{}<|end|>\n<|assistant|>\n",
+            user_message
+        )
+    } else if model_name.contains("Mistral-Small") || model_name.contains("Mistral-3.2") {
         // Mistral Small 3.2 format (24B parameter model)
         // Uses SYSTEM_PROMPT tags for better instruction following
         debug!("Using Mistral Small 3.2 chat template");
@@ -94,6 +102,68 @@ pub fn format_conversation(model_name: &str, messages: &[(&str, &str)]) -> Strin
         .unwrap_or("");
 
     format_chat_prompt(model_name, last_user_message)
+}
+
+/// Parse Kimi K2 reasoning output
+///
+/// Kimi K2 Thinking model outputs its reasoning process in <think> tags:
+/// ```text
+/// <think>
+/// The user is asking about quantum computing...
+/// I should explain superposition first...
+/// </think>
+/// Quantum computing uses quantum bits...
+/// ```
+///
+/// This function extracts:
+/// - `reasoning`: Content inside <think> tags (returns None if no tags found)
+/// - `answer`: Content outside <think> tags
+///
+/// # Arguments
+/// * `output` - The raw model output containing potential <think> tags
+///
+/// # Returns
+/// A tuple of (Option<reasoning>, answer)
+///
+/// # Example
+/// ```
+/// use q_ai_inference::parse_kimi_k2_reasoning;
+///
+/// let output = "<think>Let me think about this...</think>The answer is 42.";
+/// let (reasoning, answer) = parse_kimi_k2_reasoning(output);
+/// assert_eq!(reasoning, Some("Let me think about this...".to_string()));
+/// assert_eq!(answer, "The answer is 42.");
+/// ```
+pub fn parse_kimi_k2_reasoning(output: &str) -> (Option<String>, String) {
+    use regex::Regex;
+
+    // Match <think>...</think> tags (case-insensitive, multiline)
+    let think_regex = Regex::new(r"(?is)<think>(.*?)</think>").unwrap();
+
+    let mut reasoning_parts = Vec::new();
+    let mut answer = output.to_string();
+
+    // Extract all <think> blocks
+    for cap in think_regex.captures_iter(output) {
+        if let Some(thinking) = cap.get(1) {
+            reasoning_parts.push(thinking.as_str().trim().to_string());
+        }
+    }
+
+    // Remove <think> tags from answer
+    answer = think_regex.replace_all(&answer, "").to_string();
+
+    // Clean up whitespace
+    answer = answer.trim().to_string();
+
+    // Combine all reasoning parts
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n\n---\n\n"))
+    };
+
+    (reasoning, answer)
 }
 
 #[cfg(test)]

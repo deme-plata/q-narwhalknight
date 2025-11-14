@@ -86,7 +86,14 @@ impl ModelMetadata {
     pub fn from_name(name: &str, base_url: &str) -> Result<Self> {
         // Determine model-specific configuration
         let (gguf_filename, layer_count, parameters_billions, ram_usage_mb) =
-            if name.contains("Mistral-Small-3.2-24B") {
+            if name.contains("Kimi-K2") || name.contains("kimi-k2") {
+                (
+                    "Kimi-K2-unsloth.UD-TQ1_0.gguf".to_string(),
+                    120, // Estimated layer count for 1T MoE model
+                    1000.0, // 1 trillion parameters
+                    245000, // 245 GB with UD-TQ1_0 quantization
+                )
+            } else if name.contains("Mistral-Small-3.2-24B") {
                 (
                     "Mistral-Small-3.2-24B-Instruct-Q4_K_M.gguf".to_string(),
                     56, // 56 layers for 24B model
@@ -122,7 +129,7 @@ impl ModelMetadata {
                     38000,
                 )
             } else {
-                return Err(anyhow!("Unknown model: {}. Supported models: Mistral-7B, Mistral-Small-3.2-24B, Llama-7B, Llama-13B, Llama-70B", name));
+                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Llama-7B, Llama-13B, Llama-70B", name));
             };
 
         let download_url = format!("{}/downloads/{}", base_url, gguf_filename);

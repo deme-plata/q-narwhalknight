@@ -88,6 +88,7 @@ pub mod aegis_auth_middleware;  // ✅ ENABLED - AEGIS-QL post-quantum authentic
 pub mod chat_api;  // ✅ ENABLED - AI chat API with privacy-first distributed inference
 pub mod dex_initialization;  // ✅ ENABLED - DEX component initialization
 pub mod dex_handlers;  // ✅ ENABLED - DEX HTTP API handlers
+pub mod governance_api;  // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
 // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
 // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
 #[cfg(target_os = "linux")]
@@ -425,6 +426,29 @@ impl MiningStatistics {
     }
 }
 
+// 🔧 v1.0.4-beta: Challenge caching for mining stall prevention
+/// Cached mining challenge to ensure consistent challenge_hash across API requests for same height
+#[derive(Clone, Debug)]
+pub struct CachedChallenge {
+    pub challenge_hash: String,
+    pub difficulty_target: String,
+    pub block_height: u64,
+    pub vdf_iterations: u32,
+    pub block_reward: f64,
+    pub issued_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 🔧 v1.0.5-beta Phase 2: Solution deduplication cache
+/// Prevents duplicate solution submissions by tracking (height, solution_hash)
+/// Auto-expires entries older than 5 minutes
+#[derive(Debug, Clone)]
+pub struct SolutionDedupEntry {
+    pub height: u64,
+    pub solution_hash: String,
+    pub submitted_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Application state shared across handlers
 pub struct AppState {
     pub config: Config,
@@ -506,6 +530,18 @@ pub struct AppState {
     // Updated atomically when blocks are produced, avoids RwLock contention on node_status
     pub current_height_atomic: Arc<std::sync::atomic::AtomicU64>,
 
+    // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm during shutdown
+    // Cached height value (lock-free reads) with time-based freshness and shutdown mode
+    pub height_state: q_storage::HeightState,
+
+    // 🛑 v1.0.2-beta: Graceful shutdown broadcast channel
+    // Signal handler broadcasts shutdown to all subsystems for clean termination
+    pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
+
+    // 🔧 v1.0.4-beta: Challenge caching to prevent mining stalls
+    // Ensures consistent challenge_hash across API requests for same height
+    pub current_challenge: Arc<tokio::sync::RwLock<Option<CachedChallenge>>>,
+
     // 🔍 v0.9.67-beta: Comprehensive fork detection and automatic resolution
     // Tracks peer heights and detects backward reorgs, minority forks, network splits
     pub fork_detector: Arc<q_storage::fork_detector::ForkDetector>,
@@ -515,7 +551,8 @@ pub struct AppState {
     pub sync_start_height: Arc<std::sync::atomic::AtomicU64>,
 
     // Mining submission queue (async processing to prevent server overload)
-    pub mining_submission_tx: Option<tokio::sync::mpsc::UnboundedSender<MiningSubmission>>,
+    // ✅ v1.0.2-beta Layer 3 FIX: Changed to bounded channel with 10,000 capacity
+    pub mining_submission_tx: Option<tokio::sync::mpsc::Sender<MiningSubmission>>,
 
     // BREAKTHROUGH: DNS-Phantom → Connection Integration
     pub connection_manager: Option<Arc<q_network::connection_manager::ConnectionManager>>,
@@ -658,6 +695,12 @@ pub struct AppState {
     pub fast_sync_enabled: bool,
     pub fast_sync_tx: Option<tokio::sync::mpsc::Sender<q_types::block::QBlock>>,
     pub fast_sync_metrics: Option<Arc<tokio::sync::Mutex<q_storage::BatchMetrics>>>,
+
+    // ✅ v1.0.7-beta: AsyncStorageEngine - Permanent mining stall fix
+    // Dedicated worker thread with micro-batching (512 blocks OR 2ms)
+    // Eliminates RwLock contention and amortizes RocksDB compaction overhead
+    // AI Consensus (5/5 experts): Root cause = blocking RocksDB I/O under async RwLock
+    pub async_storage: Option<Arc<q_storage::AsyncStorageEngine>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1237,6 +1280,12 @@ impl AppState {
             libp2p_peer_count: None, // Disabled in test mode
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
+            shutdown_tx: {
+                let (tx, _rx) = tokio::sync::broadcast::channel(1);
+                tx
+            }, // 🛑 v1.0.2-beta: Graceful shutdown broadcast
+            current_challenge: Arc::new(tokio::sync::RwLock::new(None)), // 🔧 v1.0.4-beta: Challenge caching
             fork_detector: Arc::new(q_storage::fork_detector::ForkDetector::new()), // 🔍 v0.9.67-beta: Comprehensive fork detection
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
@@ -1443,6 +1492,9 @@ impl AppState {
             fast_sync_enabled: false,  // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,        // Will be initialized in main.rs if enabled
             fast_sync_metrics: None,   // Will be initialized in main.rs if enabled
+
+            // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
+            async_storage: None,  // Will be initialized in main.rs with DB handle
         })
     }
 
@@ -1896,6 +1948,12 @@ impl AppState {
             libp2p_peer_count: None,  // Will be initialized in main.rs after network manager creation
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
+            shutdown_tx: {
+                let (tx, _rx) = tokio::sync::broadcast::channel(1);
+                tx
+            }, // 🛑 v1.0.2-beta: Graceful shutdown broadcast
+            current_challenge: Arc::new(tokio::sync::RwLock::new(None)), // 🔧 v1.0.4-beta: Challenge caching
             fork_detector: Arc::new(q_storage::fork_detector::ForkDetector::new()), // 🔍 v0.9.67-beta: Comprehensive fork detection
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
@@ -2132,6 +2190,9 @@ impl AppState {
             fast_sync_enabled: false,  // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,        // Will be initialized in main.rs if enabled
             fast_sync_metrics: None,   // Will be initialized in main.rs if enabled
+
+            // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
+            async_storage: None,  // Will be initialized in main.rs with DB handle
         })
     }
 

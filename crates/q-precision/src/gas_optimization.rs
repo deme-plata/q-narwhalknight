@@ -10,22 +10,25 @@ use crate::QAmount;
 use std::str::FromStr;
 
 /// Gas cost constants (in qwei)
+#[derive(Debug, Clone)]
 pub struct GasCosts {
-    pub add: u64,           // 1 qwei (vs Solana's 100,000 lamports)
-    pub mul: u64,           // 2 qwei
-    pub div: u64,           // 4 qwei
-    pub transfer: u64,      // 10 qwei (vs Solana's 1M lamports)
-    pub contract_call: u64, // 50 qwei
+    pub add: u64,                // 1 qwei (vs Solana's 100,000 lamports)
+    pub mul: u64,                // 2 qwei
+    pub div: u64,                // 4 qwei
+    pub transfer: u64,           // 10 qwei (vs Solana's 1M lamports)
+    pub contract_call: u64,      // 50 qwei
+    pub reward_calculation: u64, // 10 qwei for mining reward calculation
 }
 
 impl Default for GasCosts {
     fn default() -> Self {
         Self {
-            add: 1,           // 0.000000000000000001 QNK (1 attosecond compute)
-            mul: 1,           // 0.000000000000000001 QNK (optimized via SIMD)
-            div: 2,           // 0.000000000000000002 QNK (quantum division)
-            transfer: 1,      // 0.000000000000000001 QNK (zero-copy transfer)
-            contract_call: 5, // 0.000000000000000005 QNK (native execution)
+            add: 1,                    // 0.000000000000000001 QNK (1 attosecond compute)
+            mul: 1,                    // 0.000000000000000001 QNK (optimized via SIMD)
+            div: 2,                    // 0.000000000000000002 QNK (quantum division)
+            transfer: 1,               // 0.000000000000000001 QNK (zero-copy transfer)
+            contract_call: 5,          // 0.000000000000000005 QNK (native execution)
+            reward_calculation: 10,    // 0.000000000000000010 QNK (reward verification)
         }
     }
 }

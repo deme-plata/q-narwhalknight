@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
-use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign, Shr, ShrAssign};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -242,6 +242,30 @@ impl AddAssign for QAmount {
 impl SubAssign for QAmount {
     fn sub_assign(&mut self, rhs: QAmount) {
         *self = *self - rhs;
+    }
+}
+
+/// Right shift operation for halving rewards (mining halving schedule)
+impl Shr<u64> for QAmount {
+    type Output = QAmount;
+
+    fn shr(self, rhs: u64) -> QAmount {
+        // Halving: divide mantissa by 2^rhs
+        if rhs >= 127 {
+            return QAmount::ZERO; // Prevent overflow
+        }
+
+        QAmount {
+            mantissa: self.mantissa >> rhs,
+            scale: self.scale,
+        }
+    }
+}
+
+/// Right shift assign for in-place halving
+impl ShrAssign<u64> for QAmount {
+    fn shr_assign(&mut self, rhs: u64) {
+        *self = *self >> rhs;
     }
 }
 

@@ -1,7 +1,7 @@
 /// Manual height pointer update tool for v0.9.99-beta height desync
 /// Directly updates qblock:latest to 710
 
-use q_storage::{QStorage, StorageConfig};
+use q_storage::{QStorage, StorageConfig, KVStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Direct database write
     let height_bytes = target_height.to_be_bytes();
-    storage.hot_db().put("blocks", b"qblock:latest", &height_bytes).await?;
+    storage.get_hot_db().put("blocks", b"qblock:latest", &height_bytes).await?;
 
     // Verify update
     let new_pointer = storage.get_latest_qblock_height().await?.unwrap_or(0);

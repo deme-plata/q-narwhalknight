@@ -31,7 +31,7 @@ pub use mempool_integration::{
 };
 pub use ordering_rules::OrderingEngine;
 pub use quantum_beacon::{BeaconState, QuantumBeacon};
-pub use quantum_vdf::{QuantumVDF, QuantumVDFConfig, QuantumVDFProof, VDFSecurityLevel};
+pub use quantum_vdf::{QuantumVDF, QuantumVDFConfig, QuantumVDFProof, VDFComputationResult, VDFSecurityLevel};
 pub use vertex_creator::{Vertex, VertexCreator, VertexCreatorConfig};
 
 // Re-export types from q-types for easier access

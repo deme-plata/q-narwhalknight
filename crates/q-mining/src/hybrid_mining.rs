@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{QuantumPoWBlock, MiningTemplate};
-use q_dag_knight::{VDFProof, QuantumVDF};
+use q_dag_knight::{QuantumVDFProof, QuantumVDF};
 use q_types::Address;
 
 /// Hybrid mining block that requires both CPU and GPU work
@@ -33,7 +33,7 @@ pub struct HybridMiningBlock {
     pub previous_hash: [u8; 32],
 
     /// CPU Component: VDF Proof (memory-bound, CPU-optimized)
-    pub vdf_proof: VDFProof,
+    pub vdf_proof: QuantumVDFProof,
     pub cpu_miner_address: Address,
     pub vdf_difficulty: u64,
 
@@ -56,7 +56,7 @@ impl HybridMiningBlock {
         height: u64,
         previous_hash: [u8; 32],
         merkle_root: [u8; 32],
-        vdf_proof: VDFProof,
+        vdf_proof: QuantumVDFProof,
         cpu_miner: Address,
         pow_hash: [u8; 32],
         pow_nonce: u64,
@@ -164,15 +164,15 @@ pub struct HybridRewards {
 #[derive(Debug)]
 pub struct CPUMiningPool {
     /// Pending VDF proofs waiting for GPU PoW
-    pending_vdf_proofs: Arc<RwLock<Vec<PendingVDFProof>>>,
+    pending_vdf_proofs: Arc<RwLock<Vec<PendingQuantumVDFProof>>>,
 
     /// Active CPU miners
     active_miners: Arc<RwLock<Vec<Address>>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingVDFProof {
-    pub proof: VDFProof,
+pub struct PendingQuantumVDFProof {
+    pub proof: QuantumVDFProof,
     pub miner_address: Address,
     pub submitted_at: u64,
     pub height: u64,
@@ -189,11 +189,11 @@ impl CPUMiningPool {
     /// Submit VDF proof from CPU miner
     pub async fn submit_vdf_proof(
         &self,
-        proof: VDFProof,
+        proof: QuantumVDFProof,
         miner_address: Address,
         height: u64,
     ) -> Result<()> {
-        let pending = PendingVDFProof {
+        let pending = PendingQuantumVDFProof {
             proof,
             miner_address,
             submitted_at: chrono::Utc::now().timestamp() as u64,
@@ -212,13 +212,13 @@ impl CPUMiningPool {
     }
 
     /// Get pending VDF proof for a given height
-    pub async fn get_pending_vdf(&self, height: u64) -> Option<PendingVDFProof> {
+    pub async fn get_pending_vdf(&self, height: u64) -> Option<PendingQuantumVDFProof> {
         let proofs = self.pending_vdf_proofs.read().await;
         proofs.iter().find(|p| p.height == height).cloned()
     }
 
     /// Remove used VDF proof
-    pub async fn consume_vdf_proof(&self, height: u64) -> Option<PendingVDFProof> {
+    pub async fn consume_vdf_proof(&self, height: u64) -> Option<PendingQuantumVDFProof> {
         let mut proofs = self.pending_vdf_proofs.write().await;
         if let Some(pos) = proofs.iter().position(|p| p.height == height) {
             Some(proofs.remove(pos))
@@ -317,7 +317,7 @@ impl HybridMiningCoordinator {
     /// Submit CPU work (VDF proof)
     pub async fn submit_cpu_work(
         &self,
-        proof: VDFProof,
+        proof: QuantumVDFProof,
         miner_address: Address,
         height: u64,
     ) -> Result<()> {
@@ -379,10 +379,14 @@ mod tests {
         let gpu_miner = Address::from([2u8; 20]);
 
         // Create dummy VDF proof
-        let vdf_proof = VDFProof {
-            proof: vec![1, 2, 3, 4],
-            iterations: 1000,
-            quantum_quality: 0.8,
+        let vdf_proof = QuantumVDFProof {
+            challenge: [0u8; 32],
+            proof: [0u8; 64],
+            quantum_seed: Some([1u8; 32]),
+            computation_time: std::time::Duration::from_secs(1),
+            difficulty: 1000,
+            entropy_estimate: 0.8,
+            parallel_witnesses: vec![],
         };
 
         // CPU miner submits VDF proof
@@ -419,10 +423,14 @@ mod tests {
             height: 1,
             timestamp: 0,
             previous_hash: [0u8; 32],
-            vdf_proof: VDFProof {
-                proof: vec![],
-                iterations: 0,
-                quantum_quality: 0.0,
+            vdf_proof: QuantumVDFProof {
+                challenge: [0u8; 32],
+                proof: [0u8; 64],
+                quantum_seed: None,
+                computation_time: std::time::Duration::from_secs(0),
+                difficulty: 0,
+                entropy_estimate: 0.0,
+                parallel_witnesses: vec![],
             },
             cpu_miner_address: Address::from([1u8; 20]),
             vdf_difficulty: 0,

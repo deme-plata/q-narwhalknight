@@ -99,6 +99,7 @@ q-quillon-bank = { path = "../q-quillon-bank" } # ✅ ENABLED - Quantum banking 
 q-tor-circuit = { path = "../q-tor-circuit" }
 # q-robot-control = { path = "../q-robot-control" } # Temporarily disabled due to compilation errors
 q-network = { path = "../q-network" }
+q-governance = { path = "../q-governance" } # ✅ v1.0.1 - Proof-of-Contribution governance
 q-plugin-system = { path = "../q-plugin-system" }
 q-ai-inference = { path = "../q-ai-inference" } # AI inference with KV-cache
 candle-core = { workspace = true } # For Device type in AI inference
@@ -125,6 +126,7 @@ lopdf = "0.32"  # Low-level PDF manipulation
 
 # Real-time event streaming
 tokio-util = { version = "0.7", features = ["codec"] }
+async-stream = "0.3"  # async stream! macro for SSE streaming
 pin-project-lite = "0.2"
 hex = "0.4"
 rand = "0.8"

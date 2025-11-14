@@ -31,6 +31,19 @@ pub struct DAGCommitter {
     stats: Arc<Mutex<CommitmentStats>>,
 }
 
+// Manual Debug implementation since DAGKnightConsensus may not implement Debug
+impl std::fmt::Debug for DAGCommitter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DAGCommitter")
+            .field("dag_consensus", &"<Option<Arc<DAGKnightConsensus>>>")
+            .field("pending_blocks", &"<Arc<RwLock<VecDeque<QuantumPoWBlock>>>>")
+            .field("committed_roots", &"<Arc<RwLock<HashMap>>>")
+            .field("config", &self.config)
+            .field("stats", &"<Arc<Mutex<CommitmentStats>>>")
+            .finish()
+    }
+}
+
 /// Configuration for DAG commitment
 #[derive(Debug, Clone)]
 pub struct CommitmentConfig {

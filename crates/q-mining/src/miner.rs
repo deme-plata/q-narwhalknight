@@ -4,7 +4,7 @@
 /// SHA-3 hashing with quantum VDF proofs and entropy injection for superior security.
 
 use crate::block::{QuantumPoWBlock, MiningTemplate, DifficultyTarget, MiningAlgorithm};
-use q_dag_knight::{QuantumVDF, QuantumVDFConfig, VDFSecurityLevel};
+use q_dag_knight::{QuantumVDF, QuantumVDFConfig, VDFSecurityLevel, VDFComputationResult};
 use q_types::*;
 use sha3::{Digest, Sha3_256};
 use std::time::{Duration, Instant};
@@ -42,15 +42,27 @@ pub struct MiningConfig {
 pub struct QuantumMiner {
     /// Mining configuration
     config: MiningConfig,
-    
+
     /// Quantum VDF system
     quantum_vdf: Arc<QuantumVDF>,
-    
+
     /// Current mining statistics
     stats: Arc<RwLock<MiningStats>>,
-    
+
     /// Mining state
     state: Arc<RwLock<MiningState>>,
+}
+
+// Implement Debug manually since QuantumVDF may not implement Debug
+impl std::fmt::Debug for QuantumMiner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuantumMiner")
+            .field("config", &self.config)
+            .field("quantum_vdf", &"<QuantumVDF>")
+            .field("stats", &"<RwLock<MiningStats>>")
+            .field("state", &"<RwLock<MiningState>>")
+            .finish()
+    }
 }
 
 /// Mining statistics tracking
@@ -144,7 +156,7 @@ impl Default for MiningConfig {
 
 impl QuantumMiner {
     /// Create new quantum-enhanced miner
-    pub fn new(config: MiningConfig) -> Result<Self> {
+    pub async fn new(config: MiningConfig) -> Result<Self> {
         // Configure VDF for mining operations
         let vdf_config = QuantumVDFConfig {
             base_difficulty: 512, // Optimized for mining
@@ -154,7 +166,7 @@ impl QuantumMiner {
             security_level: VDFSecurityLevel::PostQuantum,
         };
         
-        let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config)?);
+        let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config).await?);
         
         let stats = Arc::new(RwLock::new(MiningStats {
             total_hashes: 0,
@@ -225,20 +237,23 @@ impl QuantumMiner {
         // Complete VDF computation if it was started
         if let Some(vdf_future) = vdf_future {
             match vdf_future.await {
-                Ok(vdf_result) => {
+                Ok(Ok(vdf_result)) => {
                     let entropy_quality = vdf_result.quantum_quality;
                     let injection_points = mining_result.quantum_injection_points.clone();
-                    
+
                     block.add_quantum_enhancement(
                         vdf_result.proof,
                         entropy_quality,
                         injection_points,
                     );
-                    
+
                     info!("✅ VDF computation completed with quality {:.3}", entropy_quality);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!("VDF computation failed: {}, continuing without VDF", e);
+                }
+                Err(e) => {
+                    warn!("VDF task panicked: {}, continuing without VDF", e);
                 }
             }
         }
@@ -406,7 +421,7 @@ impl QuantumMiner {
     }
     
     /// Start VDF computation for quantum enhancement
-    async fn start_vdf_computation(&self, block: &QuantumPoWBlock) -> Result<Option<tokio::task::JoinHandle<Result<q_dag_knight::VDFComputationResult>>>> {
+    async fn start_vdf_computation(&self, block: &QuantumPoWBlock) -> Result<Option<tokio::task::JoinHandle<Result<VDFComputationResult>>>> {
         if !self.config.vdf_enabled {
             return Ok(None);
         }

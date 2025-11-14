@@ -1,0 +1,476 @@
+fabrice@fabrice-MS-7E56:~/quillon$ sudo docker logs -f q-node | grep --line-buffered -i "peer\|sync\|gossipsub\|block"
+[sudo] Mot de passe de fabrice : 
+2025-11-12T06:37:26.461073Z  INFO q_api_server::config: ✅ Discovered 2 bootstrap peer(s) automatically
+2025-11-12T06:37:26.461089Z  WARN q_api_server::config: ⚡ Fast block production enabled: 2 second intervals (Phase 2 exciting visualization)
+2025-11-12T06:37:26.461106Z  INFO q_api_server: 🔄 Transferring 2 automatically discovered bootstrap peer(s) to network config
+2025-11-12T06:37:55.257992Z  INFO q_network::unified_network_manager: 🆔 Local Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258288Z  INFO q_network::unified_network_manager: 📍 Added testnet-phase11 bootstrap peer: 12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw at /ip4/185.182.185.227/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:55.258304Z  INFO q_network::unified_network_manager: 📍 Added testnet-phase11 bootstrap peer: 12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw at /dns4/quillon.xyz/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:55.258337Z  INFO q_network::unified_network_manager: 🚀 Kademlia DHT bootstrap initiated with 2 peers
+2025-11-12T06:37:55.258372Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/blocks
+2025-11-12T06:37:55.258375Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/transactions
+2025-11-12T06:37:55.258377Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/mining-rewards
+2025-11-12T06:37:55.258382Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/dex/swaps
+2025-11-12T06:37:55.258400Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/votes
+2025-11-12T06:37:55.258408Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/ack
+2025-11-12T06:37:55.258415Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/block-requests
+2025-11-12T06:37:55.258421Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/block-responses
+2025-11-12T06:37:55.258427Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/batch-block-responses
+2025-11-12T06:37:55.258436Z  INFO q_network::distributed_ai: 🤖 Initializing Distributed AI Gossipsub topics
+2025-11-12T06:37:55.258476Z  INFO q_network::unified_network_manager: ✅ Subscribed to 5 AI inference Gossipsub topics
+2025-11-12T06:37:55.258484Z  INFO q_network::unified_network_manager: 🔗 Block sync request-response protocol initialized (BlockPackCodec)
+2025-11-12T06:37:55.258590Z  INFO q_network::unified_network_manager:   • Identify (peer exchange)
+2025-11-12T06:37:55.258602Z  INFO q_network::unified_network_manager:   • Gossipsub (consensus messaging, 9 topics)
+2025-11-12T06:37:55.258608Z  INFO q_network::unified_network_manager: ℹ️  [BOOTSTRAP] No explicit bootstrap peer configured (Q_BOOTSTRAP_PEER not set)
+2025-11-12T06:37:55.258614Z  INFO q_network::unified_network_manager:    Node will rely on mDNS and Kademlia DHT for peer discovery
+2025-11-12T06:37:55.258633Z  INFO q_api_server:    Local Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258644Z  INFO q_api_server:    Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping
+⚠️  Warning: Could not load .env file: path not found
+    Continuing without .env (environment variables must be set externally)
+🚀🚀🚀 SMARTCONTRACT ECOSYSTEM INITIALIZATION STARTED 🚀🚀🚀
+Storage engine present: true
+📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚
+✅✅✅ CONTRACT TEMPLATES LOADED SUCCESSFULLY ✅✅✅
+💾💾💾 STORAGE ENGINE IS AVAILABLE - LOADING CONTRACTS 💾💾💾
+✅✅✅ CONTRACT LOADING COMPLETED SUCCESSFULLY ✅✅✅
+🎉🎉🎉 SMARTCONTRACT ECOSYSTEM FULLY INITIALIZED 🎉🎉🎉
+2025-11-12T06:37:55.258649Z  INFO q_api_server:    Network Topics: /qnk/testnet-phase11/transactions, /qnk/testnet-phase11/blocks, etc.
+2025-11-12T06:37:55.258651Z  INFO q_network::unified_network_manager: 🌉 Gossipsub message forwarding channel established
+2025-11-12T06:37:55.258805Z  INFO q_api_server: 📡 Cached libp2p peer info for bootstrap discovery:
+2025-11-12T06:37:55.258841Z  INFO q_api_server:    Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258870Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: /qnk/database-updates/1.0.0
+2025-11-12T06:37:55.258893Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: /qnk/testnet-phase11/peer-heights
+2025-11-12T06:37:55.258901Z  INFO q_api_server: 📢 Subscribed to /qnk/testnet-phase11/peer-heights for peer discovery (network-aware)
+2025-11-12T06:37:55.258907Z  INFO q_api_server: 🔄 [LEGACY] Skipped block-pack-requests/responses topics (replaced by BlockPackCodec)
+2025-11-12T06:37:55.258925Z  INFO q_api_server: 📡 libp2p_manager extracted successfully - gossipsub channels ready!
+2025-11-12T06:37:55.305074Z  INFO q_api_server: 🔍 [v0.9.37] Validating genesis block against network consensus...
+2025-11-12T06:37:55.305077Z  INFO q_api_server: ✅ [v0.9.37] Genesis block validation passed
+2025-11-12T06:38:21.857664Z  INFO q_api_server: ✅ v0.9.99-beta: Adaptive Block Rewards initialized
+2025-11-12T06:38:21.857693Z  INFO q_api_server:    🔀 Migration: Block 200,000 activation
+2025-11-12T06:38:21.858256Z  INFO q_api_server: 🔓 Initializing LOCK-FREE Block Producer Pool (v0.9.92-beta DEADLOCK FIX)
+2025-11-12T06:38:21.858262Z  INFO q_api_server::lockfree_producer: 🚀 Initializing LOCK-FREE Parallel Block Producer Pool with 8 producers (LOADING FROM STORAGE)
+2025-11-12T06:38:21.858269Z  INFO q_api_server::lockfree_producer:    ✅ v0.9.99-beta: Adaptive block rewards ENABLED
+2025-11-12T06:38:21.858297Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #0 spawned and synced from storage
+2025-11-12T06:38:21.858347Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=1)...
+2025-11-12T06:38:21.858380Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858410Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=0)...
+2025-11-12T06:38:21.858424Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858333Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #1 spawned and synced from storage
+2025-11-12T06:38:21.858443Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #2 spawned and synced from storage
+2025-11-12T06:38:21.858468Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=2)...
+2025-11-12T06:38:21.858476Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858461Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #3 spawned and synced from storage
+2025-11-12T06:38:21.858494Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #4 spawned and synced from storage
+2025-11-12T06:38:21.858501Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #5 spawned and synced from storage
+2025-11-12T06:38:21.858508Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #6 spawned and synced from storage
+2025-11-12T06:38:21.858515Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #7 spawned and synced from storage
+2025-11-12T06:38:21.858522Z  INFO q_api_server::lockfree_producer: ✅ LOCK-FREE producer pool initialized with storage sync
+2025-11-12T06:38:21.858528Z  INFO q_api_server: ✅ LOCK-FREE Block Production initialized with 8 producers
+2025-11-12T06:38:21.858736Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=4)...
+2025-11-12T06:38:21.858754Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=6)...
+2025-11-12T06:38:21.858763Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858696Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=3)...
+2025-11-12T06:38:21.858770Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858782Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858802Z  INFO q_api_server:    ⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!
+2025-11-12T06:38:21.858804Z  INFO q_api_server::lockfree_producer: 🔄 [LOCK-FREE SYNC] Synchronizing all 8 producers with blockchain state...
+2025-11-12T06:38:21.858730Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:21.858817Z  INFO q_api_server::lockfree_producer: 📝 [LOCK-FREE SYNC] No blocks in storage yet - producers at genesis
+2025-11-12T06:38:21.858870Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=7)...
+2025-11-12T06:38:21.858882Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858906Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=5)...
+2025-11-12T06:38:21.858905Z  INFO q_api_server: 📊 Peer count tracking enabled - atomic counter initialized
+2025-11-12T06:38:21.858909Z  INFO q_api_server: 📡 libp2p peer info cached in AppState for bootstrap discovery
+2025-11-12T06:38:21.858915Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.896780Z  INFO q_network::distributed_ai: 🤖 Initializing Distributed AI Gossipsub topics
+2025-11-12T06:38:21.896850Z  INFO q_api_server:    Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:21.896868Z  INFO q_api_server: 📡 Subscribing to distributed AI gossipsub topics...
+2025-11-12T06:38:21.896878Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/inference-request/v1
+2025-11-12T06:38:21.896915Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/layer-output/v1
+2025-11-12T06:38:21.896927Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/node-capability/v1
+2025-11-12T06:38:21.896938Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/coordinator/v1
+2025-11-12T06:38:21.897009Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/heartbeat/v1
+2025-11-12T06:38:21.897016Z  INFO q_api_server: ✅ AI gossipsub topic subscriptions complete
+2025-11-12T06:38:21.897139Z  INFO q_api_server: 📊 Atomic peer count integrated into AppState
+2025-11-12T06:38:21.898117Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:26.858932Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:31.859704Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:36.859485Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:41.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:46.859414Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:51.858954Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:51.898020Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:56.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:01.859242Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:06.859220Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:11.859067Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:16.859234Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:21.859223Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:21.897730Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:39:26.859113Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:31.858710Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:36.859585Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:41.859110Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:46.859096Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:51.858677Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:51.897799Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:39:56.859626Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:01.859638Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:06.858830Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:11.859346Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:16.859659Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:21.859660Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+🚀 Initializing io_uring adapter with dedicated thread pool
+✅ io_uring adapter initialized successfully
+📡 io_uring worker thread started
+2025-11-12T06:40:21.898057Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:40:26.858939Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:31.859454Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:36.859083Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:41.859448Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:46.858906Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:51.859131Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:40:51.898252Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:40:56.859617Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:01.859304Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:06.859125Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:11.858969Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:16.858901Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:21.859054Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:21.898070Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:41:26.859315Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:31.859318Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:36.859036Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:41.859467Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:46.859344Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:51.858907Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:41:51.898033Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:41:56.859572Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:01.859478Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:06.858877Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:11.859640Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:16.859238Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:21.997077Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:42:21.997471Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:26.858901Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:31.858860Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:36.858908Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:41.859225Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:46.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:51.859120Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:42:51.898187Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:42:56.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:01.859260Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:06.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:11.859564Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:16.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:21.859136Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:21.898098Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:43:26.859447Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:31.858931Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:36.859495Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:41.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:46.859675Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:51.859194Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:43:51.898293Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:43:56.859309Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:01.858848Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:06.859479Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:11.859286Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:16.859463Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:21.859640Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:21.898045Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:44:26.859502Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:31.859527Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:36.859219Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:41.859303Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:46.859690Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:51.858672Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:44:51.897761Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:44:56.859142Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:01.859552Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:06.859116Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:11.859122Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:16.859303Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:21.859531Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:21.898511Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:45:26.858785Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:31.859556Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:36.859248Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:41.858867Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:46.859003Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:51.859187Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:45:51.898339Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:45:56.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:01.859550Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:06.859174Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:11.858919Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:16.858997Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:21.859257Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:21.898274Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:46:26.859423Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:31.858682Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:36.859370Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:41.858870Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:46.859133Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:51.859612Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:46:51.898425Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:46:56.859542Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:01.858704Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:06.859145Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:11.859559Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:16.858696Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:21.858945Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:21.897830Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:47:26.859250Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:31.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:36.859150Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:41.858709Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:46.859096Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:51.859583Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:47:51.898707Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:47:56.858951Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:01.858869Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:06.858959Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:11.858870Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:16.858705Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:21.859634Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:21.898599Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:48:26.859655Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:31.859061Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:36.859323Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:41.859171Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:46.859706Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:51.859343Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:48:51.898407Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:48:56.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:01.859123Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:06.858784Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:11.859191Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:16.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:21.858939Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:21.897980Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:49:26.858698Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:31.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:36.858705Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:41.858854Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:46.859307Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:51.859225Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:49:51.898340Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:49:56.859091Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:01.859361Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:06.858889Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:11.859551Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:16.858822Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:21.859344Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:21.898106Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:50:26.859343Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:31.859005Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:36.858833Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:41.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:46.859076Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:51.859650Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:50:51.898718Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:50:56.859031Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:01.859525Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:06.859338Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:11.859670Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:16.859546Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:21.859117Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:21.898438Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:51:26.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:31.859475Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:36.859353Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:41.859262Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:46.859677Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:51.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:51:51.898474Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:51:56.858692Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:01.858915Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:06.859076Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:11.859114Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:16.859369Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:21.859605Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:21.898564Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:52:26.859528Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:31.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:36.859061Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:41.859095Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:46.859203Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:51.859012Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:52:51.898075Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:52:56.858954Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:01.859159Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:06.859237Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:11.859475Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:16.859472Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:21.859002Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:21.898466Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:53:26.859260Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:31.859433Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:36.859573Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:41.858844Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:46.858834Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:51.859332Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:53:51.898453Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:53:56.858883Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:01.858904Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:06.859453Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:11.859578Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:16.859594Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:21.859702Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:21.898424Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:54:26.859512Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:31.859137Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:36.899464Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:41.859570Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:46.859683Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:51.859279Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:54:51.898352Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:54:56.859464Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:01.859340Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:06.859692Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:11.859593Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:16.859032Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:21.859411Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:21.898247Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:55:26.858858Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:31.859180Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:36.858991Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:41.859105Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:46.859557Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:51.858862Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:55:51.897985Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:55:56.859053Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:01.858950Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:06.859165Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:11.859327Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:16.859044Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:21.859614Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:21.898598Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:56:26.858898Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:31.859283Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:36.859438Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:41.859420Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:46.859212Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:51.858972Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:56:51.898067Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:56:56.859620Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:01.859603Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:06.858810Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:11.859310Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:16.859630Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:21.859253Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:21.897999Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:57:26.859128Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:31.859051Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:36.859333Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:41.858671Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:46.859257Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:51.859170Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:57:51.898296Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:57:56.859146Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:01.858852Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:06.859696Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:11.859433Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:16.859433Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:21.859289Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:21.898403Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:58:26.858921Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:31.859361Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:36.859268Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:41.859495Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:46.859694Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:51.859435Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:58:51.898516Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:58:56.858893Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:01.858836Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:06.859363Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:11.859593Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:16.859330Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:21.859489Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:21.898378Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:59:26.858791Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:31.858807Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:36.859683Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:41.859040Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:46.858700Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:51.859169Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:59:51.898289Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:59:56.859149Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:01.859164Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:06.859486Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:11.859349Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:16.859670Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:21.859359Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:21.898641Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:00:26.859193Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:31.858830Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:36.859184Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:41.859609Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:46.858667Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:51.859055Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:00:51.898128Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:00:56.859592Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:01.859514Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:06.858854Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:11.859248Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:16.858932Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:21.858806Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:21.897938Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:01:26.859020Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:31.859254Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:36.859164Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:41.858826Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:46.859134Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:51.859129Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:01:51.898246Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:01:56.859175Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:01.859246Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:06.859293Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:11.859007Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:16.858951Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:21.858942Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:21.898703Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:02:26.859659Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:31.859154Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:36.859519Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:41.859270Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:46.859204Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:51.858886Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:02:51.897954Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:02:56.858880Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:01.858844Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:06.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:11.859327Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:16.858845Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:21.859109Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:21.897806Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:03:26.859052Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:31.859082Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:36.858891Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:41.859025Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:46.859689Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:51.859597Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:03:51.898738Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:03:56.858708Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:01.859045Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:06.859260Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:11.859194Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:16.858961Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:21.859290Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:21.898677Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:04:26.858997Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:31.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:36.858856Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:41.858701Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:46.858832Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:51.859264Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:04:51.898336Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T07:04:56.859561Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:01.859459Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:06.859634Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:11.859283Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:16.859335Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:21.859330Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T07:05:21.897819Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR

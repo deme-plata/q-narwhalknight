@@ -60,6 +60,7 @@ once_cell = "1.21"
 parking_lot = "0.12"
 chrono = "0.4"
 ahash = { workspace = true }
+regex = "1.11"
 
 # Compression for tensor data
 flate2 = "1.0"
@@ -96,5 +97,5 @@ path = "examples/test_full_generation.rs"
 
 [features]
 default = []
-cuda = ["candle-core/cuda"]
-metal = ["candle-core/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "mistralrs/cuda", "mistralrs-core/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "mistralrs/metal", "mistralrs-core/metal"]

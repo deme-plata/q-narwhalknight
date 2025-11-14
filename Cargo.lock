@@ -2980,7 +2980,9 @@ version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
  "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-metal-kernels 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "half 2.7.1",
+ "metal 0.27.0",
  "num-traits",
  "rayon",
  "safetensors 0.6.2",
@@ -14774,6 +14776,7 @@ dependencies = [
  "q-zk-stark",
  "rand 0.8.5",
  "rayon",
+ "regex",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
@@ -14794,6 +14797,7 @@ version = "1.0.0-beta"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-stream",
  "async-stripe",
  "axum 0.7.9",
  "axum-extra",
@@ -14839,6 +14843,7 @@ dependencies = [
  "q-crypto-simd",
  "q-dag-knight",
  "q-dex",
+ "q-governance",
  "q-ipfs-storage",
  "q-kernel-io",
  "q-narwhal-core",
@@ -15161,6 +15166,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "q-governance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "q-mining",
+ "q-storage",
+ "q-types",
+ "serde",
+ "serde_json",
+ "sha3 0.10.8",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
 name = "q-higgs-hydro"
 version = "0.1.0"
 dependencies = [
@@ -15403,6 +15428,7 @@ dependencies = [
  "dilithium",
  "hex",
  "libp2p 0.53.2",
+ "num_cpus",
  "opencl3",
  "q-aegis-ql",
  "q-dag-knight",
@@ -15416,6 +15442,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.20",
  "uuid 1.18.1",
 ]
 

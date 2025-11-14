@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 use super::distributed_ai::{AIGossipsubMessage, AIMessagePayload};
 use super::distributed_ai_coordinator::{DistributedAICoordinator, InferenceResponseChunk};
 use super::layer_forwarding::{LayerOutputManager, TensorData};
-use q_ai_inference::{DistributedMistralEngine, DeviceCapability};
+use q_ai_inference::{DistributedMistralEngine, DeviceCapability, MistralRsEngine, StreamEvent as MistralStreamEvent};
 
 /// Active inference request state on worker node
 #[derive(Debug, Clone)]
@@ -50,6 +50,10 @@ pub struct DistributedAIWorker {
 
     /// Assigned layer range for this worker
     assigned_layers: Arc<RwLock<Option<(usize, usize)>>>,
+
+    /// NEW v1.0: Full-model inference engine for data parallelism
+    /// Used when handling TargetedInferenceRequest (entire model on one node)
+    full_model_engine: Arc<RwLock<Option<MistralRsEngine>>>,
 }
 
 impl DistributedAIWorker {
@@ -66,7 +70,21 @@ impl DistributedAIWorker {
             layer_output_manager,
             engine: Arc::new(RwLock::new(None)),
             assigned_layers: Arc::new(RwLock::new(None)),
+            full_model_engine: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// NEW v1.0: Initialize full-model engine for data parallelism
+    /// Loads the entire model for handling TargetedInferenceRequest messages
+    pub async fn initialize_full_model_engine(&self, model_path: &str) -> Result<()> {
+        info!("🚀 Initializing full-model MistralRsEngine for data parallelism");
+        info!("   Model: {}", model_path);
+
+        let engine = MistralRsEngine::new(model_path).await?;
+        *self.full_model_engine.write().await = Some(engine);
+
+        info!("✅ Full-model engine initialized successfully");
+        Ok(())
     }
 
     /// Initialize engine with assigned layer range
@@ -110,11 +128,340 @@ impl DistributedAIWorker {
                 info!("📥 Worker received inference request: {}", request_id);
                 // Assignment will come in separate LayerAssignment message
             }
+            // NEW v1.0: Data parallelism - full model inference on targeted node
+            AIMessagePayload::TargetedInferenceRequest {
+                request_id,
+                target_node_id,
+                prompt,
+                max_tokens,
+                temperature,
+                model,
+            } => {
+                self.handle_targeted_inference_request(
+                    request_id,
+                    target_node_id,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    model,
+                )
+                .await?;
+            }
             _ => {
                 // Other message types handled by coordinator
             }
         }
 
+        Ok(())
+    }
+
+    /// NEW v1.0: Handle targeted inference request for data parallelism
+    /// CRITICAL: Only process if target_node_id matches this worker!
+    async fn handle_targeted_inference_request(
+        &self,
+        request_id: String,
+        target_node_id: String,
+        prompt: String,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        model: String,
+    ) -> Result<()> {
+        let node_id = &self.coordinator.node_id;
+
+        // CRITICAL: Check if this request is targeted at THIS node
+        if target_node_id != *node_id {
+            debug!(
+                "ℹ️  Skipping TargetedInferenceRequest {} (target={}, me={})",
+                request_id, target_node_id, node_id
+            );
+            return Ok(()); // Not for us - skip silently
+        }
+
+        info!("╔═══════════════════════════════════════════════════════════════╗");
+        info!("║ 🎯 DATA PARALLEL INFERENCE REQUEST ACCEPTED                 ║");
+        info!("╠═══════════════════════════════════════════════════════════════╣");
+        info!("║ Worker:      {} (THIS NODE)                                 ", node_id);
+        info!("║ Request ID:  {}                          ", request_id);
+        info!("║ Prompt:      {}                                             ", prompt.chars().take(60).collect::<String>());
+        info!("║ Max tokens:  {:?}                                           ", max_tokens);
+        info!("║ Temperature: {:?}                                           ", temperature);
+        info!("╚═══════════════════════════════════════════════════════════════╝");
+
+        // Spawn async task to handle streaming inference without blocking message handler
+        let worker = self.clone();
+        let request_id_clone = request_id.clone();
+        let prompt_clone = prompt.clone();
+        let model_clone = model.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = worker
+                .process_streaming_request(
+                    request_id_clone,
+                    prompt_clone,
+                    max_tokens,
+                    temperature,
+                    model_clone,
+                )
+                .await
+            {
+                error!("❌ Streaming inference failed: {}", e);
+                // Send error message to coordinator
+                if let Err(publish_err) = worker
+                    .send_inference_error(&request_id, "engine_error", &format!("{}", e))
+                    .await
+                {
+                    error!("❌ Failed to publish error message: {}", publish_err);
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// NEW v1.0: Process streaming inference request using full model
+    /// Streams tokens back to coordinator via TokenChunk messages
+    async fn process_streaming_request(
+        &self,
+        request_id: String,
+        prompt: String,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        model: String,
+    ) -> Result<()> {
+        let start_time = std::time::Instant::now();
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+
+        info!(
+            "🚀 Worker starting streaming inference: request={}",
+            request_id
+        );
+
+        // Get full-model engine
+        let engine_lock = self.full_model_engine.read().await;
+        let engine = engine_lock.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Full-model engine not initialized - call initialize_full_model_engine() first"
+            )
+        })?;
+
+        // Send InferenceStarted acknowledgment
+        self.send_inference_started(&request_id, &model, started_at_ms)
+            .await?;
+
+        // Generate tokens with streaming
+        let max_tokens_count = max_tokens.unwrap_or(150);
+
+        info!("🧠 Worker generating {} tokens with streaming...", max_tokens_count);
+
+        // Use MistralRsEngine.generate_stream() with callback for each token
+        let request_id_for_callback = request_id.clone();
+        let coordinator_for_callback = self.coordinator.clone();
+
+        // Track token index using Arc<Mutex> so callback can increment it
+        let token_index = Arc::new(tokio::sync::Mutex::new(0usize));
+
+        let generated_text = engine
+            .generate_stream(&prompt, max_tokens_count, |event| {
+                let request_id = request_id_for_callback.clone();
+                let coordinator = coordinator_for_callback.clone();
+                let token_index_ref = token_index.clone();
+
+                async move {
+                    match event {
+                        MistralStreamEvent::Progress(msg) => {
+                            debug!("📊 {}", msg);
+                        }
+                        MistralStreamEvent::Token(token) => {
+                            // Get current token index and increment
+                            let mut idx = token_index_ref.lock().await;
+                            let current_index = *idx;
+                            *idx += 1;
+                            drop(idx); // Release lock before async call
+
+                            // Send TokenChunk message to coordinator
+                            if let Err(e) = Self::send_token_chunk_static(
+                                &coordinator,
+                                &request_id,
+                                &token,
+                                current_index,
+                            )
+                            .await
+                            {
+                                error!("❌ Failed to send token chunk: {}", e);
+                            }
+                        }
+                        MistralStreamEvent::Complete(stats) => {
+                            info!(
+                                "✅ Generation complete: {:.2} tok/s, {} tokens",
+                                stats.tokens_per_second, stats.tokens_generated
+                            );
+                        }
+                        MistralStreamEvent::Error(err) => {
+                            error!("❌ Generation error: {}", err);
+                        }
+                    }
+                    Ok(())
+                }
+            })
+            .await?;
+
+        let total_time_ms = start_time.elapsed().as_millis() as u64;
+        let tokens_generated = *token_index.lock().await;
+        let throughput = (tokens_generated as f64) / (total_time_ms as f64 / 1000.0);
+
+        info!("╔═══════════════════════════════════════════════════════════════╗");
+        info!("║ ✅ DATA PARALLEL INFERENCE COMPLETED                        ║");
+        info!("╠═══════════════════════════════════════════════════════════════╣");
+        info!("║ Worker:      {} (THIS NODE)                                 ", self.coordinator.node_id);
+        info!("║ Request ID:  {}                          ", request_id);
+        info!("║ Tokens:      {} generated                                   ", tokens_generated);
+        info!("║ Time:        {}ms                                          ", total_time_ms);
+        info!("║ Throughput:  {:.2} tokens/sec                              ", throughput);
+        info!("║ Generated:   {}...                                          ", generated_text.chars().take(50).collect::<String>());
+        info!("╚═══════════════════════════════════════════════════════════════╝");
+
+        // Send InferenceComplete message
+        self.send_inference_complete(&request_id, "eos", tokens_generated, total_time_ms)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Send InferenceStarted message to coordinator
+    async fn send_inference_started(
+        &self,
+        request_id: &str,
+        model: &str,
+        started_at_ms: u64,
+    ) -> Result<()> {
+        let sequence_num = self
+            .coordinator
+            .message_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let message = AIGossipsubMessage::new(
+            self.coordinator.node_id.clone(),
+            self.coordinator.peer_id.clone(),
+            AIMessagePayload::InferenceStarted {
+                request_id: request_id.to_string(),
+                worker_node_id: self.coordinator.node_id.clone(),
+                model: model.to_string(),
+                started_at_ms,
+            },
+            sequence_num,
+        );
+
+        self.coordinator
+            .publish_message_with_retry(
+                self.coordinator.topics.inference_request.to_string(),
+                message,
+            )
+            .await?;
+
+        info!("✅ Sent InferenceStarted for request {}", request_id);
+        Ok(())
+    }
+
+    /// Send TokenChunk message to coordinator (static version for callback)
+    async fn send_token_chunk_static(
+        coordinator: &Arc<DistributedAICoordinator>,
+        request_id: &str,
+        token: &str,
+        token_index: usize,
+    ) -> Result<()> {
+        let sequence_num = coordinator
+            .message_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let message = AIGossipsubMessage::new(
+            coordinator.node_id.clone(),
+            coordinator.peer_id.clone(),
+            AIMessagePayload::TokenChunk {
+                request_id: request_id.to_string(),
+                token: token.to_string(),
+                token_index,
+            },
+            sequence_num,
+        );
+
+        coordinator
+            .publish_message_with_retry(coordinator.topics.inference_request.to_string(), message)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Send InferenceComplete message to coordinator
+    async fn send_inference_complete(
+        &self,
+        request_id: &str,
+        finish_reason: &str,
+        tokens_generated: usize,
+        total_time_ms: u64,
+    ) -> Result<()> {
+        let sequence_num = self
+            .coordinator
+            .message_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let message = AIGossipsubMessage::new(
+            self.coordinator.node_id.clone(),
+            self.coordinator.peer_id.clone(),
+            AIMessagePayload::InferenceComplete {
+                request_id: request_id.to_string(),
+                worker_node_id: self.coordinator.node_id.clone(),
+                finish_reason: finish_reason.to_string(),
+                tokens_generated,
+                total_time_ms,
+            },
+            sequence_num,
+        );
+
+        self.coordinator
+            .publish_message_with_retry(
+                self.coordinator.topics.inference_request.to_string(),
+                message,
+            )
+            .await?;
+
+        info!("✅ Sent InferenceComplete for request {}", request_id);
+        Ok(())
+    }
+
+    /// Send InferenceError message to coordinator
+    async fn send_inference_error(
+        &self,
+        request_id: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<()> {
+        let sequence_num = self
+            .coordinator
+            .message_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let error_message = AIGossipsubMessage::new(
+            self.coordinator.node_id.clone(),
+            self.coordinator.peer_id.clone(),
+            AIMessagePayload::InferenceError {
+                request_id: request_id.to_string(),
+                worker_node_id: self.coordinator.node_id.clone(),
+                code: code.to_string(),
+                message: message.to_string(),
+            },
+            sequence_num,
+        );
+
+        self.coordinator
+            .publish_message_with_retry(
+                self.coordinator.topics.inference_request.to_string(),
+                error_message,
+            )
+            .await?;
+
+        info!("✅ Sent InferenceError for request {}", request_id);
         Ok(())
     }
 
@@ -358,6 +705,7 @@ impl DistributedAIWorker {
             layer_output_manager: Arc::clone(&self.layer_output_manager),
             engine: Arc::clone(&self.engine),
             assigned_layers: Arc::clone(&self.assigned_layers),
+            full_model_engine: Arc::clone(&self.full_model_engine),
         }
     }
 }

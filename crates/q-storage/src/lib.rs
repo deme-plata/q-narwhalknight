@@ -21,11 +21,14 @@ extern crate hex;
 extern crate blake3;
 
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
+pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_consensus;
 pub mod block_writer; // ✅ v0.9.93-beta: Single-writer queue to prevent database corruption
 pub mod chain_reorganization; // v0.9.37-beta: Cross-fork blockchain synchronization
+pub mod db_util; // ✅ v1.0.2-beta: Spawn_blocking helpers for all RocksDB operations
 pub mod emission_controller; // ✅ v0.9.99-beta: Adaptive block rewards for throughput-independent emission
 pub mod fork_detector; // ✅ v0.9.67-beta: Comprehensive fork detection & automatic reorg
+pub mod height_state; // ✅ v1.0.2-beta: Height cache to eliminate binary search storms
 pub mod integrity; // ✅ v0.9.76-beta: Database corruption detection & auto-repair
 pub mod kv;
 pub mod manifest;
@@ -58,11 +61,14 @@ pub use aegis_sync::{
     SignedBlockPack, SyncAffirmationCertificate, PeerTrustRegistry, PeerTrustMetrics,
     compute_merkle_root, verify_timestamp,
 };
+pub use async_engine::AsyncStorageEngine;
 pub use balance_consensus::{
     BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, BalanceUpdate,
     ChangeReason, ConsensusStats, GENESIS_TIMESTAMP, DEV_FEE_PERCENT, FOUNDER_WALLET,
 };
 pub use block_writer::BlockWriter;
+pub use db_util::write_batch_sync;
+pub use height_state::HeightState;
 pub use chain_reorganization::{
     detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats,
 };
@@ -3024,6 +3030,7 @@ pub struct ChatMessage {
     pub timestamp: u64,
     pub images: Option<Vec<String>>,
     pub audio: Option<String>,
+    pub reasoning: Option<String>, // Kimi K2 thinking process (v1.0.5)
     pub generation_stats: Option<GenerationStats>,
 }
 

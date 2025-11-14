@@ -84,7 +84,7 @@ pub use mistral_integration::{
 pub use tokenizer::GgufTokenizer;
 pub use mistralrs_engine::{MistralRsEngine, MistralRsConfig, StreamEvent};
 pub use model_manager::{ModelManager, ModelMetadata};
-pub use chat_templates::{format_chat_prompt, format_conversation};
+pub use chat_templates::{format_chat_prompt, format_conversation, parse_kimi_k2_reasoning};
 pub use distributed_engine::DistributedMistralEngine;
 
 #[cfg(test)]

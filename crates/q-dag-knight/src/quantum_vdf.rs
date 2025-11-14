@@ -3,6 +3,7 @@ use q_quantum_rng::{QRNGConfig, QuantumRNG};
 /// Quantum-enhanced Verifiable Delay Function (VDF) implementation
 /// Provides time-locked proofs with quantum-resistant properties and QRNG seeding
 use q_types::*;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256, Sha3_512};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -36,23 +37,72 @@ pub enum VDFSecurityLevel {
 }
 
 /// Quantum-enhanced VDF proof structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantumVDFProof {
     pub challenge: [u8; 32],
+    #[serde(with = "serde_bytes_array64")]
     pub proof: [u8; 64],
     pub quantum_seed: Option<[u8; 32]>,
+    #[serde(with = "duration_serde")]
     pub computation_time: Duration,
     pub difficulty: u64,
     pub entropy_estimate: f64,
     pub parallel_witnesses: Vec<[u8; 32]>,
 }
 
+// Helper module for [u8; 64] serialization
+mod serde_bytes_array64 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bytes.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec = Vec::<u8>::deserialize(deserializer)?;
+        if vec.len() != 64 {
+            return Err(serde::de::Error::custom("expected 64 bytes"));
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&vec);
+        Ok(arr)
+    }
+}
+
+// Helper module for Duration serialization
+mod duration_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        duration.as_secs().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
 /// VDF computation result with quantum metrics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VDFComputationResult {
     pub proof: QuantumVDFProof,
     pub quantum_quality: f64,
     pub computational_cost: u64,
+    #[serde(with = "duration_serde")]
     pub verification_time: Duration,
     pub is_quantum_enhanced: bool,
 }

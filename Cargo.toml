@@ -48,6 +48,7 @@ members = [
     "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
     "crates/q-ipfs-storage",   # IPFS-RocksDB decentralized storage
     "crates/q-aegis-ql",       # AEGIS-QL post-quantum access control
+    "crates/q-governance",     # Proof-of-Contribution Governance with mining-weighted voting
     "crates/q-quillon-bank",   # Quantum banking with CDP and PaaS revenue
     "crates/q-tui",            # Beautiful terminal UI for node monitoring
     "crates/q-quillon-bank-cli", # Quillon Bank CLI management interface

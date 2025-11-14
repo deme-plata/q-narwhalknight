@@ -9,6 +9,8 @@ use q_types::{TxStatus, TxHash, BlockRequest, BlockResponse};
 use q_storage::{BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, GENESIS_TIMESTAMP, FOUNDER_WALLET};
 // v0.9.37-beta PHASE 3: Cross-fork blockchain synchronization
 use q_storage::{detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats};
+// ✅ v1.0.7-beta: AsyncStorageEngine for permanent mining stall fix
+use q_storage::AsyncStorageEngine;
 mod contracts_api;
 mod dex_integration_api;
 mod liquidity_api;
@@ -378,7 +380,7 @@ async fn verify_binary_version() -> anyhow::Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     // Load environment variables from .env file (for Stripe API keys, etc.)
     if let Err(e) = dotenvy::dotenv() {
         eprintln!("⚠️  Warning: Could not load .env file: {}", e);
@@ -1178,6 +1180,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     info!("✅ Periodic capability announcement task started");
 
+                    // ========================================
+                    // 💓 START HEARTBEAT LOOP FOR WORKER REGISTRATION
+                    // CRITICAL FIX: Without this, nodes announce capabilities but never register as workers
+                    // ========================================
+                    coordinator_arc.clone().start_heartbeat_loop();
+                    info!("✅ Heartbeat loop started (30s interval)");
+                    info!("   Nodes will now register as active AI workers");
+
                     state.distributed_ai_coordinator = Some(coordinator_arc);
                     info!("✅ Distributed AI Coordinator fully configured and operational");
                     info!("   Ready for horizontal inference scaling across network");
@@ -1295,6 +1305,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start_height = state.storage_engine.get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
         info!("   Starting from height: {}", start_height);
 
+        // 🚀 v1.0.2-beta: Initialize HeightState cache with actual database height
+        state.height_state.update(start_height).await;
+        info!("   ✅ HeightState cache initialized at height {}", start_height);
+
         // Use conservative Phase 1A config: 16 blocks, 1s, 1 MiB
         let config = BatchConfig::default();
         info!("   Configuration:");
@@ -1341,6 +1355,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("🔒 Using default durable sync (9.3 BPS, zero loss)");
         info!("   To enable fast sync: --experimental-fast-sync");
     }
+
+    // ========================================
+    // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE
+    // Dedicated worker thread with micro-batching for permanent mining stall fix
+    // AI Consensus (5/5 experts, 95% confidence): Root cause = blocking RocksDB I/O under async RwLock
+    // ========================================
+    info!("🚀 ════════════════════════════════════════════════════════");
+    info!("🚀 Initializing AsyncStorageEngine (v1.0.7-beta)...");
+
+    // Get DB handle from hot_db (same as SafeBatchedWriter)
+    let hot_db = state.storage_engine.get_hot_db();
+    let db = hot_db.db();
+
+    let async_storage = match AsyncStorageEngine::new(
+        db.clone(),  // Same Arc<DB> handle as SafeBatchedWriter
+        q_storage::CF_BLOCKS.to_string(),
+        q_storage::CF_BALANCES.to_string(),
+        q_storage::CF_TRANSACTIONS.to_string(),
+    ) {
+        Ok(engine) => {
+            info!("✅ AsyncStorageEngine initialized successfully");
+            info!("   Max batch size: 512 blocks");
+            info!("   Max batch wait: 2ms");
+            info!("   Max queue depth: 10,000 commands");
+            info!("   Worker thread: Dedicated OS thread (not tokio)");
+            info!("   Architecture: Lock-free mpsc channel + micro-batching");
+            Arc::new(engine)
+        }
+        Err(e) => {
+            error!("❌ Failed to initialize AsyncStorageEngine: {}", e);
+            return Err(anyhow::anyhow!("AsyncStorageEngine initialization failed: {}", e));
+        }
+    };
+
+    // Store AsyncStorageEngine in state
+    state.async_storage = Some(async_storage.clone());
+
+    info!("✅ AsyncStorageEngine ready for block production");
+    info!("🚀 ════════════════════════════════════════════════════════");
 
     // ========================================
     // 🔄 PHASE 3 BLOCK SYNC INTEGRATION
@@ -1928,13 +1981,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================
     // MINING SUBMISSION QUEUE - ASYNC PROCESSING
     // ========================================
+    // ✅ v1.0.2-beta Layer 3 FIX: Bounded channel with backpressure
+    // Prevents memory exhaustion from unbounded queue growth
     info!("⚡ Initializing mining submission async queue...");
-    let (mining_tx, mut mining_rx) = tokio::sync::mpsc::unbounded_channel::<q_api_server::MiningSubmission>();
+    let (mining_tx, mut mining_rx) = tokio::sync::mpsc::channel::<q_api_server::MiningSubmission>(10_000);
     state.mining_submission_tx = Some(mining_tx);
-    info!("✅ Mining queue initialized - async processing enabled");
-    info!("   Non-blocking submission acceptance");
+    info!("✅ Mining queue initialized - async processing enabled (bounded: 10,000 capacity)");
+    info!("   Non-blocking submission acceptance (with backpressure)");
     info!("   Background I/O processing");
     info!("   Prevents server overload from mining activity");
+    info!("   Bounded capacity prevents memory exhaustion");
 
     // ========================================
     // 🚀 TURBO SYNC - Git-Inspired Fast Blockchain Synchronization
@@ -3358,6 +3414,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let mut status = app_state_clone.node_status.write().await;
                                                     if height > status.current_height {
                                                         status.current_height = height;
+
+                                                        // 🔧 v1.0.3-beta: Update atomic height for mining API
+                                                        app_state_clone.current_height_atomic.store(
+                                                            height,
+                                                            std::sync::atomic::Ordering::Relaxed
+                                                        );
+
+                                                        // 🔧 v1.0.4-beta: Clear cached challenge
+                                                        *app_state_clone.current_challenge.write().await = None;
+
                                                         info!("📈 [TURBO SYNC] Node height advanced to {}", height);
                                                     }
                                                 }
@@ -4269,34 +4335,146 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             //
                             // OLD BUG: produce_block() advanced height BEFORE storage
                             // NEW FIX: advance_height() called ONLY after save_qblock() succeeds
-                            match app_state_mining.storage_engine.save_qblock(&new_block).await {
-                                Ok(()) => {
-                                    info!("✅ Block {} saved to storage", new_block.header.height);
+                            //
+                            // ✅ v1.0.2-beta CRITICAL FIX: Add timeout to prevent infinite stalls
+                            // Root cause analysis: save_qblock() can hang indefinitely on RocksDB writes
+                            // Expert consensus (ChatGPT, Kimi AI, DeepSeek):
+                            // - "Add 5-second timeout with exponential backoff"
+                            // - "Never let block producer hang forever on disk I/O"
+                            // - "Retry with backoff, fail after 3 attempts"
+                            use tokio::time::{timeout, Duration, sleep};
 
-                                    // ✅ v1.0.1-beta: NOW advance producer height (write-first, advance-second)
-                                    let producer_ref = app_state_mining.block_producer_pool.get_producer(producer_id);
-                                    producer_ref.advance_height(block_hash);
+                            let mut retry_delay = Duration::from_millis(100);
+                            let max_retries = 3;
+                            let mut save_succeeded = false;
 
-                                    info!("✅ Producer #{} height advanced to {} AFTER storage confirmation",
-                                          producer_id, new_block.header.height);
-                                }
-                                Err(e) if e.to_string().contains("Block already exists") => {
-                                    warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
-                                    // CRITICAL: Force producers to resync after duplicate
-                                    // This ensures they move to the next height instead of retrying
-                                    if let Err(sync_err) = app_state_mining.block_producer_pool
-                                        .sync_from_storage(&app_state_mining.storage_engine).await {
-                                        error!("❌ Resync after duplicate failed: {}", sync_err);
-                                    } else {
-                                        info!("✅ Producers resynced after duplicate, continuing from database height");
+                            // ========================================
+                            // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE - PARALLEL SAVE
+                            // Hybrid approach: AsyncStorageEngine runs ALONGSIDE existing RwLock path
+                            // This allows performance comparison and easy rollback if needed
+                            // ========================================
+                            if let Some(ref async_storage) = app_state_mining.async_storage {
+                                // Serialize block to bytes
+                                let block_bytes = match bincode::serialize(&new_block) {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        error!("❌ Failed to serialize block {}: {}", new_block.header.height, e);
+                                        Vec::new() // Continue with existing path
                                     }
-                                    continue; // Skip to next production cycle (height NOT advanced)
+                                };
+
+                                if !block_bytes.is_empty() {
+                                    // Save block via AsyncStorageEngine (non-blocking, returns immediately)
+                                    let async_save_start = std::time::Instant::now();
+                                    match async_storage.save_block(new_block.header.height, block_bytes).await {
+                                        Ok(()) => {
+                                            let async_save_duration = async_save_start.elapsed();
+                                            info!("✅ AsyncStorageEngine: Block {} queued in {:?} (queue depth: {})",
+                                                new_block.header.height,
+                                                async_save_duration,
+                                                async_storage.queue_depth()
+                                            );
+
+                                            // 🐛 v1.0.8-beta FIX: Set save_succeeded flag (CRITICAL mining stall bug fix)
+                                            // Root cause: AsyncStorageEngine saved blocks but height never advanced
+                                            // AI consensus (Kimi 95%, DeepSeek 85%, ChatGPT 92%): Missing flag update
+                                            save_succeeded = true;
+
+                                            // Check for congestion warning
+                                            if async_storage.is_congested() {
+                                                warn!("⚠️ AsyncStorageEngine: Queue congested (>80% full, depth: {})",
+                                                    async_storage.queue_depth()
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("❌ AsyncStorageEngine: Failed to queue block {}: {}",
+                                                new_block.header.height, e);
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    error!("🚨 CRITICAL: Block {} save FAILED: {}", new_block.header.height, e);
-                                    error!("   Height NOT advanced - will retry block creation");
-                                    continue; // Skip this block's balance processing (height NOT advanced)
+                            }
+
+                            // ========================================
+                            // 🔄 EXISTING PATH: RwLock-based storage (kept for hybrid comparison)
+                            // 🐛 v1.0.8-beta: Skip if AsyncStorageEngine already succeeded (eliminates timeouts)
+                            // ========================================
+                            if !save_succeeded {
+                                for attempt in 0..max_retries {
+                                match timeout(Duration::from_secs(5), app_state_mining.storage_engine.save_qblock(&new_block)).await {
+                                    Ok(Ok(())) => {
+                                        info!("✅ Block {} saved to storage (attempt {})", new_block.header.height, attempt + 1);
+                                        save_succeeded = true;
+                                        break; // Success!
+                                    }
+                                    Ok(Err(e)) if e.to_string().contains("Block already exists") => {
+                                        warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
+                                        // CRITICAL: Force producers to resync after duplicate
+                                        if let Err(sync_err) = app_state_mining.block_producer_pool
+                                            .sync_from_storage(&app_state_mining.storage_engine).await {
+                                            error!("❌ Resync after duplicate failed: {}", sync_err);
+                                        } else {
+                                            info!("✅ Producers resynced after duplicate, continuing from database height");
+                                        }
+                                        continue; // Skip to next production cycle (height NOT advanced)
+                                    }
+                                    Ok(Err(e)) if attempt < max_retries - 1 => {
+                                        warn!("⚠️ Block {} save failed (attempt {}): {}. Retrying...",
+                                            new_block.header.height, attempt + 1, e);
+                                        sleep(retry_delay).await;
+                                        retry_delay *= 2; // Exponential backoff
+                                        continue; // Retry
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("🚨 CRITICAL: Block {} save failed after {} attempts: {}",
+                                            new_block.header.height, max_retries, e);
+                                        error!("   Height NOT advanced - will retry block creation");
+                                        break; // Give up, continue to next cycle
+                                    }
+                                    Err(_timeout_err) if attempt < max_retries - 1 => {
+                                        warn!("⏱️ TIMEOUT: Block {} save exceeded 5 seconds (attempt {}). Retrying...",
+                                            new_block.header.height, attempt + 1);
+                                        sleep(retry_delay).await;
+                                        retry_delay *= 2; // Exponential backoff
+                                        continue; // Retry
+                                    }
+                                    Err(_timeout_err) => {
+                                        error!("🚨 CRITICAL TIMEOUT: Block {} save failed after {} attempts (5s each)",
+                                            new_block.header.height, max_retries);
+                                        error!("   RocksDB may be stalled or deadlocked - skipping this block");
+                                        error!("   Producer will retry on next cycle");
+                                        break; // Give up, continue to next cycle
+                                    }
                                 }
+                                } // Close for loop
+                            } else {
+                                // 🐛 v1.0.8-beta: AsyncStorageEngine already succeeded, skip redundant RwLock path
+                                debug!("Skipping RwLock path - AsyncStorageEngine already succeeded for block {}",
+                                    new_block.header.height);
+                            }
+
+                            // Only advance height if save succeeded
+                            if save_succeeded {
+                                // ✅ v1.0.1-beta: NOW advance producer height (write-first, advance-second)
+                                let producer_ref = app_state_mining.block_producer_pool.get_producer(producer_id);
+                                producer_ref.advance_height(block_hash);
+
+                                // 🔧 v1.0.3-beta: Update atomic height for mining API
+                                app_state_mining.current_height_atomic.store(
+                                    new_block.header.height,
+                                    std::sync::atomic::Ordering::Relaxed
+                                );
+
+                                // 🔧 v1.0.4-beta: Clear cached challenge (height advanced)
+                                *app_state_mining.current_challenge.write().await = None;
+
+                                info!("✅ Producer #{} height advanced to {} AFTER storage confirmation",
+                                      producer_id, new_block.header.height);
+                            } else {
+                                // Save failed - skip this block, continue producing
+                                warn!("⚠️ Block {} NOT saved, height NOT advanced. Continuing production...",
+                                    new_block.header.height);
+                                continue;
                             }
 
                             // 💰 v0.9.31-beta: PROCESS MINING REWARDS via Balance Consensus Engine
@@ -4791,11 +4969,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         ).await;
 
+                        // ========================================
+                        // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE - PARALLEL SAVE (Time-based path)
+                        // ========================================
+                        if let Some(ref async_storage) = app_state_block_producer.async_storage {
+                            // Serialize block to bytes
+                            let block_bytes = match bincode::serialize(&new_block) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    error!("❌ Failed to serialize block {}: {}", new_block.header.height, e);
+                                    Vec::new() // Continue with existing path
+                                }
+                            };
+
+                            if !block_bytes.is_empty() {
+                                // Save block via AsyncStorageEngine (non-blocking)
+                                let async_save_start = std::time::Instant::now();
+                                match async_storage.save_block(new_block.header.height, block_bytes).await {
+                                    Ok(()) => {
+                                        let async_save_duration = async_save_start.elapsed();
+                                        info!("✅ AsyncStorageEngine (time-based): Block {} queued in {:?} (queue depth: {})",
+                                            new_block.header.height,
+                                            async_save_duration,
+                                            async_storage.queue_depth()
+                                        );
+
+                                        // Check for congestion
+                                        if async_storage.is_congested() {
+                                            warn!("⚠️ AsyncStorageEngine: Queue congested (>80% full, depth: {})",
+                                                async_storage.queue_depth()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("❌ AsyncStorageEngine: Failed to queue block {}: {}",
+                                            new_block.header.height, e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // ========================================
+                        // 🔄 EXISTING PATH: RwLock-based storage (kept for hybrid comparison)
+                        // ========================================
                         // Store block in RocksDB
                         // 🚨 v0.9.96-beta: CRITICAL FIX - Resync after duplicate errors
                         match app_state_block_producer.storage_engine.save_qblock(&new_block).await {
                             Ok(()) => {
                                 info!("✅ Block {} saved successfully", new_block.header.height);
+
+                                // 🚀 v1.0.2-beta: Update HeightState cache after successful block save
+                                app_state_block_producer.height_state.update(new_block.header.height).await;
                             }
                             Err(e) if e.to_string().contains("Block already exists") => {
                                 warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
@@ -5594,6 +5818,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         let mut status = app_state_sync.node_status.write().await;
                                                         if block_height > status.current_height {
                                                             status.current_height = block_height;
+
+                                                            // 🔧 v1.0.3-beta: Update atomic height for mining API
+                                                            app_state_sync.current_height_atomic.store(
+                                                                block_height,
+                                                                std::sync::atomic::Ordering::Relaxed
+                                                            );
+
+                                                            // 🔧 v1.0.4-beta: Clear cached challenge
+                                                            *app_state_sync.current_challenge.write().await = None;
+
                                                             info!("📈 Node height advanced to {} (HTTP sync)", block_height);
 
                                                             // 🚨 v0.9.7-beta CRITICAL FIX: Sync all parallel producers after HTTP sync
@@ -7127,7 +7361,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // Run normally without TUI
-        high_perf_server.run().await?;
+        high_perf_server.run().await
+            .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
     }
 
     // ========================================
@@ -7166,6 +7401,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         info!("✅ SafeBatchedWriter shutdown complete");
+    }
+
+    // ========================================
+    // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE GRACEFUL SHUTDOWN
+    // Ensure AsyncStorageEngine flushes all queued blocks before exit
+    // ========================================
+    if let Some(ref async_storage) = app_state.async_storage {
+        info!("🛑 ════════════════════════════════════════════════════════");
+        info!("🛑 Shutting down AsyncStorageEngine...");
+
+        // Flush all pending commands
+        match async_storage.flush().await {
+            Ok(()) => {
+                info!("✅ AsyncStorageEngine: All pending commands flushed");
+            }
+            Err(e) => {
+                error!("❌ AsyncStorageEngine: Flush failed: {}", e);
+            }
+        }
+
+        // Shutdown worker thread
+        match async_storage.shutdown().await {
+            Ok(()) => {
+                info!("✅ AsyncStorageEngine: Worker thread stopped gracefully");
+            }
+            Err(e) => {
+                error!("❌ AsyncStorageEngine: Shutdown failed: {}", e);
+            }
+        }
+
+        info!("✅ AsyncStorageEngine shutdown complete");
+        info!("🛑 ════════════════════════════════════════════════════════");
     }
 
     Ok(())

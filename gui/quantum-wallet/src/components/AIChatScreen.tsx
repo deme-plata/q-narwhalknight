@@ -23,7 +23,9 @@ import {
   TrendingUp,
   Network,
   Users,
-  Layers
+  Layers,
+  Brain,
+  ChevronDown
 } from 'lucide-react';
 import TransactionPreviewModal from './TransactionPreviewModal';
 
@@ -32,6 +34,7 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  reasoning?: string; // Kimi K2 thinking process (v1.0.5)
   stats?: {
     tokens: number;
     latency_ms: number;
@@ -53,6 +56,7 @@ export default function AIChatScreen() {
   const [input, setInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
+  const [streamingReasoning, setStreamingReasoning] = useState(''); // Kimi K2 reasoning (v1.0.5)
   const [maxTokens, setMaxTokens] = useState(512); // Default 512 tokens
   const [showSettings, setShowSettings] = useState(false);
   const [showCostsUsage, setShowCostsUsage] = useState(false);
@@ -67,6 +71,7 @@ export default function AIChatScreen() {
   // AI Metrics Data
   const [metricsData, setMetricsData] = useState<any>(null);
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+  const [workersData, setWorkersData] = useState<any>(null); // v1.0: Active workers for data parallelism
 
   // AI Settings
   const [temperature, setTemperature] = useState(0.7);
@@ -160,27 +165,44 @@ export default function AIChatScreen() {
     }
   };
 
+  // v1.0: Load active workers for data parallelism verification
+  const loadWorkers = async () => {
+    try {
+      const response = await fetch('/api/chat/workers');
+      const json = await response.json();
+      if (json.success) {
+        setWorkersData(json.data);
+      }
+    } catch (error) {
+      console.error('Failed to load workers:', error);
+    }
+  };
+
   useEffect(() => {
     if (showMetrics) {
       loadMetrics();
-      // Auto-refresh metrics every 3 seconds while modal is open
+      loadWorkers(); // v1.0: Also load workers when modal opens
+      // Auto-refresh metrics and workers every 3 seconds while modal is open
       const interval = setInterval(() => {
         loadMetrics();
+        loadWorkers();
       }, 3000);
       return () => clearInterval(interval);
     }
   }, [showMetrics]);
 
-  // Load metrics in background for the glowing icon indicator
+  // Load metrics and workers in background for the glowing icon indicator
   useEffect(() => {
     // Initial load
     loadMetrics();
+    loadWorkers(); // v1.0: Also load workers for icon glow
 
-    // Auto-refresh metrics every 5 seconds to update the icon glow
+    // Auto-refresh metrics and workers every 5 seconds to update the icon glow
     const interval = setInterval(() => {
       // Only fetch in background if modal is closed (avoid duplicate fetches)
       if (!showMetrics && !isLoadingMetrics) {
         loadMetrics();
+        loadWorkers();
       }
     }, 5000);
 
@@ -788,96 +810,106 @@ export default function AIChatScreen() {
     setMessages([...loadedMessages, tempUserMessage]);
 
     try {
-      // Create EventSource for SSE streaming (backend now saves messages automatically)
-      const encodedContent = encodeURIComponent(userMessage);
-      const url = `/api/chat/${chatId}/stream?content=${encodedContent}&max_tokens=${maxTokens}`;
-      const eventSource = new EventSource(url);
-      eventSourceRef.current = eventSource;
+      // ✅ v1.0.2: Use regular streaming endpoint (works with or without distributed workers)
+      // Falls back to local inference automatically if no workers available
+      const response = await fetch(`/api/chat/${chatId}/stream?content=${encodeURIComponent(userMessage)}&max_tokens=${maxTokens}`);
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('ReadableStream not supported');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
       let cumulativeText = '';
+      let workerNodeId = '';
 
-      eventSource.addEventListener('start', () => {
-        console.log('🌊 Stream started');
-      });
+      // Read SSE stream
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      eventSource.addEventListener('progress', (event) => {
-        console.log('📊 Progress:', event.data);
-      });
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      eventSource.addEventListener('token', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          cumulativeText = data.cumulative || '';
-          setStreamingMessage(cumulativeText);
-        } catch (error) {
-          console.error('Failed to parse token:', error);
-        }
-      });
-
-      eventSource.addEventListener('complete', async (event) => {
-        try {
-          const stats = JSON.parse(event.data);
-          console.log('✅ Complete:', stats);
-
-          // DON'T clear streaming message yet - keep it visible while loading from DB
-          // This prevents the jarring "disappear then reappear" effect
-          setIsGenerating(false);
-          eventSource.close();
-
-          // Clear background generation tracking
-          localStorage.removeItem('activeAIGeneration');
-
-          // Reload messages from backend to get the complete conversation
-          // Backend has already saved both user and assistant messages
-          // This ensures we display the authoritative database state
-          await loadMessages(chatId!);
-
-          // NOW clear streaming message after database messages are loaded
-          // This creates a smooth transition from streaming → persisted message
-          setStreamingMessage('');
-
-          // If this is the first message (chat was just created), generate a title
-          const currentChat = chats.find(c => c.chat_id === chatId);
-          if (currentChat && currentChat.message_count === 0 && userMessage) {
-            generateChatTitle(chatId!, userMessage);
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            // Event type line (started, token, complete, error)
+            continue;
           }
-        } catch (error) {
-          console.error('Failed to parse complete:', error);
-          // Keep the streaming message visible on error
-          setIsGenerating(false);
-          localStorage.removeItem('activeAIGeneration');
-          // Don't clear streaming message on error - it's valuable to user
+
+          if (line.startsWith('data:')) {
+            const data = line.substring(5).trim();
+            if (!data) continue;
+
+            try {
+              const parsed = JSON.parse(data);
+
+              // Handle different event types
+              if (parsed.mode === 'data_parallel') {
+                // Started event
+                workerNodeId = parsed.worker_node;
+                console.log(`🌊 Data parallel stream started on worker: ${workerNodeId}`);
+              } else if (parsed.reasoning !== undefined) {
+                // Reasoning event (Kimi K2 thinking process)
+                setStreamingReasoning((prev) => prev + parsed.reasoning);
+                console.log(`🧠 Reasoning: ${parsed.reasoning}`);
+              } else if (parsed.token !== undefined) {
+                // Token event
+                cumulativeText += parsed.token;
+                setStreamingMessage(cumulativeText);
+              } else if (parsed.finish_reason) {
+                // Complete event
+                console.log(`✅ Complete: ${parsed.tokens_generated} tokens in ${parsed.total_time_ms}ms`);
+                console.log(`   Throughput: ${parsed.tokens_per_second} tok/s`);
+                console.log(`   Worker: ${parsed.worker_node}, Mode: ${parsed.mode}`);
+
+                // DON'T clear streaming message yet - keep it visible while loading from DB
+                setIsGenerating(false);
+
+                // Clear background generation tracking
+                localStorage.removeItem('activeAIGeneration');
+
+                // Reload messages from backend to get the complete conversation
+                await loadMessages(chatId!);
+
+                // NOW clear streaming message and reasoning after database messages are loaded
+                setStreamingMessage('');
+                setStreamingReasoning('');
+
+                // If this is the first message, generate a title
+                const currentChat = chats.find(c => c.chat_id === chatId);
+                if (currentChat && currentChat.message_count === 0 && userMessage) {
+                  generateChatTitle(chatId!, userMessage);
+                }
+                break;
+              } else if (parsed.code) {
+                // Error event
+                console.error('❌ Stream error:', parsed.message);
+                setIsGenerating(false);
+                localStorage.removeItem('activeAIGeneration');
+                setStreamingMessage(`Error: ${parsed.message}`);
+                setTimeout(() => setStreamingMessage(''), 5000);
+                break;
+              }
+            } catch (error) {
+              console.error('Failed to parse SSE data:', error);
+            }
+          }
         }
-      });
-
-      eventSource.addEventListener('error', (event: any) => {
-        console.error('❌ Stream error:', event);
-        // DON'T clear streaming message - it might just be a connection hiccup
-        // The message is still valuable to the user
-        setIsGenerating(false);
-        localStorage.removeItem('activeAIGeneration');
-        // Try to load messages in case generation finished on backend
-        loadMessages(chatId!).catch(err =>
-          console.error('Failed to load messages after error:', err)
-        );
-        eventSource.close();
-      });
-
-      eventSource.onerror = () => {
-        console.error('❌ EventSource connection error');
-        setIsGenerating(false);
-        localStorage.removeItem('activeAIGeneration');
-        // Try to recover by loading messages from backend
-        loadMessages(chatId!).catch(err =>
-          console.error('Failed to load messages after connection error:', err)
-        );
-        eventSource.close();
-      };
+      }
 
     } catch (error) {
       console.error('Failed to send message:', error);
       setIsGenerating(false);
       localStorage.removeItem('activeAIGeneration');
+      setStreamingMessage(`Failed to send message: ${error}`);
+      setTimeout(() => setStreamingMessage(''), 5000);
     }
   };
 
@@ -1020,25 +1052,27 @@ export default function AIChatScreen() {
             <button
               onClick={() => setShowMetrics(true)}
               className={`p-2 rounded-lg hover:bg-purple-500/10 transition-all relative ${
-                metricsData?.distributed?.nodes_participated > 1 ? 'animate-pulse' : ''
+                (workersData?.total_workers > 1 || metricsData?.distributed?.nodes_participated > 1) ? 'animate-pulse' : ''
               }`}
               title={`AI Performance Metrics${
-                metricsData?.distributed?.nodes_participated > 1
+                workersData?.total_workers > 1
+                  ? ` - ${workersData.total_workers} Workers Online!`
+                  : metricsData?.distributed?.nodes_participated > 1
                   ? ` - ${metricsData.distributed.nodes_participated} Nodes Active!`
                   : ''
               }`}
             >
               <Activity
                 className={`w-5 h-5 ${
-                  metricsData?.distributed?.nodes_participated > 1
+                  (workersData?.total_workers > 1 || metricsData?.distributed?.nodes_participated > 1)
                     ? 'text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.8)]'
                     : 'text-purple-400'
                 }`}
               />
-              {metricsData?.distributed?.nodes_participated > 1 && (
+              {(workersData?.total_workers > 1 || metricsData?.distributed?.nodes_participated > 1) && (
                 <div className="absolute -top-1 -right-1 w-3 h-3 bg-purple-500 rounded-full animate-ping" />
               )}
-              {metricsData?.distributed?.nodes_participated > 1 && (
+              {(workersData?.total_workers > 1 || metricsData?.distributed?.nodes_participated > 1) && (
                 <div className="absolute -top-1 -right-1 w-3 h-3 bg-purple-500 rounded-full" />
               )}
             </button>
@@ -1186,6 +1220,20 @@ export default function AIChatScreen() {
                           </p>
                         )}
 
+                        {/* Kimi K2 Reasoning Display (v1.0.5) */}
+                        {message.reasoning && (
+                          <details className="mt-3 border-l-2 border-purple-400 pl-3">
+                            <summary className="cursor-pointer text-sm text-purple-400 hover:text-purple-300 flex items-center gap-2">
+                              <Brain className="w-4 h-4" />
+                              <span>View Reasoning Process</span>
+                              <ChevronDown className="w-4 h-4" />
+                            </summary>
+                            <div className="mt-2 text-sm text-gray-400 whitespace-pre-wrap font-mono bg-purple-500/5 p-3 rounded">
+                              {message.reasoning}
+                            </div>
+                          </details>
+                        )}
+
                         {message.stats && (
                           <div className="flex items-center gap-4 mt-3 pt-3 border-t border-amber-500/20 text-xs text-amber-200/60">
                             <div className="flex items-center gap-1">
@@ -1240,6 +1288,20 @@ export default function AIChatScreen() {
                         border: '1px solid rgba(212, 175, 55, 0.1)'
                       }}
                     >
+                      {/* Streaming Reasoning (Kimi K2) */}
+                      {streamingReasoning && (
+                        <div className="mb-3 border-l-2 border-purple-400 pl-3">
+                          <div className="flex items-center gap-2 text-sm text-purple-400 mb-2">
+                            <Brain className="w-4 h-4 animate-pulse" />
+                            <span>Thinking...</span>
+                          </div>
+                          <div className="text-sm text-gray-400 whitespace-pre-wrap font-mono bg-purple-500/5 p-3 rounded">
+                            {streamingReasoning}
+                            <span className="inline-block w-2 h-4 ml-1 bg-purple-400 animate-pulse" />
+                          </div>
+                        </div>
+                      )}
+
                       <div className="text-amber-50 leading-relaxed prose prose-invert prose-amber max-w-none">
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm]}
@@ -1464,6 +1526,7 @@ export default function AIChatScreen() {
                     >
                       <option value="Mistral-7B-Instruct-v0.3">Mistral 7B Instruct (4.3 GB) - Fast</option>
                       <option value="Mistral-Small-3.2-24B-Instruct">Mistral Small 24B (14 GB) - Higher Quality</option>
+                      <option value="Kimi-K2-Thinking">🧠 Kimi K2 Thinking (245 GB) - Advanced Reasoning</option>
                     </select>
                     {modelSwitchStatus && (
                       <div className="text-sm text-amber-300 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
@@ -2256,6 +2319,63 @@ export default function AIChatScreen() {
                         </div>
                       </div>
                     </div>
+
+                    {/* v1.0: Active Workers Section (Data Parallelism) */}
+                    {workersData && workersData.workers && workersData.workers.length > 0 && (
+                      <div
+                        className="mt-6 p-6 rounded-xl"
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(34, 197, 94, 0.1) 100%)',
+                          border: '1px solid rgba(34, 197, 94, 0.3)',
+                        }}
+                      >
+                        <h3 className="flex items-center gap-2 text-lg font-semibold text-green-200 mb-4">
+                          <Users className="w-5 h-5 text-green-400" />
+                          Active Workers ({workersData.total_workers})
+                        </h3>
+                        <div className="space-y-3">
+                          {workersData.workers.map((worker: any, index: number) => (
+                            <div
+                              key={worker.node_id || index}
+                              className="p-4 rounded-lg"
+                              style={{
+                                background: 'rgba(34, 197, 94, 0.1)',
+                                border: '1px solid rgba(34, 197, 94, 0.2)',
+                              }}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                                  <div>
+                                    <p className="text-sm font-medium text-green-50">{worker.node_id}</p>
+                                    <p className="text-xs text-green-200/60 font-mono">
+                                      {worker.peer_id.substring(0, 20)}...
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-4">
+                                  <div className="text-right">
+                                    <p className="text-xs text-green-200/60">Active Requests</p>
+                                    <p className="text-sm font-bold text-green-200">
+                                      {worker.active_requests}
+                                    </p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-xs text-green-200/60">Capability</p>
+                                    <p className="text-sm font-bold text-green-200">{worker.capability}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="mt-4 p-3 rounded-lg" style={{ background: 'rgba(34, 197, 94, 0.05)' }}>
+                          <p className="text-xs text-green-200/70">
+                            💡 Data Parallelism: {workersData.total_workers} worker{workersData.total_workers > 1 ? 's' : ''} can process requests simultaneously for perfect linear scaling!
+                          </p>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Info Note */}
                     <div

@@ -1028,31 +1028,40 @@ impl RocksDBKV {
     /// Write batch atomically (internal method for transactions)
     ///
     /// **SECURITY FIX (v0.8.1-beta)**: Used by QTransaction to write atomic batches
+    /// **PERFORMANCE FIX (v1.0.2-beta)**: Use spawn_blocking to prevent Tokio executor thread starvation
     pub async fn write_batch_internal(
         &self,
         batch: WriteBatch,
         write_opts: rocksdb::WriteOptions,
     ) -> Result<()> {
-        self.db
-            .write_opt(batch, &write_opts)
-            .context("RocksDB batch write failed")?;
+        // ✅ v1.0.2-beta Layer 2 FIX: Move blocking RocksDB operations to dedicated thread pool
+        // Prevents Tokio executor threads from being blocked by slow disk I/O
+        let db = self.db.clone();
 
-        // Flush critical column families to ensure MANIFEST is updated
-        let cf_names = vec![
-            "blocks",
-            "dag_vertices",
-            "transactions",
-        ];
+        tokio::task::spawn_blocking(move || {
+            // Blocking RocksDB write operation (fsync to disk)
+            db.write_opt(batch, &write_opts)
+                .context("RocksDB batch write failed")?;
 
-        for cf_name in cf_names {
-            if let Some(cf) = self.db.cf_handle(cf_name) {
-                if let Err(e) = self.db.flush_cf(&cf) {
-                    warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
+            // Flush critical column families to ensure MANIFEST is updated
+            let cf_names = vec![
+                "blocks",
+                "dag_vertices",
+                "transactions",
+            ];
+
+            for cf_name in cf_names {
+                if let Some(cf) = db.cf_handle(cf_name) {
+                    if let Err(e) = db.flush_cf(&cf) {
+                        warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("spawn_blocking task panicked")?
     }
 
     /// Get database statistics

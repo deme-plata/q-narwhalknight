@@ -46,6 +46,7 @@ pub use hybrid_mining::{HybridMiningBlock, HybridMiningCoordinator, HybridReward
 pub use gpu::{GPUMiner, OpenCLContext, SHA3Kernel};
 
 use q_types::*;
+use q_precision::QAmount;
 use anyhow::Result;
 use std::time::Duration;
 
@@ -117,25 +118,25 @@ pub type MinerId = [u8; 20];
 pub struct MiningStats {
     /// Total blocks mined
     pub blocks_mined: u64,
-    
+
     /// Current hash rate (hashes per second)
     pub hash_rate: f64,
-    
+
     /// Average hash rate over time
     pub average_hash_rate: f64,
-    
+
     /// Mining efficiency (0.0-1.0)
     pub efficiency: f64,
-    
+
     /// Quantum enhancement utilization
     pub quantum_utilization: f64,
-    
+
     /// GPU utilization (if enabled)
     pub gpu_utilization: Option<f64>,
-    
+
     /// Total QNK earned
-    pub total_rewards: u64,
-    
+    pub total_rewards: QAmount,
+
     /// Mining uptime
     pub uptime: Duration,
 }
@@ -156,22 +157,35 @@ impl Default for Phase23Config {
 
 impl QuantumMiningEngine {
     /// Create new quantum mining engine
-    pub fn new(miner_id: MinerId, config: Phase23Config) -> Result<Self> {
+    pub async fn new(miner_id: MinerId, config: Phase23Config) -> Result<Self> {
+        // Convert lib::MiningAlgorithm to block::MiningAlgorithm
+        let block_algorithm = match config.algorithm {
+            MiningAlgorithm::QuantumSHA3 => block::MiningAlgorithm::QuantumSHA3 {
+                enhancement_level: config.quantum_enhancement,
+            },
+            MiningAlgorithm::ClassicalSHA3 => block::MiningAlgorithm::ClassicalSHA3,
+            MiningAlgorithm::QuantumArgon2 => block::MiningAlgorithm::QuantumSHA3 {
+                enhancement_level: config.quantum_enhancement,
+            }, // Future feature - use QuantumSHA3 for now
+        };
+
         let miner_config = MiningConfig {
             miner_id,
-            algorithm: config.algorithm,
+            algorithm: block_algorithm,
             quantum_enhancement: config.quantum_enhancement,
             vdf_enabled: config.vdf_enabled,
             gpu_enabled: config.gpu_enabled,
+            cpu_threads: 4, // Default to 4 CPU threads (reasonable for most systems)
+            seed_refresh_interval: Duration::from_secs(300), // Refresh quantum seed every 5 minutes
         };
-        
+
         Ok(Self {
             miner_id,
-            miner: QuantumMiner::new(miner_config)?,
+            miner: QuantumMiner::new(miner_config).await?,
             network: MiningNetwork::new(miner_id)?,
             committer: DAGCommitter::new()?,
             rewards: RewardCalculator::new(RewardConfig {
-                base_reward: config.block_reward,
+                base_reward: QAmount::from_qwei(config.block_reward as i128),
                 ..Default::default()
             }),
             pool: None,
@@ -198,10 +212,10 @@ impl QuantumMiningEngine {
             efficiency: 0.0,
             quantum_utilization: 0.0,
             gpu_utilization: None,
-            total_rewards: 0,
+            total_rewards: QAmount::ZERO,
             uptime: Duration::from_secs(0),
         };
-        
+
         let start_time = std::time::Instant::now();
         
         loop {
@@ -220,15 +234,15 @@ impl QuantumMiningEngine {
                     match self.rewards.calculate_reward(&mining_result.block).await {
                         Ok(reward_result) => {
                             tracing::info!("💰 Mining reward calculated: {} QNK (base: {}, quantum bonus: {}, quality: {:.3})",
-                                         reward_result.final_reward as f64 / 1_000_000_000.0,
-                                         reward_result.base_reward as f64 / 1_000_000_000.0,
-                                         reward_result.quantum_bonus as f64 / 1_000_000_000.0,
+                                         reward_result.final_reward.to_qwei() as f64 / 1_000_000_000.0,
+                                         reward_result.base_reward.to_qwei() as f64 / 1_000_000_000.0,
+                                         reward_result.quantum_bonus.to_qwei() as f64 / 1_000_000_000.0,
                                          reward_result.quantum_quality);
                             
                             // Validate reward claim before broadcast
                             if let Err(validation_error) = self.rewards.validate_reward_claim(
-                                &mining_result.block, 
-                                reward_result.final_reward
+                                &mining_result.block,
+                                reward_result.final_reward.to_qwei() as u64
                             ).await {
                                 tracing::error!("❌ Reward validation failed: {:?}", validation_error);
                                 continue; // Skip this block and continue mining
@@ -245,16 +259,16 @@ impl QuantumMiningEngine {
                             stats.total_rewards += reward_result.final_reward;
                             stats.hash_rate = mining_result.hash_rate;
                             stats.quantum_utilization = mining_result.quantum_utilization;
-                            
+
                             if let Some(gpu_util) = mining_result.gpu_utilization {
                                 stats.gpu_utilization = Some(gpu_util);
                             }
-                            
+
                             // Log reward statistics
                             let reward_stats = self.rewards.get_statistics().await;
                             tracing::debug!("📊 Reward stats - Total distributed: {} QNK, Burned: {} QNK, Avg quality: {:.3}",
-                                          reward_stats.total_distributed as f64 / 1_000_000_000.0,
-                                          reward_stats.total_burned as f64 / 1_000_000_000.0,
+                                          reward_stats.total_distributed.to_qwei() as f64 / 1_000_000_000.0,
+                                          reward_stats.total_burned.to_qwei() as f64 / 1_000_000_000.0,
                                           reward_stats.avg_quantum_quality);
                         }
                         Err(reward_error) => {
@@ -289,29 +303,21 @@ impl QuantumMiningEngine {
     /// Commit mining block to DAG chain
     async fn commit_to_dag(&mut self, block: &QuantumPoWBlock) -> Result<()> {
         // Check if this block should be committed (every 10 blocks)
-        if block.height % 10 == 0 {
+        if block.header.height % 10 == 0 {
             let merkle_root = self.committer.calculate_merkle_root(&[block.clone()])?;
             self.committer.commit_to_dag(merkle_root).await?;
-            
-            tracing::info!("📤 Committed PoW block {} to DAG at height {}", 
-                         hex::encode(block.hash()), block.height);
+
+            tracing::info!("📤 Committed PoW block {} to DAG at height {}",
+                         hex::encode(block.hash()), block.header.height);
         }
-        
+
         Ok(())
     }
     
     /// Get current mining statistics
-    pub fn get_stats(&self) -> &MiningStats {
-        &MiningStats {
-            blocks_mined: 0, // TODO: Implement proper stats tracking
-            hash_rate: 0.0,
-            average_hash_rate: 0.0,
-            efficiency: 0.0,
-            quantum_utilization: 0.0,
-            gpu_utilization: None,
-            total_rewards: 0,
-            uptime: Duration::from_secs(0),
-        }
+    pub async fn get_stats(&self) -> miner::MiningStats {
+        // Get stats from the miner (returns owned MiningStats, not a reference)
+        self.miner.get_stats().await
     }
     
     /// Connect to mining pool
@@ -347,7 +353,7 @@ impl QuantumMiningEngine {
     }
     
     /// Calculate total supply at current chain height
-    pub fn calculate_total_supply(&self, height: u64) -> u64 {
+    pub fn calculate_total_supply(&self, height: u64) -> QAmount {
         self.rewards.calculate_total_supply(height)
     }
 }
@@ -401,7 +407,7 @@ pub mod cli {
         };
         
         // Start mining
-        let mut engine = QuantumMiningEngine::new(miner_id, config)?;
+        let mut engine = QuantumMiningEngine::new(miner_id, config).await?;
         
         // Connect to pool if specified
         if let Some(pool_addr) = cli.pool_address {
@@ -429,7 +435,8 @@ pub mod cli {
             None => {
                 // Generate random miner ID
                 use sha3::{Digest, Sha3_256};
-                let random_data = uuid::Uuid::new_v4().as_bytes();
+                let uuid = uuid::Uuid::new_v4();
+                let random_data = uuid.as_bytes();
                 let hash = Sha3_256::digest(random_data);
                 let mut id = [0u8; 20];
                 id.copy_from_slice(&hash[..20]);
@@ -447,8 +454,8 @@ mod tests {
     async fn test_mining_engine_creation() {
         let miner_id = [1u8; 20];
         let config = Phase23Config::default();
-        
-        let engine = QuantumMiningEngine::new(miner_id, config);
+
+        let engine = QuantumMiningEngine::new(miner_id, config).await;
         assert!(engine.is_ok());
     }
     

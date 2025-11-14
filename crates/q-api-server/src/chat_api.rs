@@ -231,6 +231,7 @@ pub async fn send_message(
         timestamp: now,
         images: req.images.clone(),
         audio: req.audio.clone(),
+        reasoning: None,
         generation_stats: None,
     };
 
@@ -463,6 +464,7 @@ pub async fn send_message(
         timestamp: current_timestamp(),
         images: None,
         audio: None,
+        reasoning: None,
         generation_stats: Some(generation_stats),
     };
 
@@ -626,7 +628,8 @@ pub async fn stream_message(
             timestamp: now,
             images: None,
             audio: None,
-            generation_stats: None,
+            reasoning: None,
+        generation_stats: None,
         };
 
         if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &user_message).await {
@@ -686,7 +689,8 @@ pub async fn stream_message(
                                 timestamp: current_timestamp(),
                                 images: None,
                                 audio: None,
-                                generation_stats: None,
+                                reasoning: None,
+        generation_stats: None,
                             };
                             if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &placeholder_message).await {
                                 error!("❌ Failed to save placeholder message: {}", e);
@@ -726,7 +730,8 @@ pub async fn stream_message(
                                             timestamp: current_timestamp(),
                                             images: None,
                                             audio: None,
-                                            generation_stats: None,
+                                            reasoning: None,
+        generation_stats: None,
                                         };
                                         let _ = storage_clone.save_chat_message(&chat_id_clone, &updated_message).await;
                                     }
@@ -761,6 +766,7 @@ pub async fn stream_message(
                                             timestamp: current_timestamp(),
                                             images: None,
                                             audio: None,
+                                            reasoning: None,
                                             generation_stats: Some(GenerationStats {
                                                 total_tokens,
                                                 latency_ms: total_time_ms,
@@ -810,7 +816,8 @@ pub async fn stream_message(
                 timestamp: current_timestamp(),
                 images: None,
                 audio: None,
-                generation_stats: None,
+                reasoning: None,
+        generation_stats: None,
             };
 
             if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &placeholder_message).await {
@@ -872,6 +879,7 @@ pub async fn stream_message(
                                     timestamp: current_timestamp(),
                                     images: None,
                                     audio: None,
+                                    reasoning: None,
                                     generation_stats: Some(GenerationStats {
                                         total_tokens: stats.tokens_generated,
                                         latency_ms: stats.total_time_ms as u64,
@@ -1141,15 +1149,423 @@ async fn get_ai_metrics(
     Json(ApiResponse::success(metrics))
 }
 
+/// NEW v1.0: POST /api/chat/:id/stream-distributed - Send message with data parallel streaming
+/// Uses data parallelism for perfect linear scaling (N nodes = N× throughput)
+/// Streams tokens in real-time via Server-Sent Events (SSE)
+pub async fn stream_message_distributed(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>>>, StatusCode> {
+    let now = current_timestamp();
+
+    info!("🌐 Data parallel streaming request for chat {}", chat_id);
+
+    // Get chat metadata
+    let metadata = match state.storage_engine.get_chat_metadata(&chat_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            error!("Failed to get chat metadata: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let user_message_index = metadata.message_count;
+    let ai_message_index = metadata.message_count + 1;
+
+    // Save user message
+    let user_message = ChatMessage {
+        index: user_message_index,
+        role: "user".to_string(),
+        content: req.content.clone(),
+        timestamp: now,
+        images: req.images.clone(),
+        audio: req.audio.clone(),
+        reasoning: None,
+        generation_stats: None,
+    };
+
+    if let Err(e) = state.storage_engine.save_chat_message(&chat_id, &user_message).await {
+        error!("Failed to save user message: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Format prompt with model-specific chat template
+    let formatted_prompt = q_ai_inference::format_chat_prompt(&metadata.model, &req.content);
+    let max_tokens = req.content.split_whitespace().count().max(150).min(2048); // Dynamic token limit
+
+    // Try distributed inference first, fall back to local if unavailable
+    let use_distributed = state.distributed_ai_coordinator.is_some();
+
+    if use_distributed {
+        let coordinator = state.distributed_ai_coordinator.as_ref().unwrap();
+
+        // Start data parallel inference with streaming
+        let generation_start = std::time::Instant::now();
+
+        info!("🚀 Attempting data parallel inference: prompt_len={}, max_tokens={}",
+              formatted_prompt.len(), max_tokens);
+
+        match coordinator
+            .coordinate_inference_data_parallel(
+                formatted_prompt.clone(),
+                Some(max_tokens),
+                Some(0.7), // temperature
+                metadata.model.clone(),
+            )
+            .await
+        {
+            Ok((request_id, mut stream_rx, worker_node_id)) => {
+                info!("✅ Data parallel request {} routed to worker {}", request_id, worker_node_id);
+
+                // Successfully started distributed inference - stream results (inline implementation)
+                let storage_engine = state.storage_engine.clone();
+                let chat_id_clone = chat_id.clone();
+                let metadata_clone = metadata.clone();
+
+                let sse_stream = async_stream::stream! {
+                    let mut full_response = String::new();
+                    let mut tokens_generated = 0;
+                    let mut finish_reason = "unknown".to_string();
+                    let mut total_time_ms = 0u64;
+
+                    // Send started event
+                    yield Ok(Event::default()
+                        .event("started")
+                        .data(serde_json::json!({
+                            "request_id": request_id,
+                            "worker_node": worker_node_id,
+                            "mode": "data_parallel"
+                        }).to_string()));
+
+                    // Stream tokens as they arrive
+                    while let Some(stream_event) = stream_rx.recv().await {
+                        match stream_event.event {
+                            q_network::distributed_ai_coordinator::StreamEventKind::Started { worker_node_id: worker } => {
+                                info!("📥 Worker {} started inference", worker);
+                            }
+                            q_network::distributed_ai_coordinator::StreamEventKind::Token { token, token_index } => {
+                                full_response.push_str(&token);
+                                tokens_generated += 1;
+
+                                yield Ok(Event::default()
+                                    .event("token")
+                                    .data(serde_json::json!({
+                                        "token": token,
+                                        "index": token_index
+                                    }).to_string()));
+                            }
+                            q_network::distributed_ai_coordinator::StreamEventKind::Complete {
+                                finish_reason: reason,
+                                tokens_generated: count,
+                                total_time_ms: time
+                            } => {
+                                finish_reason = reason;
+                                tokens_generated = count;
+                                total_time_ms = time;
+                                info!("✅ Distributed inference complete: {} tokens in {}ms", count, time);
+                                break;
+                            }
+                            q_network::distributed_ai_coordinator::StreamEventKind::Error { code, message } => {
+                                error!("❌ Distributed inference error: {} - {}", code, message);
+                                yield Ok(Event::default()
+                                    .event("error")
+                                    .data(serde_json::json!({
+                                        "code": code,
+                                        "message": message
+                                    }).to_string()));
+                                return;
+                            }
+                        }
+                    }
+
+                    // Parse reasoning for Kimi K2
+                    let (reasoning, content) = if metadata_clone.model.contains("Kimi-K2") || metadata_clone.model.contains("kimi-k2") {
+                        let (parsed_reasoning, parsed_answer) = q_ai_inference::parse_kimi_k2_reasoning(&full_response);
+                        if let Some(ref reasoning_text) = parsed_reasoning {
+                            yield Ok(Event::default()
+                                .event("reasoning")
+                                .data(serde_json::json!({
+                                    "reasoning": reasoning_text
+                                }).to_string()));
+                        }
+                        (parsed_reasoning, parsed_answer)
+                    } else {
+                        (None, full_response.clone())
+                    };
+
+                    // Save AI response
+                    let ai_message = ChatMessage {
+                        index: ai_message_index,
+                        role: "assistant".to_string(),
+                        content,
+                        timestamp: current_timestamp(),
+                        images: None,
+                        audio: None,
+                        reasoning,
+                        generation_stats: Some(GenerationStats {
+                            total_tokens: tokens_generated,
+                            latency_ms: total_time_ms,
+                            tokens_per_second: if total_time_ms > 0 {
+                                (tokens_generated as f64 * 1000.0) / total_time_ms as f64
+                            } else {
+                                0.0
+                            },
+                            privacy_overhead_ms: 0,
+                            zk_proof_time_ms: 0,
+                            distributed_nodes_used: 1,
+                        }),
+                    };
+
+                    if let Err(e) = storage_engine.save_chat_message(&chat_id_clone, &ai_message).await {
+                        error!("Failed to save AI message: {}", e);
+                    }
+
+                    // Send completion event
+                    yield Ok(Event::default()
+                        .event("complete")
+                        .data(serde_json::json!({
+                            "finish_reason": finish_reason,
+                            "tokens_generated": tokens_generated,
+                            "total_time_ms": total_time_ms,
+                            "tokens_per_second": if total_time_ms > 0 {
+                                (tokens_generated as f64 * 1000.0) / total_time_ms as f64
+                            } else {
+                                0.0
+                            },
+                            "worker_node": worker_node_id,
+                            "mode": "data_parallel"
+                        }).to_string()));
+                };
+
+                let boxed: std::pin::Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>> = Box::pin(sse_stream);
+                return Ok(Sse::new(boxed).keep_alive(
+                    axum::response::sse::KeepAlive::new()
+                        .interval(std::time::Duration::from_secs(1))
+                        .text("keepalive")
+                ));
+            }
+            Err(e) => {
+                warn!("⚠️ Distributed inference unavailable ({}), falling back to local inference", e);
+                // Fall through to local inference below
+            }
+        }
+    }
+
+    // Fall back to local inference (no workers available or distributed failed)
+    info!("💻 Using LOCAL single-node inference for chat {}", chat_id);
+
+    // Use mistral.rs engine for local inference
+    if let Some(ref engine) = state.mistralrs_engine {
+        let engine_clone = Arc::clone(engine);  // Clone Arc for 'static lifetime
+        let storage_clone = state.storage_engine.clone();
+        let chat_id_clone = chat_id.clone();
+        let metadata_clone = metadata.clone();
+
+        let sse_stream = async_stream::stream! {
+            let generation_start = std::time::Instant::now();
+            let cumulative_text = Arc::new(tokio::sync::RwLock::new(String::new()));
+
+            // Send started event
+            yield Ok(Event::default()
+                .event("started")
+                .data(serde_json::json!({
+                    "mode": "local_fallback",
+                    "message": "Using local inference (no distributed workers available)"
+                }).to_string()));
+
+            // Save placeholder message
+            let placeholder_message = ChatMessage {
+                index: ai_message_index,
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                timestamp: current_timestamp(),
+                images: None,
+                audio: None,
+                reasoning: None,
+                generation_stats: None,
+            };
+
+            if let Err(e) = storage_clone.save_chat_message(&chat_id_clone, &placeholder_message).await {
+                error!("❌ Failed to save placeholder message: {}", e);
+            }
+
+            // Stream generation
+            let cumulative_clone = cumulative_text.clone();
+            let storage_clone2 = storage_clone.clone();
+            let chat_id_clone2 = chat_id_clone.clone();
+
+            match engine_clone.generate_stream(
+                &formatted_prompt,
+                max_tokens,
+                |event| {
+                    let cumulative = cumulative_clone.clone();
+                    async move {
+                        match event {
+                            q_ai_inference::StreamEvent::Progress(msg) => {
+                                // Ignore progress events for cleaner stream
+                            }
+                            q_ai_inference::StreamEvent::Token(token_text) => {
+                                let cum_text = {
+                                    let mut cum = cumulative.write().await;
+                                    cum.push_str(&token_text);
+                                    cum.clone()
+                                };
+
+                                // Note: We can't yield from inside this callback
+                                // The outer stream will handle token emission
+                            }
+                            q_ai_inference::StreamEvent::Complete(stats) => {
+                                info!("✅ Local inference complete: {} tokens in {:.2}s",
+                                      stats.tokens_generated, stats.total_time_ms / 1000.0);
+                            }
+                            q_ai_inference::StreamEvent::Error(err) => {
+                                error!("❌ Local inference error: {}", err);
+                            }
+                        }
+                        Ok(())
+                    }
+                }
+            ).await {
+                Ok(_) => {
+                    let final_text = cumulative_text.read().await.clone();
+                    let total_time_ms = generation_start.elapsed().as_millis() as u64;
+                    let tokens_generated = final_text.split_whitespace().count();
+
+                    // Parse reasoning for Kimi K2
+                    let (reasoning, content) = if metadata_clone.model.contains("Kimi-K2") || metadata_clone.model.contains("kimi-k2") {
+                        let (parsed_reasoning, parsed_answer) = q_ai_inference::parse_kimi_k2_reasoning(&final_text);
+                        if let Some(ref reasoning_text) = parsed_reasoning {
+                            yield Ok(Event::default()
+                                .event("reasoning")
+                                .data(serde_json::json!({
+                                    "reasoning": reasoning_text
+                                }).to_string()));
+                        }
+                        (parsed_reasoning, parsed_answer)
+                    } else {
+                        (None, final_text.clone())
+                    };
+
+                    // Save final message
+                    let ai_message = ChatMessage {
+                        index: ai_message_index,
+                        role: "assistant".to_string(),
+                        content,
+                        timestamp: current_timestamp(),
+                        images: None,
+                        audio: None,
+                        reasoning,
+                        generation_stats: Some(GenerationStats {
+                            total_tokens: tokens_generated,
+                            latency_ms: total_time_ms,
+                            tokens_per_second: if total_time_ms > 0 {
+                                (tokens_generated as f64 * 1000.0) / total_time_ms as f64
+                            } else {
+                                0.0
+                            },
+                            privacy_overhead_ms: 0,
+                            zk_proof_time_ms: 0,
+                            distributed_nodes_used: 0, // Local inference
+                        }),
+                    };
+
+                    if let Err(e) = storage_clone2.save_chat_message(&chat_id_clone2, &ai_message).await {
+                        error!("Failed to save AI message: {}", e);
+                    }
+
+                    // Send complete event
+                    yield Ok(Event::default()
+                        .event("complete")
+                        .data(serde_json::json!({
+                            "finish_reason": "stop",
+                            "tokens_generated": tokens_generated,
+                            "total_time_ms": total_time_ms,
+                            "tokens_per_second": if total_time_ms > 0 {
+                                (tokens_generated as f64 * 1000.0) / total_time_ms as f64
+                            } else {
+                                0.0
+                            },
+                            "mode": "local_fallback"
+                        }).to_string()));
+                }
+                Err(e) => {
+                    error!("❌ Local generation error: {}", e);
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(format!("Generation error: {}", e)));
+                }
+            }
+        };
+
+        let boxed: std::pin::Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>> = Box::pin(sse_stream);
+        return Ok(Sse::new(boxed).keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(1))
+                .text("keepalive")
+        ));
+    } else {
+        error!("❌ No inference engine available (local or distributed)");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
+
+/// NEW v1.0: Get list of active AI workers for data parallelism verification
+/// GET /api/chat/workers - List all connected workers that can handle inference
+async fn get_active_workers(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    if let Some(ref coordinator) = state.distributed_ai_coordinator {
+        let nodes = coordinator.get_available_nodes().await.unwrap_or_default();
+
+        let workers: Vec<serde_json::Value> = nodes.iter().map(|node| {
+            serde_json::json!({
+                "node_id": node.node_id,
+                "peer_id": node.peer_id,
+                "active_requests": node.active_requests,
+                "capability": format!("{:?}", node.capability),
+                "status": "online"
+            })
+        }).collect();
+
+        Json(ApiResponse {
+            success: true,
+            data: Some(serde_json::json!({
+                "workers": workers,
+                "total_workers": workers.len(),
+                "coordinator_node_id": coordinator.node_id
+            })),
+            error: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        })
+    } else {
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Distributed AI coordinator not initialized".to_string()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        })
+    }
+}
+
 pub fn chat_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/create", post(create_chat))
         .route("/list", get(list_chats))
         .route("/metrics", get(get_ai_metrics)) // NEW: AI performance metrics endpoint
+        .route("/workers", get(get_active_workers)) // NEW v1.0: List active workers
         .route("/stream", get(stream_message_anonymous)) // Anonymous stream for wallet analysis
         .route("/:id/messages", get(get_messages))
         .route("/:id/message", post(send_message))
         .route("/:id/stream", get(stream_message)) // NEW: SSE streaming endpoint
+        .route("/:id/stream-distributed", post(stream_message_distributed)) // NEW v1.0: Data parallel streaming
         .route("/:id/switch-model", post(switch_model)) // NEW: Model switching endpoint
         .route("/:id", delete(delete_chat))
         .route("/:id/rename", put(rename_chat))
