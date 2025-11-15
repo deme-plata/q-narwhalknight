@@ -1132,6 +1132,31 @@ impl BlockResponse {
     }
 }
 
+// ✅ v1.0.12-beta: Batch sync trait for dependency injection
+// Placed in q-types to avoid circular dependency between q-storage and q-network
+/// Trait for network managers that can fetch block ranges
+/// This avoids circular dependency by defining the interface in shared q-types crate
+///
+/// ✅ v1.0.15-beta FIX: Removed `Sync` bound - not needed for `&mut self` methods
+/// libp2p's Swarm type is not Sync (contains Box<dyn Executor>, Box<dyn Stream>, etc.)
+/// Since method takes `&mut self` (exclusive access), Sync is unnecessary
+#[async_trait::async_trait]
+pub trait BlockRangeFetcher: Send {
+    /// Request a range of blocks from the network
+    ///
+    /// # Arguments
+    /// * `start_height` - Starting block height (inclusive)
+    /// * `end_height` - Ending block height (inclusive)
+    ///
+    /// # Returns
+    /// Vector of blocks in the requested range
+    async fn request_block_range(
+        &mut self,
+        start_height: u64,
+        end_height: u64,
+    ) -> anyhow::Result<Vec<QBlock>>;
+}
+
 #[cfg(test)]
 mod network_separation_tests {
     use super::*;

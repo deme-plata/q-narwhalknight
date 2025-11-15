@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
 use tokio::sync::RwLock;
-use tracing::{info, debug, error};
+use tracing::{info, debug, error, warn};
 
 /// High-performance CPU miner optimized for Q-NarwhalKnight
 pub struct CpuMiner {
