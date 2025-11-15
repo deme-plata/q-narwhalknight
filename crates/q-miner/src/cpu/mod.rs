@@ -228,14 +228,62 @@ pub struct CpuInfo {
 pub fn detect_cpu_capabilities() -> CpuInfo {
     let logical_threads = num_cpus::get();
     let physical_cores = num_cpus::get_physical();
-    
-    // Use raw-cpuid for detailed CPU information
+
+    // ✅ P0 FIX: Enhanced CPU detection for high-core-count systems (AMD EPYC 9654, etc.)
+    // Read /proc/cpuinfo directly on Linux for comparison with num_cpus
+    #[cfg(target_os = "linux")]
+    let proc_cpuinfo_threads = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .map(|contents| {
+            contents.lines()
+                .filter(|line| line.starts_with("processor"))
+                .count()
+        });
+
+    #[cfg(not(target_os = "linux"))]
+    let proc_cpuinfo_threads: Option<usize> = None;
+
+    // ⚠️ P0 FIX: Warn if detection appears capped at common limits
+    if logical_threads == 64 || logical_threads == 128 || logical_threads == 256 {
+        warn!("⚠️  Detected exactly {} threads - this may be a detection limit, not actual hardware", logical_threads);
+
+        if let Some(proc_count) = proc_cpuinfo_threads {
+            if proc_count > logical_threads {
+                warn!("   /proc/cpuinfo shows {} CPUs, but num_cpus sees only {}", proc_count, logical_threads);
+                warn!("   This indicates OS-level restrictions (cgroups, cpuset, or affinity)");
+                warn!("   Check: cat /sys/fs/cgroup/cpuset.cpus");
+                warn!("   Check: cat /proc/self/status | grep Cpus_allowed_list");
+            } else if proc_count == logical_threads {
+                info!("   /proc/cpuinfo confirms {} threads (OS limit or actual hardware)", logical_threads);
+            }
+        }
+
+        warn!("   If you have more cores, use --threads <N> to override");
+        warn!("   Example: --threads 96 for AMD EPYC 9654 (96 physical cores)");
+        warn!("   Example: --threads 192 for AMD EPYC 9654 (with SMT/hyperthreading)");
+    }
+
+    // 💡 P0 FIX: AMD EPYC 9654 specific detection
     #[cfg(target_arch = "x86_64")]
     {
         let cpuid = raw_cpuid::CpuId::new();
         let brand = cpuid.get_vendor_info()
             .map(|v: raw_cpuid::VendorInfo| v.as_str().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
+
+        // Check if this is AMD EPYC 9654
+        let is_epyc_9654 = brand.contains("AuthenticAMD") &&
+            proc_cpuinfo_threads.unwrap_or(0) >= 96;
+
+        if is_epyc_9654 && logical_threads < 96 {
+            warn!("🔴 AMD EPYC 9654 DETECTED but only {} threads visible!", logical_threads);
+            warn!("   This CPU has 96 physical cores (192 with SMT)");
+            warn!("   Recommended configurations:");
+            warn!("   • --threads 96  (all physical cores, lower power)");
+            warn!("   • --threads 192 (all logical threads, maximum performance)");
+            warn!("   • Check cgroup limits: cat /sys/fs/cgroup/cpuset.cpus");
+            warn!("   • Check process limits: ulimit -u");
+        }
 
         let has_avx2 = cpuid.get_extended_feature_info()
             .map(|ef: raw_cpuid::ExtendedFeatures| ef.has_avx2())
@@ -253,6 +301,14 @@ pub fn detect_cpu_capabilities() -> CpuInfo {
         // We'll just set a default value for now
         let cache_l3_size = 0usize;
 
+        info!("💻 CPU Detection Results:");
+        info!("   Brand: {}", brand);
+        info!("   num_cpus: {} logical threads, {} physical cores", logical_threads, physical_cores);
+        if let Some(proc_count) = proc_cpuinfo_threads {
+            info!("   /proc/cpuinfo: {} processors", proc_count);
+        }
+        info!("   Features: AVX2={}, AVX512={}, AES-NI={}", has_avx2, has_avx512, has_aes_ni);
+
         return CpuInfo {
             brand,
             physical_cores,
@@ -263,8 +319,13 @@ pub fn detect_cpu_capabilities() -> CpuInfo {
             cache_l3_size,
         };
     }
-    
+
     // Fallback for non-x86_64 or if cpuid fails
+    info!("💻 CPU Detection: {} logical threads, {} physical cores", logical_threads, physical_cores);
+    if let Some(proc_count) = proc_cpuinfo_threads {
+        info!("   /proc/cpuinfo: {} processors", proc_count);
+    }
+
     CpuInfo {
         brand: "Unknown CPU".to_string(),
         physical_cores,
