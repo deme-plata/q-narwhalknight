@@ -25,8 +25,8 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Domain**: `quillon.xyz`
 
 ### **P2P Network Bootstrap:**
-- **Bootstrap Peer ID**: `12D3KooWRX3GGK9Fs3iM3BfqYNNJiHBDujac7EHwqWjaK1n1kzPN`
-- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWRX3GGK9Fs3iM3BfqYNNJiHBDujac7EHwqWjaK1n1kzPN`
+- **Bootstrap Peer ID**: `12D3KooWC688bzHi7djbkensGQMABzX9tY41LNasgd3g3FdwqQn7` (Server Beta actual PeerID as of 2025-11-18)
+- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWC688bzHi7djbkensGQMABzX9tY41LNasgd3g3FdwqQn7`
 - **Network ID**: `testnet-phase2`
 - **Gossipsub Topics**:
   - `/qnk/testnet-phase2/blocks` - Block propagation
