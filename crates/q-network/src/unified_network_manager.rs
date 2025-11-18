@@ -690,6 +690,21 @@ impl UnifiedNetworkManager {
                     warn!("   → Node will still attempt discovery via mDNS and identify protocol");
                 }
             }
+
+            // 🔧 v1.0.17-beta: DIAGNOSTIC - Also manually dial bootstrap peers
+            // This helps us see connection errors immediately instead of waiting for Kademlia
+            info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers for immediate error visibility", bootstrap_count);
+            for (peer_id, addr) in &bootstrap_peer_map {
+                info!("📡 [BOOTSTRAP-DIAG] Manually dialing: {} at {}", peer_id, addr);
+                match swarm.dial(addr.clone()) {
+                    Ok(_) => {
+                        info!("✅ [BOOTSTRAP-DIAG] Dial initiated for {}", peer_id);
+                    }
+                    Err(e) => {
+                        error!("❌ [BOOTSTRAP-DIAG] Failed to dial {}: {:?}", peer_id, e);
+                    }
+                }
+            }
         } else {
             info!("ℹ️  [BOOTSTRAP] No bootstrap peers to dial - relying on mDNS/identify discovery");
         }
