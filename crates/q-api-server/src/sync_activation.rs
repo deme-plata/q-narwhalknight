@@ -79,8 +79,18 @@ impl TimeoutBasedSyncActivation {
             Some(delta) => delta > self.config.retry_interval,
         };
 
+        // 🔧 v1.0.18-beta: CRITICAL FIX - Inverted logic bug
+        // If node is clearly behind (network_height > current_height + 5),
+        // we should IMMEDIATELY activate sync, not return false!
+        // Previous bug: returned false when clearly_behind=true, preventing all sync!
         if clearly_behind {
-            return false;
+            debug!(
+                "🚀 [SYNC ACTIVATION] Node clearly behind: current={}, network={}, gap={}",
+                current_height,
+                network_height,
+                network_height.saturating_sub(current_height)
+            );
+            return true;  // ✅ FIX: Return TRUE to activate sync when behind!
         }
 
         let have_enough_peers = peer_count >= self.config.min_peers;
