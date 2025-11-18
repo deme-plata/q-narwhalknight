@@ -7062,14 +7062,16 @@ async fn main() -> anyhow::Result<()> {
                     );
 
                     // ✅ DEEPSEEK + KIMI AI FIX: Check peer availability before timeout sync
-                    // Don't blindly sync to current_height + 100 if no peers have those blocks
+                    // 🔧 v1.0.18-beta: CRITICAL FIX #2 - Sync to network height, not just +100!
+                    // Previous bug: (current_height + 100).min(network_height) = max 100 blocks
+                    // Correct: network_height.min(current_height + 10000) = sync to network (capped for safety)
                     let target_height = if network_height_snapshot > current_height {
-                        // If we know network height, sync to that (capped at +100 for safety)
-                        (current_height + 100).min(network_height_snapshot)
+                        // Sync to network height (cap at +10000 per batch for safety)
+                        network_height_snapshot.min(current_height + 10000)
                     } else {
-                        // If network_height is unknown (0), try conservative +100
+                        // If network_height is unknown (0), try conservative +1000
                         // This will fail gracefully if peers don't have blocks
-                        current_height + 100
+                        current_height + 1000
                     };
 
                     warn!(
