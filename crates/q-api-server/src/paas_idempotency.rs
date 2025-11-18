@@ -321,8 +321,8 @@ pub async fn idempotency_middleware(
 
             // Build response from cache
             let mut response = Response::new(Body::from(cached.body));
-            *response.status_mut() = StatusCode::from_u16(cached.status_code)
-                .unwrap_or(StatusCode::OK);
+            *response.status_mut() =
+                StatusCode::from_u16(cached.status_code).unwrap_or(StatusCode::OK);
 
             // Add cached headers
             for (name, value) in cached.headers {
@@ -335,10 +335,9 @@ pub async fn idempotency_middleware(
             }
 
             // Add idempotency replay header
-            response.headers_mut().insert(
-                "X-Idempotency-Replay",
-                "true".parse().unwrap(),
-            );
+            response
+                .headers_mut()
+                .insert("X-Idempotency-Replay", "true".parse().unwrap());
 
             Ok(response)
         }

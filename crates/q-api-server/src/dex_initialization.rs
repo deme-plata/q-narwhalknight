@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use q_dex::QuantumDexManager;
-use q_storage::{token_registry::TokenRegistry, price_history::PriceHistoryManager, QStorage};
+use q_storage::{price_history::PriceHistoryManager, token_registry::TokenRegistry, QStorage};
 use q_types::{NodeId, Phase};
 use std::sync::Arc;
 use tracing::info;

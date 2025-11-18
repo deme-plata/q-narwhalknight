@@ -1,3 +1,4 @@
+use crate::AppState;
 /// High-Performance Binary Protocol for 1M+ TPS
 ///
 /// Replaces HTTP/JSON with binary MessagePack protocol
@@ -6,16 +7,9 @@
 /// Latency breakdown:
 /// - JSON (before): 3.0ms per tx → 333 TPS
 /// - Binary (after): 0.003ms per tx → 333,333 TPS
-
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
-use std::sync::Arc;
-use crate::AppState;
+use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse};
 use q_types::{Transaction, TxHash, TxStatus};
+use std::sync::Arc;
 
 /// Binary transaction batch for high-performance ingestion
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -41,8 +35,8 @@ pub async fn submit_binary_transaction(
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Deserialize from MessagePack (10x faster than JSON)
-    let transaction: Transaction = rmp_serde::from_slice(&body)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let transaction: Transaction =
+        rmp_serde::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let tx_hash = transaction.hash();
 
@@ -58,8 +52,8 @@ pub async fn submit_binary_transaction(
         rejected: 0,
     };
 
-    let response_bytes = rmp_serde::to_vec(&response)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let response_bytes =
+        rmp_serde::to_vec(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::OK, response_bytes))
 }
@@ -78,18 +72,25 @@ pub async fn submit_binary_batch(
     let start_time = std::time::Instant::now();
 
     // Deserialize batch from MessagePack
-    let batch: BinaryTransactionBatch = rmp_serde::from_slice(&body)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let batch: BinaryTransactionBatch =
+        rmp_serde::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Validate batch size (allow up to 50K transactions)
     const MAX_BATCH_SIZE: usize = 50_000;
     if batch.transactions.len() > MAX_BATCH_SIZE {
-        tracing::warn!("Batch size {} exceeds maximum {}", batch.transactions.len(), MAX_BATCH_SIZE);
+        tracing::warn!(
+            "Batch size {} exceeds maximum {}",
+            batch.transactions.len(),
+            MAX_BATCH_SIZE
+        );
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     let batch_size = batch.transactions.len();
-    tracing::info!("📦 Processing binary batch with SIMD verification: {} transactions", batch_size);
+    tracing::info!(
+        "📦 Processing binary batch with SIMD verification: {} transactions",
+        batch_size
+    );
 
     let mut tx_hashes = Vec::with_capacity(batch_size);
     let mut accepted = 0;
@@ -98,10 +99,15 @@ pub async fn submit_binary_batch(
     // IMMEDIATE SIMD BATCH SIGNATURE VERIFICATION (8x faster with TRUE PARALLEL)
     // ============================================================================
     if let Some(simd_engine) = &state.simd_crypto_engine {
-        tracing::info!("🔐 SIMD batch signature verification: {} transactions", batch_size);
+        tracing::info!(
+            "🔐 SIMD batch signature verification: {} transactions",
+            batch_size
+        );
 
         // Prepare signatures, messages, and public keys for batch verification
-        let signatures: Vec<q_types::Signature> = batch.transactions.iter()
+        let signatures: Vec<q_types::Signature> = batch
+            .transactions
+            .iter()
             .filter_map(|tx| {
                 if tx.signature.len() == 64 {
                     let sig_array: &[u8; 64] = tx.signature.as_slice().try_into().ok()?;
@@ -111,23 +117,36 @@ pub async fn submit_binary_batch(
                 }
             })
             .collect();
-        let public_keys: Vec<q_types::PublicKey> = batch.transactions.iter()
+        let public_keys: Vec<q_types::PublicKey> = batch
+            .transactions
+            .iter()
             .filter_map(|tx| q_types::PublicKey::from_bytes(&tx.from).ok())
             .collect();
-        let messages: Vec<Vec<u8>> = batch.transactions.iter().map(|tx| {
-            // Create canonical transaction message for verification
-            postcard::to_allocvec(&(tx.from, tx.to, tx.amount, tx.nonce)).unwrap_or_default()
-        }).collect();
+        let messages: Vec<Vec<u8>> = batch
+            .transactions
+            .iter()
+            .map(|tx| {
+                // Create canonical transaction message for verification
+                postcard::to_allocvec(&(tx.from, tx.to, tx.amount, tx.nonce)).unwrap_or_default()
+            })
+            .collect();
         let message_refs: Vec<&[u8]> = messages.iter().map(|m| m.as_slice()).collect();
 
         // TRUE PARALLEL SIMD verification (8x faster than sequential)
         let verification_start = std::time::Instant::now();
-        match simd_engine.batch_verify_signatures(&signatures, &message_refs, &public_keys).await {
+        match simd_engine
+            .batch_verify_signatures(&signatures, &message_refs, &public_keys)
+            .await
+        {
             Ok(result) => {
                 let verification_time = verification_start.elapsed();
-                tracing::info!("✅ SIMD verification: {}/{} valid in {:?} ({:.0} sigs/sec)",
-                               result.valid_signatures, result.total_signatures,
-                               verification_time, result.throughput_sigs_per_sec);
+                tracing::info!(
+                    "✅ SIMD verification: {}/{} valid in {:?} ({:.0} sigs/sec)",
+                    result.valid_signatures,
+                    result.total_signatures,
+                    verification_time,
+                    result.throughput_sigs_per_sec
+                );
 
                 // Only accept valid transactions
                 for (tx, valid_idx) in batch.transactions.iter().zip(0..) {
@@ -140,9 +159,12 @@ pub async fn submit_binary_batch(
                     } else {
                         // Mark invalid
                         let tx_hash = tx.hash();
-                        state.tx_status.insert(tx_hash, TxStatus::Failed {
-                            error: "Invalid signature".to_string()
-                        });
+                        state.tx_status.insert(
+                            tx_hash,
+                            TxStatus::Failed {
+                                error: "Invalid signature".to_string(),
+                            },
+                        );
                     }
                 }
             }
@@ -173,8 +195,13 @@ pub async fn submit_binary_batch(
     let elapsed = start_time.elapsed();
     let tps = batch_size as f64 / elapsed.as_secs_f64();
 
-    tracing::info!("✅ Binary batch processed: {} accepted, {} rejected, in {:?} ({:.0} TPS)",
-                   accepted, batch_size - accepted, elapsed, tps);
+    tracing::info!(
+        "✅ Binary batch processed: {} accepted, {} rejected, in {:?} ({:.0} TPS)",
+        accepted,
+        batch_size - accepted,
+        elapsed,
+        tps
+    );
 
     // Serialize response
     let response = BinaryResponse {
@@ -184,8 +211,8 @@ pub async fn submit_binary_batch(
         rejected: 0,
     };
 
-    let response_bytes = rmp_serde::to_vec(&response)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let response_bytes =
+        rmp_serde::to_vec(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::OK, response_bytes))
 }
@@ -201,10 +228,7 @@ pub async fn websocket_binary_handler(
     ws.on_upgrade(|socket| handle_websocket_binary(socket, state))
 }
 
-async fn handle_websocket_binary(
-    mut socket: axum::extract::ws::WebSocket,
-    state: Arc<AppState>,
-) {
+async fn handle_websocket_binary(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
 
@@ -299,10 +323,24 @@ mod tests {
         let mp_bytes = rmp_serde::to_vec(&tx).unwrap();
         let mp_time = mp_start.elapsed();
 
-        println!("JSON size: {} bytes, time: {:?}", json_bytes.len(), json_time);
-        println!("MessagePack size: {} bytes, time: {:?}", mp_bytes.len(), mp_time);
-        println!("Size reduction: {:.1}%", (1.0 - mp_bytes.len() as f64 / json_bytes.len() as f64) * 100.0);
-        println!("Speed improvement: {:.1}x", json_time.as_nanos() as f64 / mp_time.as_nanos() as f64);
+        println!(
+            "JSON size: {} bytes, time: {:?}",
+            json_bytes.len(),
+            json_time
+        );
+        println!(
+            "MessagePack size: {} bytes, time: {:?}",
+            mp_bytes.len(),
+            mp_time
+        );
+        println!(
+            "Size reduction: {:.1}%",
+            (1.0 - mp_bytes.len() as f64 / json_bytes.len() as f64) * 100.0
+        );
+        println!(
+            "Speed improvement: {:.1}x",
+            json_time.as_nanos() as f64 / mp_time.as_nanos() as f64
+        );
 
         // MessagePack should be smaller and faster
         assert!(mp_bytes.len() < json_bytes.len());

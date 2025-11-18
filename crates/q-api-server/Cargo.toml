@@ -16,7 +16,7 @@ path = "src/main.rs"
 # path = "src/bin/phantom-node.rs"
 
 [dependencies]
-q-types = { path = "../q-types" }
+q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
 q-aegis-ql = { path = "../q-aegis-ql" }
 libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }

@@ -1,3 +1,7 @@
+/// Q-NarwhalKnight API Server - Version v1.0.17-beta
+/// Features: Enhanced HTTP server diagnostics (multi-AI consultation)
+pub const VERSION: &str = "v1.0.17-beta";
+
 // DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
 // DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
 // DEACTIVATED: use q_dns_phantom::DNSPhantomNetwork;
@@ -8,8 +12,8 @@ use q_types::*;
 use q_wallet::{MemoryWalletStore, WalletManager};
 
 // ZK Privacy Components - ✅ ENABLED
-use q_zk_stark::StarkSystem;
 use q_zk_snark::UniversalSNARK;
+use q_zk_stark::StarkSystem;
 
 // Performance & Scaling Components
 // use q_sharding::{ShardCoordinator, ShardManager}; // Temporarily disabled
@@ -17,9 +21,9 @@ use q_zk_snark::UniversalSNARK;
 
 // Consensus & DAG Components
 use q_dag_knight::{DAGKnightConsensus, QuantumAnchorElection};
-use q_narwhal_core::{NarwhalCore, ReliableBroadcast};
 use q_narwhal_core::production_mempool::ProductionMempool;
-use q_resonance::{KParameterAnalyzer, ResonanceCoordinator, KParameterMetrics, PhaseTransition};
+use q_narwhal_core::{NarwhalCore, ReliableBroadcast};
+use q_resonance::{KParameterAnalyzer, KParameterMetrics, PhaseTransition, ResonanceCoordinator};
 use q_vdf::{QuantumVDF, VDFProof};
 
 // Crypto & Security
@@ -36,8 +40,8 @@ use q_quillon_bank::QuillonBankSystem; // ✅ ENABLED - Full quantum banking sys
 // Network & Infrastructure
 use q_tor_circuit::{CircuitPool, DedicatedCircuitManager};
 // use q_robot_control::{RobotFleet, SwarmIntelligence}; // Temporarily disabled
-use q_network::{CryptoProvider, QuantumNetwork};
 use libp2p::PeerId;
+use q_network::{CryptoProvider, QuantumNetwork};
 
 // Plugin System
 use q_plugin_system::{PluginManager, PluginSystem, PluginSystemConfig};
@@ -50,55 +54,176 @@ use q_vm::contracts::{ContractRegistry, OrobitSmartContractEcosystem};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 use uuid::Uuid;
 
+// ✅ v1.0.17-beta DEADLOCK FIX: Lock timeout helpers to prevent deadlocks
+use anyhow::{Context, Result};
+use tokio::time::{timeout, Duration};
+
+/// Acquire a Mutex with timeout to prevent deadlocks
+///
+/// # Arguments
+/// * `mutex` - The mutex to acquire
+/// * `timeout_secs` - Timeout in seconds (recommended: 5-30s)
+/// * `lock_name` - Human-readable lock name for diagnostics
+///
+/// # Returns
+/// * `Ok(guard)` - Successfully acquired lock
+/// * `Err(anyhow::Error)` - Timeout occurred, likely deadlock
+///
+/// # Panics
+/// Does NOT panic - returns error for caller to handle
+pub async fn lock_with_timeout<'a, T>(
+    mutex: &'a tokio::sync::Mutex<T>,
+    timeout_secs: u64,
+    lock_name: &str,
+) -> Result<tokio::sync::MutexGuard<'a, T>> {
+    match timeout(Duration::from_secs(timeout_secs), mutex.lock()).await {
+        Ok(guard) => {
+            trace!("🔓 Acquired {} lock successfully", lock_name);
+            Ok(guard)
+        }
+        Err(_) => {
+            error!(
+                "🚨 TIMEOUT: Failed to acquire {} lock within {}s",
+                lock_name, timeout_secs
+            );
+            error!("💀 Likely deadlock detected - check lock ordering and hold durations");
+            error!("📊 Lock timeout metrics should be monitored in production");
+            anyhow::bail!(
+                "Lock timeout on {} after {}s - potential deadlock",
+                lock_name,
+                timeout_secs
+            );
+        }
+    }
+}
+
+/// Acquire a RwLock write lock with timeout
+///
+/// # Arguments
+/// * `rwlock` - The RwLock to acquire
+/// * `timeout_secs` - Timeout in seconds (recommended: 5-30s)
+/// * `lock_name` - Human-readable lock name for diagnostics
+///
+/// # Returns
+/// * `Ok(guard)` - Successfully acquired write lock
+/// * `Err(anyhow::Error)` - Timeout occurred, likely deadlock
+pub async fn write_lock_with_timeout<'a, T>(
+    rwlock: &'a tokio::sync::RwLock<T>,
+    timeout_secs: u64,
+    lock_name: &str,
+) -> Result<tokio::sync::RwLockWriteGuard<'a, T>> {
+    match timeout(Duration::from_secs(timeout_secs), rwlock.write()).await {
+        Ok(guard) => {
+            trace!("🔓 Acquired {} write lock successfully", lock_name);
+            Ok(guard)
+        }
+        Err(_) => {
+            error!(
+                "🚨 TIMEOUT: Failed to acquire {} write lock within {}s",
+                lock_name, timeout_secs
+            );
+            error!("💀 Likely deadlock detected - check lock ordering and hold durations");
+            error!("📊 Write lock timeout metrics should be monitored in production");
+            anyhow::bail!(
+                "Write lock timeout on {} after {}s - potential deadlock",
+                lock_name,
+                timeout_secs
+            );
+        }
+    }
+}
+
+/// Acquire a RwLock read lock with timeout
+///
+/// # Arguments
+/// * `rwlock` - The RwLock to acquire
+/// * `timeout_secs` - Timeout in seconds (recommended: 5-30s)
+/// * `lock_name` - Human-readable lock name for diagnostics
+///
+/// # Returns
+/// * `Ok(guard)` - Successfully acquired read lock
+/// * `Err(anyhow::Error)` - Timeout occurred, likely deadlock
+pub async fn read_lock_with_timeout<'a, T>(
+    rwlock: &'a tokio::sync::RwLock<T>,
+    timeout_secs: u64,
+    lock_name: &str,
+) -> Result<tokio::sync::RwLockReadGuard<'a, T>> {
+    match timeout(Duration::from_secs(timeout_secs), rwlock.read()).await {
+        Ok(guard) => {
+            trace!("🔓 Acquired {} read lock successfully", lock_name);
+            Ok(guard)
+        }
+        Err(_) => {
+            error!(
+                "🚨 TIMEOUT: Failed to acquire {} read lock within {}s",
+                lock_name, timeout_secs
+            );
+            error!("💀 Likely deadlock detected - check lock ordering and hold durations");
+            error!("📊 Read lock timeout metrics should be monitored in production");
+            anyhow::bail!(
+                "Read lock timeout on {} after {}s - potential deadlock",
+                lock_name,
+                timeout_secs
+            );
+        }
+    }
+}
+
 pub mod config;
-pub mod console_viz;  // Beautiful animated console visualization
-// v0.9.1-beta: DEX modules commented out (q_dex/q_oracle crates not yet implemented)
-// pub mod dex_integration_api;
-// #[cfg(test)]
-// pub mod dex_integration_tests;
-// pub mod dex_handlers;  // ✅ NEW - Dynamic token registry & price history API
-// pub mod dex_initialization;  // ✅ NEW - DEX component initialization
-// pub mod liquidity_api;  // Liquidity provision API
-pub mod quillon_bank_api;  // ✅ ENABLED - Full Quillon Bank CDP system
-pub mod cdp_simple;  // Simple CDP system for QUGUSD minting (fallback, can be removed)
+pub mod console_viz; // Beautiful animated console visualization
+                     // v0.9.1-beta: DEX modules commented out (q_dex/q_oracle crates not yet implemented)
+                     // pub mod dex_integration_api;
+                     // #[cfg(test)]
+                     // pub mod dex_integration_tests;
+                     // pub mod dex_handlers;  // ✅ NEW - Dynamic token registry & price history API
+                     // pub mod dex_initialization;  // ✅ NEW - DEX component initialization
+                     // pub mod liquidity_api;  // Liquidity provision API
+pub mod aegis_auth_middleware; // ✅ ENABLED - AEGIS-QL post-quantum authentication for founder operations
+pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
+pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
+pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod database_replication_bridge; // Bridge between IPFS replication and gossipsub
+pub mod dex_handlers; // ✅ ENABLED - DEX HTTP API handlers
+pub mod dex_initialization; // ✅ ENABLED - DEX component initialization
+pub mod governance_api; // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
 pub mod handlers;
+pub mod hashrate_tracker; // ✅ v1.0.16-beta - Network hashrate tracking for adaptive security
+pub mod high_performance_server; // HTTP/2 server optimized for 1M+ TPS
+pub mod oauth2_provider; // ✅ ENABLED - OAuth2 provider for third-party integrations
 pub mod p2p_listener;
+pub mod paas_admin_api; // ✅ ENABLED - PaaS admin endpoints for CLI management
+pub mod paas_api_keys; // ✅ ENABLED - API key management with argon2id hashing
+pub mod paas_audit; // ✅ ENABLED - Audit logging and distributed tracing
+pub mod paas_auth; // ✅ ENABLED - PaaS authentication and rate limiting
+pub mod paas_billing; // ✅ ENABLED - Atomic billing with pre-charge and reserve
+pub mod paas_billing_v2; // ✅ ENABLED - Atomic billing v2 with Grok improvements
+pub mod paas_idempotency; // ✅ ENABLED - Idempotency support for safe retries
+pub mod paas_pricing; // ✅ ENABLED - Dynamic USD pricing with oracle integration
+pub mod payment_api; // ✅ ENABLED - Stripe payment processing with async-stripe
+pub mod privacy_service_api; // ✅ ENABLED - Privacy-as-a-Service (PaaS) enterprise API
+pub mod quillon_bank_api; // ✅ ENABLED - Full Quillon Bank CDP system
+pub mod security_tier_governance; // ✅ v1.0.16-beta - Community governance for VDF security tiers
+pub mod storage_api; // IPFS-RocksDB decentralized storage for database backups
 pub mod streaming;
-pub mod binary_protocol;  // High-performance binary ingestion for 1M+ TPS
-pub mod high_performance_server;  // HTTP/2 server optimized for 1M+ TPS
-pub mod websocket_stream;  // WebSocket streaming for 1M+ TPS (zero HTTP overhead)
-pub mod wallet_auth;  // Signature-based wallet authentication for privacy
-pub mod storage_api;  // IPFS-RocksDB decentralized storage for database backups
-pub mod database_replication_bridge;  // Bridge between IPFS replication and gossipsub
-pub mod payment_api;  // ✅ ENABLED - Stripe payment processing with async-stripe
-pub mod oauth2_provider;  // ✅ ENABLED - OAuth2 provider for third-party integrations
-pub mod privacy_service_api;  // ✅ ENABLED - Privacy-as-a-Service (PaaS) enterprise API
-pub mod paas_auth;  // ✅ ENABLED - PaaS authentication and rate limiting
-pub mod paas_api_keys;  // ✅ ENABLED - API key management with argon2id hashing
-pub mod paas_pricing;  // ✅ ENABLED - Dynamic USD pricing with oracle integration
-pub mod paas_billing;  // ✅ ENABLED - Atomic billing with pre-charge and reserve
-pub mod paas_billing_v2;  // ✅ ENABLED - Atomic billing v2 with Grok improvements
-pub mod paas_idempotency;  // ✅ ENABLED - Idempotency support for safe retries
-pub mod paas_audit;  // ✅ ENABLED - Audit logging and distributed tracing
-pub mod paas_admin_api;  // ✅ ENABLED - PaaS admin endpoints for CLI management
-pub mod aegis_auth_middleware;  // ✅ ENABLED - AEGIS-QL post-quantum authentication for founder operations
-pub mod chat_api;  // ✅ ENABLED - AI chat API with privacy-first distributed inference
-pub mod dex_initialization;  // ✅ ENABLED - DEX component initialization
-pub mod dex_handlers;  // ✅ ENABLED - DEX HTTP API handlers
-pub mod governance_api;  // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
-// pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
-// io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
+pub mod sync_activation; // ✅ v1.0.15-beta - Timeout-based sync activation
+pub mod wallet_auth; // Signature-based wallet authentication for privacy
+pub mod websocket_stream; // WebSocket streaming for 1M+ TPS (zero HTTP overhead)
+pub mod zcash_api;
+pub mod zcash_rpc; // ✅ v1.0.15-beta - Zcash RPC client for Zebra node integration // ✅ v1.0.15-beta - Zcash wallet API endpoints (address, balance, send)
+                                                                                    // pub mod sync_activation;  // ❌ DUPLICATE - Already declared on line 73
+                                                                                    // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
+                                                                                    // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
+pub mod block_producer; // 🏗️ Block producer - aggregates mining solutions into QBlocks
 #[cfg(target_os = "linux")]
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
-pub mod parallel_workers; // 16x parallel worker pool for high TPS
-pub mod block_producer;  // 🏗️ Block producer - aggregates mining solutions into QBlocks
-pub mod lockfree_producer;  // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
+pub mod lockfree_producer;
+pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
 
 pub use config::Config;
-pub use console_viz::{ConsoleVisualizer, ConsensusStats, update_stats};
+pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
 pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent};
 
 /// Faucet request tracking for IP-based rate limiting
@@ -152,11 +277,11 @@ pub struct PendingMixingRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiquidityPool {
     pub pool_id: String,
-    pub token0: String,  // Native QUG or token contract address
-    pub token1: String,  // Token contract address
+    pub token0: String, // Native QUG or token contract address
+    pub token1: String, // Token contract address
     pub reserve0: u64,
     pub reserve1: u64,
-    pub provider: [u8; 32],  // Wallet address that provided liquidity
+    pub provider: [u8; 32], // Wallet address that provided liquidity
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -212,7 +337,8 @@ impl FaucetState {
     pub fn is_ip_rate_limited(&self, ip: &str) -> bool {
         let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         if let Some(requests) = self.ip_requests.get(ip) {
-            let recent_requests = requests.iter()
+            let recent_requests = requests
+                .iter()
                 .filter(|req| req.timestamp > one_hour_ago)
                 .count();
             return recent_requests >= 10;
@@ -242,7 +368,8 @@ impl FaucetState {
     pub fn analyze_abuse_patterns(&mut self, ip: &str) -> bool {
         let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         if let Some(requests) = self.ip_requests.get(ip) {
-            let recent_requests: Vec<_> = requests.iter()
+            let recent_requests: Vec<_> = requests
+                .iter()
                 .filter(|req| req.timestamp > one_hour_ago)
                 .collect();
 
@@ -256,14 +383,31 @@ impl FaucetState {
 
                 // Calculate address pattern score (random vs sequential patterns)
                 let addresses: Vec<_> = recent_requests.iter().map(|r| &r.address).collect();
-                let unique_addresses = addresses.iter().collect::<std::collections::HashSet<_>>().len();
+                let unique_addresses = addresses
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
                 pattern.address_pattern_score = if unique_addresses > 1 {
                     // Check for sequential patterns in addresses
                     let mut sequential_score = 0.0;
                     for i in 1..addresses.len() {
                         if let (Ok(prev), Ok(curr)) = (
-                            u64::from_str_radix(&addresses[i-1].replace("qnk", "").chars().take(16).collect::<String>(), 16),
-                            u64::from_str_radix(&addresses[i].replace("qnk", "").chars().take(16).collect::<String>(), 16)
+                            u64::from_str_radix(
+                                &addresses[i - 1]
+                                    .replace("qnk", "")
+                                    .chars()
+                                    .take(16)
+                                    .collect::<String>(),
+                                16,
+                            ),
+                            u64::from_str_radix(
+                                &addresses[i]
+                                    .replace("qnk", "")
+                                    .chars()
+                                    .take(16)
+                                    .collect::<String>(),
+                                16,
+                            ),
                         ) {
                             if curr.saturating_sub(prev) <= 10 {
                                 sequential_score += 1.0;
@@ -279,15 +423,19 @@ impl FaucetState {
                 if recent_requests.len() >= 3 {
                     let mut intervals = Vec::new();
                     for i in 1..recent_requests.len() {
-                        let interval = recent_requests[i].timestamp
-                            .signed_duration_since(recent_requests[i-1].timestamp)
+                        let interval = recent_requests[i]
+                            .timestamp
+                            .signed_duration_since(recent_requests[i - 1].timestamp)
                             .num_seconds();
                         intervals.push(interval.abs());
                     }
-                    let avg_interval = intervals.iter().sum::<i64>() as f64 / intervals.len() as f64;
-                    let variance = intervals.iter()
+                    let avg_interval =
+                        intervals.iter().sum::<i64>() as f64 / intervals.len() as f64;
+                    let variance = intervals
+                        .iter()
                         .map(|&x| (x as f64 - avg_interval).powi(2))
-                        .sum::<f64>() / intervals.len() as f64;
+                        .sum::<f64>()
+                        / intervals.len() as f64;
                     pattern.timing_regularity_score = 1.0 / (1.0 + variance / 100.0);
                 }
 
@@ -318,10 +466,11 @@ impl FaucetState {
             amount,
         };
 
-        self.ip_requests.entry(ip.to_string())
+        self.ip_requests
+            .entry(ip.to_string())
             .or_insert_with(Vec::new)
             .push(request);
-        
+
         self.address_requests.insert(address.to_string(), now);
         self.daily_total_distributed += amount;
     }
@@ -387,12 +536,15 @@ impl Default for MiningStatistics {
 impl MiningStatistics {
     /// Update miner statistics with new submission
     pub fn update_miner(&mut self, miner_address: String, hash_rate: f64) {
-        let stats = self.active_miners.entry(miner_address.clone()).or_insert(MinerStats {
-            address: miner_address,
-            last_hashrate: 0.0,
-            last_update: std::time::Instant::now(),
-            total_solutions: 0,
-        });
+        let stats = self
+            .active_miners
+            .entry(miner_address.clone())
+            .or_insert(MinerStats {
+                address: miner_address,
+                last_hashrate: 0.0,
+                last_update: std::time::Instant::now(),
+                total_solutions: 0,
+            });
 
         stats.last_hashrate = hash_rate;
         stats.last_update = std::time::Instant::now();
@@ -405,14 +557,14 @@ impl MiningStatistics {
         // Clean up stale miners (no activity in last 5 minutes)
         let now = std::time::Instant::now();
         if now.duration_since(self.last_cleanup).as_secs() > 60 {
-            self.active_miners.retain(|_, stats| {
-                now.duration_since(stats.last_update).as_secs() < 300
-            });
+            self.active_miners
+                .retain(|_, stats| now.duration_since(stats.last_update).as_secs() < 300);
             self.last_cleanup = now;
         }
 
         // Sum hash rates from all active miners
-        self.active_miners.values()
+        self.active_miners
+            .values()
             .map(|stats| stats.last_hashrate)
             .sum()
     }
@@ -420,7 +572,8 @@ impl MiningStatistics {
     /// Get count of active miners
     pub fn active_miner_count(&self) -> usize {
         let now = std::time::Instant::now();
-        self.active_miners.values()
+        self.active_miners
+            .values()
             .filter(|stats| now.duration_since(stats.last_update).as_secs() < 300)
             .count()
     }
@@ -509,7 +662,8 @@ pub struct AppState {
     pub bep44_discovery: Option<Arc<()>>, // DEACTIVATED placeholder
     pub tor_client: Option<Arc<QTorClient>>,
     pub network_manager: Option<Arc<q_network::NetworkManager>>,
-    pub production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
+    pub production_peer_discovery:
+        Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
 
     // libp2p-based zero-config peer discovery (mDNS + Gossipsub)
     pub libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
@@ -639,7 +793,8 @@ pub struct AppState {
     pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
 
     // Quillon Bank Loan Applications - Pending loan applications with RocksDB persistence
-    pub pending_loan_applications: Arc<RwLock<HashMap<String, crate::quillon_bank_api::LoanApplication>>>,
+    pub pending_loan_applications:
+        Arc<RwLock<HashMap<String, crate::quillon_bank_api::LoanApplication>>>,
 
     // Advanced Infrastructure
     pub tor_circuit_manager: Option<Arc<DedicatedCircuitManager>>,
@@ -668,7 +823,9 @@ pub struct AppState {
     pub oauth2_storage: Arc<RwLock<oauth2_provider::OAuth2Storage>>,
 
     // AI Inference Engine - Privacy-first distributed inference with KV-cache (OLD - slow)
-    pub inference_engine: Option<Arc<tokio::sync::Mutex<q_ai_inference::distributed_cache::DistributedInferenceWithCache>>>,
+    pub inference_engine: Option<
+        Arc<tokio::sync::Mutex<q_ai_inference::distributed_cache::DistributedInferenceWithCache>>,
+    >,
 
     // High-performance mistral.rs engine (10-100x faster, <2s first token)
     pub mistralrs_engine: Option<Arc<q_ai_inference::MistralRsEngine>>,
@@ -681,7 +838,8 @@ pub struct AppState {
 
     // 🌉 v0.9.6-beta: TURBO SYNC PEER BRIDGE - Synchronizes libp2p peers to TurboSync registry
     // Fixes: "No peers available with target height" even when peers connected via libp2p
-    pub peer_bridge: Option<Arc<q_storage::TurboSyncPeerBridge>>,
+    // TEMPORARILY DISABLED v1.0.15: Circular dependency with sync_activation module
+    // pub peer_bridge: Option<Arc<q_storage::TurboSyncPeerBridge>>,
 
     // 🔐 AEGIS-KL MINER AUTHENTICATION - Post-Quantum Fork Protection (v0.5.7+)
     // Ensures only authorized miners with valid AEGIS-KL signatures can submit solutions
@@ -701,6 +859,21 @@ pub struct AppState {
     // Eliminates RwLock contention and amortizes RocksDB compaction overhead
     // AI Consensus (5/5 experts): Root cause = blocking RocksDB I/O under async RwLock
     pub async_storage: Option<Arc<q_storage::AsyncStorageEngine>>,
+
+    // ✨ v1.0.16-beta: PQC Validator Keypair - Post-Quantum Block Signing
+    // Loaded from --validator-key CLI argument for PQC signature generation
+    // Contains Ed25519 (classical) + Dilithium5 (post-quantum) keys
+    pub validator_keypair: Option<Arc<q_types::ValidatorKeypair>>,
+
+    // ✨ v1.0.16-beta: Validator Public Key Registry - For PQC signature verification
+    // Maps NodeId → Public keys (Ed25519 + Dilithium5) for all known validators
+    // Used to verify spectral signatures on incoming blocks
+    pub validator_key_registry: Arc<RwLock<q_types::ValidatorKeyRegistry>>,
+
+    // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Breaks "stuck at genesis" deadlock
+    // Forces sync after timeout even when network_height=0 (no peer announcements received)
+    // Solves: Node stuck at 12,923 waiting forever for gossipsub peer height announcements
+    pub sync_activator: Option<Arc<crate::sync_activation::TimeoutBasedSyncActivation>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -716,8 +889,8 @@ unsafe impl Sync for AppState {}
 impl AppState {
     /// Load founder's AEGIS-QL public key from file or environment
     fn load_founder_aegis_public_key() -> anyhow::Result<q_aegis_ql::PublicKey> {
-        use std::path::PathBuf;
         use anyhow::Context;
+        use std::path::PathBuf;
 
         // Try environment variable first
         if let Ok(key_path_env) = std::env::var("QUILLON_FOUNDER_AEGIS_PUBKEY") {
@@ -742,7 +915,8 @@ impl AppState {
 
         // Generate a deterministic key for development (NOT SECURE)
         let mut aegis = q_aegis_ql::AegisQL::new();
-        let (public_key, _secret_key) = aegis.generate_keypair()
+        let (public_key, _secret_key) = aegis
+            .generate_keypair()
             .map_err(|e| anyhow::anyhow!("Failed to generate development key: {:?}", e))?;
 
         Ok(public_key)
@@ -755,10 +929,13 @@ impl AppState {
         let key_bytes = std::fs::read(path)
             .with_context(|| format!("Failed to read AEGIS public key from {}", path.display()))?;
 
-        let public_key: q_aegis_ql::PublicKey = bincode::deserialize(&key_bytes)
-            .context("Failed to deserialize AEGIS public key")?;
+        let public_key: q_aegis_ql::PublicKey =
+            bincode::deserialize(&key_bytes).context("Failed to deserialize AEGIS public key")?;
 
-        tracing::info!("✅ Loaded founder AEGIS-QL public key from {}", path.display());
+        tracing::info!(
+            "✅ Loaded founder AEGIS-QL public key from {}",
+            path.display()
+        );
 
         Ok(public_key)
     }
@@ -787,7 +964,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "data/q-narwhal-hot".to_string()),
             enable_metrics: true,
-            sync_writes: true,  // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
+            sync_writes: true, // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
             cache_size_mb: 256,
             max_open_files: 1000,
         };
@@ -833,7 +1010,9 @@ impl AppState {
                     tracing::error!("   1. Check disk health: smartctl -a /dev/sdX");
                     tracing::error!("   2. Review logs for crash/OOM events");
                     tracing::error!("   3. Restore from backup if available");
-                    tracing::error!("   4. Or reset (testnet only): repair-database --reset-pointer=0");
+                    tracing::error!(
+                        "   4. Or reset (testnet only): repair-database --reset-pointer=0"
+                    );
                     tracing::error!("");
                     tracing::error!("   SERVICE WILL NOT START");
                     tracing::error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -849,8 +1028,15 @@ impl AppState {
                     match checker.repair(&report).await {
                         Ok(()) => {
                             tracing::info!("✅ Auto-repair completed successfully");
-                            tracing::info!("   Database repaired: pointer {} → {}", report.pointer_height, report.highest_contiguous);
-                            tracing::info!("   Node will start from height {}", report.highest_contiguous);
+                            tracing::info!(
+                                "   Database repaired: pointer {} → {}",
+                                report.pointer_height,
+                                report.highest_contiguous
+                            );
+                            tracing::info!(
+                                "   Node will start from height {}",
+                                report.highest_contiguous
+                            );
                         }
                         Err(e) => {
                             tracing::error!("❌ Auto-repair failed: {}", e);
@@ -859,7 +1045,10 @@ impl AppState {
                     }
                 } else {
                     // Database healthy
-                    tracing::info!("✅ Database integrity verified: {} blocks", report.highest_contiguous);
+                    tracing::info!(
+                        "✅ Database integrity verified: {} blocks",
+                        report.highest_contiguous
+                    );
                     tracing::info!("   No corruption detected");
                 }
             }
@@ -874,10 +1063,15 @@ impl AppState {
 
         // ✅ HEIGHT RECOVERY FIX (v0.8.5-beta): Repair height pointer before loading height
         // NOTE: v0.9.97-beta comprehensive check above supersedes this, but kept for compatibility
-        tracing::info!("🔧 [v0.8.5] Running legacy height pointer check (superseded by v0.9.97)...");
+        tracing::info!(
+            "🔧 [v0.8.5] Running legacy height pointer check (superseded by v0.9.97)..."
+        );
         match storage_engine.repair_height_pointer().await {
             Ok(repaired_height) => {
-                tracing::info!("✅ [v0.8.5] Legacy check passed: height {}", repaired_height);
+                tracing::info!(
+                    "✅ [v0.8.5] Legacy check passed: height {}",
+                    repaired_height
+                );
             }
             Err(e) => {
                 tracing::warn!("⚠️  [v0.8.5] Legacy check error (non-critical): {}", e);
@@ -892,22 +1086,34 @@ impl AppState {
 
         let initial_height = match storage_engine.get_highest_contiguous_block().await {
             Ok(height) if height > 0 => {
-                tracing::info!("✅ [v0.6.6] SUCCESS: Loaded blockchain state from database: height {}", height);
+                tracing::info!(
+                    "✅ [v0.6.6] SUCCESS: Loaded blockchain state from database: height {}",
+                    height
+                );
                 tracing::info!("✅ [v0.6.6] Node will resume from block {}", height);
                 height
             }
             Ok(zero_height) => {
-                tracing::warn!("⚠️  [v0.6.6] Database returned height {} - no blocks found!", zero_height);
+                tracing::warn!(
+                    "⚠️  [v0.6.6] Database returned height {} - no blocks found!",
+                    zero_height
+                );
                 tracing::warn!("⚠️  [v0.6.6] Database path: {:?}", db_path_for_logging);
                 tracing::warn!("⚠️  [v0.6.6] Starting fresh blockchain at height 0");
-                tracing::warn!("⚠️  [v0.6.6] If you expected blocks to be present, CHECK DATABASE INTEGRITY!");
+                tracing::warn!(
+                    "⚠️  [v0.6.6] If you expected blocks to be present, CHECK DATABASE INTEGRITY!"
+                );
                 0
             }
             Err(e) => {
-                tracing::error!("🚨 [v0.6.6] CRITICAL ERROR: Failed to load blockchain height from database!");
+                tracing::error!(
+                    "🚨 [v0.6.6] CRITICAL ERROR: Failed to load blockchain height from database!"
+                );
                 tracing::error!("🚨 [v0.6.6] Error: {}", e);
                 tracing::error!("🚨 [v0.6.6] Database path: {:?}", db_path_for_logging);
-                tracing::error!("🚨 [v0.6.6] This will cause blockchain reset! Starting at height 0");
+                tracing::error!(
+                    "🚨 [v0.6.6] This will cause blockchain reset! Starting at height 0"
+                );
                 tracing::error!("🚨 [v0.6.6] Node will re-sync from peers (slow but safe)");
                 0
             }
@@ -917,15 +1123,20 @@ impl AppState {
         tracing::info!("🔍 [v0.6.6] Final initial_height: {}", initial_height);
         if initial_height == 0 {
             tracing::warn!("⚠️  [v0.6.6] Blockchain starting at height 0");
-            tracing::warn!("⚠️  [v0.6.6] If this is unexpected, database may be empty or corrupted");
+            tracing::warn!(
+                "⚠️  [v0.6.6] If this is unexpected, database may be empty or corrupted"
+            );
         } else {
-            tracing::info!("✅ [v0.6.6] Blockchain initialized at height {}", initial_height);
+            tracing::info!(
+                "✅ [v0.6.6] Blockchain initialized at height {}",
+                initial_height
+            );
         }
 
         let node_status = NodeStatus {
             node_id,
             current_round: 0,
-            current_height: initial_height,  // ✅ Load from database instead of hardcoded 0
+            current_height: initial_height, // ✅ Load from database instead of hardcoded 0
             connected_peers: 0,
             tx_pool_size: 0,
             is_validator,
@@ -1054,10 +1265,7 @@ impl AppState {
                 // but are NOT added to tx_pool to prevent reprocessing
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load historical transactions from storage: {}",
-                    e
-                );
+                tracing::warn!("Failed to load historical transactions from storage: {}", e);
             }
         }
 
@@ -1067,19 +1275,20 @@ impl AppState {
 
         // Initialize VM and Smart Contract system with Orobit integration
         // IMPORTANT: Create ecosystem FIRST with storage, then pass to registry
-        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?);
-        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(orobit_ecosystem.clone()));
+        let orobit_ecosystem = Arc::new(
+            OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?,
+        );
+        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(
+            orobit_ecosystem.clone(),
+        ));
 
         // NOTE: Token balances are now loaded from persistent storage above
         // No need to restore from deployed contracts - persistence handles it
 
         // Initialize Quillon Bank - Full Quantum Banking System with CDP
         let plugin_manager = Arc::new(PluginManager::new());
-        let quillon_bank_system = QuillonBankSystem::new(
-            node_id,
-            q_types::Phase::Phase1,
-            plugin_manager.clone(),
-        ).await?;
+        let quillon_bank_system =
+            QuillonBankSystem::new(node_id, q_types::Phase::Phase1, plugin_manager.clone()).await?;
         quillon_bank_system.initialize().await?;
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
@@ -1100,7 +1309,10 @@ impl AppState {
             expected_bytes.copy_from_slice(&expected_wallet);
 
             if auth_state.founder_wallet == expected_bytes {
-                tracing::info!("✅ Founder wallet verified: qnk{}", aegis_auth_middleware::FOUNDER_WALLET);
+                tracing::info!(
+                    "✅ Founder wallet verified: qnk{}",
+                    aegis_auth_middleware::FOUNDER_WALLET
+                );
             } else {
                 tracing::warn!("⚠️  Founder wallet mismatch - check AEGIS key configuration");
             }
@@ -1123,7 +1335,10 @@ impl AppState {
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to deserialize CollateralVault: {}, creating new vault", e);
+                        tracing::warn!(
+                            "Failed to deserialize CollateralVault: {}, creating new vault",
+                            e
+                        );
                         Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
                     }
                 }
@@ -1147,7 +1362,9 @@ impl AppState {
         match storage_engine.load_loan_applications().await {
             Ok(persisted_loans) => {
                 for (loan_id, loan_bytes) in persisted_loans {
-                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(&loan_bytes) {
+                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(
+                        &loan_bytes,
+                    ) {
                         Ok(loan) => {
                             pending_loan_applications_map.insert(loan_id.clone(), loan);
                         }
@@ -1217,7 +1434,7 @@ impl AppState {
 
             // 💓 MINING HEARTBEAT MONITORING (v0.8.9-beta) - Detect mining stalls
             last_mining_solution_time: Arc::new(std::sync::atomic::AtomicU64::new(
-                chrono::Utc::now().timestamp() as u64
+                chrono::Utc::now().timestamp() as u64,
             )),
             mining_is_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
 
@@ -1230,7 +1447,9 @@ impl AppState {
                         let entropy_arc = Arc::new(entropy_pool);
                         match QuantumMixingEngine::new(entropy_arc).await {
                             Ok(mixer) => {
-                                tracing::info!("✅ Quantum Mixing Engine initialized - Privacy mixer ready");
+                                tracing::info!(
+                                    "✅ Quantum Mixing Engine initialized - Privacy mixer ready"
+                                );
                                 Some(Arc::new(mixer))
                             }
                             Err(e) => {
@@ -1240,7 +1459,10 @@ impl AppState {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Quantum Entropy Pool initialization failed: {}, mixer disabled", e);
+                        tracing::warn!(
+                            "⚠️ Quantum Entropy Pool initialization failed: {}, mixer disabled",
+                            e
+                        );
                         None
                     }
                 }
@@ -1251,17 +1473,25 @@ impl AppState {
                         let zkp_config = q_quantum_mixing::zkp_prover::ZKProofConfig::default();
                         match QuantumZKPProver::new(Arc::new(entropy_pool), zkp_config).await {
                             Ok(prover) => {
-                                tracing::info!("✅ Quantum ZK Proof Engine initialized - ZK proofs ready");
+                                tracing::info!(
+                                    "✅ Quantum ZK Proof Engine initialized - ZK proofs ready"
+                                );
                                 Some(Arc::new(prover))
                             }
                             Err(e) => {
-                                tracing::warn!("⚠️ ZK Proof Engine initialization failed: {}, proofs disabled", e);
+                                tracing::warn!(
+                                    "⚠️ ZK Proof Engine initialization failed: {}, proofs disabled",
+                                    e
+                                );
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Quantum Entropy Pool initialization failed: {}, ZK proofs disabled", e);
+                        tracing::warn!(
+                            "⚠️ Quantum Entropy Pool initialization failed: {}, ZK proofs disabled",
+                            e
+                        );
                         None
                     }
                 }
@@ -1275,7 +1505,7 @@ impl AppState {
             network_manager: None,
             production_peer_discovery: None,
             libp2p_discovery: None,  // Disabled in test mode
-            libp2p_command_tx: None,  // Disabled in test mode
+            libp2p_command_tx: None, // Disabled in test mode
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
@@ -1289,9 +1519,9 @@ impl AppState {
             fork_detector: Arc::new(q_storage::fork_detector::ForkDetector::new()), // 🔍 v0.9.67-beta: Comprehensive fork detection
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
-            mining_submission_tx: None,  // Disabled in test mode
+            mining_submission_tx: None, // Disabled in test mode
             connection_manager: None,
-            dag_sync_manager: None,  // Will be initialized with PeerRegistry
+            dag_sync_manager: None, // Will be initialized with PeerRegistry
 
             // ZK Privacy Components - Initialize with None
             zk_stark_system: None,
@@ -1302,11 +1532,16 @@ impl AppState {
                 let simd_config = q_crypto_simd::SimdCryptoConfig::default();
                 match q_crypto_simd::SimdCryptoEngine::new(simd_config).await {
                     Ok(engine) => {
-                        tracing::info!("✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled");
+                        tracing::info!(
+                            "✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled"
+                        );
                         Some(Arc::new(engine))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ SIMD Crypto Engine initialization failed: {}, using fallback", e);
+                        tracing::warn!(
+                            "⚠️ SIMD Crypto Engine initialization failed: {}, using fallback",
+                            e
+                        );
                         None
                     }
                 }
@@ -1315,11 +1550,16 @@ impl AppState {
             kernel_io_engine: {
                 match crate::io_uring_adapter::IoUringAdapter::new() {
                     Ok(adapter) => {
-                        tracing::info!("✅ Kernel I/O Engine initialized with dedicated thread pool");
+                        tracing::info!(
+                            "✅ Kernel I/O Engine initialized with dedicated thread pool"
+                        );
                         Some(Arc::new(adapter))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O", e);
+                        tracing::warn!(
+                            "⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O",
+                            e
+                        );
                         None
                     }
                 }
@@ -1333,7 +1573,7 @@ impl AppState {
             dag_knight: None,
             anchor_election: None,
             narwhal_core: None,
-            production_mempool: None,  // Will be initialized in main.rs for high TPS
+            production_mempool: None, // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
 
@@ -1363,9 +1603,13 @@ impl AppState {
                     base_config,
                     &storage_engine, // Pass storage Arc to load blockchain state
                     Some(balance_consensus_engine.clone()), // ✅ v0.9.99-beta: Adaptive rewards
-                ).await?;
+                )
+                .await?;
 
-                info!("✅ LOCK-FREE Block Production initialized with {} producers", num_producers);
+                info!(
+                    "✅ LOCK-FREE Block Production initialized with {} producers",
+                    num_producers
+                );
                 info!("   🔓 ZERO RwLocks - Channel-based architecture");
                 info!("   ⚡ ZERO lock contention - Message passing only");
                 info!("   🛡️  ZERO deadlock risk - No shared mutable state");
@@ -1379,7 +1623,19 @@ impl AppState {
                     error!("❌ Failed to sync producers at startup: {}", e);
                 }
 
-                Arc::new(pool)
+                let pool_arc = Arc::new(pool);
+
+                // 🚀 v1.0.3.9-beta: START STATE CONSISTENCY MONITOR (PRIMARY FIX)
+                // Monitors database vs producer height every 10 seconds and auto-resyncs on divergence
+                // This prevents the stale state bug where producers fall behind database state
+                info!("🚀 [v1.0.3.9-beta] Starting state consistency monitor...");
+                pool_arc
+                    .clone()
+                    .spawn_state_monitor(storage_engine.clone())
+                    .await;
+                info!("✅ [v1.0.3.9-beta] State monitor active - monitoring every 10s");
+
+                pool_arc
             },
 
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
@@ -1388,12 +1644,14 @@ impl AppState {
             // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
             consensus: {
                 let consensus = DAGKnightConsensus::new(
-                    node_id,
-                    1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
-                ).await?;
+                    node_id, 1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
+                )
+                .await?;
 
-                info!("🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
-                    1, 3);
+                info!(
+                    "🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
+                    1, 3
+                );
 
                 Arc::new(RwLock::new(consensus))
             },
@@ -1476,7 +1734,8 @@ impl AppState {
             turbo_sync: None,
 
             // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
-            peer_bridge: None,
+            // TEMPORARILY DISABLED v1.0.15: Circular dependency
+            // peer_bridge: None,
 
             // AEGIS-KL Miner Authentication (initialized in main.rs)
             // miner_auth: None,
@@ -1489,23 +1748,34 @@ impl AppState {
             price_bridge: None,
 
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
-            fast_sync_enabled: false,  // Will be set in main.rs based on CLI flag
-            fast_sync_tx: None,        // Will be initialized in main.rs if enabled
-            fast_sync_metrics: None,   // Will be initialized in main.rs if enabled
+            fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
+            fast_sync_tx: None,       // Will be initialized in main.rs if enabled
+            fast_sync_metrics: None,  // Will be initialized in main.rs if enabled
 
             // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
-            async_storage: None,  // Will be initialized in main.rs with DB handle
+            async_storage: None, // Will be initialized in main.rs with DB handle
+
+            // ✨ v1.0.16-beta: PQC Validator Keypair - Initialized in main.rs if --validator-key provided
+            validator_keypair: None, // Will be set in main.rs after loading from file
+
+            // ✨ v1.0.16-beta: Validator Key Registry - For PQC signature verification
+            validator_key_registry: Arc::new(RwLock::new(q_types::ValidatorKeyRegistry::new())),
+
+            // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
+            sync_activator: None, // Will be set in main.rs after AppState creation
         })
     }
 
     pub async fn new_with_networks(
         config: Config,
         node_id: NodeId,
-        bitcoin_bridge: Option<Arc<()>>, // DEACTIVATED
-        dns_phantom: Option<Arc<()>>, // DEACTIVATED
+        bitcoin_bridge: Option<Arc<()>>,  // DEACTIVATED
+        dns_phantom: Option<Arc<()>>,     // DEACTIVATED
         bep44_discovery: Option<Arc<()>>, // DEACTIVATED
         tor_client: Option<Arc<QTorClient>>,
-        __production_peer_discovery: Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
+        __production_peer_discovery: Option<
+            Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>,
+        >,
         libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
         libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
     ) -> anyhow::Result<Self> {
@@ -1542,7 +1812,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "data/q-narwhal-hot".to_string()),
             enable_metrics: true,
-            sync_writes: true,  // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
+            sync_writes: true, // CRITICAL: Enable fsync() to survive hard kills (pkill -9)
             cache_size_mb: 256,
             max_open_files: 1000,
         };
@@ -1556,7 +1826,10 @@ impl AppState {
         tracing::info!("🔧 [v0.9.10] Running height pointer integrity check...");
         match storage_engine.repair_height_pointer().await {
             Ok(repaired_height) => {
-                tracing::info!("✅ [v0.9.10] Height pointer verified/repaired: {}", repaired_height);
+                tracing::info!(
+                    "✅ [v0.9.10] Height pointer verified/repaired: {}",
+                    repaired_height
+                );
             }
             Err(e) => {
                 tracing::error!("❌ [v0.9.10] Height pointer repair failed: {}", e);
@@ -1575,7 +1848,9 @@ impl AppState {
                 tracing::error!("❌ [v0.9.37] CRITICAL: Genesis block mismatch detected!");
                 tracing::error!("   This node is on an incompatible fork!");
                 tracing::error!("   Local genesis differs from network consensus");
-                tracing::error!("   Action required: Database reset or manual chain reorganization");
+                tracing::error!(
+                    "   Action required: Database reset or manual chain reorganization"
+                );
                 tracing::warn!("⚠️  Continuing despite genesis mismatch (allow fork debugging)");
             }
             Err(e) => {
@@ -1587,7 +1862,7 @@ impl AppState {
         // Initialize NetworkManager to bridge DNS-phantom to libp2p
         let network_manager = {
             let mut tor_config = q_tor_client::TorConfig::default();
-            tor_config.enabled = true;  // Enable Tor for NetworkManager
+            tor_config.enabled = true; // Enable Tor for NetworkManager
 
             let network_config = q_network::NetworkManagerConfig {
                 local_validator_id: node_id,
@@ -1755,10 +2030,7 @@ impl AppState {
                 // but are NOT added to tx_pool to prevent reprocessing
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load historical transactions from storage: {}",
-                    e
-                );
+                tracing::warn!("Failed to load historical transactions from storage: {}", e);
             }
         }
 
@@ -1768,19 +2040,20 @@ impl AppState {
 
         // Initialize VM and Smart Contract system with Orobit integration
         // IMPORTANT: Create ecosystem FIRST with storage, then pass to registry
-        let orobit_ecosystem = Arc::new(OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?);
-        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(orobit_ecosystem.clone()));
+        let orobit_ecosystem = Arc::new(
+            OrobitSmartContractEcosystem::new_with_storage(Some(storage_engine.clone())).await?,
+        );
+        let contract_registry = Arc::new(ContractRegistry::new_with_ecosystem(
+            orobit_ecosystem.clone(),
+        ));
 
         // NOTE: Token balances are now loaded from persistent storage above
         // No need to restore from deployed contracts - persistence handles it
 
         // Initialize Quillon Bank - Full Quantum Banking System with CDP
         let plugin_manager = Arc::new(PluginManager::new());
-        let quillon_bank_system = QuillonBankSystem::new(
-            node_id,
-            q_types::Phase::Phase1,
-            plugin_manager.clone(),
-        ).await?;
+        let quillon_bank_system =
+            QuillonBankSystem::new(node_id, q_types::Phase::Phase1, plugin_manager.clone()).await?;
         quillon_bank_system.initialize().await?;
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
@@ -1801,7 +2074,10 @@ impl AppState {
             expected_bytes.copy_from_slice(&expected_wallet);
 
             if auth_state.founder_wallet == expected_bytes {
-                tracing::info!("✅ Founder wallet verified: qnk{}", aegis_auth_middleware::FOUNDER_WALLET);
+                tracing::info!(
+                    "✅ Founder wallet verified: qnk{}",
+                    aegis_auth_middleware::FOUNDER_WALLET
+                );
             } else {
                 tracing::warn!("⚠️  Founder wallet mismatch - check AEGIS key configuration");
             }
@@ -1824,7 +2100,10 @@ impl AppState {
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to deserialize CollateralVault: {}, creating new vault", e);
+                        tracing::warn!(
+                            "Failed to deserialize CollateralVault: {}, creating new vault",
+                            e
+                        );
                         Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
                     }
                 }
@@ -1848,7 +2127,9 @@ impl AppState {
         match storage_engine.load_loan_applications().await {
             Ok(persisted_loans) => {
                 for (loan_id, loan_bytes) in persisted_loans {
-                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(&loan_bytes) {
+                    match bincode::deserialize::<crate::quillon_bank_api::LoanApplication>(
+                        &loan_bytes,
+                    ) {
                         Ok(loan) => {
                             pending_loan_applications_map.insert(loan_id.clone(), loan);
                         }
@@ -1918,14 +2199,14 @@ impl AppState {
 
             // 💓 MINING HEARTBEAT MONITORING (v0.8.9-beta) - Detect mining stalls
             last_mining_solution_time: Arc::new(std::sync::atomic::AtomicU64::new(
-                chrono::Utc::now().timestamp() as u64
+                chrono::Utc::now().timestamp() as u64,
             )),
             mining_is_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
 
             // Quantum Privacy Mixer State
             mixing_requests: Arc::new(RwLock::new(HashMap::new())),
             quantum_mixer: None, // Initialized later if needed
-            zkp_prover: None, // Initialized later if needed
+            zkp_prover: None,    // Initialized later if needed
 
             // Network components with provided values
             bitcoin_bridge,
@@ -1945,7 +2226,7 @@ impl AppState {
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))),
 
             // Atomic peer count (will be populated from network manager)
-            libp2p_peer_count: None,  // Will be initialized in main.rs after network manager creation
+            libp2p_peer_count: None, // Will be initialized in main.rs after network manager creation
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
@@ -1959,7 +2240,7 @@ impl AppState {
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
 
             // Mining submission async queue
-            mining_submission_tx: None,  // Will be initialized in main.rs
+            mining_submission_tx: None, // Will be initialized in main.rs
 
             // BREAKTHROUGH: DNS-Phantom → Connection Integration
             connection_manager: {
@@ -1979,11 +2260,16 @@ impl AppState {
             zk_stark_system: {
                 match StarkSystem::new(false).await {
                     Ok(system) => {
-                        tracing::info!("✅ ZK-STARK System initialized - Zero-knowledge proofs enabled");
+                        tracing::info!(
+                            "✅ ZK-STARK System initialized - Zero-knowledge proofs enabled"
+                        );
                         Some(Arc::new(tokio::sync::Mutex::new(system)))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ ZK-STARK System initialization failed: {}, ZK proofs unavailable", e);
+                        tracing::warn!(
+                            "⚠️ ZK-STARK System initialization failed: {}, ZK proofs unavailable",
+                            e
+                        );
                         None
                     }
                 }
@@ -2000,11 +2286,16 @@ impl AppState {
                 let simd_config = q_crypto_simd::SimdCryptoConfig::default();
                 match q_crypto_simd::SimdCryptoEngine::new(simd_config).await {
                     Ok(engine) => {
-                        tracing::info!("✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled");
+                        tracing::info!(
+                            "✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled"
+                        );
                         Some(Arc::new(engine))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ SIMD Crypto Engine initialization failed: {}, using fallback", e);
+                        tracing::warn!(
+                            "⚠️ SIMD Crypto Engine initialization failed: {}, using fallback",
+                            e
+                        );
                         None
                     }
                 }
@@ -2013,11 +2304,16 @@ impl AppState {
             kernel_io_engine: {
                 match crate::io_uring_adapter::IoUringAdapter::new() {
                     Ok(adapter) => {
-                        tracing::info!("✅ Kernel I/O Engine initialized with dedicated thread pool");
+                        tracing::info!(
+                            "✅ Kernel I/O Engine initialized with dedicated thread pool"
+                        );
                         Some(Arc::new(adapter))
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O", e);
+                        tracing::warn!(
+                            "⚠️ Kernel I/O Engine failed to initialize: {}, using standard I/O",
+                            e
+                        );
                         None
                     }
                 }
@@ -2031,7 +2327,7 @@ impl AppState {
             dag_knight: None,
             anchor_election: None,
             narwhal_core: None,
-            production_mempool: None,  // Will be initialized in main.rs for high TPS
+            production_mempool: None, // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
 
@@ -2061,9 +2357,13 @@ impl AppState {
                     base_config,
                     &storage_engine, // Pass storage Arc to load blockchain state
                     Some(balance_consensus_engine.clone()), // ✅ v0.9.99-beta: Adaptive rewards
-                ).await?;
+                )
+                .await?;
 
-                info!("✅ LOCK-FREE Block Production initialized with {} producers", num_producers);
+                info!(
+                    "✅ LOCK-FREE Block Production initialized with {} producers",
+                    num_producers
+                );
                 info!("   🔓 ZERO RwLocks - Channel-based architecture");
                 info!("   ⚡ ZERO lock contention - Message passing only");
                 info!("   🛡️  ZERO deadlock risk - No shared mutable state");
@@ -2077,7 +2377,19 @@ impl AppState {
                     error!("❌ Failed to sync producers at startup: {}", e);
                 }
 
-                Arc::new(pool)
+                let pool_arc = Arc::new(pool);
+
+                // 🚀 v1.0.3.9-beta: START STATE CONSISTENCY MONITOR (PRIMARY FIX)
+                // Monitors database vs producer height every 10 seconds and auto-resyncs on divergence
+                // This prevents the stale state bug where producers fall behind database state
+                info!("🚀 [v1.0.3.9-beta] Starting state consistency monitor...");
+                pool_arc
+                    .clone()
+                    .spawn_state_monitor(storage_engine.clone())
+                    .await;
+                info!("✅ [v1.0.3.9-beta] State monitor active - monitoring every 10s");
+
+                pool_arc
             },
 
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
@@ -2086,12 +2398,14 @@ impl AppState {
             // PHASE 3: DAG-Knight Consensus - Initialize with Byzantine fault tolerance
             consensus: {
                 let consensus = DAGKnightConsensus::new(
-                    node_id,
-                    1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
-                ).await?;
+                    node_id, 1, // f = 1 (supports 2f+1 = 3 nodes minimum for BFT)
+                )
+                .await?;
 
-                info!("🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
-                    1, 3);
+                info!(
+                    "🎯 Initialized DAG-Knight consensus engine (f={}, min_nodes={})",
+                    1, 3
+                );
 
                 Arc::new(RwLock::new(consensus))
             },
@@ -2174,7 +2488,8 @@ impl AppState {
             turbo_sync: None,
 
             // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
-            peer_bridge: None,
+            // TEMPORARILY DISABLED v1.0.15: Circular dependency
+            // peer_bridge: None,
 
             // AEGIS-KL Miner Authentication (initialized in main.rs)
             // miner_auth: None,
@@ -2187,12 +2502,21 @@ impl AppState {
             price_bridge: None,
 
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
-            fast_sync_enabled: false,  // Will be set in main.rs based on CLI flag
-            fast_sync_tx: None,        // Will be initialized in main.rs if enabled
-            fast_sync_metrics: None,   // Will be initialized in main.rs if enabled
+            fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
+            fast_sync_tx: None,       // Will be initialized in main.rs if enabled
+            fast_sync_metrics: None,  // Will be initialized in main.rs if enabled
 
             // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
-            async_storage: None,  // Will be initialized in main.rs with DB handle
+            async_storage: None, // Will be initialized in main.rs with DB handle
+
+            // ✨ v1.0.16-beta: PQC Validator Keypair - Initialized in main.rs if --validator-key provided
+            validator_keypair: None, // Will be set in main.rs after loading from file
+
+            // ✨ v1.0.16-beta: Validator Key Registry - For PQC signature verification
+            validator_key_registry: Arc::new(RwLock::new(q_types::ValidatorKeyRegistry::new())),
+
+            // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
+            sync_activator: None, // Will be set in main.rs after AppState creation
         })
     }
 
@@ -2212,14 +2536,19 @@ impl AppState {
     }
 
     /// Initialize distributed VM and DEX protocol (for horizontal scaling)
-    pub async fn init_distributed_protocol(&mut self, local_peer_id: libp2p::PeerId) -> anyhow::Result<()> {
+    pub async fn init_distributed_protocol(
+        &mut self,
+        local_peer_id: libp2p::PeerId,
+    ) -> anyhow::Result<()> {
         tracing::info!("🌐 Initializing distributed VM & DEX coordinators for horizontal scaling");
 
         let protocol = q_network::DistributedProtocolManager::new(local_peer_id).await?;
 
         self.distributed_protocol = Some(Arc::new(protocol));
 
-        tracing::info!("✅ Distributed protocol coordinators initialized - ready for multi-node collaboration");
+        tracing::info!(
+            "✅ Distributed protocol coordinators initialized - ready for multi-node collaboration"
+        );
         tracing::info!("📝 Note: Network transport will be managed by UnifiedNetworkManager");
 
         Ok(())

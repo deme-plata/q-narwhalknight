@@ -118,6 +118,39 @@ pub struct VDFProof {
 
     /// Proof generation timestamp
     pub generated_at: u64,
+
+    /// Adaptive security parameters (v1.0.16-beta+)
+    /// Optional for backwards compatibility with existing blocks
+    #[serde(default)]
+    pub adaptive_params: Option<AdaptiveVDFParams>,
+}
+
+/// Adaptive VDF parameters based on network hashrate
+/// v1.0.16-beta: Conservative implementation based on AI review feedback
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveVDFParams {
+    /// Security tier (Standard = 1000, Enhanced = 1500, Maximum = 2000 iterations)
+    pub security_tier: SecurityTier,
+
+    /// Network hashrate (24-hour smoothed moving average)
+    pub smoothed_hashrate: f64,
+
+    /// Security multiplier (1.0 - 2.0 range)
+    pub security_multiplier: f64,
+
+    /// Actual adaptive iterations used
+    pub adaptive_iterations: u64,
+}
+
+/// Security tier levels (governance-approved)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecurityTier {
+    /// Standard security - 1,000 VDF iterations
+    Standard,
+    /// Enhanced security - 1,500 VDF iterations
+    Enhanced,
+    /// Maximum security - 2,000 VDF iterations
+    Maximum,
 }
 
 /// Mining proof-of-work solution
@@ -238,14 +271,41 @@ pub struct EnergyComponents {
     pub finality: f64,
 }
 
+/// Cryptographic phase for signature scheme
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignaturePhase {
+    /// Phase 0: Ed25519 classical signatures
+    Phase0Ed25519,
+    /// Phase 1: Dilithium5 post-quantum signatures
+    Phase1Dilithium5,
+    /// Hybrid: Both Ed25519 and Dilithium5 (transition mode)
+    HybridEd25519Dilithium5,
+}
+
+impl Default for SignaturePhase {
+    fn default() -> Self {
+        SignaturePhase::Phase0Ed25519
+    }
+}
+
 /// Spectral BFT signature (quantum-enhanced Byzantine detection)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectralSignature {
     /// Validator public key
     pub validator: super::NodeId,
 
-    /// Classical signature (Ed25519 in Phase 0, Dilithium in Phase 1)
+    /// ✨ v1.0.15-beta: Cryptographic phase used for this signature
+    #[serde(default)]
+    pub crypto_phase: SignaturePhase,
+
+    /// Classical signature (Ed25519 in Phase 0, Dilithium5 in Phase 1)
+    /// For hybrid mode, this contains Ed25519 signature
     pub classical_sig: Vec<u8>,
+
+    /// ✨ v1.0.15-beta: Post-quantum signature (Dilithium5)
+    /// Only populated in Phase1 or Hybrid mode
+    #[serde(default)]
+    pub pqc_sig: Option<Vec<u8>>,
 
     /// Spectral decomposition coefficient (for Byzantine detection)
     pub spectral_coefficient: f64,
@@ -494,6 +554,7 @@ impl Default for VDFProof {
             iterations: 100,
             challenge: vec![],
             generated_at: chrono::Utc::now().timestamp() as u64,
+            adaptive_params: None,
         }
     }
 }

@@ -2,20 +2,20 @@
 // Implements payment intent creation, confirmation, and USD balance management
 
 use axum::{
-    extract::{State, Json},
+    extract::{Json, State},
     http::StatusCode,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 use std::sync::Arc;
 use stripe::{
-    Client, CreatePaymentIntent, PaymentIntent, PaymentIntentConfirmParams,
-    Currency, CreateCustomer, Customer,
+    Client, CreateCustomer, CreatePaymentIntent, Currency, Customer, PaymentIntent,
+    PaymentIntentConfirmParams,
 };
-use tracing::{info, warn, error};
-use rust_decimal::Decimal;
-use std::convert::TryInto;
+use tracing::{error, info, warn};
 
-use crate::{AppState, ApiResponse};
+use crate::{ApiResponse, AppState};
 
 // ============================================================================
 // Request/Response Types
@@ -122,15 +122,16 @@ pub async fn create_payment_intent(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreatePaymentIntentRequest>,
 ) -> Result<Json<ApiResponse<PaymentIntentResponse>>, StatusCode> {
-    info!("💳 Creating payment intent for wallet: {}, amount: ${}",
-        request.wallet_address, request.amount);
+    info!(
+        "💳 Creating payment intent for wallet: {}, amount: ${}",
+        request.wallet_address, request.amount
+    );
 
     // Parse amount as decimal and convert to cents
-    let amount_decimal: Decimal = request.amount.parse()
-        .map_err(|e| {
-            error!("Invalid amount format: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let amount_decimal: Decimal = request.amount.parse().map_err(|e| {
+        error!("Invalid amount format: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     // Convert to cents (multiply by 100)
     let amount_cents: i64 = (amount_decimal * Decimal::from(100))
@@ -151,11 +152,10 @@ pub async fn create_payment_intent(
     }
 
     // Initialize Stripe client
-    let stripe_client = init_stripe_client()
-        .map_err(|e| {
-            error!("Failed to initialize Stripe client: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let stripe_client = init_stripe_client().map_err(|e| {
+        error!("Failed to initialize Stripe client: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Create payment intent
     let mut create_intent = CreatePaymentIntent::new(amount_cents, Currency::USD);
@@ -209,21 +209,22 @@ pub async fn confirm_payment(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConfirmPaymentRequest>,
 ) -> Result<Json<ApiResponse<ConfirmPaymentResponse>>, StatusCode> {
-    info!("✅ Confirming payment intent: {}", request.payment_intent_id);
+    info!(
+        "✅ Confirming payment intent: {}",
+        request.payment_intent_id
+    );
 
     // Initialize Stripe client
-    let stripe_client = init_stripe_client()
-        .map_err(|e| {
-            error!("Failed to initialize Stripe client: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let stripe_client = init_stripe_client().map_err(|e| {
+        error!("Failed to initialize Stripe client: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Retrieve payment intent to check status
-    let intent_id: stripe::PaymentIntentId = request.payment_intent_id.parse()
-        .map_err(|e| {
-            error!("Invalid payment intent ID: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let intent_id: stripe::PaymentIntentId = request.payment_intent_id.parse().map_err(|e| {
+        error!("Invalid payment intent ID: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     match PaymentIntent::retrieve(&stripe_client, &intent_id, &[]).await {
         Ok(intent) => {
@@ -232,7 +233,8 @@ pub async fn confirm_payment(
             // Check if payment succeeded
             if intent.status == stripe::PaymentIntentStatus::Succeeded {
                 // Extract wallet address from metadata
-                let wallet_address = intent.metadata
+                let wallet_address = intent
+                    .metadata
                     .get("wallet_address")
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
@@ -242,12 +244,22 @@ pub async fn confirm_payment(
                 let amount_usd_str = amount_usd.to_string();
 
                 // Credit USD to wallet in storage
-                match state.storage_engine.credit_usd_balance(&wallet_address, intent.amount as u64).await {
+                match state
+                    .storage_engine
+                    .credit_usd_balance(&wallet_address, intent.amount as u64)
+                    .await
+                {
                     Ok(_) => {
-                        info!("💵 Credited ${} to wallet {}", amount_usd_str, wallet_address);
+                        info!(
+                            "💵 Credited ${} to wallet {}",
+                            amount_usd_str, wallet_address
+                        );
 
                         // Get updated balance
-                        let new_balance = state.storage_engine.get_usd_balance(&wallet_address).await
+                        let new_balance = state
+                            .storage_engine
+                            .get_usd_balance(&wallet_address)
+                            .await
                             .unwrap_or(0);
                         let new_balance_usd = Decimal::from(new_balance) / Decimal::from(100);
 
@@ -306,9 +318,16 @@ pub async fn get_usd_balance(
     State(state): State<Arc<AppState>>,
     Json(request): Json<GetBalanceRequest>,
 ) -> Result<Json<ApiResponse<BalanceResponse>>, StatusCode> {
-    info!("💰 Getting USD balance for wallet: {}", request.wallet_address);
+    info!(
+        "💰 Getting USD balance for wallet: {}",
+        request.wallet_address
+    );
 
-    match state.storage_engine.get_usd_balance(&request.wallet_address).await {
+    match state
+        .storage_engine
+        .get_usd_balance(&request.wallet_address)
+        .await
+    {
         Ok(balance_cents) => {
             let balance_usd = Decimal::from(balance_cents) / Decimal::from(100);
 
@@ -341,25 +360,33 @@ pub async fn withdraw_usd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<WithdrawRequest>,
 ) -> Result<Json<ApiResponse<WithdrawResponse>>, StatusCode> {
-    info!("🏦 Processing USD withdrawal for wallet: {}, amount: ${}",
-        request.wallet_address, request.amount_usd);
+    info!(
+        "🏦 Processing USD withdrawal for wallet: {}, amount: ${}",
+        request.wallet_address, request.amount_usd
+    );
 
     // Parse amount
-    let amount_decimal: Decimal = request.amount_usd.parse()
-        .map_err(|e| {
-            error!("Invalid amount format: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let amount_decimal: Decimal = request.amount_usd.parse().map_err(|e| {
+        error!("Invalid amount format: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     let amount_cents: u64 = (amount_decimal * Decimal::from(100))
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Check if wallet has sufficient balance
-    match state.storage_engine.get_usd_balance(&request.wallet_address).await {
+    match state
+        .storage_engine
+        .get_usd_balance(&request.wallet_address)
+        .await
+    {
         Ok(balance_cents) => {
             if balance_cents < amount_cents {
-                warn!("Insufficient balance for withdrawal: {} < {}", balance_cents, amount_cents);
+                warn!(
+                    "Insufficient balance for withdrawal: {} < {}",
+                    balance_cents, amount_cents
+                );
                 return Ok(Json(ApiResponse {
                     success: false,
                     data: None,
@@ -369,12 +396,19 @@ pub async fn withdraw_usd(
             }
 
             // Debit from wallet
-            match state.storage_engine.debit_usd_balance(&request.wallet_address, amount_cents).await {
+            match state
+                .storage_engine
+                .debit_usd_balance(&request.wallet_address, amount_cents)
+                .await
+            {
                 Ok(_) => {
                     // In production, this would initiate ACH transfer or Stripe payout
                     let transaction_id = uuid::Uuid::new_v4().to_string();
 
-                    let new_balance = state.storage_engine.get_usd_balance(&request.wallet_address).await
+                    let new_balance = state
+                        .storage_engine
+                        .get_usd_balance(&request.wallet_address)
+                        .await
                         .unwrap_or(0);
                     let new_balance_usd = Decimal::from(new_balance) / Decimal::from(100);
 
@@ -439,30 +473,41 @@ pub async fn convert_usd_to_qugusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConvertToQugusdRequest>,
 ) -> Result<Json<ApiResponse<ConvertToQugusdResponse>>, StatusCode> {
-    info!("🔄 Converting USD to QUGUSD for wallet: {}, amount: ${}",
-        request.wallet_address, request.usd_amount);
+    info!(
+        "🔄 Converting USD to QUGUSD for wallet: {}, amount: ${}",
+        request.wallet_address, request.usd_amount
+    );
 
     // Parse amount
-    let amount_decimal: Decimal = request.usd_amount.parse()
-        .map_err(|e| {
-            error!("Invalid amount format: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let amount_decimal: Decimal = request.usd_amount.parse().map_err(|e| {
+        error!("Invalid amount format: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     let usd_cents: u64 = (amount_decimal * Decimal::from(100))
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Check USD balance
-    match state.storage_engine.get_usd_balance(&request.wallet_address).await {
+    match state
+        .storage_engine
+        .get_usd_balance(&request.wallet_address)
+        .await
+    {
         Ok(balance_cents) => {
             if balance_cents < usd_cents {
-                warn!("Insufficient USD balance: {} < {}", balance_cents, usd_cents);
+                warn!(
+                    "Insufficient USD balance: {} < {}",
+                    balance_cents, usd_cents
+                );
                 return Ok(Json(ApiResponse {
                     success: false,
                     data: None,
-                    error: Some(format!("Insufficient USD balance. You have ${:.2}, need ${:.2}",
-                        balance_cents as f64 / 100.0, usd_cents as f64 / 100.0)),
+                    error: Some(format!(
+                        "Insufficient USD balance. You have ${:.2}, need ${:.2}",
+                        balance_cents as f64 / 100.0,
+                        usd_cents as f64 / 100.0
+                    )),
                     timestamp: chrono::Utc::now(),
                 }));
             }
@@ -475,32 +520,51 @@ pub async fn convert_usd_to_qugusd(
             let qugusd_amount = qugusd_cents * 1_000_000; // 1 cent = 1_000_000 base units
 
             // Parse wallet address to bytes
-            let wallet_addr_bytes = match crate::handlers::parse_wallet_address(&request.wallet_address) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    error!("Invalid wallet address: {}", e);
-                    return Ok(Json(ApiResponse {
-                        success: false,
-                        data: None,
-                        error: Some(format!("Invalid wallet address: {}", e)),
-                        timestamp: chrono::Utc::now(),
-                    }));
-                }
-            };
+            let wallet_addr_bytes =
+                match crate::handlers::parse_wallet_address(&request.wallet_address) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        error!("Invalid wallet address: {}", e);
+                        return Ok(Json(ApiResponse {
+                            success: false,
+                            data: None,
+                            error: Some(format!("Invalid wallet address: {}", e)),
+                            timestamp: chrono::Utc::now(),
+                        }));
+                    }
+                };
 
             // Deduct USD balance
-            match state.storage_engine.debit_usd_balance(&request.wallet_address, usd_cents).await {
+            match state
+                .storage_engine
+                .debit_usd_balance(&request.wallet_address, usd_cents)
+                .await
+            {
                 Ok(_) => {
                     // Get current QUGUSD balance and add to it
-                    let current_qugusd = state.storage_engine.get_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS).await
+                    let current_qugusd = state
+                        .storage_engine
+                        .get_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS)
+                        .await
                         .unwrap_or(0);
                     let new_qugusd_total = current_qugusd + qugusd_amount;
 
                     // Mint QUGUSD by saving the new balance
-                    match state.storage_engine.save_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS, new_qugusd_total).await {
+                    match state
+                        .storage_engine
+                        .save_token_balance(
+                            &wallet_addr_bytes,
+                            &q_types::QUGUSD_TOKEN_ADDRESS,
+                            new_qugusd_total,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             // Get updated balances
-                            let new_usd_balance = state.storage_engine.get_usd_balance(&request.wallet_address).await
+                            let new_usd_balance = state
+                                .storage_engine
+                                .get_usd_balance(&request.wallet_address)
+                                .await
                                 .unwrap_or(0);
                             let new_qugusd_balance = new_qugusd_total;
 
@@ -508,8 +572,10 @@ pub async fn convert_usd_to_qugusd(
                             let qugusd_minted = qugusd_cents as f64 / 100.0;
                             let fee = fee_cents as f64 / 100.0;
 
-                            info!("✅ Converted ${:.2} USD → {:.4} QUGUSD (fee: ${:.4})",
-                                usd_deducted, qugusd_minted, fee);
+                            info!(
+                                "✅ Converted ${:.2} USD → {:.4} QUGUSD (fee: ${:.4})",
+                                usd_deducted, qugusd_minted, fee
+                            );
 
                             Ok(Json(ApiResponse {
                                 success: true,
@@ -518,8 +584,14 @@ pub async fn convert_usd_to_qugusd(
                                     usd_deducted: format!("{:.2}", usd_deducted),
                                     qugusd_minted: format!("{:.4}", qugusd_minted),
                                     conversion_fee: format!("{:.4}", fee),
-                                    new_usd_balance: format!("{:.2}", new_usd_balance as f64 / 100.0),
-                                    new_qugusd_balance: format!("{:.8}", new_qugusd_balance as f64 / 100_000_000.0),
+                                    new_usd_balance: format!(
+                                        "{:.2}",
+                                        new_usd_balance as f64 / 100.0
+                                    ),
+                                    new_qugusd_balance: format!(
+                                        "{:.8}",
+                                        new_qugusd_balance as f64 / 100_000_000.0
+                                    ),
                                 }),
                                 error: None,
                                 timestamp: chrono::Utc::now(),
@@ -528,7 +600,10 @@ pub async fn convert_usd_to_qugusd(
                         Err(e) => {
                             error!("Failed to mint QUGUSD: {}", e);
                             // Refund USD since minting failed
-                            let _ = state.storage_engine.credit_usd_balance(&request.wallet_address, usd_cents).await;
+                            let _ = state
+                                .storage_engine
+                                .credit_usd_balance(&request.wallet_address, usd_cents)
+                                .await;
                             Ok(Json(ApiResponse {
                                 success: false,
                                 data: None,
@@ -585,15 +660,16 @@ pub async fn transfer_usd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TransferUsdRequest>,
 ) -> Result<Json<ApiResponse<TransferUsdResponse>>, StatusCode> {
-    info!("💸 Transferring USD: {} → {}, amount: ${}",
-        request.from_wallet, request.to_wallet, request.amount_usd);
+    info!(
+        "💸 Transferring USD: {} → {}, amount: ${}",
+        request.from_wallet, request.to_wallet, request.amount_usd
+    );
 
     // Parse amount
-    let amount_decimal: Decimal = request.amount_usd.parse()
-        .map_err(|e| {
-            error!("Invalid amount format: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let amount_decimal: Decimal = request.amount_usd.parse().map_err(|e| {
+        error!("Invalid amount format: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     let amount_cents: u64 = (amount_decimal * Decimal::from(100))
         .try_into()
@@ -609,29 +685,53 @@ pub async fn transfer_usd(
     }
 
     // Check sender balance
-    match state.storage_engine.get_usd_balance(&request.from_wallet).await {
+    match state
+        .storage_engine
+        .get_usd_balance(&request.from_wallet)
+        .await
+    {
         Ok(from_balance_cents) => {
             if from_balance_cents < amount_cents {
-                warn!("Insufficient balance for transfer: {} < {}", from_balance_cents, amount_cents);
+                warn!(
+                    "Insufficient balance for transfer: {} < {}",
+                    from_balance_cents, amount_cents
+                );
                 return Ok(Json(ApiResponse {
                     success: false,
                     data: None,
-                    error: Some(format!("Insufficient balance. You have ${:.2}, need ${:.2}",
-                        from_balance_cents as f64 / 100.0, amount_cents as f64 / 100.0)),
+                    error: Some(format!(
+                        "Insufficient balance. You have ${:.2}, need ${:.2}",
+                        from_balance_cents as f64 / 100.0,
+                        amount_cents as f64 / 100.0
+                    )),
                     timestamp: chrono::Utc::now(),
                 }));
             }
 
             // Debit from sender
-            match state.storage_engine.debit_usd_balance(&request.from_wallet, amount_cents).await {
+            match state
+                .storage_engine
+                .debit_usd_balance(&request.from_wallet, amount_cents)
+                .await
+            {
                 Ok(_) => {
                     // Credit to recipient
-                    match state.storage_engine.credit_usd_balance(&request.to_wallet, amount_cents).await {
+                    match state
+                        .storage_engine
+                        .credit_usd_balance(&request.to_wallet, amount_cents)
+                        .await
+                    {
                         Ok(_) => {
                             // Get updated balances
-                            let from_new_balance = state.storage_engine.get_usd_balance(&request.from_wallet).await
+                            let from_new_balance = state
+                                .storage_engine
+                                .get_usd_balance(&request.from_wallet)
+                                .await
                                 .unwrap_or(0);
-                            let to_new_balance = state.storage_engine.get_usd_balance(&request.to_wallet).await
+                            let to_new_balance = state
+                                .storage_engine
+                                .get_usd_balance(&request.to_wallet)
+                                .await
                                 .unwrap_or(0);
 
                             let transaction_id = uuid::Uuid::new_v4().to_string();
@@ -643,7 +743,10 @@ pub async fn transfer_usd(
                                 data: Some(TransferUsdResponse {
                                     success: true,
                                     amount_transferred: request.amount_usd.clone(),
-                                    from_new_balance: format!("{:.2}", from_new_balance as f64 / 100.0),
+                                    from_new_balance: format!(
+                                        "{:.2}",
+                                        from_new_balance as f64 / 100.0
+                                    ),
                                     to_new_balance: format!("{:.2}", to_new_balance as f64 / 100.0),
                                     transaction_id,
                                 }),
@@ -654,7 +757,10 @@ pub async fn transfer_usd(
                         Err(e) => {
                             error!("Failed to credit recipient: {}", e);
                             // Refund sender since credit failed
-                            let _ = state.storage_engine.credit_usd_balance(&request.from_wallet, amount_cents).await;
+                            let _ = state
+                                .storage_engine
+                                .credit_usd_balance(&request.from_wallet, amount_cents)
+                                .await;
                             Ok(Json(ApiResponse {
                                 success: false,
                                 data: None,
@@ -710,7 +816,7 @@ pub struct AIWalletBalanceResponse {
 #[derive(Debug, Serialize)]
 pub struct AIWalletBalanceData {
     pub wallet_address: String,
-    pub balance_qnk: u64,  // QUG balance (changed from QNK ticker)
+    pub balance_qnk: u64, // QUG balance (changed from QNK ticker)
     pub balance_qnk_usd: f64,
     pub balance_qugusd: u64,
     pub tokens_generated_lifetime: u64,
@@ -782,10 +888,17 @@ pub async fn get_ai_wallet_balance(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WalletQueryParams>,
 ) -> Result<Json<AIWalletBalanceResponse>, StatusCode> {
-    info!("📊 GET /api/wallet/balance - wallet: {}", params.wallet_address);
+    info!(
+        "📊 GET /api/wallet/balance - wallet: {}",
+        params.wallet_address
+    );
 
     // Try to get credits from storage
-    match state.storage_engine.get_wallet_credits(&params.wallet_address).await {
+    match state
+        .storage_engine
+        .get_wallet_credits(&params.wallet_address)
+        .await
+    {
         Ok(Some(credits)) => {
             // Calculate USD value (assuming $0.005 per QUG for now)
             let qnk_to_usd = 0.005;
@@ -840,10 +953,17 @@ pub async fn get_ai_wallet_usage(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WalletQueryParams>,
 ) -> Result<Json<AIUsageStatsResponse>, StatusCode> {
-    info!("📊 GET /api/wallet/usage - wallet: {}", params.wallet_address);
+    info!(
+        "📊 GET /api/wallet/usage - wallet: {}",
+        params.wallet_address
+    );
 
     // Try to get credits from storage
-    match state.storage_engine.get_wallet_credits(&params.wallet_address).await {
+    match state
+        .storage_engine
+        .get_wallet_credits(&params.wallet_address)
+        .await
+    {
         Ok(Some(credits)) => {
             // Calculate USD value
             let qnk_to_usd = 0.005;

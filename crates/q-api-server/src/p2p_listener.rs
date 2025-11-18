@@ -1,3 +1,4 @@
+use crate::NodeStatus;
 use q_types::NodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
-use crate::NodeStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeMessage {
@@ -48,8 +48,14 @@ pub async fn start_p2p_listener(
         let node_status_clone = node_status.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_p2p_connection(stream, addr, local_node_id_clone, active_peers_clone, node_status_clone).await
+            if let Err(e) = handle_p2p_connection(
+                stream,
+                addr,
+                local_node_id_clone,
+                active_peers_clone,
+                node_status_clone,
+            )
+            .await
             {
                 warn!("❌ P2P connection handling failed for {}: {}", addr, e);
             }
@@ -130,8 +136,7 @@ async fn handle_p2p_connection(
         let peer_count = peers.len();
         info!(
             "👥 Added peer {} to active connections (total: {})",
-            peer_handshake.node_id,
-            peer_count
+            peer_handshake.node_id, peer_count
         );
 
         // Update node_status with current peer count
@@ -177,8 +182,7 @@ async fn handle_p2p_connection(
         let peer_count = peers.len();
         info!(
             "👥 Removed peer {} from active connections (remaining: {})",
-            peer_handshake.node_id,
-            peer_count
+            peer_handshake.node_id, peer_count
         );
 
         // Update node_status with current peer count

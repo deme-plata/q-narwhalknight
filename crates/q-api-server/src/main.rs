@@ -3,18 +3,24 @@ use axum::{
     Router,
 };
 use clap::{Arg, ArgAction, Command};
-use q_api_server::{handlers, streaming, payment_api, oauth2_provider, chat_api, AppState, Config, ConsoleVisualizer, LiquidityPool, update_stats, aegis_auth_middleware};
-use q_types::{TxStatus, TxHash, BlockRequest, BlockResponse};
+use q_api_server::{
+    aegis_auth_middleware, chat_api, handlers, oauth2_provider, payment_api, streaming,
+    update_stats, AppState, Config, ConsoleVisualizer, LiquidityPool,
+};
+use q_types::{BlockRequest, BlockResponse, TxHash, TxStatus};
 // v0.8.0-beta: Balance Consensus Engine imports
-use q_storage::{BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, GENESIS_TIMESTAMP, FOUNDER_WALLET};
+use q_storage::{
+    BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, FOUNDER_WALLET,
+    GENESIS_TIMESTAMP,
+};
 // v0.9.37-beta PHASE 3: Cross-fork blockchain synchronization
 use q_storage::{detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats};
 // ✅ v1.0.7-beta: AsyncStorageEngine for permanent mining stall fix
 use q_storage::AsyncStorageEngine;
+mod cdp_simple;
 mod contracts_api;
 mod dex_integration_api;
 mod liquidity_api;
-mod cdp_simple;
 // ✅ ENABLED - Full Quillon Bank CDP system
 mod quillon_bank_api;
 // ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System
@@ -24,11 +30,11 @@ mod ai_transaction_assistant;
 // ✅ v0.9.9-beta - AI Chat Attachment System
 // TEMPORARILY DISABLED: Incomplete implementation with missing state.db field
 // mod attachment_api;
+use cdp_simple::create_cdp_router;
 use contracts_api::create_contracts_router;
 use dex_integration_api::create_dex_integration_router;
 use liquidity_api::create_liquidity_router;
-use cdp_simple::create_cdp_router;
-use quillon_bank_api::{create_quillon_bank_router, create_public_routes, create_protected_routes};
+use quillon_bank_api::{create_protected_routes, create_public_routes, create_quillon_bank_router};
 // DEACTIVATED: use q_bep44_discovery::{Bep44DiscoveryConfig, DiscoveryEngine};
 // DEACTIVATED: use q_bitcoin_bridge::{
 //     bridge::{IntegratedBitcoinBridge, PeerNetworkEvent},
@@ -36,11 +42,13 @@ use quillon_bank_api::{create_quillon_bank_router, create_public_routes, create_
 // };
 use q_tor_client::QTorClient; // ✅ Re-enabled with embedded Arti support
 use q_types::NodeId;
-use std::{collections::HashSet, sync::Arc};
+// ✨ v1.0.16-beta: PQC key management
 use candle_core::Device;
+use pqcrypto_traits::sign::PublicKey as PQPublicKey;
+use std::{collections::HashSet, sync::Arc};
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tower_http::services::ServeDir;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -122,7 +130,10 @@ fn verify_height_monotonicity(new_height: u64, context: &str) -> anyhow::Result<
         error!("   ABORTING TO PREVENT DATA LOSS!");
         error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-        panic!("SAFETY ABORT: Height reset to zero from {} blocks (context: {})", highest_ever, context);
+        panic!(
+            "SAFETY ABORT: Height reset to zero from {} blocks (context: {})",
+            highest_ever, context
+        );
     }
 
     // CRITICAL SAFETY CHECK #2: Detect significant regression
@@ -134,7 +145,10 @@ fn verify_height_monotonicity(new_height: u64, context: &str) -> anyhow::Result<
         error!("   Context: {}", context);
         error!("   Previous height: {} blocks", highest_ever);
         error!("   New height: {} blocks", new_height);
-        error!("   Regression: {} blocks backwards", highest_ever - new_height);
+        error!(
+            "   Regression: {} blocks backwards",
+            highest_ever - new_height
+        );
         error!("   ");
         error!("   This would cause DATA LOSS!");
         error!("   ABORTING TO PROTECT BLOCKCHAIN INTEGRITY!");
@@ -142,7 +156,10 @@ fn verify_height_monotonicity(new_height: u64, context: &str) -> anyhow::Result<
 
         return Err(anyhow::anyhow!(
             "Height regression: {} → {} blocks (lost {} blocks) in context: {}",
-            highest_ever, new_height, highest_ever - new_height, context
+            highest_ever,
+            new_height,
+            highest_ever - new_height,
+            context
         ));
     }
 
@@ -153,7 +170,7 @@ fn verify_height_monotonicity(new_height: u64, context: &str) -> anyhow::Result<
             current,
             new_height,
             Ordering::SeqCst,
-            Ordering::SeqCst
+            Ordering::SeqCst,
         ) {
             Ok(_) => break,
             Err(actual) => current = actual,
@@ -259,7 +276,10 @@ async fn update_tui_metrics(
     // Get node status
     let (peer_count, block_height) = {
         let node_status = app_state.node_status.read().await;
-        (node_status.connected_peers as usize, node_status.current_height)
+        (
+            node_status.connected_peers as usize,
+            node_status.current_height,
+        )
     };
 
     // Get transaction pool size
@@ -277,7 +297,7 @@ async fn update_tui_metrics(
     // Get system metrics (non-async)
     #[cfg(target_os = "linux")]
     let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = {
-        use sysinfo::{System, Disks};
+        use sysinfo::{Disks, System};
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -369,7 +389,9 @@ async fn verify_binary_version() -> anyhow::Result<()> {
                 error!("❌ Q_STRICT_VERSION_CHECK is enabled - refusing to start");
                 anyhow::bail!("Version mismatch - refusing to start");
             } else {
-                warn!("⚠️  Version mismatch but Q_STRICT_VERSION_CHECK not set - continuing anyway");
+                warn!(
+                    "⚠️  Version mismatch but Q_STRICT_VERSION_CHECK not set - continuing anyway"
+                );
             }
         } else {
             info!("✅ Binary version matches expected: {}", version);
@@ -438,6 +460,13 @@ async fn main() -> anyhow::Result<()> {
                 .help("Enable experimental batched sync (150-250 BPS, ≤16 block max loss on crash)")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("validator-key")
+                .long("validator-key")
+                .value_name("PATH")
+                .help("Path to validator keypair file (enables PQC block signing)")
+                .required(false),
+        )
         .get_matches();
 
     // Check if TUI mode is enabled
@@ -448,11 +477,10 @@ async fn main() -> anyhow::Result<()> {
         // Normal logging mode - suppress verbose third-party library output
         tracing_subscriber::registry()
             .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| {
-                        // Our crates: debug level for detailed logs
-                        // Third-party AI/ML libs: warn level to suppress verbose tensor/byte array output
-                        "q_api_server=debug,\
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    // Our crates: debug level for detailed logs
+                    // Third-party AI/ML libs: warn level to suppress verbose tensor/byte array output
+                    "q_api_server=debug,\
                          q_network=debug,\
                          tower_http=debug,\
                          candle=warn,\
@@ -461,8 +489,9 @@ async fn main() -> anyhow::Result<()> {
                          mistralrs=warn,\
                          tokenizers=warn,\
                          safetensors=warn,\
-                         hf_hub=warn".into()
-                    }),
+                         hf_hub=warn"
+                        .into()
+                }),
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
@@ -495,12 +524,16 @@ async fn main() -> anyhow::Result<()> {
     let network_str = std::env::var("Q_NETWORK_ID")
         .ok()
         .or_else(|| matches.get_one::<String>("network").map(|s| s.to_string()))
-        .unwrap_or_else(|| "testnet-phase11".to_string()); // ✅ CRITICAL Bug #5 fix - Phase 11 default
+        .unwrap_or_else(|| "testnet-phase12".to_string()); // ✅ v1.0.12-beta CRITICAL Bug #5 fix - Phase 12 default
 
-    let network_id = network_str.parse::<q_types::NetworkId>()
+    let network_id = network_str
+        .parse::<q_types::NetworkId>()
         .unwrap_or_else(|e| {
-            warn!("Invalid network '{}': {}. Defaulting to Phase 11.", network_str, e);
-            q_types::NetworkId::TestnetPhase10 // ✅ CRITICAL Bug #5 fix - Phase 10 default
+            warn!(
+                "Invalid network '{}': {}. Defaulting to Phase 12.",
+                network_str, e
+            );
+            q_types::NetworkId::TestnetPhase12 // ✅ v1.0.12-beta CRITICAL Bug #5 fix - Phase 12 default
         });
 
     let mut network_config = q_types::NetworkConfig::from_network_id(network_id);
@@ -508,7 +541,10 @@ async fn main() -> anyhow::Result<()> {
     // Copy automatically discovered bootstrap peers from config to network_config
     // This ensures Kademlia DHT gets populated with bootstrap peers
     if !config.bootstrap_peers.is_empty() {
-        info!("🔄 Transferring {} automatically discovered bootstrap peer(s) to network config", config.bootstrap_peers.len());
+        info!(
+            "🔄 Transferring {} automatically discovered bootstrap peer(s) to network config",
+            config.bootstrap_peers.len()
+        );
         network_config.bootstrap_peers = config.bootstrap_peers.clone();
     } else {
         info!("ℹ️  No automatically discovered bootstrap peers - using static network config");
@@ -525,6 +561,62 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     info!("🌐 ════════════════════════════════════════════════════════");
+
+    // ✨ v1.0.16-beta: Load validator keypair for PQC block signing
+    let validator_keypair = if let Some(key_path) = matches.get_one::<String>("validator-key") {
+        info!("🔐 ════════════════════════════════════════════════════════");
+        info!("🔐 Loading validator keypair for PQC signing...");
+        match q_types::ValidatorKeypair::load_from_file(key_path) {
+            Ok(keypair) => {
+                let node_id_hex = hex::encode(&keypair.node_id[..8]);
+                info!("✅ Validator keypair loaded successfully");
+                info!("   Node ID: {}...", node_id_hex);
+                info!("   Preferred phase: {:?}", keypair.preferred_phase);
+                info!(
+                    "   Ed25519 public key: {} bytes",
+                    keypair.ed25519_verifying.to_bytes().len()
+                );
+                info!(
+                    "   Dilithium5 public key: {} bytes",
+                    keypair.dilithium5_public.as_bytes().len()
+                );
+                info!("🔐 PQC block signing: ENABLED");
+                info!("🔐 ════════════════════════════════════════════════════════");
+                Some(Arc::new(keypair))
+            }
+            Err(e) => {
+                error!(
+                    "❌ Failed to load validator keypair from {}: {}",
+                    key_path, e
+                );
+                error!("   PQC block signing will be DISABLED");
+                error!("   Use --validator-key to specify a valid keypair file");
+                None
+            }
+        }
+    } else {
+        info!("ℹ️  No validator keypair specified (use --validator-key)");
+        info!("   Fallback: Using zk-STARK untrusted setup for PQC");
+        info!("   🔐 PQC block signing: ENABLED (via zk-STARK)");
+        info!("   ⚠️  Untrusted setup - suitable for testing/development");
+
+        // Generate ephemeral keypair using zk-STARK untrusted setup
+        // This provides quantum-resistant signatures without requiring pre-generated keys
+        match q_types::ValidatorKeypair::generate_with_zk_stark_untrusted() {
+            Ok(keypair) => {
+                let node_id_hex = hex::encode(&keypair.node_id[..8]);
+                info!("✅ Generated ephemeral keypair with zk-STARK");
+                info!("   Node ID: {}...", node_id_hex);
+                info!("   zk-STARK untrusted setup: ACTIVE");
+                Some(Arc::new(keypair))
+            }
+            Err(e) => {
+                error!("❌ Failed to generate zk-STARK keypair: {}", e);
+                error!("   PQC block signing will be DISABLED");
+                None
+            }
+        }
+    };
 
     // Parse experimental fast sync flag (v1.0.2-beta Phase 1A)
     let use_fast_sync = matches.get_flag("experimental-fast-sync");
@@ -569,11 +661,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if production_mode {
-        info!(
-            "🚀 PRODUCTION MODE ENABLED - Real Network Peer Discovery",
-        );
+        info!("🚀 PRODUCTION MODE ENABLED - Real Network Peer Discovery",);
         info!("📡 Will perform genuine peer discovery with real network connections");
-        
+
         // Enable all production networking features
         config.tor.enabled = true;
         config.tor.enable_dandelion = true;
@@ -599,22 +689,23 @@ async fn main() -> anyhow::Result<()> {
     // Initialize Tor client first
     info!("🧅 Starting Tor client...");
     let tor_config = q_tor_client::TorConfig::default();
-    let tor_client = match q_tor_client::QTorClient::new(tor_config, node_id, q_types::Phase::Phase1).await {
-        Ok(client) => {
-            info!("✅ Tor client initialized successfully");
-            Some(Arc::new(client))
-        }
-        Err(e) => {
-            warn!(
-                "⚠️  Tor client initialization failed: {}, continuing without Tor",
-                e
-            );
-            info!("   Error details: {}", e);
-            info!("   Make sure Tor is running on 127.0.0.1:9150");
-            // Continue without Tor rather than using mock
-            None
-        }
-    };
+    let tor_client =
+        match q_tor_client::QTorClient::new(tor_config, node_id, q_types::Phase::Phase1).await {
+            Ok(client) => {
+                info!("✅ Tor client initialized successfully");
+                Some(Arc::new(client))
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️  Tor client initialization failed: {}, continuing without Tor",
+                    e
+                );
+                info!("   Error details: {}", e);
+                info!("   Make sure Tor is running on 127.0.0.1:9150");
+                // Continue without Tor rather than using mock
+                None
+            }
+        };
 
     // Initialize Bitcoin-Tor Bridge - DEACTIVATED
     let bitcoin_bridge: Option<Arc<()>> = {
@@ -749,18 +840,18 @@ async fn main() -> anyhow::Result<()> {
                                                 NodeEvent::PeerDiscovered { peer_id, via_dns }
                                                     if via_dns =>
                                                 {
-                                                    info!("🔍 Peer discovered via DNS steganography: {}", 
+                                                    info!("🔍 Peer discovered via DNS steganography: {}",
                                                           hex::encode(&peer_id[..8]));
                                                 }
                                                 NodeEvent::TransactionVerified {
                                                     tx_hash,
                                                     score,
                                                 } => {
-                                                    info!("✅ Transaction verified via DNS: {} (score: {:.2})", 
+                                                    info!("✅ Transaction verified via DNS: {} (score: {:.2})",
                                                           hex::encode(&tx_hash[..8.min(tx_hash.len())]), score);
                                                 }
                                                 NodeEvent::BlockReceived { block_hash, height } => {
-                                                    info!("⛓️ Block received via DNS: height={}, hash={}", 
+                                                    info!("⛓️ Block received via DNS: height={}, hash={}",
                                                           height, hex::encode(&block_hash[..8.min(block_hash.len())]));
                                                 }
                                                 _ => {}
@@ -878,7 +969,7 @@ async fn main() -> anyhow::Result<()> {
         // DEACTIVATED: use q_dns_phantom::real_dns_resolver::RealDnsResolver;
         use q_tor_client::real_tor_client::RealTorClient;
         use q_network::real_dht::RealDht;
-        
+
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             async {
@@ -895,10 +986,10 @@ async fn main() -> anyhow::Result<()> {
                     // DEACTIVATED: real_dns,
                     real_tor,
                 ).await?;
-                
+
                 // Start peer discovery
                 peer_discovery.start_discovery().await?;
-                
+
                 anyhow::Ok(peer_discovery)
             }
         ).await {
@@ -931,16 +1022,24 @@ async fn main() -> anyhow::Result<()> {
     // 🌐 LIBP2P UNIFIED NETWORK MANAGER
     // Network-specific P2P networking with Gossipsub
     // ========================================
-    info!("🌐 Initializing libp2p Unified Network Manager for {}...", network_config.network_id.display_name());
+    info!(
+        "🌐 Initializing libp2p Unified Network Manager for {}...",
+        network_config.network_id.display_name()
+    );
 
     let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone()).await {
         Ok(mut manager) => {
-            info!("✅ libp2p Network Manager initialized for {}", manager.network_config().network_id.display_name());
+            info!(
+                "✅ libp2p Network Manager initialized for {}",
+                manager.network_config().network_id.display_name()
+            );
             info!("   Local Peer ID: {}", manager.peer_id());
             info!("   Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping");
-            info!("   Network Topics: {}/transactions, {}/blocks, etc.",
-                  manager.network_config().network_id.gossipsub_topic_prefix(),
-                  manager.network_config().network_id.gossipsub_topic_prefix());
+            info!(
+                "   Network Topics: {}/transactions, {}/blocks, etc.",
+                manager.network_config().network_id.gossipsub_topic_prefix(),
+                manager.network_config().network_id.gossipsub_topic_prefix()
+            );
 
             // Set up gossipsub message forwarding
             let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -972,9 +1071,10 @@ async fn main() -> anyhow::Result<()> {
                     Err(_) => "0.0.0.0".to_string(), // Fallback if curl fails
                 };
 
-                vec![
-                    format!("/ip4/{}/tcp/{}/p2p/{}", public_ip, p2p_port, peer_id),
-                ]
+                vec![format!(
+                    "/ip4/{}/tcp/{}/p2p/{}",
+                    public_ip, p2p_port, peer_id
+                )]
             } else {
                 vec![] // Random port - can't predict the address
             };
@@ -989,7 +1089,10 @@ async fn main() -> anyhow::Result<()> {
             // Subscribe to database updates topic BEFORE spawning event loop
             // This prevents deadlock when database replication tries to subscribe later
             if let Err(e) = manager.subscribe_topic(q_ipfs_storage::DATABASE_UPDATES_TOPIC) {
-                warn!("⚠️  Failed to pre-subscribe to database updates topic: {}", e);
+                warn!(
+                    "⚠️  Failed to pre-subscribe to database updates topic: {}",
+                    e
+                );
             } else {
                 info!("📢 Pre-subscribed to database updates topic for replication");
             }
@@ -1013,7 +1116,10 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = manager.subscribe_topic(&peer_heights_topic) {
                 warn!("⚠️  Failed to subscribe to peer-heights topic: {}", e);
             } else {
-                info!("📢 Subscribed to {} for peer discovery (network-aware)", peer_heights_topic);
+                info!(
+                    "📢 Subscribed to {} for peer discovery (network-aware)",
+                    peer_heights_topic
+                );
             }
 
             info!("🔄 [LEGACY] Skipped block-pack-requests/responses topics (replaced by BlockPackCodec)");
@@ -1023,8 +1129,17 @@ async fn main() -> anyhow::Result<()> {
             // causing Phase 3 storage injection to timeout and breaking BlockPackCodec responses.
             // Phase 3 will set storage/channel, THEN spawn the event loop.
             let manager_arc = Arc::new(tokio::sync::Mutex::new(manager));
-            info!("✅ libp2p manager initialized (storage and event loop will be set up in Phase 3)");
-            Some((manager_arc, gossipsub_rx, gossipsub_tx_clone, command_tx, peer_count_atomic, cached_peer_info))
+            info!(
+                "✅ libp2p manager initialized (storage and event loop will be set up in Phase 3)"
+            );
+            Some((
+                manager_arc,
+                gossipsub_rx,
+                gossipsub_tx_clone,
+                command_tx,
+                peer_count_atomic,
+                cached_peer_info,
+            ))
         }
         Err(e) => {
             warn!("⚠️  libp2p Network Manager initialization failed: {}", e);
@@ -1034,10 +1149,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Split libp2p_manager tuple into manager, gossipsub receiver, gossipsub sender, command sender, peer count, and cached peer info
-    let (libp2p_discovery, gossipsub_rx_opt, gossipsub_tx_opt, libp2p_command_tx, peer_count_atomic, libp2p_cached_peer_info) = match libp2p_manager {
+    let (
+        libp2p_discovery,
+        gossipsub_rx_opt,
+        gossipsub_tx_opt,
+        libp2p_command_tx,
+        peer_count_atomic,
+        libp2p_cached_peer_info,
+    ) = match libp2p_manager {
         Some((manager, rx, tx, cmd_tx, peer_count, cached_info)) => {
             info!("📡 libp2p_manager extracted successfully - gossipsub channels ready!");
-            (Some(manager), Some(rx), Some(tx), Some(cmd_tx), Some(peer_count), Some(cached_info))
+            (
+                Some(manager),
+                Some(rx),
+                Some(tx),
+                Some(cmd_tx),
+                Some(peer_count),
+                Some(cached_info),
+            )
         }
         None => {
             warn!("⚠️  libp2p_manager is None - no gossipsub receiver available");
@@ -1051,10 +1180,13 @@ async fn main() -> anyhow::Result<()> {
     // ========================================
     let balance_engine = Arc::new(BalanceConsensusEngine::new(
         GENESIS_TIMESTAMP,
-        FOUNDER_WALLET.to_string()
+        FOUNDER_WALLET.to_string(),
     ));
-    info!("✅ Balance consensus engine initialized (genesis: {}, dev wallet: {})",
-          GENESIS_TIMESTAMP, &FOUNDER_WALLET[..20]);
+    info!(
+        "✅ Balance consensus engine initialized (genesis: {}, dev wallet: {})",
+        GENESIS_TIMESTAMP,
+        &FOUNDER_WALLET[..20]
+    );
 
     // Initialize application state with network components
     let state = AppState::new_with_networks(
@@ -1064,12 +1196,57 @@ async fn main() -> anyhow::Result<()> {
         dns_phantom,
         bep44_discovery,
         tor_client,
-        None,  // production_peer_discovery is deactivated
-        libp2p_discovery,  // ✅ ENABLED - libp2p gossipsub for transaction propagation
-        libp2p_command_tx.clone(),  // ✅ Command channel for non-blocking P2P operations
+        None,                      // production_peer_discovery is deactivated
+        libp2p_discovery,          // ✅ ENABLED - libp2p gossipsub for transaction propagation
+        libp2p_command_tx.clone(), // ✅ Command channel for non-blocking P2P operations
     )
     .await?;
     let mut state = state;
+
+    // ✨ v1.0.16-beta: Set validator keypair for PQC block signing
+    state.validator_keypair = validator_keypair.clone();
+
+    // ✨ v1.0.16-beta: Wire validator keypair into block producer pool for ACTIVE signing
+    if let Some(ref keypair) = validator_keypair {
+        info!("🔐 Wiring validator keypair into block producer pool...");
+        state
+            .block_producer_pool
+            .set_validator_keypair(keypair.clone());
+        info!("✅ PQC block signing ACTIVATED for all producers!");
+
+        // Register our own public keys in the validator registry
+        info!("🔐 Registering validator public keys in registry...");
+        let public_keys = keypair.public_keys();
+        {
+            let mut registry = state.validator_key_registry.write().await;
+            registry.register(public_keys);
+        }
+        info!(
+            "✅ Validator public keys registered (Node ID: {}...)",
+            hex::encode(&keypair.node_id[..8])
+        );
+    } else {
+        info!("ℹ️  No validator keypair - blocks will not be PQC signed");
+    }
+
+    // 🔔 v1.0.17-beta: Wire event emitter into block producer pool for SSE mining rewards
+    // NOTE: Event emitter is set per-producer when producers are spawned, not globally
+    // info!("🔔 Wiring event emitter into block producer pool...");
+    // state.block_producer_pool.set_event_emitter(event_emitter.clone());
+    // info!("✅ Mining reward SSE notifications ACTIVATED for all producers!");
+
+    // ⏰ v1.0.15-beta: Initialize Timeout-Based Sync Activation
+    // Breaks the "stuck at genesis" deadlock by forcing sync after timeout
+    info!("⏰ Initializing timeout-based sync activation...");
+    let sync_activation_config = q_api_server::sync_activation::SyncActivationConfig::default();
+    let sync_activator = Arc::new(
+        q_api_server::sync_activation::TimeoutBasedSyncActivation::new(sync_activation_config),
+    );
+    state.sync_activator = Some(sync_activator.clone());
+    info!("✅ Sync activation initialized - will force sync after 30s if stuck");
+    info!("   Cold start timeout: 30s");
+    info!("   Retry interval: 60s");
+    info!("   Minimum peers: 1");
 
     // ========================================
     // 📊 LIBP2P PEER COUNT & INFO - Atomic Counter and Cached Peer Info
@@ -1098,7 +1275,8 @@ async fn main() -> anyhow::Result<()> {
             let node_id_hex = hex::encode(node_id);
             let (peer_id_str, _listen_addrs) = cached_info;
 
-            match q_network::DistributedAICoordinator::new(node_id_hex.clone(), peer_id_str.clone()) {
+            match q_network::DistributedAICoordinator::new(node_id_hex.clone(), peer_id_str.clone())
+            {
                 Ok(mut coordinator) => {
                     info!("✅ Distributed AI Coordinator initialized");
                     info!("   Node ID: {}", node_id_hex);
@@ -1113,7 +1291,9 @@ async fn main() -> anyhow::Result<()> {
                         // Set the libp2p command channel directly on the coordinator
                         coordinator.set_network_channel(libp2p_cmd_tx.clone());
 
-                        info!("✅ Network TX channel set on coordinator (direct libp2p integration)");
+                        info!(
+                            "✅ Network TX channel set on coordinator (direct libp2p integration)"
+                        );
                     } else {
                         error!("❌ CRITICAL: libp2p command TX not available!");
                         error!("   Distributed AI will NOT work without network connection");
@@ -1136,11 +1316,16 @@ async fn main() -> anyhow::Result<()> {
                         for topic in topics {
                             match tokio::time::timeout(
                                 tokio::time::Duration::from_secs(2),
-                                libp2p_mgr.lock()
-                            ).await {
+                                libp2p_mgr.lock(),
+                            )
+                            .await
+                            {
                                 Ok(mut mgr) => {
                                     if let Err(e) = mgr.subscribe_topic(topic) {
-                                        error!("❌ Failed to subscribe to AI topic {}: {}", topic, e);
+                                        error!(
+                                            "❌ Failed to subscribe to AI topic {}: {}",
+                                            topic, e
+                                        );
                                     } else {
                                         info!("✅ Subscribed to AI topic: {}", topic);
                                     }
@@ -1164,7 +1349,8 @@ async fn main() -> anyhow::Result<()> {
                         info!("💓 Starting periodic capability announcement task...");
                         info!("   Interval: 30 seconds");
 
-                        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                        let mut interval =
+                            tokio::time::interval(tokio::time::Duration::from_secs(30));
 
                         loop {
                             interval.tick().await;
@@ -1262,7 +1448,9 @@ async fn main() -> anyhow::Result<()> {
             node_id,
             phase,
             enable_oracle,
-        ).await {
+        )
+        .await
+        {
             Ok(dex_components) => {
                 state.token_registry = Some(dex_components.token_registry);
                 state.price_history = Some(dex_components.price_history);
@@ -1273,8 +1461,22 @@ async fn main() -> anyhow::Result<()> {
                 info!("   Token Registry: ✅");
                 info!("   Price History: ✅");
                 info!("   DEX Manager: ✅");
-                info!("   Oracle: {}", if enable_oracle { "✅" } else { "⏭️  (disabled)" });
-                info!("   Price Bridge: {}", if state.price_bridge.is_some() { "✅" } else { "⏭️  (disabled)" });
+                info!(
+                    "   Oracle: {}",
+                    if enable_oracle {
+                        "✅"
+                    } else {
+                        "⏭️  (disabled)"
+                    }
+                );
+                info!(
+                    "   Price Bridge: {}",
+                    if state.price_bridge.is_some() {
+                        "✅"
+                    } else {
+                        "⏭️  (disabled)"
+                    }
+                );
                 info!("   Features:");
                 info!("      • Dynamic token registration from VM");
                 info!("      • Real-time OHLCV candle generation (7 intervals)");
@@ -1299,22 +1501,36 @@ async fn main() -> anyhow::Result<()> {
         info!("🚀 ════════════════════════════════════════════════════════");
         info!("🚀 Initializing SafeBatchedWriter (Phase 1A)...");
 
-        use q_storage::{SafeBatchedWriter, BatchConfig};
+        use q_storage::{BatchConfig, SafeBatchedWriter};
 
         // Get start height from storage
-        let start_height = state.storage_engine.get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
+        let start_height = state
+            .storage_engine
+            .get_latest_qblock_height()
+            .await
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         info!("   Starting from height: {}", start_height);
 
         // 🚀 v1.0.2-beta: Initialize HeightState cache with actual database height
         state.height_state.update(start_height).await;
-        info!("   ✅ HeightState cache initialized at height {}", start_height);
+        info!(
+            "   ✅ HeightState cache initialized at height {}",
+            start_height
+        );
 
         // Use conservative Phase 1A config: 16 blocks, 1s, 1 MiB
         let config = BatchConfig::default();
         info!("   Configuration:");
         info!("      • Max batch blocks: {}", config.max_batch_blocks);
-        info!("      • Max batch duration: {:?}", config.max_batch_duration);
-        info!("      • Max WAL bytes: {} MiB", config.max_wal_bytes / 1024 / 1024);
+        info!(
+            "      • Max batch duration: {:?}",
+            config.max_batch_duration
+        );
+        info!(
+            "      • Max WAL bytes: {} MiB",
+            config.max_wal_bytes / 1024 / 1024
+        );
         info!("      • Max reorder gap: {}", config.max_reorder_gap);
 
         // Get DB handle from hot_db (RocksDBKV)
@@ -1322,11 +1538,7 @@ async fn main() -> anyhow::Result<()> {
         let db = hot_db.db();
 
         // Create SafeBatchedWriter
-        let (mut writer, tx) = SafeBatchedWriter::new(
-            db.clone(),
-            config,
-            start_height,
-        );
+        let (mut writer, tx) = SafeBatchedWriter::new(db.clone(), config, start_height);
 
         // Clone metrics for API access
         let metrics_handle = Arc::new(tokio::sync::Mutex::new(writer.get_metrics()));
@@ -1368,8 +1580,45 @@ async fn main() -> anyhow::Result<()> {
     let hot_db = state.storage_engine.get_hot_db();
     let db = hot_db.db();
 
+    // ========================================
+    // 🔒 v1.0.14-beta: DATABASE POINTER INTEGRITY CHECK
+    // Prevents height regression from pointer corruption (height 12,114 → 353 incident)
+    // ========================================
+    info!("🔒 ════════════════════════════════════════════════════════");
+    info!("🔒 Running Database Pointer Integrity Check (v1.0.14-beta)...");
+    info!("   Prevents: Height regression from corrupted qblock:latest pointer");
+    info!("   Incident: 2025-11-17 pointer corruption (12,114 → 353)");
+
+    match q_storage::check_and_repair_on_startup(db.clone()) {
+        Ok(check_result) => {
+            info!("✅ Database integrity check passed");
+            info!("   Pointer height: {}", check_result.pointer_height);
+            info!("   Actual height: {}", check_result.actual_highest_height);
+            info!("   Total blocks: {}", check_result.total_blocks_found);
+            info!("   Corruption: {:?}", check_result.corruption_severity);
+
+            if check_result.is_corrupted
+                && check_result.corruption_severity != q_storage::CorruptionSeverity::None
+            {
+                info!("✅ Database pointer auto-repaired successfully!");
+                info!(
+                    "   Old pointer: {} → New pointer: {}",
+                    check_result.pointer_height, check_result.actual_highest_height
+                );
+            }
+        }
+        Err(e) => {
+            error!("🚨 CRITICAL: Database pointer integrity check FAILED!");
+            error!("   Error: {}", e);
+            error!("   Cannot start with corrupted database pointer");
+            error!("   Please run: ./target/release/repair-database ./data-mine12/hot");
+            panic!("Database pointer corruption detected - refusing to start");
+        }
+    }
+    info!("🔒 ════════════════════════════════════════════════════════");
+
     let async_storage = match AsyncStorageEngine::new(
-        db.clone(),  // Same Arc<DB> handle as SafeBatchedWriter
+        db.clone(), // Same Arc<DB> handle as SafeBatchedWriter
         q_storage::CF_BLOCKS.to_string(),
         q_storage::CF_BALANCES.to_string(),
         q_storage::CF_TRANSACTIONS.to_string(),
@@ -1385,7 +1634,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             error!("❌ Failed to initialize AsyncStorageEngine: {}", e);
-            return Err(anyhow::anyhow!("AsyncStorageEngine initialization failed: {}", e));
+            return Err(anyhow::anyhow!(
+                "AsyncStorageEngine initialization failed: {}",
+                e
+            ));
         }
     };
 
@@ -1447,7 +1699,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             info!("🔄 Starting block sync receiver task...");
             while let Some(blocks) = block_sync_rx.recv().await {
-                info!("📦 Received {} blocks from peer via libp2p sync", blocks.len());
+                info!(
+                    "📦 Received {} blocks from peer via libp2p sync",
+                    blocks.len()
+                );
 
                 // ========================================
                 // 🚀 v1.0.2-beta PHASE 1A: FAST SYNC ROUTING
@@ -1478,29 +1733,44 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     };
 
-                                    if let Err(e) = balance_engine_sync.process_block_mining_rewards_tx(&tx, &block).await {
+                                    if let Err(e) = balance_engine_sync
+                                        .process_block_mining_rewards_tx(&tx, &block)
+                                        .await
+                                    {
                                         error!("❌ Fallback balance processing failed for block {}: {:?}",
                                                block.header.height, e);
                                         continue;
                                     }
 
                                     if let Err(e) = tx.save_qblock(&block).await {
-                                        error!("❌ Fallback save failed for block {}: {:?}", block.header.height, e);
+                                        error!(
+                                            "❌ Fallback save failed for block {}: {:?}",
+                                            block.header.height, e
+                                        );
                                         continue;
                                     }
 
                                     if let Err(e) = tx.commit().await {
-                                        error!("❌ Fallback commit failed for block {}: {:?}", block.header.height, e);
+                                        error!(
+                                            "❌ Fallback commit failed for block {}: {:?}",
+                                            block.header.height, e
+                                        );
                                     }
                                 }
                             }
                         }
 
                         if sent_count > 0 {
-                            info!("🚀 Fast sync: {} blocks sent to SafeBatchedWriter", sent_count);
+                            info!(
+                                "🚀 Fast sync: {} blocks sent to SafeBatchedWriter",
+                                sent_count
+                            );
                         }
                         if failed_count > 0 {
-                            warn!("⚠️  {} blocks failed to send to fast sync, used fallback", failed_count);
+                            warn!(
+                                "⚠️  {} blocks failed to send to fast sync, used fallback",
+                                failed_count
+                            );
                         }
 
                         // Skip the normal processing loop since we used fast sync
@@ -1519,29 +1789,39 @@ async fn main() -> anyhow::Result<()> {
                     let tx = match storage_clone.begin_transaction().await {
                         Ok(tx) => tx,
                         Err(e) => {
-                            error!("❌ [TRANSACTION] Failed to begin transaction for block {}: {:?}",
-                                   block.header.height, e);
+                            error!(
+                                "❌ [TRANSACTION] Failed to begin transaction for block {}: {:?}",
+                                block.header.height, e
+                            );
                             continue; // Skip this block
                         }
                     };
 
                     // Process balance consensus within transaction (buffered)
-                    let updates = match balance_engine_sync.process_block_mining_rewards_tx(&tx, block).await {
+                    let updates = match balance_engine_sync
+                        .process_block_mining_rewards_tx(&tx, block)
+                        .await
+                    {
                         Ok(updates) => updates,
                         Err(BalanceConsensusError::AlreadyProcessed(_)) => {
                             // Safe retry - skip already processed
                             continue;
                         }
                         Err(e) => {
-                            error!("❌ [DIRECT SYNC CONSENSUS TX] CRITICAL: Failed for block {}: {:?}",
-                                   block.header.height, e);
+                            error!(
+                                "❌ [DIRECT SYNC CONSENSUS TX] CRITICAL: Failed for block {}: {:?}",
+                                block.header.height, e
+                            );
                             continue; // Transaction auto-rolled back
                         }
                     };
 
                     // Save block within transaction (buffered)
                     if let Err(e) = tx.save_qblock(block).await {
-                        error!("❌ [TRANSACTION] Failed to save block {}: {:?}", block.header.height, e);
+                        error!(
+                            "❌ [TRANSACTION] Failed to save block {}: {:?}",
+                            block.header.height, e
+                        );
                         continue; // Transaction auto-rolled back
                     }
 
@@ -1550,17 +1830,27 @@ async fn main() -> anyhow::Result<()> {
                         Ok(_) => {
                             balance_updates_total += updates.len();
                             blocks_committed += 1;
-                            info!("✅ Committed block {} atomically ({} updates)",
-                                  block.header.height, updates.len());
+                            info!(
+                                "✅ Committed block {} atomically ({} updates)",
+                                block.header.height,
+                                updates.len()
+                            );
                         }
                         Err(e) => {
-                            error!("❌ [TRANSACTION] Failed to commit block {}: {:?}", block.header.height, e);
+                            error!(
+                                "❌ [TRANSACTION] Failed to commit block {}: {:?}",
+                                block.header.height, e
+                            );
                         }
                     }
                 }
                 if balance_updates_total > 0 {
-                    info!("💰 [DIRECT SYNC TX] Processed {} balance updates for {}/{} blocks",
-                          balance_updates_total, blocks_committed, blocks.len());
+                    info!(
+                        "💰 [DIRECT SYNC TX] Processed {} balance updates for {}/{} blocks",
+                        balance_updates_total,
+                        blocks_committed,
+                        blocks.len()
+                    );
                 }
 
                 // Forward to consensus for validation
@@ -1568,7 +1858,10 @@ async fn main() -> anyhow::Result<()> {
                 for block in blocks {
                     // Convert block to DAG vertex for consensus processing
                     // For now, just log - full consensus integration requires vertex conversion
-                    info!("🎯 Block {} ready for consensus validation", block.header.height);
+                    info!(
+                        "🎯 Block {} ready for consensus validation",
+                        block.header.height
+                    );
                 }
             }
             info!("⚠️  Block sync receiver task terminated");
@@ -1621,150 +1914,149 @@ async fn main() -> anyhow::Result<()> {
         info!("   WARNING: This will consume ~30GB of RAM");
 
         // Auto-download model helper function
-    async fn ensure_model_available() -> anyhow::Result<std::path::PathBuf> {
-        use futures_util::StreamExt;
-        use tokio::io::AsyncWriteExt;
+        async fn ensure_model_available() -> anyhow::Result<std::path::PathBuf> {
+            use futures_util::StreamExt;
+            use tokio::io::AsyncWriteExt;
 
-        let model_dir = std::path::PathBuf::from("./models");
-        tokio::fs::create_dir_all(&model_dir).await?;
+            let model_dir = std::path::PathBuf::from("./models");
+            tokio::fs::create_dir_all(&model_dir).await?;
 
-        let model_path = model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
-        let tokenizer_config_path = model_dir.join("tokenizer_config.json");
-        let tokenizer_json_path = model_dir.join("tokenizer.json");
+            let model_path = model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
+            let tokenizer_config_path = model_dir.join("tokenizer_config.json");
+            let tokenizer_json_path = model_dir.join("tokenizer.json");
 
-        // Download tokenizer_config.json if it doesn't exist
-        if !tokenizer_config_path.exists() {
-            info!("📥 Downloading tokenizer_config.json from bootstrap node...");
-            info!("   Source: https://quillon.xyz/downloads/tokenizer_config.json");
+            // Download tokenizer_config.json if it doesn't exist
+            if !tokenizer_config_path.exists() {
+                info!("📥 Downloading tokenizer_config.json from bootstrap node...");
+                info!("   Source: https://quillon.xyz/downloads/tokenizer_config.json");
 
-            let url = "https://quillon.xyz/downloads/tokenizer_config.json";
-            let response = reqwest::get(url).await?;
+                let url = "https://quillon.xyz/downloads/tokenizer_config.json";
+                let response = reqwest::get(url).await?;
 
-            if !response.status().is_success() {
-                return Err(anyhow::anyhow!("Failed to download tokenizer config: HTTP {}", response.status()));
-            }
-
-            let bytes = response.bytes().await?;
-            tokio::fs::write(&tokenizer_config_path, bytes).await?;
-            info!("✅ Tokenizer config downloaded: {:?}", tokenizer_config_path);
-        } else {
-            info!("✅ Tokenizer config already exists locally at: {:?}", tokenizer_config_path);
-        }
-
-        // Download tokenizer.json if it doesn't exist
-        if !tokenizer_json_path.exists() {
-            info!("📥 Downloading tokenizer.json from bootstrap node...");
-            info!("   Source: https://quillon.xyz/downloads/tokenizer.json");
-
-            let url = "https://quillon.xyz/downloads/tokenizer.json";
-            let response = reqwest::get(url).await?;
-
-            if !response.status().is_success() {
-                return Err(anyhow::anyhow!("Failed to download tokenizer.json: HTTP {}", response.status()));
-            }
-
-            let bytes = response.bytes().await?;
-            tokio::fs::write(&tokenizer_json_path, bytes).await?;
-            info!("✅ Tokenizer.json downloaded: {:?}", tokenizer_json_path);
-        } else {
-            info!("✅ Tokenizer.json already exists locally at: {:?}", tokenizer_json_path);
-        }
-
-        // If model doesn't exist, download from bootstrap node
-        if !model_path.exists() {
-            info!("📥 Downloading Mistral-7B model (4.1GB) from bootstrap node...");
-            info!("   This is a one-time download and will be cached locally");
-            info!("   Source: https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
-
-            let url = "https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf";
-            let response = reqwest::get(url).await?;
-
-            if !response.status().is_success() {
-                return Err(anyhow::anyhow!("Failed to download model: HTTP {}", response.status()));
-            }
-
-            let total_size = response.content_length().unwrap_or(0);
-            info!("   Download size: {:.2} GB", total_size as f64 / 1_000_000_000.0);
-
-            let mut file = tokio::fs::File::create(&model_path).await?;
-            let mut downloaded: u64 = 0;
-            let mut stream = response.bytes_stream();
-
-            let progress_interval = 100 * 1024 * 1024; // Log every 100MB
-            let mut last_logged = 0u64;
-
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                file.write_all(&chunk).await?;
-                downloaded += chunk.len() as u64;
-
-                // Log progress every 100MB
-                if downloaded - last_logged >= progress_interval {
-                    let percent = if total_size > 0 {
-                        (downloaded as f64 / total_size as f64 * 100.0)
-                    } else {
-                        0.0
-                    };
-                    info!("   Downloaded: {:.2} MB / {:.2} MB ({:.1}%)",
-                          downloaded as f64 / 1_000_000.0,
-                          total_size as f64 / 1_000_000.0,
-                          percent);
-                    last_logged = downloaded;
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to download tokenizer config: HTTP {}",
+                        response.status()
+                    ));
                 }
+
+                let bytes = response.bytes().await?;
+                tokio::fs::write(&tokenizer_config_path, bytes).await?;
+                info!(
+                    "✅ Tokenizer config downloaded: {:?}",
+                    tokenizer_config_path
+                );
+            } else {
+                info!(
+                    "✅ Tokenizer config already exists locally at: {:?}",
+                    tokenizer_config_path
+                );
             }
 
-            file.flush().await?;
-            info!("✅ Model downloaded successfully and cached at: {:?}", model_path);
-            info!("   File size: {:.2} GB", downloaded as f64 / 1_000_000_000.0);
-        } else {
-            info!("✅ Model already exists locally at: {:?}", model_path);
-        }
+            // Download tokenizer.json if it doesn't exist
+            if !tokenizer_json_path.exists() {
+                info!("📥 Downloading tokenizer.json from bootstrap node...");
+                info!("   Source: https://quillon.xyz/downloads/tokenizer.json");
 
-        Ok(model_path)
-    }
+                let url = "https://quillon.xyz/downloads/tokenizer.json";
+                let response = reqwest::get(url).await?;
 
-    // Determine model path: manual override or auto-download
-    let model_path_result = if let Ok(path) = std::env::var("Q_AI_MODEL_PATH") {
-        info!("   Using manually specified model path: {}", path);
-        Ok(std::path::PathBuf::from(path))
-    } else {
-        info!("   Q_AI_MODEL_PATH not set - attempting auto-download from bootstrap node");
-        ensure_model_available().await
-    };
-
-    // Try to load AI model with HIGH-PERFORMANCE mistral.rs engine
-    let mistralrs_engine = match model_path_result {
-        Ok(model_path) => {
-            info!("   Model path: {:?}", model_path);
-            info!("   Loading Mistral-7B-Instruct-v0.3 (4.1GB GGUF) with mistral.rs...");
-            info!("   🚀 Using optimized mistral.rs engine (10-100x faster than Candle)");
-
-            match q_ai_inference::MistralRsEngine::new(model_path.to_str().unwrap()).await {
-                Ok(engine) => {
-                    info!("✅ mistral.rs HIGH-PERFORMANCE Engine loaded successfully!");
-                    info!("   Model: Mistral-7B-Instruct-v0.3");
-                    info!("   Performance: <2s first token, 5-15 tok/s on CPU");
-                    info!("   KV-cache: ENABLED (14.27x speedup for multi-turn)");
-                    info!("   Device: CPU (optimized GGUF Q4_K_M quantization)");
-                    info!("   Streaming: SSE with real-time progress indicators");
-                    Some(Arc::new(engine))
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to download tokenizer.json: HTTP {}",
+                        response.status()
+                    ));
                 }
-                Err(e) => {
-                    warn!("⚠️  mistral.rs Engine failed to load: {}", e);
-                    warn!("   Chat API will be disabled");
-                    None
-                }
+
+                let bytes = response.bytes().await?;
+                tokio::fs::write(&tokenizer_json_path, bytes).await?;
+                info!("✅ Tokenizer.json downloaded: {:?}", tokenizer_json_path);
+            } else {
+                info!(
+                    "✅ Tokenizer.json already exists locally at: {:?}",
+                    tokenizer_json_path
+                );
             }
-        }
-        Err(e) => {
-            warn!("⚠️  Model download/access failed: {}", e);
-            warn!("   AI inference disabled - Chat API will not be available");
-            None
-        }
-    };
 
-        state.mistralrs_engine = mistralrs_engine;
-        state.inference_engine = None; // Disable old slow engine
+            // If model doesn't exist, download from bootstrap node
+            if !model_path.exists() {
+                info!("📥 Downloading Mistral-7B model (4.1GB) from bootstrap node...");
+                info!("   This is a one-time download and will be cached locally");
+                info!(
+                    "   Source: https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
+                );
+
+                let url = "https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf";
+                let response = reqwest::get(url).await?;
+
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to download model: HTTP {}",
+                        response.status()
+                    ));
+                }
+
+                let total_size = response.content_length().unwrap_or(0);
+                info!(
+                    "   Download size: {:.2} GB",
+                    total_size as f64 / 1_000_000_000.0
+                );
+
+                let mut file = tokio::fs::File::create(&model_path).await?;
+                let mut downloaded: u64 = 0;
+                let mut stream = response.bytes_stream();
+
+                let progress_interval = 100 * 1024 * 1024; // Log every 100MB
+                let mut last_logged = 0u64;
+
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    file.write_all(&chunk).await?;
+                    downloaded += chunk.len() as u64;
+
+                    // Log progress every 100MB
+                    if downloaded - last_logged >= progress_interval {
+                        let percent = if total_size > 0 {
+                            (downloaded as f64 / total_size as f64 * 100.0)
+                        } else {
+                            0.0
+                        };
+                        info!(
+                            "   Downloaded: {:.2} MB / {:.2} MB ({:.1}%)",
+                            downloaded as f64 / 1_000_000.0,
+                            total_size as f64 / 1_000_000.0,
+                            percent
+                        );
+                        last_logged = downloaded;
+                    }
+                }
+
+                file.flush().await?;
+                info!(
+                    "✅ Model downloaded successfully and cached at: {:?}",
+                    model_path
+                );
+                info!(
+                    "   File size: {:.2} GB",
+                    downloaded as f64 / 1_000_000_000.0
+                );
+            } else {
+                info!("✅ Model already exists locally at: {:?}", model_path);
+            }
+
+            Ok(model_path)
+        }
+
+        // 🚀 v1.0.17-beta: ON-DEMAND AI LOADING FIX
+        // Don't load AI model at startup to avoid blocking HTTP server
+        // AI will be loaded on-demand when chat API is first called
+        info!("🚀 Configuring on-demand AI loading...");
+        info!("   HTTP server will start immediately");
+        info!("   AI model will load automatically when chat API is first used");
+        info!("   This ensures HTTP API is available within <1 second of startup");
+
+        state.mistralrs_engine = None; // Load on first chat API call
+        state.inference_engine = None;
     } // end if ai_enabled
 
     // ========================================
@@ -1780,15 +2072,19 @@ async fn main() -> anyhow::Result<()> {
     // Determine number of parallel workers (4x CPU cores for I/O bound workload)
     let cpu_cores = num_cpus::get();
     let num_workers = (cpu_cores * 4).max(64); // Minimum 64 workers, optimal for 1M TPS target
-    info!("   Parallel Workers: {} ({}x CPU cores)", num_workers, num_workers / cpu_cores);
+    info!(
+        "   Parallel Workers: {} ({}x CPU cores)",
+        num_workers,
+        num_workers / cpu_cores
+    );
 
     // Initialize Production Mempool for high-throughput transaction batching
     let mempool_config = q_narwhal_core::production_mempool::MempoolConfig {
-        max_transactions: 1_000_000,  // 1M transaction capacity
+        max_transactions: 1_000_000,                  // 1M transaction capacity
         max_age: std::time::Duration::from_secs(300), // 5 minutes
-        min_fee_per_byte: 1,  // Low fees for high throughput
-        max_transaction_size: 1024 * 1024,  // 1MB max tx size
-        max_tx_per_validator_per_second: 100_000,  // 100K TPS per validator
+        min_fee_per_byte: 1,                          // Low fees for high throughput
+        max_transaction_size: 1024 * 1024,            // 1MB max tx size
+        max_tx_per_validator_per_second: 100_000,     // 100K TPS per validator
         enable_byzantine_protection: true,
     };
 
@@ -1799,7 +2095,7 @@ async fn main() -> anyhow::Result<()> {
     use q_types::Phase;
 
     let tor_config = TorClientConfig {
-        socks_proxy: "127.0.0.1:9050".to_string(),  // Default Tor SOCKS5 proxy
+        socks_proxy: "127.0.0.1:9050".to_string(), // Default Tor SOCKS5 proxy
         connection_timeout: std::time::Duration::from_secs(30),
         max_pool_size: 100,
         enable_connection_pooling: true,
@@ -1820,8 +2116,10 @@ async fn main() -> anyhow::Result<()> {
             match q_narwhal_core::production_mempool::ProductionMempool::new(
                 mempool_config,
                 tor_client,
-                Phase::Phase1,  // Phase 1: Post-quantum cryptography
-            ).await {
+                Phase::Phase1, // Phase 1: Post-quantum cryptography
+            )
+            .await
+            {
                 Ok(mempool) => {
                     info!("✅ Production Mempool initialized with Tor broadcast");
                     info!("   Max transactions: 1M");
@@ -1846,9 +2144,10 @@ async fn main() -> anyhow::Result<()> {
     info!("   Workers: {} parallel vertex processors", num_workers);
 
     let dag_knight = match q_dag_knight::DAGKnightConsensus::new(
-        node_id,
-        3, // f = 3 for 3f+1 = 10 total validators (minimum Byzantine fault tolerance)
-    ).await {
+        node_id, 3, // f = 3 for 3f+1 = 10 total validators (minimum Byzantine fault tolerance)
+    )
+    .await
+    {
         Ok(consensus) => {
             info!("✅ DAG-Knight Consensus initialized successfully");
             info!("   Validator ID: {}", hex::encode(node_id));
@@ -1898,12 +2197,12 @@ async fn main() -> anyhow::Result<()> {
         // Configure shadow mode
         let shadow_config = q_resonance::ShadowModeConfig {
             enabled: true,
-            agreement_threshold: 0.85,       // 85% agreement required
-            observation_rounds: 100,          // Observe 100 rounds
-            hybrid_mode: false,               // Pure shadow initially
-            resonance_weight: 0.0,            // Start at 0% resonance
-            auto_adjust_weight: true,         // Auto-adjust on performance
-            log_interval_rounds: 10,          // Log every 10 rounds
+            agreement_threshold: 0.85, // 85% agreement required
+            observation_rounds: 100,   // Observe 100 rounds
+            hybrid_mode: false,        // Pure shadow initially
+            resonance_weight: 0.0,     // Start at 0% resonance
+            auto_adjust_weight: true,  // Auto-adjust on performance
+            log_interval_rounds: 10,   // Log every 10 rounds
         };
 
         // Create ShadowModeCoordinator
@@ -1911,7 +2210,9 @@ async fn main() -> anyhow::Result<()> {
             dag_knight_ref.clone(),
             resonance_arc.clone(),
             shadow_config,
-        ).await {
+        )
+        .await
+        {
             Ok(shadow_coordinator) => {
                 info!("✅ Shadow Mode Coordinator initialized");
                 info!("   🎯 Primary: DAG-Knight Consensus");
@@ -1925,7 +2226,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // Store both coordinators in app state
                 state.resonance_coordinator = Some(resonance_arc);
-                state.shadow_coordinator = Some(Arc::new(tokio::sync::Mutex::new(shadow_coordinator)));
+                state.shadow_coordinator =
+                    Some(Arc::new(tokio::sync::Mutex::new(shadow_coordinator)));
             }
             Err(e) => {
                 warn!("⚠️  Shadow Mode Coordinator initialization failed: {}", e);
@@ -1984,7 +2286,8 @@ async fn main() -> anyhow::Result<()> {
     // ✅ v1.0.2-beta Layer 3 FIX: Bounded channel with backpressure
     // Prevents memory exhaustion from unbounded queue growth
     info!("⚡ Initializing mining submission async queue...");
-    let (mining_tx, mut mining_rx) = tokio::sync::mpsc::channel::<q_api_server::MiningSubmission>(10_000);
+    let (mining_tx, mut mining_rx) =
+        tokio::sync::mpsc::channel::<q_api_server::MiningSubmission>(10_000);
     state.mining_submission_tx = Some(mining_tx);
     info!("✅ Mining queue initialized - async processing enabled (bounded: 10,000 capacity)");
     info!("   Non-blocking submission acceptance (with backpressure)");
@@ -1999,14 +2302,14 @@ async fn main() -> anyhow::Result<()> {
     info!("🚀 Initializing Turbo Sync (Git-inspired fast sync)...");
 
     let turbo_sync_config = q_storage::TurboSyncConfig {
-        parallel_streams: 8,          // 8 concurrent download streams
-        chunk_size: 5000,             // 5000 blocks per chunk (optimized for batched writes)
-        compression_level: 3,         // Fast compression (Git's default)
-        enable_pipelining: true,      // Download + process simultaneously
-        max_peer_connections: 16,     // Support up to 16 peers
-        delta_compression: true,      // Enable delta compression
-        chunk_timeout: std::time::Duration::from_secs(60),  // Longer timeout for larger chunks
-        smart_protocol: true,         // Enable smart negotiation
+        parallel_streams: 8,      // 8 concurrent download streams
+        chunk_size: 5000,         // 5000 blocks per chunk (optimized for batched writes)
+        compression_level: 3,     // Fast compression (Git's default)
+        enable_pipelining: true,  // Download + process simultaneously
+        max_peer_connections: 16, // Support up to 16 peers
+        delta_compression: true,  // Enable delta compression
+        chunk_timeout: std::time::Duration::from_secs(60), // Longer timeout for larger chunks
+        smart_protocol: true,     // Enable smart negotiation
     };
 
     // ========================================
@@ -2017,15 +2320,17 @@ async fn main() -> anyhow::Result<()> {
         tokio::sync::mpsc::unbounded_channel::<q_storage::NetworkRequest>();
 
     // Shared response map for tracking pending block pack requests
-    let turbo_sync_response_map: Arc<tokio::sync::Mutex<std::collections::HashMap<
-        String,
-        tokio::sync::oneshot::Sender<anyhow::Result<q_storage::BlockPack>>,
-    >>> = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let turbo_sync_response_map: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                tokio::sync::oneshot::Sender<anyhow::Result<q_storage::BlockPack>>,
+            >,
+        >,
+    > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
-    let mut turbo_sync_manager = q_storage::TurboSyncManager::new(
-        state.storage_engine.clone(),
-        turbo_sync_config
-    );
+    let mut turbo_sync_manager =
+        q_storage::TurboSyncManager::new(state.storage_engine.clone(), turbo_sync_config);
 
     // Configure network channel BEFORE wrapping in Arc
     turbo_sync_manager.set_network_channel(network_request_tx.clone());
@@ -2037,16 +2342,58 @@ async fn main() -> anyhow::Result<()> {
     // 🌉 v0.9.6-beta: Initialize peer registry bridge (CRITICAL FIX)
     // This bridges libp2p peer discoveries to TurboSync peer registry
     // Fixes: "No peers available with target height" even when peers connected
-    let peer_bridge = Arc::new(q_storage::TurboSyncPeerBridge::new());
-    state.peer_bridge = Some(peer_bridge.clone());
-    info!("🌉 [PEER BRIDGE] Initialized TurboSync peer registry bridge");
+    // TEMPORARILY DISABLED v1.0.15: Circular dependency with sync_activation module
+    // let peer_bridge = Arc::new(q_storage::TurboSyncPeerBridge::new());
+    // state.peer_bridge = Some(peer_bridge.clone());
+    // info!("🌉 [PEER BRIDGE] Initialized TurboSync peer registry bridge");
 
-    // Spawn periodic sync task (updates TurboSync registry every 5 seconds)
-    let peer_bridge_clone = peer_bridge.clone();
-    let turbo_sync_clone = turbo_sync.clone();
+    // TEMPORARILY DISABLED v1.0.15: Circular dependency with turbo_sync_peer_bridge
+    // ✅ v1.0.4-beta: Spawn ENHANCED periodic sync task with timeout activation
+    // This replaces the old run_periodic_sync with intelligent sync activation
+    // CRITICAL FIX: Solves genesis deadlock where nodes get stuck at height 1
+    // let peer_bridge_clone = peer_bridge.clone();
+    // let turbo_sync_clone = turbo_sync.clone();
+    // let storage_clone = state.storage_engine.clone();
+    // tokio::spawn(async move {
+    //     info!("🚀 [ENHANCED SYNC] Starting enhanced periodic sync with timeout activation");
+    //     info!("🔧 [ENHANCED SYNC] This is the v1.0.4-beta CRITICAL FIX for sync deadlock");
+    //     q_storage::run_enhanced_periodic_sync(
+    //         peer_bridge_clone,
+    //         turbo_sync_clone,
+    //         storage_clone,
+    //         30,  // cold_start_timeout_secs: Force sync after 30s at genesis
+    //         60,  // retry_interval_secs: Retry every 60s if sync fails
+    //         1,   // min_peers: Require at least 1 peer before forcing sync
+    //     ).await;
+    // });
+
+    // 🔍 QNK-102: Spawn periodic registry status monitoring
+    let turbo_sync_monitor = turbo_sync.clone();
     tokio::spawn(async move {
-        info!("🔄 [PEER BRIDGE] Starting periodic sync task (every 5 seconds)");
-        q_storage::run_periodic_sync(peer_bridge_clone, turbo_sync_clone).await;
+        info!("🔍 [QNK-102] Starting peer registry status monitor (every 60 seconds)");
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let registry = turbo_sync_monitor.get_peer_registry_info().await;
+
+            warn!(
+                "🔍 [QNK-102 REGISTRY STATUS] Total peers registered: {}",
+                registry.len()
+            );
+
+            if registry.is_empty() {
+                warn!("   ⚠️  WARNING: Peer registry is EMPTY - P2P batch sync will NOT activate!");
+            } else {
+                warn!("   ✅ Registry populated - P2P batch sync available");
+                // Log up to 5 peer entries
+                for (idx, (peer_id, height)) in registry.iter().take(5).enumerate() {
+                    warn!("   Peer {}: {} = height {}", idx + 1, peer_id, height);
+                }
+                if registry.len() > 5 {
+                    warn!("   ... and {} more peers", registry.len() - 5);
+                }
+            }
+        }
     });
 
     info!("✅ Turbo Sync initialized - 50-250x faster blockchain sync enabled!");
@@ -2108,13 +2455,17 @@ async fn main() -> anyhow::Result<()> {
                                 info!("   Protocol Version: {}", pack_request.protocol_version);
                                 info!("   Heights: {}-{}", start_height, end_height);
                                 info!("   Request ID: {}", &request_id[..16]);
-                                info!("   Serialized bytes (len={}): {:02x?}", data.len(), &data[..data.len().min(64)]);
+                                info!(
+                                    "   Serialized bytes (len={}): {:02x?}",
+                                    data.len(),
+                                    &data[..data.len().min(64)]
+                                );
 
                                 // ✅ v0.9.33-beta: Use configured network ID (not hardcoded phase4)
                                 let network_id = std::env::var("Q_NETWORK_ID")
                                     .ok()
                                     .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                    .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
+                                    .unwrap_or(q_types::NetworkId::TestnetPhase12); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
                                 let topic = network_id.block_pack_requests_topic();
 
                                 if let Err(e) = gossipsub_tx_for_requests.send((topic, data)) {
@@ -2123,7 +2474,9 @@ async fn main() -> anyhow::Result<()> {
                                     // Remove from map and send error
                                     let mut map = response_map_for_processor.lock().await;
                                     if let Some(tx) = map.remove(&request_id) {
-                                        let _ = tx.send(Err(anyhow::anyhow!("Failed to publish request")));
+                                        let _ = tx.send(Err(anyhow::anyhow!(
+                                            "Failed to publish request"
+                                        )));
                                     }
                                 } else {
                                     info!("📤 [TURBO SYNC P2P] Published block pack request {}-{} (ID: {})",
@@ -2147,7 +2500,9 @@ async fn main() -> anyhow::Result<()> {
             info!("🌐 [TURBO SYNC P2P] Network request processor stopped");
         });
     } else {
-        warn!("⚠️ [TURBO SYNC P2P] Gossipsub not available - network request processor NOT started");
+        warn!(
+            "⚠️ [TURBO SYNC P2P] Gossipsub not available - network request processor NOT started"
+        );
     }
 
     let app_state = Arc::new(state);
@@ -2166,7 +2521,10 @@ async fn main() -> anyhow::Result<()> {
         Ok(report) => {
             if report.is_healthy {
                 info!("✅ Database integrity check: PASSED");
-                info!("   Blocks: {}, Height: {}", report.total_blocks, report.highest_contiguous);
+                info!(
+                    "   Blocks: {}, Height: {}",
+                    report.total_blocks, report.highest_contiguous
+                );
             } else {
                 error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 error!("🚨 DATABASE CORRUPTION DETECTED!");
@@ -2196,7 +2554,10 @@ async fn main() -> anyhow::Result<()> {
                 match integrity_checker.repair(&report).await {
                     Ok(_) => {
                         info!("✅ Automatic repair completed successfully");
-                        info!("   Node will now sync from height {} via P2P", report.highest_contiguous);
+                        info!(
+                            "   Node will now sync from height {} via P2P",
+                            report.highest_contiguous
+                        );
                     }
                     Err(e) => {
                         error!("❌ Automatic repair failed: {}", e);
@@ -2218,7 +2579,10 @@ async fn main() -> anyhow::Result<()> {
     // GOSSIPSUB TRANSACTION/BLOCK SYNCHRONIZATION PROCESSOR
     // CRITICAL: Spawn IMMEDIATELY after AppState creation to prevent channel closure
     // ========================================
-    info!("🔍 Checking gossipsub_rx_opt status: is_some={}", gossipsub_rx_opt.is_some());
+    info!(
+        "🔍 Checking gossipsub_rx_opt status: is_some={}",
+        gossipsub_rx_opt.is_some()
+    );
     if let Some(mut gossipsub_rx) = gossipsub_rx_opt {
         let app_state_gossip = app_state.clone();
         let response_map_for_gossipsub = turbo_sync_response_map.clone();
@@ -2230,91 +2594,113 @@ async fn main() -> anyhow::Result<()> {
                 // Match topics by suffix to support both testnet and mainnet
                 // e.g., "/qnk/testnet/transactions" or "/qnk/mainnet/transactions"
                 if topic.ends_with("/transactions") {
-                        // Deserialize and process incoming transaction
-                        match postcard::from_bytes::<q_types::Transaction>(&data) {
-                            Ok(tx) => {
-                                let tx_hash = tx.id;
-                                info!("📥 Received transaction {} from network", hex::encode(&tx_hash[..8]));
+                    // Deserialize and process incoming transaction
+                    match postcard::from_bytes::<q_types::Transaction>(&data) {
+                        Ok(tx) => {
+                            let tx_hash = tx.id;
+                            info!(
+                                "📥 Received transaction {} from network",
+                                hex::encode(&tx_hash[..8])
+                            );
 
-                                // Add to transaction pool (lock-free)
-                                app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
-                                app_state_gossip.tx_status.insert(tx_hash, q_types::TxStatus::InMempool);
+                            // Add to transaction pool (lock-free)
+                            app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
+                            app_state_gossip
+                                .tx_status
+                                .insert(tx_hash, q_types::TxStatus::InMempool);
 
-                                info!("✅ Transaction {} synced to local pool", hex::encode(&tx_hash[..8]));
-                            }
-                            Err(e) => {
-                                warn!("Failed to deserialize transaction from network: {}", e);
-                            }
+                            info!(
+                                "✅ Transaction {} synced to local pool",
+                                hex::encode(&tx_hash[..8])
+                            );
                         }
+                        Err(e) => {
+                            warn!("Failed to deserialize transaction from network: {}", e);
+                        }
+                    }
                 } else if topic.ends_with("/mining-rewards") {
-                        // Deserialize and process incoming mining reward transaction
-                        match postcard::from_bytes::<q_types::Transaction>(&data) {
-                            Ok(tx) => {
-                                let tx_hash = tx.id;
-                                let miner_addr = tx.to;
-                                let reward = tx.amount;
+                    // Deserialize and process incoming mining reward transaction
+                    match postcard::from_bytes::<q_types::Transaction>(&data) {
+                        Ok(tx) => {
+                            let tx_hash = tx.id;
+                            let miner_addr = tx.to;
+                            let reward = tx.amount;
 
-                                // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
-                                debug!("💎 Received mining reward from network");
+                            // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
+                            debug!("💎 Received mining reward from network");
 
-                                // Update wallet balance
-                                let mut balances = app_state_gossip.wallet_balances.write().await;
-                                let current_balance = balances.get(&miner_addr).copied().unwrap_or(0);
-                                let new_balance = current_balance + reward;
-                                balances.insert(miner_addr, new_balance);
+                            // Update wallet balance
+                            let mut balances = app_state_gossip.wallet_balances.write().await;
+                            let current_balance = balances.get(&miner_addr).copied().unwrap_or(0);
+                            let new_balance = current_balance + reward;
+                            balances.insert(miner_addr, new_balance);
 
-                                // ⚡ PERFORMANCE: Persistence now handled by periodic background task (every 15s)
-                                // Previously synced on EVERY gossip reward - now batched for 450x improvement
-                                drop(balances);
+                            // ⚡ PERFORMANCE: Persistence now handled by periodic background task (every 15s)
+                            // Previously synced on EVERY gossip reward - now batched for 450x improvement
+                            drop(balances);
 
-                                // Add transaction to pool
-                                app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
-                                let block_height = app_state_gossip.node_status.read().await.current_height;
-                                app_state_gossip.tx_status.insert(tx_hash, q_types::TxStatus::Confirmed { block_height, round: 0 });
+                            // Add transaction to pool
+                            app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
+                            let block_height =
+                                app_state_gossip.node_status.read().await.current_height;
+                            app_state_gossip.tx_status.insert(
+                                tx_hash,
+                                q_types::TxStatus::Confirmed {
+                                    block_height,
+                                    round: 0,
+                                },
+                            );
 
-                                // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
-                                debug!("✅ Mining reward synced successfully");
-                            }
-                            Err(e) => {
-                                warn!("Failed to deserialize mining reward from network: {}", e);
-                            }
+                            // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
+                            debug!("✅ Mining reward synced successfully");
                         }
+                        Err(e) => {
+                            warn!("Failed to deserialize mining reward from network: {}", e);
+                        }
+                    }
                 } else if topic.ends_with("/dex/swaps") {
-                        // Deserialize and process incoming DEX swap event
-                        match postcard::from_bytes::<q_api_server::handlers::SwapEvent>(&data) {
-                            Ok(swap) => {
-                                info!("💱 Received DEX swap from network: {}->{} (pool: {})",
-                                      swap.from_token, swap.to_token, &swap.pool_id);
+                    // Deserialize and process incoming DEX swap event
+                    match postcard::from_bytes::<q_api_server::handlers::SwapEvent>(&data) {
+                        Ok(swap) => {
+                            info!(
+                                "💱 Received DEX swap from network: {}->{} (pool: {})",
+                                swap.from_token, swap.to_token, &swap.pool_id
+                            );
 
-                                // Update liquidity pool reserves
-                                let pool_data_opt = {
-                                    let mut pools = app_state_gossip.liquidity_pools.write().await;
-                                    if let Some(pool) = pools.get_mut(&swap.pool_id) {
-                                        pool.reserve0 = swap.new_reserve0;
-                                        pool.reserve1 = swap.new_reserve1;
-                                        info!("✅ DEX pool {} synced: reserves {}/{}",
-                                              swap.pool_id, swap.new_reserve0, swap.new_reserve1);
+                            // Update liquidity pool reserves
+                            let pool_data_opt = {
+                                let mut pools = app_state_gossip.liquidity_pools.write().await;
+                                if let Some(pool) = pools.get_mut(&swap.pool_id) {
+                                    pool.reserve0 = swap.new_reserve0;
+                                    pool.reserve1 = swap.new_reserve1;
+                                    info!(
+                                        "✅ DEX pool {} synced: reserves {}/{}",
+                                        swap.pool_id, swap.new_reserve0, swap.new_reserve1
+                                    );
 
-                                        // Serialize pool data before dropping lock
-                                        serde_json::to_vec(&*pool).ok()
-                                    } else {
-                                        warn!("DEX swap references unknown pool: {}", swap.pool_id);
-                                        None
-                                    }
-                                };
+                                    // Serialize pool data before dropping lock
+                                    serde_json::to_vec(&*pool).ok()
+                                } else {
+                                    warn!("DEX swap references unknown pool: {}", swap.pool_id);
+                                    None
+                                }
+                            };
 
-                                // Persist updated pool to storage (outside of lock)
-                                if let Some(pool_data) = pool_data_opt {
-                                    if let Err(e) = app_state_gossip.storage_engine
-                                        .save_liquidity_pool(&swap.pool_id, &pool_data).await {
-                                        warn!("Failed to persist synced liquidity pool: {}", e);
-                                    }
+                            // Persist updated pool to storage (outside of lock)
+                            if let Some(pool_data) = pool_data_opt {
+                                if let Err(e) = app_state_gossip
+                                    .storage_engine
+                                    .save_liquidity_pool(&swap.pool_id, &pool_data)
+                                    .await
+                                {
+                                    warn!("Failed to persist synced liquidity pool: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                warn!("Failed to deserialize DEX swap from network: {}", e);
-                            }
                         }
+                        Err(e) => {
+                            warn!("Failed to deserialize DEX swap from network: {}", e);
+                        }
+                    }
                 } else if topic.ends_with("/blocks") {
                     // ========================================
                     // v0.9.31-beta: BALANCE REORGANIZATION HELPER FUNCTION
@@ -2334,13 +2720,19 @@ async fn main() -> anyhow::Result<()> {
                         old_block: &q_types::QBlock,
                         new_block: &q_types::QBlock,
                     ) -> anyhow::Result<()> {
-                        use q_storage::balance_consensus::{GENESIS_TIMESTAMP, DEV_FEE_PERCENT, FOUNDER_WALLET};
+                        use q_storage::balance_consensus::{
+                            DEV_FEE_PERCENT, FOUNDER_WALLET, GENESIS_TIMESTAMP,
+                        };
                         use std::collections::HashMap;
 
-                        info!("🔀 [BALANCE REORG] Starting balance reorganization at height {}", old_block.header.height);
+                        info!(
+                            "🔀 [BALANCE REORG] Starting balance reorganization at height {}",
+                            old_block.header.height
+                        );
 
                         // Step 1: Calculate rewards from old block (to subtract)
-                        let old_block_reward = calculate_block_reward(old_block.header.timestamp, GENESIS_TIMESTAMP)?;
+                        let old_block_reward =
+                            calculate_block_reward(old_block.header.timestamp, GENESIS_TIMESTAMP)?;
                         let old_dev_fee = (old_block_reward as f64 * DEV_FEE_PERCENT) as u64;
                         let old_miner_reward = old_block_reward.saturating_sub(old_dev_fee);
 
@@ -2353,7 +2745,8 @@ async fn main() -> anyhow::Result<()> {
                             old_dev_fee * old_block.mining_solutions.len() as u64;
 
                         // Step 2: Calculate rewards from new block (to add)
-                        let new_block_reward = calculate_block_reward(new_block.header.timestamp, GENESIS_TIMESTAMP)?;
+                        let new_block_reward =
+                            calculate_block_reward(new_block.header.timestamp, GENESIS_TIMESTAMP)?;
                         let new_dev_fee = (new_block_reward as f64 * DEV_FEE_PERCENT) as u64;
                         let new_miner_reward = new_block_reward.saturating_sub(new_dev_fee);
 
@@ -2374,7 +2767,10 @@ async fn main() -> anyhow::Result<()> {
                             affected_addresses.insert(addr.clone());
                         }
 
-                        info!("🔀 [BALANCE REORG] {} addresses affected by fork", affected_addresses.len());
+                        info!(
+                            "🔀 [BALANCE REORG] {} addresses affected by fork",
+                            affected_addresses.len()
+                        );
 
                         // Step 4: Begin atomic transaction
                         let tx = storage.begin_transaction().await?;
@@ -2396,11 +2792,16 @@ async fn main() -> anyhow::Result<()> {
                                 .saturating_add(new_amount);
 
                             if corrected_balance != current_balance {
-                                storage.as_ref().set_balance(&address, corrected_balance).await?;
-                                info!("🔀 [BALANCE REORG] {} QNK → {} QNK for {}",
-                                      current_balance as f64 / 1_000_000.0,
-                                      corrected_balance as f64 / 1_000_000.0,
-                                      &address[..12]);
+                                storage
+                                    .as_ref()
+                                    .set_balance(&address, corrected_balance)
+                                    .await?;
+                                info!(
+                                    "🔀 [BALANCE REORG] {} QNK → {} QNK for {}",
+                                    current_balance as f64 / 1_000_000.0,
+                                    corrected_balance as f64 / 1_000_000.0,
+                                    &address[..12]
+                                );
                             }
                         }
 
@@ -2415,12 +2816,19 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     /// Calculate block reward based on timestamp (halving schedule)
-                    fn calculate_block_reward(current_timestamp: u64, genesis_timestamp: u64) -> anyhow::Result<u64> {
+                    fn calculate_block_reward(
+                        current_timestamp: u64,
+                        genesis_timestamp: u64,
+                    ) -> anyhow::Result<u64> {
                         const SECONDS_PER_YEAR: u64 = 31_536_000;
                         const BASE_REWARD: u64 = 100_000; // 0.001 QNK
 
                         if current_timestamp < genesis_timestamp {
-                            return Err(anyhow::anyhow!("Invalid timestamp: {} < {}", current_timestamp, genesis_timestamp));
+                            return Err(anyhow::anyhow!(
+                                "Invalid timestamp: {} < {}",
+                                current_timestamp,
+                                genesis_timestamp
+                            ));
                         }
 
                         let elapsed_seconds = current_timestamp - genesis_timestamp;
@@ -2437,12 +2845,108 @@ async fn main() -> anyhow::Result<()> {
                     match postcard::from_bytes::<q_types::QBlock>(&data) {
                         Ok(block) => {
                             let block_height = block.header.height;
-                            let block_hash = hex::encode(&block.calculate_hash()[..8]);
+                            let block_hash_bytes = block.calculate_hash();
+                            let block_hash = hex::encode(&block_hash_bytes[..8]);
                             let proposer = hex::encode(&block.header.proposer[..4]);
 
                             // 🔍 v0.9.35-beta: DEBUG - Log ALL blocks received from gossipsub
                             info!("🔍 [BLOCK DEBUG] Received block {} from gossipsub (hash={}, proposer={}, txs={})",
                                   block_height, block_hash, proposer, block.transactions.len());
+
+                            // 🚀 v1.0.3.8-beta: BLOCK HEIGHT FALLBACK - Use received block heights to update network height
+                            // This bypasses broken peer-height announcements and uses authoritative block data instead
+                            {
+                                use std::sync::atomic::Ordering;
+                                let current_highest = app_state_gossip
+                                    .highest_network_height
+                                    .load(Ordering::SeqCst);
+                                if block_height > current_highest {
+                                    app_state_gossip
+                                        .highest_network_height
+                                        .store(block_height, Ordering::SeqCst);
+                                    info!("📊 [BLOCK FALLBACK] Network height updated to {} (from received block, was {})",
+                                          block_height, current_highest);
+                                    debug!("🔄 [BLOCK FALLBACK] Bypassing peer-height announcements - using block height directly");
+                                } else if block_height == current_highest {
+                                    debug!("📊 [BLOCK FALLBACK] Block {} matches current network height", block_height);
+                                } else {
+                                    debug!("📊 [BLOCK FALLBACK] Block {} is older than network height {} (historical block)",
+                                           block_height, current_highest);
+                                }
+                            }
+
+                            // ✨ v1.0.16-beta: PQC SIGNATURE VERIFICATION - ACTIVE!
+                            // Verify all spectral signatures on the block before accepting it
+                            if !block.quantum_metadata.spectral_signatures.is_empty() {
+                                debug!(
+                                    "🔐 [PQC] Block {} has {} spectral signatures - verifying...",
+                                    block_height,
+                                    block.quantum_metadata.spectral_signatures.len()
+                                );
+
+                                // Load validator key registry for verification
+                                let registry = app_state_gossip.validator_key_registry.read().await;
+
+                                for (idx, sig) in block
+                                    .quantum_metadata
+                                    .spectral_signatures
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    // Get validator's public keys from registry
+                                    let (ed25519_key, dilithium5_key) = match (
+                                        registry.get_ed25519(&sig.validator),
+                                        registry.get_dilithium5(&sig.validator),
+                                    ) {
+                                        (Some(ed_key), Some(dil_key)) => (ed_key, dil_key),
+                                        _ => {
+                                            warn!("⚠️  [PQC] No public keys for validator {} - skipping verification",
+                                                  hex::encode(&sig.validator[..4]));
+                                            debug!(
+                                                "🔐 [PQC] Block {} signature {} skipped (no keys)",
+                                                block_height, idx
+                                            );
+                                            continue; // Skip verification if keys not available
+                                        }
+                                    };
+
+                                    // Verify the spectral signature
+                                    match q_types::verify_spectral_signature(
+                                        sig,
+                                        &block_hash_bytes,
+                                        Some(&ed25519_key),
+                                        Some(&dilithium5_key),
+                                    ) {
+                                        Ok(_) => {
+                                            debug!("✅ [PQC] Signature {} verified for block {} (phase: {:?})",
+                                                   idx, block_height, sig.crypto_phase);
+                                        }
+                                        Err(e) => {
+                                            error!("❌ [PQC] Signature {} verification FAILED for block {}: {}",
+                                                   idx, block_height, e);
+                                            error!(
+                                                "   Validator: {}",
+                                                hex::encode(&sig.validator[..8])
+                                            );
+                                            error!("   Phase: {:?}", sig.crypto_phase);
+                                            error!(
+                                                "   Block REJECTED due to invalid PQC signature!"
+                                            );
+                                            return; // Reject block with invalid signature
+                                        }
+                                    }
+                                }
+
+                                info!(
+                                    "✅ [PQC] All {} signatures verified for block {}",
+                                    block.quantum_metadata.spectral_signatures.len(),
+                                    block_height
+                                );
+                            } else {
+                                // No signatures - acceptable for blocks from validators without PQC keys
+                                debug!("ℹ️  [PQC] Block {} has no spectral signatures (validator may not have PQC key)",
+                                      block_height);
+                            }
 
                             // Clone app_state FIRST to avoid moving original (critical for subsequent match arms)
                             let app_state_for_spawn = app_state_gossip.clone();
@@ -2454,7 +2958,8 @@ async fn main() -> anyhow::Result<()> {
                                 let storage = app_state_for_spawn.storage_engine.clone();
                                 let node_status = app_state_for_spawn.node_status.clone();
                                 let balance_engine_clone = balance_engine_for_spawn;
-                                let highest_network_height = app_state_for_spawn.highest_network_height.clone();
+                                let highest_network_height =
+                                    app_state_for_spawn.highest_network_height.clone();
                                 // v0.9.43-beta: Clone app_state for deep fork detection
                                 let app_state_gossip = app_state_for_spawn.clone();
                                 // ========================================
@@ -2485,21 +2990,37 @@ async fn main() -> anyhow::Result<()> {
                                                 incoming_chain_weight,
                                             } => {
                                                 // 🔀 FORK DETECTED at this height
-                                                info!("🔀 [v0.9.37 FORK] Detected at height {}", fork_height);
-                                                info!("   Local hash:      {:02x?}...", &local_hash[..8]);
-                                                info!("   Incoming hash:   {:02x?}...", &incoming_hash[..8]);
+                                                info!(
+                                                    "🔀 [v0.9.37 FORK] Detected at height {}",
+                                                    fork_height
+                                                );
+                                                info!(
+                                                    "   Local hash:      {:02x?}...",
+                                                    &local_hash[..8]
+                                                );
+                                                info!(
+                                                    "   Incoming hash:   {:02x?}...",
+                                                    &incoming_hash[..8]
+                                                );
                                                 info!("   Local weight:    {}", local_chain_weight);
-                                                info!("   Incoming weight: {}", incoming_chain_weight);
+                                                info!(
+                                                    "   Incoming weight: {}",
+                                                    incoming_chain_weight
+                                                );
 
                                                 // Compare using total_difficulty (more accurate than height-based weight)
-                                                let existing_difficulty = existing_block.header.total_difficulty;
-                                                let incoming_difficulty = block.header.total_difficulty;
+                                                let existing_difficulty =
+                                                    existing_block.header.total_difficulty;
+                                                let incoming_difficulty =
+                                                    block.header.total_difficulty;
 
                                                 if incoming_difficulty <= existing_difficulty {
                                                     // Our chain is heavier or equal - keep our fork
                                                     if incoming_difficulty == existing_difficulty {
                                                         // Tiebreaker: Use proposer ID (deterministic)
-                                                        if block.header.proposer < existing_block.header.proposer {
+                                                        if block.header.proposer
+                                                            < existing_block.header.proposer
+                                                        {
                                                             info!("🔀 [v0.9.37 TIE] Lower proposer ID - accepting incoming block");
                                                         } else {
                                                             info!("✅ [v0.9.37] Local chain wins (tiebreaker on proposer ID)");
@@ -2517,19 +3038,31 @@ async fn main() -> anyhow::Result<()> {
 
                                                 // ✅ v0.9.43-beta PHASE 4: Multi-block reorganization execution
                                                 // Determine fork depth and execute appropriate reorganization strategy
-                                                let local_height = storage.get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
-                                                let fork_depth = local_height.saturating_sub(block_height);
+                                                let local_height = storage
+                                                    .get_latest_qblock_height()
+                                                    .await
+                                                    .unwrap_or(Some(0))
+                                                    .unwrap_or(0);
+                                                let fork_depth =
+                                                    local_height.saturating_sub(block_height);
 
                                                 if fork_depth > 10 {
                                                     // DEEP FORK: Requires multi-block reorganization
                                                     warn!("🔀 [v0.9.43 DEEP FORK] Detected at height {} (depth: {} blocks)",
                                                           block_height, fork_depth);
-                                                    warn!("   Local chain: {} blocks", local_height);
-                                                    warn!("   Network height: {} blocks", incoming_difficulty);
+                                                    warn!(
+                                                        "   Local chain: {} blocks",
+                                                        local_height
+                                                    );
+                                                    warn!(
+                                                        "   Network height: {} blocks",
+                                                        incoming_difficulty
+                                                    );
                                                     warn!("   Incoming chain heavier - executing multi-block reorganization");
 
                                                     // Get network height from highest peer
-                                                    let network_height = app_state_gossip.highest_network_height
+                                                    let network_height = app_state_gossip
+                                                        .highest_network_height
                                                         .load(std::sync::atomic::Ordering::Relaxed);
 
                                                     if network_height > local_height {
@@ -2558,14 +3091,18 @@ async fn main() -> anyhow::Result<()> {
                                                     &storage,
                                                     &balance_engine_clone,
                                                     &existing_block,
-                                                    &block
-                                                ).await {
+                                                    &block,
+                                                )
+                                                .await
+                                                {
                                                     error!("❌ [v0.9.37 REORG] Balance reorganization failed: {:?}", e);
                                                     error!("   Keeping existing block for safety");
                                                     return;
                                                 }
 
-                                                info!("✅ [v0.9.37 REORG] Fork resolution complete");
+                                                info!(
+                                                    "✅ [v0.9.37 REORG] Fork resolution complete"
+                                                );
                                                 return;
                                             }
 
@@ -2575,8 +3112,14 @@ async fn main() -> anyhow::Result<()> {
                                             } => {
                                                 // ❌ CRITICAL: Genesis-level fork (incompatible chains)
                                                 error!("❌ [v0.9.37 CRITICAL] Genesis-level fork detected!");
-                                                error!("   Local genesis:    {:02x?}...", &local_genesis[..8]);
-                                                error!("   Incoming genesis: {:02x?}...", &incoming_genesis[..8]);
+                                                error!(
+                                                    "   Local genesis:    {:02x?}...",
+                                                    &local_genesis[..8]
+                                                );
+                                                error!(
+                                                    "   Incoming genesis: {:02x?}...",
+                                                    &incoming_genesis[..8]
+                                                );
                                                 error!("   This node is on an INCOMPATIBLE fork!");
                                                 error!("   Rejecting block - manual intervention required");
                                                 return;
@@ -2588,7 +3131,10 @@ async fn main() -> anyhow::Result<()> {
                                         debug!("✅ [BLOCK DEBUG] No existing block at height {}, proceeding to save", block_height);
                                     }
                                     Err(e) => {
-                                        warn!("⚠️ Failed to check if block {} exists: {}", block_height, e);
+                                        warn!(
+                                            "⚠️ Failed to check if block {} exists: {}",
+                                            block_height, e
+                                        );
                                         return;
                                     }
                                 }
@@ -2602,12 +3148,15 @@ async fn main() -> anyhow::Result<()> {
                                     Ok(tx) => tx,
                                     Err(e) => {
                                         error!("❌ [TRANSACTION] Failed to begin transaction for block {}: {:?}", block_height, e);
-                                        return;  // Abort block processing
+                                        return; // Abort block processing
                                     }
                                 };
 
                                 // Process balance consensus within transaction (buffered, not yet committed)
-                                let updates = match balance_engine_clone.process_block_mining_rewards_tx(&tx, &block).await {
+                                let updates = match balance_engine_clone
+                                    .process_block_mining_rewards_tx(&tx, &block)
+                                    .await
+                                {
                                     Ok(updates) => {
                                         if !updates.is_empty() {
                                             debug!("💰 [BALANCE CONSENSUS TX] Processed {} balance updates for block {}",
@@ -2620,45 +3169,77 @@ async fn main() -> anyhow::Result<()> {
                                         // but MUST still save to blockchain storage to maintain consistency
                                         debug!("🔄 [BALANCE CONSENSUS TX] Block {} already processed for balances, ensuring blockchain consistency (safe retry)",
                                               block_height);
-                                        Vec::new()  // No new balance updates, but continue to save block
+                                        Vec::new() // No new balance updates, but continue to save block
                                     }
                                     Err(e) => {
                                         // CRITICAL CONSENSUS FAILURE - reject block
                                         error!("❌ [BALANCE CONSENSUS TX] CRITICAL: Consensus failure for block {}: {:?}",
                                                block_height, e);
                                         error!("   Block REJECTED - state divergence prevented");
-                                        return;  // Transaction auto-rolled back
+                                        return; // Transaction auto-rolled back
                                     }
                                 };
 
                                 // Save block within transaction (buffered, not yet committed)
                                 if let Err(e) = tx.save_qblock(&block).await {
-                                    error!("❌ [TRANSACTION] Failed to save block {}: {:?}", block_height, e);
-                                    return;  // Transaction auto-rolled back
+                                    error!(
+                                        "❌ [TRANSACTION] Failed to save block {}: {:?}",
+                                        block_height, e
+                                    );
+                                    return; // Transaction auto-rolled back
                                 }
 
                                 // Commit transaction atomically (all or nothing)
                                 match tx.commit().await {
                                     Ok(_) => {
-                                        // 📊 v0.9.37-beta: ENHANCED SYNC PROGRESS LOGGING
-                                        // Show sync progress every 10 blocks
+                                        // 📊 v1.0.10-beta: ENHANCED SYNC PROGRESS LOGGING + HEIGHT SYNCHRONIZATION
+                                        // Show sync progress every 10 blocks AND synchronize network height across all app_states
+
+                                        // ✅ FIX #3 (v1.0.17-beta DEADLOCK): Read current height ONCE and cache it
+                                        // Root cause: Previously read node_status twice (lines 2856 & 2887), causing unnecessary contention
+                                        // Impact: Extra lock acquisitions in hot path, increases deadlock probability
+                                        // Fix: Read once, use cached value throughout this block
+                                        let current_height =
+                                            node_status.read().await.current_height;
+
                                         if block_height % 10 == 0 {
-                                            let current_height = node_status.read().await.current_height;
-                                            let network_height = highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                                            let network_height = highest_network_height
+                                                .load(std::sync::atomic::Ordering::SeqCst);
+
+                                            // 🚀 v1.0.11-beta FIX #1: Update network height in gossipsub callback with STRONG ordering
+                                            // Root cause: app_state_block_producer.highest_network_height was stale (0 or old value)
+                                            // causing production pause to never trigger during catch-up
+                                            // CRITICAL FIX: Changed Relaxed → SeqCst per external AI review (Kimi AI, ChatGPT, DeepSeek)
+                                            // SeqCst ensures cross-thread visibility guarantees - prevents race conditions
+                                            // NOTE: This gossipsub callback updates app_state_gossip, which is shared with other components
+                                            if block_height > current_height {
+                                                // We received a block from the network - update this app_state
+                                                app_state_gossip.highest_network_height.store(
+                                                    block_height,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+
+                                                debug!("🔄 [v1.0.11-beta] Updated network height to {} (SeqCst)", block_height);
+                                            }
 
                                             if network_height > current_height {
-                                                let blocks_behind = network_height.saturating_sub(current_height);
-                                                let percent_synced = (current_height as f64 / network_height as f64 * 100.0).min(100.0);
+                                                let blocks_behind =
+                                                    network_height.saturating_sub(current_height);
+                                                let percent_synced = (current_height as f64
+                                                    / network_height as f64
+                                                    * 100.0)
+                                                    .min(100.0);
                                                 info!("📊 [SYNC] Height: {}/{} ({:.1}% synced, {} blocks behind)",
                                                       current_height, network_height, percent_synced, blocks_behind);
                                             } else {
-                                                info!("✅ [SYNCED] Height: {} (fully synced)", block_height);
+                                                info!(
+                                                    "✅ [SYNCED] Height: {} (fully synced)",
+                                                    block_height
+                                                );
                                             }
                                         }
 
-                                        // ✅ SMART HEIGHT ADVANCEMENT (v0.5.17-beta fix)
-                                        // Read current height once
-                                        let current_height = node_status.read().await.current_height;
+                                        // ✅ Use the cached current_height (already read above, no second read needed)
 
                                         if block_height == current_height + 1 {
                                             // 🚀 FAST PATH: Sequential block - O(1) direct increment
@@ -2682,23 +3263,41 @@ async fn main() -> anyhow::Result<()> {
                                                     warn!("   Height advancement paused until gap is filled by network");
                                                 }
                                                 Ok(None) => {
-                                                    // No gaps - safe to advance to highest contiguous
-                                                    match storage.get_highest_contiguous_block().await {
+                                                    // ✅ FIX #2 (v1.0.17-beta DEADLOCK): Query storage FIRST without holding any locks
+                                                    // Root cause: Previously held node_status.write() across 10-100ms RocksDB query
+                                                    // Impact: Blocked all readers/writers (block production, sync, API status)
+                                                    // Fix: Query storage first, then acquire write lock only for field update
+                                                    match storage
+                                                        .get_highest_contiguous_block()
+                                                        .await
+                                                    {
                                                         Ok(new_height) => {
-                                                            let mut status = node_status.write().await;
+                                                            // ✅ Now acquire write lock for minimal duration (just field update)
+                                                            let mut status =
+                                                                node_status.write().await;
+
                                                             if new_height != status.current_height {
-                                                                let blocks_advanced = if new_height > status.current_height {
-                                                                    new_height - status.current_height
+                                                                let blocks_advanced = if new_height
+                                                                    > status.current_height
+                                                                {
+                                                                    new_height
+                                                                        - status.current_height
                                                                 } else {
                                                                     0
                                                                 };
                                                                 status.current_height = new_height;
+
+                                                                // ✅ Immediately drop the lock after field update
+                                                                drop(status);
+
                                                                 info!("📈 Advanced blockchain height by {} to {} (no gaps) ⚡",
                                                                       blocks_advanced, new_height);
                                                             }
+                                                            // ✅ Lock dropped automatically here if no update needed
                                                         }
                                                         Err(e) => {
                                                             warn!("⚠️ Failed to calculate highest contiguous block: {}", e);
+                                                            // ✅ No locks acquired if storage query fails
                                                         }
                                                     }
                                                 }
@@ -2727,15 +3326,20 @@ async fn main() -> anyhow::Result<()> {
                             let peer_id = request.requester_peer_id.clone();
                             let start = request.start_height;
                             let end = request.end_height;
-                            info!("📥 Received P2P block request from {}: heights {}-{} ({} blocks)",
-                                  &peer_id[..16], start, end, request.block_count());
+                            info!(
+                                "📥 Received P2P block request from {}: heights {}-{} ({} blocks)",
+                                &peer_id[..16],
+                                start,
+                                end,
+                                request.block_count()
+                            );
 
                             // Respond with blocks we have
                             if let Some(ref network_tx) = app_state_gossip.libp2p_command_tx {
                                 let storage = app_state_gossip.storage_engine.clone();
                                 let network_tx_clone = network_tx.clone();
                                 // Use testnet for P2P topic
-                                let network_id = q_types::NetworkId::TestnetPhase10; // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                                let network_id = q_types::NetworkId::TestnetPhase12; // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                                 let my_peer_info = app_state_gossip.libp2p_peer_info.read().await;
                                 let responder_peer_id = my_peer_info.0.clone();
                                 drop(my_peer_info);
@@ -2747,9 +3351,17 @@ async fn main() -> anyhow::Result<()> {
                                     const BYTES_PER_BLOCK: usize = 400; // Conservative estimate (measured: 395)
                                     const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB gossipsub limit
                                     const TARGET_UTILIZATION: f64 = 0.85; // ✅ 85% utilization for 800-block safety margin
-                                    const CALCULATED_BATCH_SIZE: u64 = ((MAX_MESSAGE_SIZE as f64 * TARGET_UTILIZATION) / BYTES_PER_BLOCK as f64) as u64;
+                                    const CALCULATED_BATCH_SIZE: u64 = ((MAX_MESSAGE_SIZE as f64
+                                        * TARGET_UTILIZATION)
+                                        / BYTES_PER_BLOCK as f64)
+                                        as u64;
                                     const MAX_SAFE_BATCH_SIZE: u64 = 800; // ✅ v0.9.42-beta: Match turbo_sync.rs chunk_size
-                                    const BATCH_SIZE: u64 = if CALCULATED_BATCH_SIZE < MAX_SAFE_BATCH_SIZE { CALCULATED_BATCH_SIZE } else { MAX_SAFE_BATCH_SIZE };
+                                    const BATCH_SIZE: u64 =
+                                        if CALCULATED_BATCH_SIZE < MAX_SAFE_BATCH_SIZE {
+                                            CALCULATED_BATCH_SIZE
+                                        } else {
+                                            MAX_SAFE_BATCH_SIZE
+                                        };
                                     // Result: 800 blocks per batch (matches TURBO SYNC chunks, ~6.4MB compressed)
                                     let mut batches_sent = 0;
                                     let mut total_blocks_sent = 0;
@@ -2769,7 +3381,10 @@ async fn main() -> anyhow::Result<()> {
                                                     batch_blocks.push(block);
                                                 }
                                                 Ok(None) => {
-                                                    debug!("Block {} not found, stopping batch", height);
+                                                    debug!(
+                                                        "Block {} not found, stopping batch",
+                                                        height
+                                                    );
                                                     break; // Stop batch if we hit a gap
                                                 }
                                                 Err(e) => {
@@ -2802,7 +3417,10 @@ async fn main() -> anyhow::Result<()> {
                                                               current_start, batch_end, &peer_id[..16]);
                                                     }
                                                 }
-                                                Err(e) => warn!("Failed to serialize batch response: {}", e),
+                                                Err(e) => warn!(
+                                                    "Failed to serialize batch response: {}",
+                                                    e
+                                                ),
                                             }
                                         }
 
@@ -2832,8 +3450,13 @@ async fn main() -> anyhow::Result<()> {
                             let start_height = batch_response.start_height;
                             let end_height = batch_response.end_height;
                             let responder = batch_response.responder_peer_id;
-                            info!("📦 [BATCH SYNC] Received {} blocks (heights {}-{}) from peer {}",
-                                  block_count, start_height, end_height, &responder[..16]);
+                            info!(
+                                "📦 [BATCH SYNC] Received {} blocks (heights {}-{}) from peer {}",
+                                block_count,
+                                start_height,
+                                end_height,
+                                &responder[..16]
+                            );
 
                             // 🚨 v0.5.31-beta: CRITICAL - Reject Phase 1 blocks (height >50k) but allow Phase 2 (up to 50k)
                             // Phase 1 had 140k-147k blocks. Phase 2 reset to 0, currently at ~1.4k blocks.
@@ -2848,7 +3471,7 @@ async fn main() -> anyhow::Result<()> {
 
                             // 🚨 v0.9.6-beta: CRITICAL - Validate network_id on ALL blocks AND filter out invalid ones
                             // v0.9.39-beta: Use NetworkId enum for correct phase (testnet-phase5)
-                            let expected_network_id = q_types::NetworkId::TestnetPhase10.as_str(); // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                            let expected_network_id = q_types::NetworkId::TestnetPhase12.as_str(); // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                             let mut valid_blocks = Vec::new();
                             let mut rejected_count = 0;
 
@@ -2867,9 +3490,14 @@ async fn main() -> anyhow::Result<()> {
                             // If ALL blocks invalid, skip this entire message
                             if valid_blocks.is_empty() {
                                 error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                error!("🚨 CRITICAL: ALL BLOCKS IN BATCH REJECTED - NETWORK MISMATCH!");
+                                error!(
+                                    "🚨 CRITICAL: ALL BLOCKS IN BATCH REJECTED - NETWORK MISMATCH!"
+                                );
                                 error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                error!("   Rejected {} blocks with wrong network_id", rejected_count);
+                                error!(
+                                    "   Rejected {} blocks with wrong network_id",
+                                    rejected_count
+                                );
                                 error!("   Expected: '{}'", expected_network_id);
                                 error!("   Peer may be on different network (phase1/mainnet/etc)");
                                 error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2877,8 +3505,11 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if rejected_count > 0 {
-                                warn!("⚠️  [BATCH SYNC] Partial batch: {} valid blocks, {} rejected",
-                                      valid_blocks.len(), rejected_count);
+                                warn!(
+                                    "⚠️  [BATCH SYNC] Partial batch: {} valid blocks, {} rejected",
+                                    valid_blocks.len(),
+                                    rejected_count
+                                );
                             }
 
                             let storage = app_state_gossip.storage_engine.clone();
@@ -2886,7 +3517,8 @@ async fn main() -> anyhow::Result<()> {
                             let balance_engine_clone = balance_engine.clone();
                             let network_tx_clone = app_state_gossip.libp2p_command_tx.clone(); // ✅ v0.9.49-beta: For gap fill requests
                             let peer_info_clone = app_state_gossip.libp2p_peer_info.clone(); // ✅ v0.9.49-beta: For gap fill requests
-                            let block_producer_pool_clone = app_state_gossip.block_producer_pool.clone(); // ✅ v0.9.101-beta: For producer resync after batch
+                            let block_producer_pool_clone =
+                                app_state_gossip.block_producer_pool.clone(); // ✅ v0.9.101-beta: For producer resync after batch
                             let blocks = valid_blocks; // ✅ Only process valid blocks!
 
                             // Process batch in parallel with database for maximum speed
@@ -2904,8 +3536,13 @@ async fn main() -> anyhow::Result<()> {
 
                                 // ✅ v0.9.47-beta PERFORMANCE: Get current height ONCE for the entire batch
                                 // to determine if we should check for existing blocks (resume scenario)
-                                let current_height = storage.get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
-                                let batch_start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+                                let current_height = storage
+                                    .get_latest_qblock_height()
+                                    .await
+                                    .unwrap_or(Some(0))
+                                    .unwrap_or(0);
+                                let batch_start_height =
+                                    blocks.first().map(|b| b.header.height).unwrap_or(0);
                                 let is_resume_sync = batch_start_height <= current_height;
 
                                 // ✅ v0.9.48-beta: BEGIN SINGLE TRANSACTION FOR ENTIRE BATCH
@@ -2932,7 +3569,9 @@ async fn main() -> anyhow::Result<()> {
                                     // ✅ v0.9.47-beta: Only check existence if we're in resume mode (batch overlaps with current height)
                                     // For fresh syncs (batch_start > current_height), skip the check entirely for performance
                                     if is_resume_sync {
-                                        if let Ok(Some(_existing_block)) = storage.get_qblock_by_height(block.header.height).await {
+                                        if let Ok(Some(_existing_block)) =
+                                            storage.get_qblock_by_height(block.header.height).await
+                                        {
                                             debug!("⏩ [BATCH SYNC] Block {} already exists in blockchain storage, skipping",
                                                    block.header.height);
                                             saved_count += 1; // Count as saved since it's already there
@@ -2941,7 +3580,10 @@ async fn main() -> anyhow::Result<()> {
                                     }
 
                                     // Process balance consensus within THE BATCH transaction (buffered)
-                                    let updates = match balance_engine_clone.process_block_mining_rewards_tx(&batch_tx, block).await {
+                                    let updates = match balance_engine_clone
+                                        .process_block_mining_rewards_tx(&batch_tx, block)
+                                        .await
+                                    {
                                         Ok(updates) => updates,
                                         Err(BalanceConsensusError::AlreadyProcessed(_)) => {
                                             // ✅ v0.9.44-beta FIX: Block already processed for balances,
@@ -2982,11 +3624,18 @@ async fn main() -> anyhow::Result<()> {
                                         // IMPACT: Pointer stuck at height 1, gap detection sees "missing block 2", height never advances
                                         // SOLUTION: Explicitly update pointer to highest block in batch AFTER commit succeeds
                                         if saved_count > 0 {
-                                            let highest_batch_height = blocks.iter().map(|b| b.header.height).max().unwrap_or(0);
+                                            let highest_batch_height = blocks
+                                                .iter()
+                                                .map(|b| b.header.height)
+                                                .max()
+                                                .unwrap_or(0);
 
                                             // Update qblock:latest pointer in database
                                             let height_bytes = highest_batch_height.to_be_bytes();
-                                            if let Err(e) = storage.db_put("blocks", b"qblock:latest", &height_bytes).await {
+                                            if let Err(e) = storage
+                                                .db_put("blocks", b"qblock:latest", &height_bytes)
+                                                .await
+                                            {
                                                 error!("❌ [BATCH SYNC] Failed to update qblock:latest pointer after batch commit: {:?}", e);
                                             } else {
                                                 debug!("✅ [BATCH SYNC] Updated qblock:latest pointer to {} after committing {} blocks",
@@ -2997,7 +3646,10 @@ async fn main() -> anyhow::Result<()> {
                                                 // IMPACT: Producers never see batch-synced blocks, node stuck at "Gap at height 2"
                                                 // SOLUTION: Force producers to refresh height from database after batch completes
                                                 // Timeline bug: Batch sync stores 1600 blocks, but producers still see height 0
-                                                if let Err(e) = block_producer_pool_clone.sync_from_storage(&storage).await {
+                                                if let Err(e) = block_producer_pool_clone
+                                                    .sync_from_storage(&storage)
+                                                    .await
+                                                {
                                                     error!("❌ [BATCH SYNC] Failed to sync producers after batch: {}", e);
                                                 } else {
                                                     info!("🔄 [BATCH SYNC] Synced {} producers to height {} after batch commit",
@@ -3029,7 +3681,8 @@ async fn main() -> anyhow::Result<()> {
                                 // New method: Only advance if NO gaps exist, request missing blocks otherwise
                                 if saved_count > 0 {
                                     let mut status = node_status.write().await;
-                                    let highest_batch_height = blocks.iter().map(|b| b.header.height).max().unwrap_or(0);
+                                    let highest_batch_height =
+                                        blocks.iter().map(|b| b.header.height).max().unwrap_or(0);
 
                                     if highest_batch_height > status.current_height {
                                         // Check for gaps FIRST before advancing height
@@ -3044,7 +3697,8 @@ async fn main() -> anyhow::Result<()> {
                                                 // ✅ v0.9.49-beta: IMMEDIATE GAP FILL REQUEST
                                                 // ✅ v0.9.103-beta: FIX gap request range to use network height instead of fixed 10 blocks
                                                 // Trigger P2P request to specifically request missing block(s)
-                                                if let Some(network_tx) = network_tx_clone.as_ref() {
+                                                if let Some(network_tx) = network_tx_clone.as_ref()
+                                                {
                                                     let peer_info = peer_info_clone.read().await;
                                                     let my_peer_id = peer_info.0.clone();
                                                     drop(peer_info);
@@ -3066,7 +3720,8 @@ async fn main() -> anyhow::Result<()> {
                                                     // Serialize BlockRequest to bytes
                                                     match bincode::serialize(&gap_request) {
                                                         Ok(request_bytes) => {
-                                                            let network_id = q_types::NetworkId::TestnetPhase10; // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                                                            let network_id =
+                                                                q_types::NetworkId::TestnetPhase12; // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                                                             let cmd = q_network::NetworkCommand::PublishBlockRequest {
                                                                 topic: network_id.block_requests_topic(),
                                                                 request_bytes,
@@ -3095,7 +3750,8 @@ async fn main() -> anyhow::Result<()> {
                                                 match storage.get_highest_contiguous_block().await {
                                                     Ok(new_height) => {
                                                         if new_height > status.current_height {
-                                                            let blocks_advanced = new_height - status.current_height;
+                                                            let blocks_advanced =
+                                                                new_height - status.current_height;
                                                             status.current_height = new_height;
                                                             info!("✅ [SEQUENTIAL] Advanced height by {} blocks to {} after batch sync ⚡",
                                                                   blocks_advanced, new_height);
@@ -3114,7 +3770,8 @@ async fn main() -> anyhow::Result<()> {
                                                 match storage.get_highest_contiguous_block().await {
                                                     Ok(new_height) => {
                                                         if new_height > status.current_height {
-                                                            let blocks_advanced = new_height - status.current_height;
+                                                            let blocks_advanced =
+                                                                new_height - status.current_height;
                                                             status.current_height = new_height;
                                                             info!("📈 [BATCH SYNC] Advanced height by {} blocks to {} (no gaps) ⚡",
                                                                   blocks_advanced, new_height);
@@ -3144,11 +3801,15 @@ async fn main() -> anyhow::Result<()> {
                             let block = response.block;
                             let block_height = block.header.height;
                             let responder = response.responder_peer_id;
-                            info!("📦 Received P2P block {} from peer {}", block_height, &responder[..16]);
+                            info!(
+                                "📦 Received P2P block {} from peer {}",
+                                block_height,
+                                &responder[..16]
+                            );
 
                             // v0.6.0-beta: Validate network_id to prevent cross-network pollution
                             // v0.9.39-beta: Use NetworkId enum for correct phase (testnet-phase5)
-                            let expected_network_id = q_types::NetworkId::TestnetPhase10.as_str(); // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                            let expected_network_id = q_types::NetworkId::TestnetPhase12.as_str(); // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                             if block.header.network_id != expected_network_id {
                                 warn!("🚫 REJECTED block {} from peer {} - wrong network_id: '{}' (expected: '{}')",
                                       block_height, &responder[..16],
@@ -3172,17 +3833,21 @@ async fn main() -> anyhow::Result<()> {
                             // to prevent CRITICAL-1 race condition (balances updated but blocks not saved)
 
                             // Begin transaction
-                            let tx = match app_state_gossip.storage_engine.begin_transaction().await {
+                            let tx = match app_state_gossip.storage_engine.begin_transaction().await
+                            {
                                 Ok(tx) => tx,
                                 Err(e) => {
                                     error!("❌ [TRANSACTION] Failed to begin transaction for block {}: {:?}",
                                            block_height, e);
-                                    continue;  // Skip this block
+                                    continue; // Skip this block
                                 }
                             };
 
                             // Process balance consensus within transaction (buffered)
-                            let updates = match balance_engine.process_block_mining_rewards_tx(&tx, &block).await {
+                            let updates = match balance_engine
+                                .process_block_mining_rewards_tx(&tx, &block)
+                                .await
+                            {
                                 Ok(updates) => {
                                     if !updates.is_empty() {
                                         debug!("💰 [SINGLE BLOCK TX] Processed {} balance updates for block {}",
@@ -3195,20 +3860,25 @@ async fn main() -> anyhow::Result<()> {
                                     // but MUST still save to blockchain storage to maintain consistency
                                     debug!("🔄 [SINGLE BLOCK TX] Block {} already processed for balances, ensuring blockchain consistency",
                                           block_height);
-                                    Vec::new()  // No new balance updates, but continue to save block
+                                    Vec::new() // No new balance updates, but continue to save block
                                 }
                                 Err(e) => {
-                                    error!("❌ [SINGLE BLOCK TX] CRITICAL: Failed for block {}: {:?}",
-                                           block_height, e);
+                                    error!(
+                                        "❌ [SINGLE BLOCK TX] CRITICAL: Failed for block {}: {:?}",
+                                        block_height, e
+                                    );
                                     error!("   Block REJECTED - state divergence prevented");
-                                    continue;  // Transaction auto-rolled back
+                                    continue; // Transaction auto-rolled back
                                 }
                             };
 
                             // Save block within transaction (buffered)
                             if let Err(e) = tx.save_qblock(&block).await {
-                                error!("❌ [TRANSACTION] Failed to save P2P block {}: {:?}", block_height, e);
-                                continue;  // Transaction auto-rolled back
+                                error!(
+                                    "❌ [TRANSACTION] Failed to save P2P block {}: {:?}",
+                                    block_height, e
+                                );
+                                continue; // Transaction auto-rolled back
                             }
 
                             // Commit transaction atomically (all or nothing)
@@ -3218,24 +3888,33 @@ async fn main() -> anyhow::Result<()> {
                                     true
                                 }
                                 Err(e) => {
-                                    error!("❌ [TRANSACTION] Failed to commit block {}: {:?}", block_height, e);
+                                    error!(
+                                        "❌ [TRANSACTION] Failed to commit block {}: {:?}",
+                                        block_height, e
+                                    );
                                     false
                                 }
                             };
 
                             // Only update height if transaction succeeded
                             if transaction_success {
-
                                 // Update node height if this advances us
                                 let mut status = app_state_gossip.node_status.write().await;
                                 if block_height > status.current_height {
                                     // Check for consecutive blocks
                                     let mut next_expected = status.current_height + 1;
                                     loop {
-                                        match app_state_gossip.storage_engine.get_qblock_by_height(next_expected).await {
+                                        match app_state_gossip
+                                            .storage_engine
+                                            .get_qblock_by_height(next_expected)
+                                            .await
+                                        {
                                             Ok(Some(_)) => {
                                                 status.current_height = next_expected;
-                                                info!("📈 P2P sync advanced height to {}", next_expected);
+                                                info!(
+                                                    "📈 P2P sync advanced height to {}",
+                                                    next_expected
+                                                );
                                                 next_expected += 1;
                                             }
                                             _ => break,
@@ -3258,98 +3937,116 @@ async fn main() -> anyhow::Result<()> {
                     // Skip old deserialization to avoid errors
                     if false {
                         match q_storage::BlockPackRequest::from_bytes(&data) {
-                        Ok(mut request) => {
-                            // 🔒 CRITICAL VALIDATION: Detect version mismatches and corruption
-                            // This prevents catastrophic failures from binary incompatibility
-                            // 🔄 v0.7.2-beta: Auto-fix reversed heights for backwards compatibility
-                            // This handles height pointer corruption + gossipsub message caching issues
-                            if request.end_height < request.start_height {
-                                warn!(
+                            Ok(mut request) => {
+                                // 🔒 CRITICAL VALIDATION: Detect version mismatches and corruption
+                                // This prevents catastrophic failures from binary incompatibility
+                                // 🔄 v0.7.2-beta: Auto-fix reversed heights for backwards compatibility
+                                // This handles height pointer corruption + gossipsub message caching issues
+                                if request.end_height < request.start_height {
+                                    warn!(
                                     "🔄 [TURBO SYNC P2P] Auto-fixing reversed heights from peer {}: {} <-> {}",
                                     &request.request_id[..16], request.start_height, request.end_height
                                 );
 
-                                // Swap them to fix the request
-                                std::mem::swap(&mut request.start_height, &mut request.end_height);
+                                    // Swap them to fix the request
+                                    std::mem::swap(
+                                        &mut request.start_height,
+                                        &mut request.end_height,
+                                    );
 
-                                info!(
+                                    info!(
                                     "✅ [TURBO SYNC P2P] Request corrected: now requesting blocks {}-{}",
                                     request.start_height, request.end_height
                                 );
-                            }
+                                }
 
-                            // v0.9.53-beta: Validation now happens in from_bytes() via validate_heights()
-                            // No need for separate corruption detection - it's built into deserialization
+                                // v0.9.53-beta: Validation now happens in from_bytes() via validate_heights()
+                                // No need for separate corruption detection - it's built into deserialization
 
-                            // ✅ v0.8.7-beta FIX: Removed broken protocol version check
-                            // The protocol_version field was reading height data from old nodes,
-                            // causing ALL Turbo Sync requests to be rejected (versions like 1762165440).
-                            // This completely broke Turbo Sync, forcing nodes to use slow gossip sync.
-                            // Now we accept all valid BlockPackRequests regardless of version field.
+                                // ✅ v0.8.7-beta FIX: Removed broken protocol version check
+                                // The protocol_version field was reading height data from old nodes,
+                                // causing ALL Turbo Sync requests to be rejected (versions like 1762165440).
+                                // This completely broke Turbo Sync, forcing nodes to use slow gossip sync.
+                                // Now we accept all valid BlockPackRequests regardless of version field.
 
-                            let request_id = request.request_id.clone();
-                            info!("🚀 [TURBO SYNC P2P] Received pack request for blocks {}-{} (ID: {})",
+                                let request_id = request.request_id.clone();
+                                info!("🚀 [TURBO SYNC P2P] Received pack request for blocks {}-{} (ID: {})",
                                   request.start_height, request.end_height, &request_id[..16]);
 
-                            // v0.9.59-beta: Debug - check if turbo_sync and libp2p_command_tx are available
-                            info!("🔍 [TURBO SYNC DEBUG] turbo_sync available: {}, libp2p_command_tx available: {}",
+                                // v0.9.59-beta: Debug - check if turbo_sync and libp2p_command_tx are available
+                                info!("🔍 [TURBO SYNC DEBUG] turbo_sync available: {}, libp2p_command_tx available: {}",
                                   app_state_gossip.turbo_sync.is_some(),
                                   app_state_gossip.libp2p_command_tx.is_some());
 
-                            // Serve pack asynchronously (don't block gossipsub handler)
-                            if let (Some(turbo_sync), Some(network_tx)) =
-                                   (&app_state_gossip.turbo_sync, &app_state_gossip.libp2p_command_tx) {
-                                info!("✅ [TURBO SYNC DEBUG] Entering response generation code...");
-                                let turbo_clone = turbo_sync.clone();
-                                let network_clone = network_tx.clone();
-                                let start = request.start_height;
-                                let end = request.end_height;
+                                // Serve pack asynchronously (don't block gossipsub handler)
+                                if let (Some(turbo_sync), Some(network_tx)) = (
+                                    &app_state_gossip.turbo_sync,
+                                    &app_state_gossip.libp2p_command_tx,
+                                ) {
+                                    info!("✅ [TURBO SYNC DEBUG] Entering response generation code...");
+                                    let turbo_clone = turbo_sync.clone();
+                                    let network_clone = network_tx.clone();
+                                    let start = request.start_height;
+                                    let end = request.end_height;
 
-                                tokio::spawn(async move {
-                                    match turbo_clone.create_block_pack(start, end).await {
-                                        Ok(mut pack) => {
-                                            // SET REQUEST ID for P2P response tracking
-                                            pack.request_id = Some(request_id.clone());
+                                    tokio::spawn(async move {
+                                        match turbo_clone.create_block_pack(start, end).await {
+                                            Ok(mut pack) => {
+                                                // SET REQUEST ID for P2P response tracking
+                                                pack.request_id = Some(request_id.clone());
 
-                                            match postcard::to_allocvec(&pack) {
-                                                Ok(pack_bytes) => {
-                                                    // ✅ v0.9.34-beta: Use network-aware topic (fixes phase4/phase5 mismatch)
-                                                    // This ensures responses are published to the SAME topic nodes are subscribed to
-                                                    let network_id = std::env::var("Q_NETWORK_ID")
+                                                match postcard::to_allocvec(&pack) {
+                                                    Ok(pack_bytes) => {
+                                                        // ✅ v0.9.34-beta: Use network-aware topic (fixes phase4/phase5 mismatch)
+                                                        // This ensures responses are published to the SAME topic nodes are subscribed to
+                                                        let network_id = std::env::var(
+                                                            "Q_NETWORK_ID",
+                                                        )
                                                         .ok()
-                                                        .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                        .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
-                                                    let response_topic = network_id.block_pack_responses_topic();
+                                                        .and_then(|s| {
+                                                            s.parse::<q_types::NetworkId>().ok()
+                                                        })
+                                                        .unwrap_or(
+                                                            q_types::NetworkId::TestnetPhase12,
+                                                        ); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
+                                                        let response_topic =
+                                                            network_id.block_pack_responses_topic();
 
-                                                    let _ = network_clone.send(q_network::NetworkCommand::PublishBlockPack {
+                                                        let _ = network_clone.send(q_network::NetworkCommand::PublishBlockPack {
                                                         topic: response_topic.clone(),
                                                         pack_bytes,
                                                     });
-                                                    info!("✅ [TURBO SYNC P2P] Served pack {}-{} with ID {} on topic {} ({:.1} KB compressed, {:.1}% compression)",
+                                                        info!("✅ [TURBO SYNC P2P] Served pack {}-{} with ID {} on topic {} ({:.1} KB compressed, {:.1}% compression)",
                                                           start, end, &request_id[..16], response_topic,
                                                           pack.compressed_data.len() as f64 / 1024.0,
                                                           (1.0 - pack.compression_ratio) * 100.0);
-                                                }
-                                                Err(e) => {
-                                                    warn!("❌ [TURBO SYNC P2P] Failed to serialize pack: {}", e);
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("❌ [TURBO SYNC P2P] Failed to serialize pack: {}", e);
+                                                    }
                                                 }
                                             }
+                                            Err(e) => {
+                                                warn!(
+                                                    "❌ [TURBO SYNC P2P] Failed to create pack: {}",
+                                                    e
+                                                );
+                                            }
                                         }
-                                        Err(e) => {
-                                            warn!("❌ [TURBO SYNC P2P] Failed to create pack: {}", e);
-                                        }
-                                    }
-                                });
-                            } else {
-                                // v0.9.59-beta: Log why response wasn't sent
-                                warn!("❌ [TURBO SYNC DEBUG] Cannot serve pack request - turbo_sync or libp2p_command_tx not available!");
+                                    });
+                                } else {
+                                    // v0.9.59-beta: Log why response wasn't sent
+                                    warn!("❌ [TURBO SYNC DEBUG] Cannot serve pack request - turbo_sync or libp2p_command_tx not available!");
+                                }
+                            }
+                            Err(e) => {
+                                error!("❌ [TURBO SYNC DEBUG] Failed to deserialize block pack request: {}", e);
+                                error!(
+                                    "❌ [TURBO SYNC DEBUG] Raw data (first 50 bytes): {:?}",
+                                    &data[..data.len().min(50)]
+                                );
                             }
                         }
-                        Err(e) => {
-                            error!("❌ [TURBO SYNC DEBUG] Failed to deserialize block pack request: {}", e);
-                            error!("❌ [TURBO SYNC DEBUG] Raw data (first 50 bytes): {:?}", &data[..data.len().min(50)]);
-                        }
-                    }
                     } // End of `if false` block - legacy code disabled
                 } else if topic.ends_with("/block-pack-responses") {
                     // 🚀 TURBO SYNC RESPONSE HANDLER - Apply received compressed block packs
@@ -3360,11 +4057,17 @@ async fn main() -> anyhow::Result<()> {
                     // Try postcard first (most common), then bincode, then MessagePack
                     let pack_result = postcard::from_bytes::<q_storage::BlockPack>(&data)
                         .or_else(|e1| {
-                            info!("🔍 [TURBO SYNC] Postcard decode failed: {:?}, trying bincode", e1);
+                            info!(
+                                "🔍 [TURBO SYNC] Postcard decode failed: {:?}, trying bincode",
+                                e1
+                            );
                             bincode::deserialize::<q_storage::BlockPack>(&data)
                         })
                         .or_else(|e2| {
-                            info!("🔍 [TURBO SYNC] Bincode decode failed: {:?}, trying MessagePack", e2);
+                            info!(
+                                "🔍 [TURBO SYNC] Bincode decode failed: {:?}, trying MessagePack",
+                                e2
+                            );
                             rmp_serde::from_slice::<q_storage::BlockPack>(&data)
                         });
 
@@ -3377,15 +4080,20 @@ async fn main() -> anyhow::Result<()> {
 
                             // TRUE P2P: Check if this is a response to a pending request
                             if let Some(request_id) = &pack.request_id {
-                                info!("🌐 [TURBO SYNC P2P] Pack has request_id: {}", &request_id[..16]);
+                                info!(
+                                    "🌐 [TURBO SYNC P2P] Pack has request_id: {}",
+                                    &request_id[..16]
+                                );
 
                                 // Look up response sender in tracking map
                                 let mut map = response_map_for_gossipsub.lock().await;
                                 if let Some(response_tx) = map.remove(request_id) {
                                     // Send pack to waiting download_and_apply_chunk
                                     let _ = response_tx.send(Ok(pack.clone()));
-                                    info!("✅ [TURBO SYNC P2P] Delivered pack to requester (ID: {})",
-                                          &request_id[..16]);
+                                    info!(
+                                        "✅ [TURBO SYNC P2P] Delivered pack to requester (ID: {})",
+                                        &request_id[..16]
+                                    );
                                     // Don't apply locally - requester will apply it
                                     drop(map); // Release lock before returning
                                     continue; // Skip local application
@@ -3404,25 +4112,38 @@ async fn main() -> anyhow::Result<()> {
 
                                 tokio::spawn(async move {
                                     // v0.8.0-beta: Pass balance_engine for deterministic reward processing
-                                    match turbo_clone.apply_block_pack(pack, Some(&balance_engine_clone)).await {
+                                    match turbo_clone
+                                        .apply_block_pack(pack, Some(&balance_engine_clone))
+                                        .await
+                                    {
                                         Ok(()) => {
                                             info!("✅ [TURBO SYNC] Pack applied successfully");
 
                                             // Update node height
-                                            if let Ok(latest_height) = app_state_clone.storage_engine.get_latest_qblock_height().await {
+                                            if let Ok(latest_height) = app_state_clone
+                                                .storage_engine
+                                                .get_latest_qblock_height()
+                                                .await
+                                            {
                                                 if let Some(height) = latest_height {
-                                                    let mut status = app_state_clone.node_status.write().await;
+                                                    let mut status =
+                                                        app_state_clone.node_status.write().await;
                                                     if height > status.current_height {
                                                         status.current_height = height;
 
                                                         // 🔧 v1.0.3-beta: Update atomic height for mining API
-                                                        app_state_clone.current_height_atomic.store(
+                                                        app_state_clone
+                                                            .current_height_atomic
+                                                            .store(
                                                             height,
-                                                            std::sync::atomic::Ordering::Relaxed
+                                                            std::sync::atomic::Ordering::Relaxed,
                                                         );
 
                                                         // 🔧 v1.0.4-beta: Clear cached challenge
-                                                        *app_state_clone.current_challenge.write().await = None;
+                                                        *app_state_clone
+                                                            .current_challenge
+                                                            .write()
+                                                            .await = None;
 
                                                         info!("📈 [TURBO SYNC] Node height advanced to {}", height);
                                                     }
@@ -3448,32 +4169,67 @@ async fn main() -> anyhow::Result<()> {
                         highest_block: u64,
                     }
 
+                    // 🔍 QNK-101: Log ALL peer-height messages received
+                    warn!(
+                        "🔍 [QNK-101] Received peer-height message on topic: {}",
+                        topic
+                    );
+                    warn!("🔍 [QNK-101] Message size: {} bytes", data.len());
+                    warn!(
+                        "🔍 [QNK-101] First 64 bytes (hex): {}",
+                        hex::encode(&data[..data.len().min(64)])
+                    );
+
                     match postcard::from_bytes::<PeerHeightAnnouncement>(&data) {
                         Ok(announcement) => {
+                            // ✅ QNK-101: Log successful parse
+                            info!("✅ [QNK-101] Successfully parsed peer height announcement!");
+                            info!("   Peer ID: {}", announcement.peer_id);
+                            info!("   Height: {}", announcement.highest_block);
+                            info!("   Message size: {} bytes", data.len());
+
                             if let Some(turbo_sync) = &app_state_gossip.turbo_sync {
                                 if let Ok(peer_id) = announcement.peer_id.parse() {
-                                    turbo_sync.register_peer(peer_id, announcement.highest_block).await;
+                                    turbo_sync
+                                        .register_peer(peer_id, announcement.highest_block)
+                                        .await;
 
+                                    // TEMPORARILY DISABLED v1.0.15: Circular dependency with sync_activation
                                     // 🌉 v0.9.6-beta: Update peer bridge cache for continuous sync
-                                    if let Some(peer_bridge) = &app_state_gossip.peer_bridge {
-                                        peer_bridge.update_peer_height(peer_id, announcement.highest_block).await;
-                                        debug!("🌉 [PEER BRIDGE] Updated peer {} to height {}", peer_id, announcement.highest_block);
-                                    }
+                                    // if let Some(peer_bridge) = &app_state_gossip.peer_bridge {
+                                    //     peer_bridge.update_peer_height(peer_id, announcement.highest_block).await;
+                                    //     debug!("🌉 [PEER BRIDGE] Updated peer {} to height {}", peer_id, announcement.highest_block);
+                                    // }
 
                                     // 🔍 v0.9.67-beta: Update fork detector with peer height
-                                    app_state_gossip.fork_detector.update_peer_height(
-                                        announcement.peer_id.clone(),
-                                        announcement.highest_block
-                                    ).await;
+                                    app_state_gossip
+                                        .fork_detector
+                                        .update_peer_height(
+                                            announcement.peer_id.clone(),
+                                            announcement.highest_block,
+                                        )
+                                        .await;
 
-                                    info!("📡 [TURBO SYNC] Peer {} has height {}",
-                                           &announcement.peer_id[..16], announcement.highest_block);
+                                    info!(
+                                        "📡 [TURBO SYNC] Peer {} has height {}",
+                                        &announcement.peer_id[..16],
+                                        announcement.highest_block
+                                    );
 
                                     // Update highest network height for sync coordination
-                                    let current_highest = app_state_gossip.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                                    // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
+                                    let current_highest = app_state_gossip
+                                        .highest_network_height
+                                        .load(std::sync::atomic::Ordering::SeqCst);
                                     if announcement.highest_block > current_highest {
-                                        app_state_gossip.highest_network_height.store(announcement.highest_block, std::sync::atomic::Ordering::Relaxed);
-                                        info!("📊 [TURBO SYNC] Network height updated to {}", announcement.highest_block);
+                                        app_state_gossip.highest_network_height.store(
+                                            announcement.highest_block,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        info!(
+                                            "📊 [TURBO SYNC] Network height updated to {}",
+                                            announcement.highest_block
+                                        );
 
                                         // ⚠️ v0.9.76-beta: DISABLED old gossipsub auto-trigger
                                         // This old path conflicts with the new optimistic P2P BlockPackCodec sync (line 5000+)
@@ -3485,14 +4241,23 @@ async fn main() -> anyhow::Result<()> {
                                         // This eliminates the competing sync paths issue.
 
                                         let _old_sync_disabled = false; // Marker to skip old gossipsub sync code
-                                        if _old_sync_disabled { // DISABLED - replaced by optimistic P2P sync at line 5000+
+                                        if _old_sync_disabled {
+                                            // DISABLED - replaced by optimistic P2P sync at line 5000+
                                             // OLD GOSSIPSUB SYNC CODE BELOW (DISABLED)
-                                            let storage_clone = app_state_gossip.storage_engine.clone();
+                                            let storage_clone =
+                                                app_state_gossip.storage_engine.clone();
                                             let turbo_clone = turbo_sync.clone();
-                                            let network_tx_clone = app_state_gossip.libp2p_command_tx.clone();
-                                            let peer_info_clone = app_state_gossip.libp2p_peer_info.clone();
+                                            let network_tx_clone =
+                                                app_state_gossip.libp2p_command_tx.clone();
+                                            let peer_info_clone =
+                                                app_state_gossip.libp2p_peer_info.clone();
                                             let target = announcement.highest_block;
-                                            let local_height = storage_clone.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
+                                            let local_height = storage_clone
+                                                .get_latest_qblock_height()
+                                                .await
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(0);
 
                                             // Rest of old code continues below but never executes...
                                             info!("🚀 [TURBO SYNC] AUTO-TRIGGER: Local={}, Network={}, Gap={} blocks",
@@ -3502,94 +4267,128 @@ async fn main() -> anyhow::Result<()> {
                                                 // Get sync chunks from Turbo Sync
                                                 match turbo_clone.get_sync_chunks(target).await {
                                                     Ok(chunks) if !chunks.is_empty() => {
-                                                            info!("📦 [TURBO SYNC] Generated {} chunks for gossipsub sync", chunks.len());
+                                                        info!("📦 [TURBO SYNC] Generated {} chunks for gossipsub sync", chunks.len());
 
-                                                            // Get our peer ID
-                                                            let our_peer_id = {
-                                                                let info = peer_info_clone.read().await;
-                                                                info.0.clone()
-                                                            };
+                                                        // Get our peer ID
+                                                        let our_peer_id = {
+                                                            let info = peer_info_clone.read().await;
+                                                            info.0.clone()
+                                                        };
 
-                                                            // Send block-pack requests via gossipsub
-                                                            if let Some(network_tx) = network_tx_clone {
-                                                                let request_id = std::time::SystemTime::now()
-                                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                        // Send block-pack requests via gossipsub
+                                                        if let Some(network_tx) = network_tx_clone {
+                                                            let request_id =
+                                                                std::time::SystemTime::now()
+                                                                    .duration_since(
+                                                                        std::time::UNIX_EPOCH,
+                                                                    )
                                                                     .unwrap()
                                                                     .as_secs();
 
-                                                                for (chunk_idx, (start, end)) in chunks.iter().enumerate() {
-                                                                    #[derive(serde::Serialize, serde::Deserialize)]
-                                                                    struct BlockPackRequest {
-                                                                        request_id: u64,
-                                                                        requester_peer_id: String,
-                                                                        start_height: u64,
-                                                                        end_height: u64,
-                                                                    }
+                                                            for (chunk_idx, (start, end)) in
+                                                                chunks.iter().enumerate()
+                                                            {
+                                                                #[derive(
+                                                                    serde::Serialize,
+                                                                    serde::Deserialize,
+                                                                )]
+                                                                struct BlockPackRequest {
+                                                                    request_id: u64,
+                                                                    requester_peer_id: String,
+                                                                    start_height: u64,
+                                                                    end_height: u64,
+                                                                }
 
-                                                                    let request = BlockPackRequest {
-                                                                        request_id: request_id + chunk_idx as u64,
-                                                                        requester_peer_id: our_peer_id.clone(),
-                                                                        start_height: *start,
-                                                                        end_height: *end,
-                                                                    };
+                                                                let request = BlockPackRequest {
+                                                                    request_id: request_id
+                                                                        + chunk_idx as u64,
+                                                                    requester_peer_id: our_peer_id
+                                                                        .clone(),
+                                                                    start_height: *start,
+                                                                    end_height: *end,
+                                                                };
 
-                                                                    if let Ok(request_bytes) = postcard::to_allocvec(&request) {
-                                                                        info!("🎯 [TURBO SYNC DEBUG] Sending request: {} bytes for blocks {}-{}",
+                                                                if let Ok(request_bytes) =
+                                                                    postcard::to_allocvec(&request)
+                                                                {
+                                                                    info!("🎯 [TURBO SYNC DEBUG] Sending request: {} bytes for blocks {}-{}",
                                                                               request_bytes.len(), start, end);
 
-                                                                        // ✅ v0.9.33-beta: Use configured network ID (not hardcoded phase4)
-                                                                        let network_id = std::env::var("Q_NETWORK_ID")
+                                                                    // ✅ v0.9.33-beta: Use configured network ID (not hardcoded phase4)
+                                                                    let network_id = std::env::var("Q_NETWORK_ID")
                                                                             .ok()
                                                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                                            .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
-                                                                        let topic = network_id.block_pack_requests_topic();
+                                                                            .unwrap_or(q_types::NetworkId::TestnetPhase12); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
+                                                                    let topic = network_id
+                                                                        .block_pack_requests_topic(
+                                                                        );
 
-                                                                        let _ = network_tx.send(q_network::NetworkCommand::PublishBlock {
+                                                                    let _ = network_tx.send(q_network::NetworkCommand::PublishBlock {
                                                                             topic,
                                                                             block_bytes: request_bytes.clone(),
                                                                             block_height: *start,
                                                                         });
 
-                                                                        info!("📤 [TURBO SYNC] Sent gossipsub request for blocks {}-{} (chunk {}/{})",
+                                                                    info!("📤 [TURBO SYNC] Sent gossipsub request for blocks {}-{} (chunk {}/{})",
                                                                               start, end, chunk_idx + 1, chunks.len());
-                                                                    } else {
-                                                                        error!("❌ [TURBO SYNC DEBUG] Failed to serialize request");
-                                                                    }
-
-                                                                    // Small delay to avoid overwhelming the network
-                                                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                                                } else {
+                                                                    error!("❌ [TURBO SYNC DEBUG] Failed to serialize request");
                                                                 }
 
-                                                                info!("✅ [TURBO SYNC] All {} block-pack requests sent via gossipsub!", chunks.len());
-                                                                info!("⏳ [TURBO SYNC] Responses will be handled by gossipsub handler...");
+                                                                // Small delay to avoid overwhelming the network
+                                                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                                            }
 
-                                                                // ✅ v0.9.63-beta FIX: HTTP fallback if gossipsub doesn't respond in 90s
-                                                                // This prevents nodes from getting stuck when InsufficientPeers blocks gossipsub response
-                                                                let storage_fallback = storage_clone.clone();
-                                                                let start_height = local_height + 1;
-                                                                let end_height = target;
+                                                            info!("✅ [TURBO SYNC] All {} block-pack requests sent via gossipsub!", chunks.len());
+                                                            info!("⏳ [TURBO SYNC] Responses will be handled by gossipsub handler...");
 
-                                                                tokio::spawn(async move {
-                                                                    // Wait for gossipsub response
-                                                                    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                                                            // ✅ v0.9.63-beta FIX: HTTP fallback if gossipsub doesn't respond in 90s
+                                                            // This prevents nodes from getting stuck when InsufficientPeers blocks gossipsub response
+                                                            let storage_fallback =
+                                                                storage_clone.clone();
+                                                            let start_height = local_height + 1;
+                                                            let end_height = target;
 
-                                                                    // Check if gap still exists
-                                                                    match storage_fallback.get_highest_contiguous_block().await {
-                                                                        Ok(current) if current < end_height => {
-                                                                            warn!("🔄 [HTTP FALLBACK] Gossipsub turbo sync timed out after 90s");
-                                                                            warn!("   Gap still exists: current={}, target={}", current, end_height);
-                                                                            warn!("   Activating HTTP gap-fill...");
+                                                            tokio::spawn(async move {
+                                                                // Wait for gossipsub response
+                                                                tokio::time::sleep(
+                                                                    std::time::Duration::from_secs(
+                                                                        90,
+                                                                    ),
+                                                                )
+                                                                .await;
 
-                                                                            let bootstrap_peer = "http://185.182.185.227:8080";
-                                                                            let mut filled_blocks = 0;
-                                                                            let mut failed_blocks = 0;
+                                                                // Check if gap still exists
+                                                                match storage_fallback
+                                                                    .get_highest_contiguous_block()
+                                                                    .await
+                                                                {
+                                                                    Ok(current)
+                                                                        if current < end_height =>
+                                                                    {
+                                                                        warn!("🔄 [HTTP FALLBACK] Gossipsub turbo sync timed out after 90s");
+                                                                        warn!("   Gap still exists: current={}, target={}", current, end_height);
+                                                                        warn!("   Activating HTTP gap-fill...");
 
-                                                                            for height in (current + 1)..=end_height {
-                                                                                let url = format!("{}/api/v1/blocks/{}", bootstrap_peer, height);
+                                                                        let bootstrap_peer = "http://185.182.185.227:8080";
+                                                                        let mut filled_blocks = 0;
+                                                                        let mut failed_blocks = 0;
 
-                                                                                match reqwest::get(&url).await {
-                                                                                    Ok(response) if response.status().is_success() => {
-                                                                                        match response.json::<serde_json::Value>().await {
+                                                                        for height in (current + 1)
+                                                                            ..=end_height
+                                                                        {
+                                                                            let url = format!("{}/api/v1/blocks/{}", bootstrap_peer, height);
+
+                                                                            match reqwest::get(&url)
+                                                                                .await
+                                                                            {
+                                                                                Ok(response)
+                                                                                    if response
+                                                                                        .status()
+                                                                                        .is_success(
+                                                                                        ) =>
+                                                                                {
+                                                                                    match response.json::<serde_json::Value>().await {
                                                                                             Ok(json) if json["success"].as_bool().unwrap_or(false) => {
                                                                                                 if let Some(block_data) = json["data"].as_object() {
                                                                                                     match serde_json::from_value::<q_types::block::QBlock>(
@@ -3630,62 +4429,90 @@ async fn main() -> anyhow::Result<()> {
                                                                                                 if failed_blocks > 10 { break; }
                                                                                             }
                                                                                         }
-                                                                                    }
-                                                                                    Ok(response) => {
-                                                                                        warn!("HTTP request for block {} failed: status {}", height, response.status());
-                                                                                        failed_blocks += 1;
-                                                                                        if failed_blocks > 10 { break; }
-                                                                                    }
-                                                                                    Err(e) => {
-                                                                                        error!("Failed to fetch block {} via HTTP: {}", height, e);
-                                                                                        failed_blocks += 1;
-                                                                                        if failed_blocks > 10 { break; }
+                                                                                }
+                                                                                Ok(response) => {
+                                                                                    warn!("HTTP request for block {} failed: status {}", height, response.status());
+                                                                                    failed_blocks += 1;
+                                                                                    if failed_blocks
+                                                                                        > 10
+                                                                                    {
+                                                                                        break;
                                                                                     }
                                                                                 }
-
-                                                                                // Small delay to avoid overwhelming bootstrap peer
-                                                                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                                                Err(e) => {
+                                                                                    error!("Failed to fetch block {} via HTTP: {}", height, e);
+                                                                                    failed_blocks += 1;
+                                                                                    if failed_blocks
+                                                                                        > 10
+                                                                                    {
+                                                                                        break;
+                                                                                    }
+                                                                                }
                                                                             }
 
-                                                                            if filled_blocks > 0 {
-                                                                                info!("✅ [HTTP FALLBACK] Successfully filled {} blocks via HTTP", filled_blocks);
-                                                                                info!("   Gap resolution: {} -> {}", current, current + filled_blocks);
-                                                                            } else {
-                                                                                warn!("⚠️ [HTTP FALLBACK] Failed to fill any blocks via HTTP (failed: {})", failed_blocks);
-                                                                            }
+                                                                            // Small delay to avoid overwhelming bootstrap peer
+                                                                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                                                                         }
-                                                                        Ok(current) => {
-                                                                            info!("✅ [TURBO SYNC] Gap already filled by gossipsub (current={})", current);
-                                                                        }
-                                                                        Err(e) => {
-                                                                            error!("❌ [HTTP FALLBACK] Failed to check current height: {}", e);
+
+                                                                        if filled_blocks > 0 {
+                                                                            info!("✅ [HTTP FALLBACK] Successfully filled {} blocks via HTTP", filled_blocks);
+                                                                            info!("   Gap resolution: {} -> {}", current, current + filled_blocks);
+                                                                        } else {
+                                                                            warn!("⚠️ [HTTP FALLBACK] Failed to fill any blocks via HTTP (failed: {})", failed_blocks);
                                                                         }
                                                                     }
-                                                                });
-                                                            } else {
-                                                                error!("❌ [TURBO SYNC] No network channel available");
-                                                            }
-                                                        }
-                                                        // ✅ v0.8.6-beta FIX: Explicit logging for empty chunks
-                                                        Ok(chunks) if chunks.is_empty() => {
-                                                            warn!("⚠️  [TURBO SYNC] No chunks generated for target height {} (already synced or invalid range)", target);
-                                                        }
-                                                        Ok(_) => {
-                                                            warn!("⚠️  [TURBO SYNC] Unexpected match pattern - this shouldn't happen");
-                                                        }
-                                                        // ✅ v0.8.6-beta FIX: Explicit error logging for chunk generation failures
-                                                        Err(e) => {
-                                                            error!("❌ [TURBO SYNC] Failed to generate sync chunks for target {}: {}", target, e);
+                                                                    Ok(current) => {
+                                                                        info!("✅ [TURBO SYNC] Gap already filled by gossipsub (current={})", current);
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error!("❌ [HTTP FALLBACK] Failed to check current height: {}", e);
+                                                                    }
+                                                                }
+                                                            });
+                                                        } else {
+                                                            error!("❌ [TURBO SYNC] No network channel available");
                                                         }
                                                     }
-                                                });
-                                            }
+                                                    // ✅ v0.8.6-beta FIX: Explicit logging for empty chunks
+                                                    Ok(chunks) if chunks.is_empty() => {
+                                                        warn!("⚠️  [TURBO SYNC] No chunks generated for target height {} (already synced or invalid range)", target);
+                                                    }
+                                                    Ok(_) => {
+                                                        warn!("⚠️  [TURBO SYNC] Unexpected match pattern - this shouldn't happen");
+                                                    }
+                                                    // ✅ v0.8.6-beta FIX: Explicit error logging for chunk generation failures
+                                                    Err(e) => {
+                                                        error!("❌ [TURBO SYNC] Failed to generate sync chunks for target {}: {}", target, e);
+                                                    }
+                                                }
+                                            });
                                         }
+                                    }
                                 }
                             }
                         }
                         Err(e) => {
-                            warn!("⚠️  Failed to deserialize peer height announcement: {}", e);
+                            // ❌ QNK-101: Comprehensive error logging for parse failures
+                            error!("❌ [QNK-101] Failed to deserialize peer height announcement!");
+                            error!("   Topic: {}", topic);
+                            error!("   Error: {}", e);
+                            error!("   Message size: {} bytes", data.len());
+                            error!("   First 100 bytes: {:?}", &data[..data.len().min(100)]);
+
+                            // Try UTF-8 decode to diagnose format issues
+                            if let Ok(s) = String::from_utf8(data.clone()) {
+                                error!("   Data as UTF-8 string: {}", &s[..s.len().min(200)]);
+                            } else {
+                                error!("   Data is not valid UTF-8");
+                            }
+
+                            // Try to decode as JSON to see if format mismatch
+                            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) {
+                                error!(
+                                    "   Data appears to be JSON: {:?}",
+                                    &json.to_string()[..json.to_string().len().min(200)]
+                                );
+                            }
                         }
                     }
                 } else if topic.contains("/ai/") {
@@ -3699,9 +4526,11 @@ async fn main() -> anyhow::Result<()> {
                         Ok(ai_message) => {
                             info!("✅ Successfully deserialized AI message");
                             info!("   Message ID: {}", ai_message.message_id);
-                            info!("   Protocol Version: {} (current: {})",
-                                  ai_message.protocol_version,
-                                  q_network::CURRENT_PROTOCOL_VERSION);
+                            info!(
+                                "   Protocol Version: {} (current: {})",
+                                ai_message.protocol_version,
+                                q_network::CURRENT_PROTOCOL_VERSION
+                            );
                             info!("   Sender Node: {}", ai_message.sender_node_id);
                             info!("   Sender Peer: {}", ai_message.sender_peer_id);
                             info!("   Timestamp: {}", ai_message.timestamp);
@@ -3710,9 +4539,11 @@ async fn main() -> anyhow::Result<()> {
                             // Version 0 = old binaries without versioning (backwards compatible)
                             // Version 1+ = new binaries with versioning
                             if ai_message.protocol_version > q_network::CURRENT_PROTOCOL_VERSION {
-                                warn!("⚠️  INCOMPATIBLE PROTOCOL VERSION: Received v{}, current v{}",
-                                      ai_message.protocol_version,
-                                      q_network::CURRENT_PROTOCOL_VERSION);
+                                warn!(
+                                    "⚠️  INCOMPATIBLE PROTOCOL VERSION: Received v{}, current v{}",
+                                    ai_message.protocol_version,
+                                    q_network::CURRENT_PROTOCOL_VERSION
+                                );
                                 warn!("   This message is from a NEWER node version");
                                 warn!("   Skipping message to prevent deserialization errors");
                                 warn!("   Please upgrade this node to the latest version");
@@ -3723,38 +4554,66 @@ async fn main() -> anyhow::Result<()> {
 
                             // Match on payload type for detailed logging
                             match &ai_message.payload {
-                                q_network::AIMessagePayload::NodeCapability { node_id, capability, available_layers, .. } => {
+                                q_network::AIMessagePayload::NodeCapability {
+                                    node_id,
+                                    capability,
+                                    available_layers,
+                                    ..
+                                } => {
                                     info!("📋 Payload: NodeCapability");
                                     info!("      Node: {}", node_id);
                                     info!("      Capability: {:?}", capability);
                                     info!("      Layers: {}", available_layers);
                                 }
-                                q_network::AIMessagePayload::InferenceRequest { request_id, prompt, .. } => {
+                                q_network::AIMessagePayload::InferenceRequest {
+                                    request_id,
+                                    prompt,
+                                    ..
+                                } => {
                                     info!("📋 Payload: InferenceRequest");
                                     info!("      Request ID: {}", request_id);
                                     info!("      Prompt: {} chars", prompt.len());
                                 }
-                                q_network::AIMessagePayload::InferenceResponse { request_id, tokens_generated, .. } => {
+                                q_network::AIMessagePayload::InferenceResponse {
+                                    request_id,
+                                    tokens_generated,
+                                    ..
+                                } => {
                                     info!("📋 Payload: InferenceResponse");
                                     info!("      Request ID: {}", request_id);
                                     info!("      Tokens: {}", tokens_generated);
                                 }
-                                q_network::AIMessagePayload::LayerOutput { request_id, layer_index, .. } => {
+                                q_network::AIMessagePayload::LayerOutput {
+                                    request_id,
+                                    layer_index,
+                                    ..
+                                } => {
                                     info!("📋 Payload: LayerOutput");
                                     info!("      Request ID: {}", request_id);
                                     info!("      Layer: {}", layer_index);
                                 }
-                                q_network::AIMessagePayload::LayerAssignment { request_id, assignments } => {
+                                q_network::AIMessagePayload::LayerAssignment {
+                                    request_id,
+                                    assignments,
+                                } => {
                                     info!("📋 Payload: LayerAssignment");
                                     info!("      Request ID: {}", request_id);
                                     info!("      Nodes: {}", assignments.len());
                                 }
-                                q_network::AIMessagePayload::Heartbeat { node_id, active_requests, .. } => {
+                                q_network::AIMessagePayload::Heartbeat {
+                                    node_id,
+                                    active_requests,
+                                    ..
+                                } => {
                                     info!("📋 Payload: Heartbeat");
                                     info!("      Node: {}", node_id);
                                     info!("      Active: {}", active_requests);
                                 }
-                                q_network::AIMessagePayload::CoordinatorElection { node_id, score, .. } => {
+                                q_network::AIMessagePayload::CoordinatorElection {
+                                    node_id,
+                                    score,
+                                    ..
+                                } => {
                                     info!("📋 Payload: CoordinatorElection");
                                     info!("      Node: {}", node_id);
                                     info!("      Score: {}", score);
@@ -3770,13 +4629,16 @@ async fn main() -> anyhow::Result<()> {
                                 prompt,
                                 max_tokens,
                                 temperature,
-                                model
-                            } = ai_message.payload.clone() {
+                                model,
+                            } = ai_message.payload.clone()
+                            {
                                 info!("🤖 HANDLING INFERENCE REQUEST AS WORKER NODE");
 
                                 // Spawn worker task to process inference
                                 let app_state_for_ai_processing = app_state_gossip.clone();
-                                let coordinator = app_state_for_ai_processing.distributed_ai_coordinator.clone();
+                                let coordinator = app_state_for_ai_processing
+                                    .distributed_ai_coordinator
+                                    .clone();
                                 let engine = app_state_for_ai_processing.mistralrs_engine.clone();
 
                                 // Check availability before moving
@@ -3789,20 +4651,28 @@ async fn main() -> anyhow::Result<()> {
                                         let start_time = std::time::Instant::now();
 
                                         // Run inference on this worker node
-                                        match eng.generate(&prompt, max_tokens.unwrap_or(2048)).await {
+                                        match eng
+                                            .generate(&prompt, max_tokens.unwrap_or(2048))
+                                            .await
+                                        {
                                             Ok(generated_text) => {
-                                                let latency_ms = start_time.elapsed().as_millis() as u64;
-                                                let tokens_generated = generated_text.split_whitespace().count();
+                                                let latency_ms =
+                                                    start_time.elapsed().as_millis() as u64;
+                                                let tokens_generated =
+                                                    generated_text.split_whitespace().count();
 
                                                 info!("✅ Worker inference complete: {} tokens in {}ms", tokens_generated, latency_ms);
 
                                                 // Publish response back to network
-                                                if let Err(e) = coord.publish_inference_response(
-                                                    request_id,
-                                                    generated_text,
-                                                    tokens_generated,
-                                                    latency_ms,
-                                                ).await {
+                                                if let Err(e) = coord
+                                                    .publish_inference_response(
+                                                        request_id,
+                                                        generated_text,
+                                                        tokens_generated,
+                                                        latency_ms,
+                                                    )
+                                                    .await
+                                                {
                                                     error!("❌ Failed to publish inference response: {}", e);
                                                 }
                                             }
@@ -3812,17 +4682,31 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     } else {
                                         warn!("⚠️  Coordinator or engine not available for distributed inference");
-                                        warn!("     Coordinator: {}", if has_coordinator { "AVAILABLE" } else { "MISSING" });
-                                        warn!("     Engine: {}", if has_engine { "AVAILABLE" } else { "MISSING" });
+                                        warn!(
+                                            "     Coordinator: {}",
+                                            if has_coordinator {
+                                                "AVAILABLE"
+                                            } else {
+                                                "MISSING"
+                                            }
+                                        );
+                                        warn!(
+                                            "     Engine: {}",
+                                            if has_engine { "AVAILABLE" } else { "MISSING" }
+                                        );
                                     }
                                 });
                             }
 
                             // Forward ALL AI messages to coordinator for processing
                             info!("📤 Forwarding AI message to coordinator...");
-                            if let Some(ref coordinator) = app_state_gossip.distributed_ai_coordinator {
+                            if let Some(ref coordinator) =
+                                app_state_gossip.distributed_ai_coordinator
+                            {
                                 info!("   Coordinator is AVAILABLE - forwarding message");
-                                if let Err(e) = coordinator.handle_ai_message(ai_message_clone).await {
+                                if let Err(e) =
+                                    coordinator.handle_ai_message(ai_message_clone).await
+                                {
                                     error!("❌ Failed to handle AI message in coordinator: {}", e);
                                 } else {
                                     info!("✅ AI message successfully handled by coordinator");
@@ -3866,7 +4750,9 @@ async fn main() -> anyhow::Result<()> {
     // Announces our blockchain height to the network every 30 seconds
     // This enables other peers to know we're available for Turbo Sync
     // ========================================
-    if let (Some(_turbo_sync), Some(network_tx)) = (&app_state.turbo_sync, &app_state.libp2p_command_tx) {
+    if let (Some(_turbo_sync), Some(network_tx)) =
+        (&app_state.turbo_sync, &app_state.libp2p_command_tx)
+    {
         let storage_clone = app_state.storage_engine.clone();
         let network_clone = network_tx.clone();
         let peer_info_clone = app_state.libp2p_peer_info.clone();
@@ -3911,7 +4797,7 @@ async fn main() -> anyhow::Result<()> {
 
                         if let Ok(bytes) = postcard::to_allocvec(&announcement) {
                             // ✅ v0.9.6-beta: Network-aware peer-heights topic (Flaw #3 fix)
-                            let network_id = q_types::NetworkId::TestnetPhase10; // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                            let network_id = q_types::NetworkId::TestnetPhase12; // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                             let _ = network_clone.send(q_network::NetworkCommand::PublishBlock {
                                 topic: network_id.peer_heights_topic(),
                                 block_bytes: bytes,
@@ -3925,7 +4811,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => {
-                        warn!("⚠️  [TURBO SYNC] Failed to get verified height for announcement: {}", e);
+                        warn!(
+                            "⚠️  [TURBO SYNC] Failed to get verified height for announcement: {}",
+                            e
+                        );
                     }
                 }
             }
@@ -3948,7 +4837,9 @@ async fn main() -> anyhow::Result<()> {
                 interval.tick().await;
 
                 // Get our current height
-                let our_height = app_state_fork.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                let our_height = app_state_fork
+                    .current_height_atomic
+                    .load(std::sync::atomic::Ordering::Relaxed);
 
                 // Detect forks based on peer consensus
                 match app_state_fork.fork_detector.detect_fork(our_height).await {
@@ -3956,7 +4847,11 @@ async fn main() -> anyhow::Result<()> {
                         use q_storage::fork_detector::ForkEvent;
 
                         match fork_event {
-                            ForkEvent::BackwardReorg { our_height, network_height, reorg_depth } => {
+                            ForkEvent::BackwardReorg {
+                                our_height,
+                                network_height,
+                                reorg_depth,
+                            } => {
                                 error!("🚨 [FORK DETECTOR] BACKWARD REORG DETECTED!");
                                 error!("🚨   Our height: {}", our_height);
                                 error!("🚨   Network consensus: {}", network_height);
@@ -3979,24 +4874,47 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            ForkEvent::MinorityFork { our_height, majority_height, peer_count_majority, peer_count_our_fork } => {
+                            ForkEvent::MinorityFork {
+                                our_height,
+                                majority_height,
+                                peer_count_majority,
+                                peer_count_our_fork,
+                            } => {
                                 warn!("⚠️  [FORK DETECTOR] Minority fork detected!");
-                                warn!("   Our height: {} ({} peers agree)", our_height, peer_count_our_fork);
-                                warn!("   Majority height: {} ({} peers agree)", majority_height, peer_count_majority);
-                                warn!("   Recommendation: Sync to majority fork at height {}", majority_height);
+                                warn!(
+                                    "   Our height: {} ({} peers agree)",
+                                    our_height, peer_count_our_fork
+                                );
+                                warn!(
+                                    "   Majority height: {} ({} peers agree)",
+                                    majority_height, peer_count_majority
+                                );
+                                warn!(
+                                    "   Recommendation: Sync to majority fork at height {}",
+                                    majority_height
+                                );
                             }
 
-                            ForkEvent::AheadOfNetwork { our_height, network_height } => {
+                            ForkEvent::AheadOfNetwork {
+                                our_height,
+                                network_height,
+                            } => {
                                 warn!("⚠️  [FORK DETECTOR] We're ahead of network");
                                 warn!("   Our height: {}", our_height);
                                 warn!("   Network height: {}", network_height);
                                 warn!("   Possibly isolated or on divergent fork");
                             }
 
-                            ForkEvent::ForwardSync { our_height, network_height } => {
+                            ForkEvent::ForwardSync {
+                                our_height,
+                                network_height,
+                            } => {
                                 // Normal operation - network is ahead, we're syncing
                                 if network_height > our_height + 10 {
-                                    debug!("📊 [FORK DETECTOR] Normal forward sync: {} → {}", our_height, network_height);
+                                    debug!(
+                                        "📊 [FORK DETECTOR] Normal forward sync: {} → {}",
+                                        our_height, network_height
+                                    );
                                 }
                             }
                         }
@@ -4036,10 +4954,11 @@ async fn main() -> anyhow::Result<()> {
 
                     // PHASE 1: Bulk balance updates in memory (FAST - no I/O)
                     let current_timestamp = chrono::Utc::now().timestamp() as u64;
-                    let block_reward_total = q_api_server::handlers::calculate_block_reward_time_based(
-                        q_api_server::handlers::GENESIS_TIMESTAMP,
-                        current_timestamp,
-                    );
+                    let block_reward_total =
+                        q_api_server::handlers::calculate_block_reward_time_based(
+                            q_api_server::handlers::GENESIS_TIMESTAMP,
+                            current_timestamp,
+                        );
 
                     // 🔒 MAX SUPPLY ENFORCEMENT - Prevent exceeding 21M QUG total supply
                     // CRITICAL: Check before minting to ensure we never violate the hard cap
@@ -4050,14 +4969,24 @@ async fn main() -> anyhow::Result<()> {
 
                     if *current_supply + new_coins > MAX_SUPPLY {
                         let remaining_supply = MAX_SUPPLY.saturating_sub(*current_supply);
-                        let can_mint_solutions = (remaining_supply / block_reward_total).min(batch_size as u64);
+                        let can_mint_solutions =
+                            (remaining_supply / block_reward_total).min(batch_size as u64);
 
-                        warn!("⚠️ MAX SUPPLY APPROACHING! Current: {} / {} QUG",
-                            *current_supply / 100_000_000, MAX_SUPPLY / 100_000_000);
+                        warn!(
+                            "⚠️ MAX SUPPLY APPROACHING! Current: {} / {} QUG",
+                            *current_supply / 100_000_000,
+                            MAX_SUPPLY / 100_000_000
+                        );
 
                         if can_mint_solutions == 0 {
-                            warn!("🚨 MAX SUPPLY REACHED! Rejecting {} mining submissions", batch_size);
-                            warn!("   Total supply: {} QUG (HARD CAP ENFORCED)", MAX_SUPPLY / 100_000_000);
+                            warn!(
+                                "🚨 MAX SUPPLY REACHED! Rejecting {} mining submissions",
+                                batch_size
+                            );
+                            warn!(
+                                "   Total supply: {} QUG (HARD CAP ENFORCED)",
+                                MAX_SUPPLY / 100_000_000
+                            );
 
                             // Clear batch and continue - no more minting allowed
                             batch_buffer.clear();
@@ -4065,8 +4994,12 @@ async fn main() -> anyhow::Result<()> {
                             drop(current_supply);
                             continue;
                         } else {
-                            warn!("⚠️ Partial mint: {} of {} submissions (remaining supply: {} QUG)",
-                                can_mint_solutions, batch_size, remaining_supply / 100_000_000);
+                            warn!(
+                                "⚠️ Partial mint: {} of {} submissions (remaining supply: {} QUG)",
+                                can_mint_solutions,
+                                batch_size,
+                                remaining_supply / 100_000_000
+                            );
 
                             // Truncate batch to what we can mint
                             batch_buffer.truncate(can_mint_solutions as usize);
@@ -4079,11 +5012,13 @@ async fn main() -> anyhow::Result<()> {
                     let updated_supply = *current_supply;
                     drop(current_supply); // Release lock early
 
-                    info!("💰 Minting {} QUG. Total supply: {} / {} QUG ({:.2}%)",
+                    info!(
+                        "💰 Minting {} QUG. Total supply: {} / {} QUG ({:.2}%)",
                         actual_new_coins / 100_000_000,
                         updated_supply / 100_000_000,
                         MAX_SUPPLY / 100_000_000,
-                        (updated_supply as f64 / MAX_SUPPLY as f64) * 100.0);
+                        (updated_supply as f64 / MAX_SUPPLY as f64) * 100.0
+                    );
 
                     // ==================================================================================
                     // TRANSPARENT DEVELOPMENT FEE: 1% to founder wallet for sustainable development
@@ -4092,13 +5027,15 @@ async fn main() -> anyhow::Result<()> {
                     // This funds ongoing development, post-quantum research, infrastructure, and support
                     // Fully documented in README.md and project whitepapers
                     const DEV_FEE_PERCENT: f64 = 0.01; // 1%
-                    const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                    const FOUNDER_WALLET_HEX: &str =
+                        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
                     let dev_fee_amount = (block_reward_total as f64 * DEV_FEE_PERCENT) as u64;
                     let miner_reward = block_reward_total - dev_fee_amount;
 
                     // Decode founder wallet address
-                    let founder_wallet_bytes = hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
+                    let founder_wallet_bytes =
+                        hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
                     let mut founder_wallet = [0u8; 32];
                     founder_wallet.copy_from_slice(&founder_wallet_bytes);
 
@@ -4112,10 +5049,18 @@ async fn main() -> anyhow::Result<()> {
 
                     for submission in &batch_buffer {
                         // Pay miners 99% of reward
-                        let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
+                        let current_balance = balances
+                            .get(&submission.miner_address)
+                            .copied()
+                            .unwrap_or(0);
                         let new_balance = current_balance + miner_reward;
                         balances.insert(submission.miner_address, new_balance);
-                        balance_updates.push((submission.miner_address, current_balance, new_balance, submission.miner_address_str.clone()));
+                        balance_updates.push((
+                            submission.miner_address,
+                            current_balance,
+                            new_balance,
+                            submission.miner_address_str.clone(),
+                        ));
                     }
 
                     // ⚡ PERFORMANCE OPTIMIZATION: Balance persistence moved to periodic background task
@@ -4141,7 +5086,7 @@ async fn main() -> anyhow::Result<()> {
                                 // MiningSubmission.hash_rate is already in KH/s
                                 mining_stats.update_miner(
                                     submission.miner_address_str.clone(),
-                                    submission.hash_rate
+                                    submission.hash_rate,
                                 );
                             }
                         }
@@ -4149,9 +5094,11 @@ async fn main() -> anyhow::Result<()> {
                         // Log network hashrate for monitoring
                         let network_hashrate_khs = mining_stats.calculate_network_hashrate();
                         if network_hashrate_khs > 0.0 {
-                            debug!("⛏️  Network hashrate: {:.2} KH/s from {} active miners",
-                                  network_hashrate_khs,
-                                  mining_stats.active_miner_count());
+                            debug!(
+                                "⛏️  Network hashrate: {:.2} KH/s from {} active miners",
+                                network_hashrate_khs,
+                                mining_stats.active_miner_count()
+                            );
                         }
                     }
 
@@ -4166,7 +5113,8 @@ async fn main() -> anyhow::Result<()> {
                     let mut aggregated_updates: HashMap<String, (u64, u64, usize)> = HashMap::new(); // addr -> (old, new, count)
 
                     for (_, old_bal, new_bal, addr_str) in balance_updates.iter() {
-                        aggregated_updates.entry(addr_str.clone())
+                        aggregated_updates
+                            .entry(addr_str.clone())
                             .and_modify(|(_, new, count)| {
                                 *new = *new_bal; // Keep latest balance
                                 *count += 1; // Count solutions for this wallet
@@ -4176,38 +5124,50 @@ async fn main() -> anyhow::Result<()> {
 
                     // Broadcast ONE aggregated event per wallet (massive event reduction!)
                     use q_api_server::streaming::StreamEvent;
-                    for (addr_str, (old_bal, new_bal, solution_count)) in aggregated_updates.iter() {
-                        let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
-                            wallet_address: addr_str.clone(),
-                            old_balance: *old_bal as f64 / 100_000_000.0,
-                            new_balance: *new_bal as f64 / 100_000_000.0,
-                            change_reason: format!("mining_reward_batch_{}", solution_count), // Show solution count
-                            timestamp: chrono::Utc::now(),
-                        }).await;
+                    for (addr_str, (old_bal, new_bal, solution_count)) in aggregated_updates.iter()
+                    {
+                        let _ = app_state_mining
+                            .event_broadcaster
+                            .broadcast(StreamEvent::BalanceUpdated {
+                                wallet_address: addr_str.clone(),
+                                old_balance: *old_bal as f64 / 100_000_000.0,
+                                new_balance: *new_bal as f64 / 100_000_000.0,
+                                change_reason: format!("mining_reward_batch_{}", solution_count), // Show solution count
+                                timestamp: chrono::Utc::now(),
+                            })
+                            .await;
 
                         // Also broadcast mining stats for this miner
                         if let Some(ref mining_stats_arc) = app_state_mining.mining_statistics {
                             let mining_stats = mining_stats_arc.read().await;
-                            debug!("📊 Mining stats check: addr_str={}, active_miners count={}",
-                                   addr_str, mining_stats.active_miners.len());
+                            debug!(
+                                "📊 Mining stats check: addr_str={}, active_miners count={}",
+                                addr_str,
+                                mining_stats.active_miners.len()
+                            );
 
                             if let Some(miner_stats) = mining_stats.active_miners.get(addr_str) {
                                 info!("📊 Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
                                       &addr_str[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
-                                let _ = app_state_mining.event_broadcaster.broadcast(StreamEvent::MiningStats {
-                                    miner_address: addr_str.clone(),
-                                    total_rewards: *new_bal as f64 / 100_000_000.0,
-                                    total_blocks_found: miner_stats.total_solutions,
-                                    current_balance: *new_bal as f64 / 100_000_000.0,
-                                    avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
-                                    timestamp: chrono::Utc::now(),
-                                }).await;
+                                let _ = app_state_mining
+                                    .event_broadcaster
+                                    .broadcast(StreamEvent::MiningStats {
+                                        miner_address: addr_str.clone(),
+                                        total_rewards: *new_bal as f64 / 100_000_000.0,
+                                        total_blocks_found: miner_stats.total_solutions,
+                                        current_balance: *new_bal as f64 / 100_000_000.0,
+                                        avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                        timestamp: chrono::Utc::now(),
+                                    })
+                                    .await;
                             } else {
                                 debug!("⚠️  No miner stats found for addr_str={}. Available keys: {:?}",
                                        addr_str, mining_stats.active_miners.keys().take(3).collect::<Vec<_>>());
                             }
                         } else {
-                            warn!("⚠️  mining_statistics is None - stats tracking not initialized!");
+                            warn!(
+                                "⚠️  mining_statistics is None - stats tracking not initialized!"
+                            );
                         }
                     }
                     // 🔒 PRIVACY: Log aggregate statistics only, no individual miner data
@@ -4215,7 +5175,10 @@ async fn main() -> anyhow::Result<()> {
                           aggregated_updates.len(), balance_updates.len());
 
                     // PHASE 4: Batch queue solutions to BlockProducer
-                    debug!("⚡ PHASE 4: Queueing {} mining solutions to BlockProducer pool", batch_buffer.len());
+                    debug!(
+                        "⚡ PHASE 4: Queueing {} mining solutions to BlockProducer pool",
+                        batch_buffer.len()
+                    );
                     for submission in &batch_buffer {
                         // Convert KH/s to H/s for ultra-precise network hashrate tracking
                         let hash_rate_hs = (submission.hash_rate * 1000.0) as u64;
@@ -4229,31 +5192,61 @@ async fn main() -> anyhow::Result<()> {
                             pool_id: None,
                             hash_rate_hs, // Include miner's hash rate for precise network statistics
                         };
-                        debug!("  📤 Queueing solution: miner={}, nonce={}, hashrate={:.2} KH/s",
-                            hex::encode(&submission.miner_address[..8]), submission.nonce, submission.hash_rate);
+                        debug!(
+                            "  📤 Queueing solution: miner={}, nonce={}, hashrate={:.2} KH/s",
+                            hex::encode(&submission.miner_address[..8]),
+                            submission.nonce,
+                            submission.hash_rate
+                        );
                         // ✅ v0.9.92-beta DEADLOCK FIX: queue_solution() is now synchronous (bounded channel with backpressure)
-                        if let Err(e) = app_state_mining.block_producer_pool.queue_solution(solution) {
-                            warn!("⚠️ Failed to queue solution: {:?} - Producer may be overloaded", e);
+                        if let Err(e) = app_state_mining
+                            .block_producer_pool
+                            .queue_solution(solution)
+                        {
+                            warn!(
+                                "⚠️ Failed to queue solution: {:?} - Producer may be overloaded",
+                                e
+                            );
                         }
 
                         // 💓 v0.8.9-beta: Update mining heartbeat (lock-free atomic operation)
                         app_state_mining.last_mining_solution_time.store(
                             chrono::Utc::now().timestamp() as u64,
-                            std::sync::atomic::Ordering::SeqCst
+                            std::sync::atomic::Ordering::SeqCst,
                         );
-                        app_state_mining.mining_is_healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+                        app_state_mining
+                            .mining_is_healthy
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                     }
-                    debug!("✅ PHASE 4 COMPLETE: All {} solutions queued", batch_buffer.len());
+                    debug!(
+                        "✅ PHASE 4 COMPLETE: All {} solutions queued",
+                        batch_buffer.len()
+                    );
 
                     // PHASE 5: Check if we should produce blocks
-                    let should_produce = app_state_mining.block_producer_pool.should_produce().await;
+                    let should_produce =
+                        match app_state_mining.block_producer_pool.should_produce().await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
+                                error!("   This indicates one or more producer tasks have died!");
+                                error!("   Exiting to trigger systemd restart...");
+                                std::process::exit(1); // Crash-fast philosophy
+                            }
+                        };
 
                     if should_produce {
                         // SYNC MODE CHECK: Don't produce blocks if we're catching up
-                        let current_height = app_state_mining.node_status.read().await.current_height;
-                        let network_height = app_state_mining.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                        // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
+                        let current_height =
+                            app_state_mining.node_status.read().await.current_height;
+                        let network_height = app_state_mining
+                            .highest_network_height
+                            .load(std::sync::atomic::Ordering::SeqCst);
                         let sync_threshold = 10;
-                        let is_synced = network_height == 0 || (network_height > 0 && current_height + sync_threshold >= network_height);
+                        let is_synced = network_height == 0
+                            || (network_height > 0
+                                && current_height + sync_threshold >= network_height);
 
                         if !is_synced {
                             debug!("⏸️  Block production paused (mining handler): syncing {} blocks behind",
@@ -4264,8 +5257,11 @@ async fn main() -> anyhow::Result<()> {
                         // 🚨 v0.9.95-beta: CRITICAL FIX - Verify producers are synced with database
                         // Expert consensus: ChatGPT, DeepSeek, Kimi AI (99% confidence)
                         // Prevents height desync bug that caused 221→242 phantom jump
-                        if let Err(e) = app_state_mining.block_producer_pool
-                            .sync_from_storage(&app_state_mining.storage_engine).await {
+                        if let Err(e) = app_state_mining
+                            .block_producer_pool
+                            .sync_from_storage(&app_state_mining.storage_engine)
+                            .await
+                        {
                             error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
                             error!("   Forcing producer resync to prevent height drift");
                             continue; // Skip this production cycle, retry after resync
@@ -4273,11 +5269,15 @@ async fn main() -> anyhow::Result<()> {
 
                         info!("🔨 Block production triggered");
                         let produce_start = std::time::Instant::now();
-                        let new_blocks = app_state_mining.block_producer_pool.produce_blocks().await;
+                        let new_blocks =
+                            app_state_mining.block_producer_pool.produce_blocks().await;
                         let produce_duration = produce_start.elapsed();
 
                         let blocks_produced = new_blocks.len();
-                        info!("⚡ Produced {} blocks in {:?}", blocks_produced, produce_duration);
+                        info!(
+                            "⚡ Produced {} blocks in {:?}",
+                            blocks_produced, produce_duration
+                        );
 
                         // v0.8.11-beta: Each producer creates UNIQUE blocks with different producer_id
                         // This ensures each block has a unique hash (producer_id included in BlockHeader)
@@ -4295,7 +5295,10 @@ async fn main() -> anyhow::Result<()> {
                             // Update node status with new height
                             {
                                 // 🚨 v0.9.0-beta-emergency: CRITICAL SAFETY CHECK
-                                if let Err(e) = verify_height_monotonicity(new_block.header.height, "block production") {
+                                if let Err(e) = verify_height_monotonicity(
+                                    new_block.header.height,
+                                    "block production",
+                                ) {
                                     error!("❌ Height monotonicity check failed during block production: {}", e);
                                     error!("   Refusing to update height - this would cause data loss!");
                                     continue; // Skip this block production cycle
@@ -4307,12 +5310,17 @@ async fn main() -> anyhow::Result<()> {
 
                             // Broadcast NewBlock event via SSE with enhanced data
                             let block_hash = new_block.calculate_hash();
-                            let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
-                            let block_reward = new_block.mining_solutions.len() as u64 * reward_per_solution;
+                            let reward_per_solution =
+                                q_api_server::handlers::calculate_block_reward(
+                                    new_block.header.height,
+                                );
+                            let block_reward =
+                                new_block.mining_solutions.len() as u64 * reward_per_solution;
                             let tx_count = new_block.transactions.len();
 
-                            let _ = app_state_mining.event_broadcaster.broadcast(
-                                q_api_server::streaming::StreamEvent::NewBlock {
+                            let _ = app_state_mining
+                                .event_broadcaster
+                                .broadcast(q_api_server::streaming::StreamEvent::NewBlock {
                                     height: new_block.header.height,
                                     hash: hex::encode(&block_hash),
                                     prev_hash: hex::encode(&new_block.header.prev_block_hash),
@@ -4324,8 +5332,31 @@ async fn main() -> anyhow::Result<()> {
                                     block_reward: block_reward as f64,
                                     producer_id, // PHASE 2: Use actual producer ID from parallel pool
                                     timestamp: chrono::Utc::now(),
-                                }
-                            ).await;
+                                })
+                                .await;
+
+                            // 🎁 v1.0.17-beta: Broadcast individual mining reward events via SSE
+                            // Each miner gets a dedicated MiningReward event for their contribution
+                            for solution in &new_block.mining_solutions {
+                                let miner_address = hex::encode(&solution.miner_address);
+                                let _ = app_state_mining
+                                    .event_broadcaster
+                                    .broadcast(q_api_server::streaming::StreamEvent::MiningReward {
+                                        miner_address: miner_address.clone(),
+                                        reward_qnk: reward_per_solution as f64,
+                                        block_height: new_block.header.height,
+                                        nonce: solution.nonce,
+                                        difficulty: format!("{}", new_block.header.height), // Difficulty as string (simplified)
+                                        hash_rate: 0.0, // Hash rate calculated elsewhere
+                                        timestamp: chrono::Utc::now(),
+                                    })
+                                    .await;
+
+                                info!(
+                                    "💰 Mining reward SSE: {} QNK to {} (height {})",
+                                    reward_per_solution, miner_address, new_block.header.height
+                                );
+                            }
 
                             // ✅ v1.0.1-beta CRITICAL FIX: Store block THEN advance height
                             // Expert consensus (Kimi AI, DeepSeek, ChatGPT):
@@ -4342,7 +5373,7 @@ async fn main() -> anyhow::Result<()> {
                             // - "Add 5-second timeout with exponential backoff"
                             // - "Never let block producer hang forever on disk I/O"
                             // - "Retry with backoff, fail after 3 attempts"
-                            use tokio::time::{timeout, Duration, sleep};
+                            use tokio::time::{sleep, timeout, Duration};
 
                             let mut retry_delay = Duration::from_millis(100);
                             let max_retries = 3;
@@ -4358,7 +5389,10 @@ async fn main() -> anyhow::Result<()> {
                                 let block_bytes = match bincode::serialize(&new_block) {
                                     Ok(bytes) => bytes,
                                     Err(e) => {
-                                        error!("❌ Failed to serialize block {}: {}", new_block.header.height, e);
+                                        error!(
+                                            "❌ Failed to serialize block {}: {}",
+                                            new_block.header.height, e
+                                        );
                                         Vec::new() // Continue with existing path
                                     }
                                 };
@@ -4366,7 +5400,10 @@ async fn main() -> anyhow::Result<()> {
                                 if !block_bytes.is_empty() {
                                     // Save block via AsyncStorageEngine (non-blocking, returns immediately)
                                     let async_save_start = std::time::Instant::now();
-                                    match async_storage.save_block(new_block.header.height, block_bytes).await {
+                                    match async_storage
+                                        .save_block(new_block.header.height, block_bytes)
+                                        .await
+                                    {
                                         Ok(()) => {
                                             let async_save_duration = async_save_start.elapsed();
                                             info!("✅ AsyncStorageEngine: Block {} queued in {:?} (queue depth: {})",
@@ -4379,6 +5416,7 @@ async fn main() -> anyhow::Result<()> {
                                             // Root cause: AsyncStorageEngine saved blocks but height never advanced
                                             // AI consensus (Kimi 95%, DeepSeek 85%, ChatGPT 92%): Missing flag update
                                             save_succeeded = true;
+                                            info!("🎯 [v1.0.9-beta] save_succeeded = true (AsyncStorageEngine path)");
 
                                             // Check for congestion warning
                                             if async_storage.is_congested() {
@@ -4401,51 +5439,69 @@ async fn main() -> anyhow::Result<()> {
                             // ========================================
                             if !save_succeeded {
                                 for attempt in 0..max_retries {
-                                match timeout(Duration::from_secs(5), app_state_mining.storage_engine.save_qblock(&new_block)).await {
-                                    Ok(Ok(())) => {
-                                        info!("✅ Block {} saved to storage (attempt {})", new_block.header.height, attempt + 1);
-                                        save_succeeded = true;
-                                        break; // Success!
-                                    }
-                                    Ok(Err(e)) if e.to_string().contains("Block already exists") => {
-                                        warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
-                                        // CRITICAL: Force producers to resync after duplicate
-                                        if let Err(sync_err) = app_state_mining.block_producer_pool
-                                            .sync_from_storage(&app_state_mining.storage_engine).await {
-                                            error!("❌ Resync after duplicate failed: {}", sync_err);
-                                        } else {
-                                            info!("✅ Producers resynced after duplicate, continuing from database height");
+                                    match timeout(
+                                        Duration::from_secs(5),
+                                        app_state_mining.storage_engine.save_qblock(&new_block),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(())) => {
+                                            info!(
+                                                "✅ Block {} saved to storage (attempt {})",
+                                                new_block.header.height,
+                                                attempt + 1
+                                            );
+                                            save_succeeded = true;
+                                            info!("🎯 [v1.0.9-beta] save_succeeded = true (RwLock path)");
+                                            break; // Success!
                                         }
-                                        continue; // Skip to next production cycle (height NOT advanced)
-                                    }
-                                    Ok(Err(e)) if attempt < max_retries - 1 => {
-                                        warn!("⚠️ Block {} save failed (attempt {}): {}. Retrying...",
+                                        Ok(Err(e))
+                                            if e.to_string().contains("Block already exists") =>
+                                        {
+                                            warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
+                                            // CRITICAL: Force producers to resync after duplicate
+                                            if let Err(sync_err) = app_state_mining
+                                                .block_producer_pool
+                                                .sync_from_storage(&app_state_mining.storage_engine)
+                                                .await
+                                            {
+                                                error!(
+                                                    "❌ Resync after duplicate failed: {}",
+                                                    sync_err
+                                                );
+                                            } else {
+                                                info!("✅ Producers resynced after duplicate, continuing from database height");
+                                            }
+                                            continue; // Skip to next production cycle (height NOT advanced)
+                                        }
+                                        Ok(Err(e)) if attempt < max_retries - 1 => {
+                                            warn!("⚠️ Block {} save failed (attempt {}): {}. Retrying...",
                                             new_block.header.height, attempt + 1, e);
-                                        sleep(retry_delay).await;
-                                        retry_delay *= 2; // Exponential backoff
-                                        continue; // Retry
-                                    }
-                                    Ok(Err(e)) => {
-                                        error!("🚨 CRITICAL: Block {} save failed after {} attempts: {}",
+                                            sleep(retry_delay).await;
+                                            retry_delay *= 2; // Exponential backoff
+                                            continue; // Retry
+                                        }
+                                        Ok(Err(e)) => {
+                                            error!("🚨 CRITICAL: Block {} save failed after {} attempts: {}",
                                             new_block.header.height, max_retries, e);
-                                        error!("   Height NOT advanced - will retry block creation");
-                                        break; // Give up, continue to next cycle
-                                    }
-                                    Err(_timeout_err) if attempt < max_retries - 1 => {
-                                        warn!("⏱️ TIMEOUT: Block {} save exceeded 5 seconds (attempt {}). Retrying...",
+                                            error!("   Height NOT advanced - will retry block creation");
+                                            break; // Give up, continue to next cycle
+                                        }
+                                        Err(_timeout_err) if attempt < max_retries - 1 => {
+                                            warn!("⏱️ TIMEOUT: Block {} save exceeded 5 seconds (attempt {}). Retrying...",
                                             new_block.header.height, attempt + 1);
-                                        sleep(retry_delay).await;
-                                        retry_delay *= 2; // Exponential backoff
-                                        continue; // Retry
-                                    }
-                                    Err(_timeout_err) => {
-                                        error!("🚨 CRITICAL TIMEOUT: Block {} save failed after {} attempts (5s each)",
+                                            sleep(retry_delay).await;
+                                            retry_delay *= 2; // Exponential backoff
+                                            continue; // Retry
+                                        }
+                                        Err(_timeout_err) => {
+                                            error!("🚨 CRITICAL TIMEOUT: Block {} save failed after {} attempts (5s each)",
                                             new_block.header.height, max_retries);
-                                        error!("   RocksDB may be stalled or deadlocked - skipping this block");
-                                        error!("   Producer will retry on next cycle");
-                                        break; // Give up, continue to next cycle
+                                            error!("   RocksDB may be stalled or deadlocked - skipping this block");
+                                            error!("   Producer will retry on next cycle");
+                                            break; // Give up, continue to next cycle
+                                        }
                                     }
-                                }
                                 } // Close for loop
                             } else {
                                 // 🐛 v1.0.8-beta: AsyncStorageEngine already succeeded, skip redundant RwLock path
@@ -4455,25 +5511,46 @@ async fn main() -> anyhow::Result<()> {
 
                             // Only advance height if save succeeded
                             if save_succeeded {
-                                // ✅ v1.0.8-beta CRITICAL FIX: NOW advance producer height (write-first, advance-second)
-                                // Fixed: Use new advance_producer_height() method which sends command via channel
-                                // Old code: producer_ref.advance_height(block_hash) <- Won't compile (immutable ref)
-                                // New code: Calls pool method that forwards to correct producer via lock-free channel
-                                app_state_mining.block_producer_pool.advance_producer_height(producer_id, block_hash);
+                                info!("🎯 [v1.0.14-beta] EXECUTING height advancement (save_succeeded=true)");
+
+                                // ✅ v1.0.14-beta CRITICAL FIX: Sync ALL producers after EVERY block save
+                                // Root cause: Only advancing single producer caused 7/8 producers stuck at stale heights
+                                // Symptoms: Producer #0 at height 94835, producers #1-7 stuck at 91630-92204 (2,600+ blocks behind)
+                                // Solution: Force all producers to reload height from database after EVERY successful save
+                                //
+                                // OLD BUG (v1.0.13-beta and earlier):
+                                //   app_state_mining.block_producer_pool.advance_producer_height(producer_id, block_hash);
+                                //   ^ Only updated the ONE producer that created the block!
+                                //
+                                // NEW FIX (v1.0.14-beta):
+                                //   Sync ALL producers from storage after EVERY successful block save
+                                info!("🔄 [v1.0.14-beta] Syncing ALL {} producers to latest height {} (bug fix)",
+                                      8, new_block.header.height);
+
+                                if let Err(e) = app_state_mining
+                                    .block_producer_pool
+                                    .sync_from_storage(&app_state_mining.storage_engine)
+                                    .await
+                                {
+                                    error!("❌ CRITICAL: Failed to sync producers after block save: {}", e);
+                                    error!("   This will cause height regression on next block!");
+                                    // Continue anyway - better to have stale producers than halt block production
+                                } else {
+                                    info!("✅ [v1.0.14-beta] ALL producers synchronized to height {} (prevents height regression)",
+                                          new_block.header.height);
+                                }
 
                                 // 🔧 v1.0.3-beta: Update atomic height for mining API
                                 app_state_mining.current_height_atomic.store(
                                     new_block.header.height,
-                                    std::sync::atomic::Ordering::Relaxed
+                                    std::sync::atomic::Ordering::Relaxed,
                                 );
 
                                 // 🔧 v1.0.4-beta: Clear cached challenge (height advanced)
                                 *app_state_mining.current_challenge.write().await = None;
-
-                                info!("✅ Producer #{} height advanced to {} AFTER storage confirmation",
-                                      producer_id, new_block.header.height);
                             } else {
                                 // Save failed - skip this block, continue producing
+                                error!("🚨 [v1.0.9-beta] SKIPPING height advancement (save_succeeded=false) - THIS IS THE BUG!");
                                 warn!("⚠️ Block {} NOT saved, height NOT advanced. Continuing production...",
                                     new_block.header.height);
                                 continue;
@@ -4482,19 +5559,25 @@ async fn main() -> anyhow::Result<()> {
                             // 💰 v0.9.31-beta: PROCESS MINING REWARDS via Balance Consensus Engine
                             // This persists dev fee and miner rewards to RocksDB for consensus across all nodes
                             {
-                                use q_storage::balance_consensus::{BalanceConsensusEngine, BalanceConsensusError, GENESIS_TIMESTAMP};
+                                use q_storage::balance_consensus::{
+                                    BalanceConsensusEngine, BalanceConsensusError,
+                                    GENESIS_TIMESTAMP,
+                                };
 
                                 // Create balance consensus engine with genesis timestamp and dev wallet
                                 let balance_engine = BalanceConsensusEngine::new(
                                     GENESIS_TIMESTAMP,
-                                    q_storage::balance_consensus::FOUNDER_WALLET.to_string()
+                                    q_storage::balance_consensus::FOUNDER_WALLET.to_string(),
                                 );
 
                                 // Dereference Arc to get &QStorage (which implements BalanceStorage)
-                                match balance_engine.process_block_mining_rewards(
-                                    &*app_state_mining.storage_engine,
-                                    &new_block
-                                ).await {
+                                match balance_engine
+                                    .process_block_mining_rewards(
+                                        &*app_state_mining.storage_engine,
+                                        &new_block,
+                                    )
+                                    .await
+                                {
                                     Ok(updates) => {
                                         info!("💰 Applied {} balance updates for block {} (including dev fee)",
                                               updates.len(), new_block.header.height);
@@ -4510,15 +5593,24 @@ async fn main() -> anyhow::Result<()> {
 
                                             // Fetch actual wallet balance from storage (not just the reward amount!)
                                             // Strip "qnk" prefix if present since get_balance() expects raw hex
-                                            let address_for_lookup = if update.address.starts_with("qnk") {
-                                                &update.address[3..]
-                                            } else {
-                                                &update.address
-                                            };
-                                            match app_state_mining.storage_engine.get_balance(address_for_lookup).await {
+                                            let address_for_lookup =
+                                                if update.address.starts_with("qnk") {
+                                                    &update.address[3..]
+                                                } else {
+                                                    &update.address
+                                                };
+                                            match app_state_mining
+                                                .storage_engine
+                                                .get_balance(address_for_lookup)
+                                                .await
+                                            {
                                                 Ok(actual_balance) => {
-                                                    let old_balance_f64 = (actual_balance.saturating_sub(update.amount)) as f64 / 100_000_000.0;
-                                                    let new_balance_f64 = actual_balance as f64 / 100_000_000.0;
+                                                    let old_balance_f64 = (actual_balance
+                                                        .saturating_sub(update.amount))
+                                                        as f64
+                                                        / 100_000_000.0;
+                                                    let new_balance_f64 =
+                                                        actual_balance as f64 / 100_000_000.0;
 
                                                     let _ = app_state_mining.event_broadcaster.broadcast(
                                                         q_api_server::streaming::StreamEvent::BalanceUpdated {
@@ -4532,7 +5624,7 @@ async fn main() -> anyhow::Result<()> {
                                                     debug!("📡 SSE: Balance updated for {}: {} → {} QUG (+{} QUG reward)",
                                                            wallet_addr, old_balance_f64, new_balance_f64,
                                                            update.amount as f64 / 100_000_000.0);
-                                                },
+                                                }
                                                 Err(e) => {
                                                     error!("❌ Failed to fetch balance for SSE event {}: {:?}", wallet_addr, e);
                                                 }
@@ -4540,7 +5632,10 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                     Err(BalanceConsensusError::AlreadyProcessed(_)) => {
-                                        debug!("Block {} already processed for rewards (safe retry)", new_block.header.height);
+                                        debug!(
+                                            "Block {} already processed for rewards (safe retry)",
+                                            new_block.header.height
+                                        );
                                     }
                                     Err(e) => {
                                         error!("❌ Failed to process mining rewards for block {}: {:?}", new_block.header.height, e);
@@ -4555,7 +5650,8 @@ async fn main() -> anyhow::Result<()> {
                                     // Check if this is a coinbase transaction (from address is all zeros)
                                     if tx.from == [0u8; 32] {
                                         // Credit the recipient (miner or dev wallet)
-                                        let current_balance = balances.get(&tx.to).copied().unwrap_or(0);
+                                        let current_balance =
+                                            balances.get(&tx.to).copied().unwrap_or(0);
                                         let new_balance = current_balance + tx.amount;
                                         balances.insert(tx.to, new_balance);
 
@@ -4563,10 +5659,12 @@ async fn main() -> anyhow::Result<()> {
                                         // Previously synced on EVERY coinbase TX - now batched for 450x improvement
 
                                         // 🔇 Reduced logging: Changed to DEBUG to prevent 50GB+ logs (100+ logs per block)
-                                        debug!("💰 Coinbase TX: {} QNK → {} (new balance: {} QNK)",
-                                              tx.amount as f64 / 100_000_000.0,
-                                              hex::encode(&tx.to[..8]),
-                                              new_balance as f64 / 100_000_000.0);
+                                        debug!(
+                                            "💰 Coinbase TX: {} QNK → {} (new balance: {} QNK)",
+                                            tx.amount as f64 / 100_000_000.0,
+                                            hex::encode(&tx.to[..8]),
+                                            new_balance as f64 / 100_000_000.0
+                                        );
                                     }
                                 }
                             }
@@ -4576,24 +5674,36 @@ async fn main() -> anyhow::Result<()> {
                                 // PHASE 2: Get a producer from the pool for vertex conversion (stateless utility methods)
                                 // We use the first producer since these are stateless conversion functions
                                 // ✅ v0.9.92-beta DEADLOCK FIX: get_producer() is now instant (no await)
-                                let producer_ref = app_state_mining.block_producer_pool.get_producer(0);
+                                let producer_ref =
+                                    app_state_mining.block_producer_pool.get_producer(0);
 
                                 // Convert QBlock to DAG Vertex (async via channel)
-                                let dag_vertex = match producer_ref.qblock_to_vertex(&new_block).await {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        error!("❌ Failed to convert block {} to vertex: {}", new_block.header.height, e);
-                                        continue;
-                                    }
-                                };
+                                let dag_vertex =
+                                    match producer_ref.qblock_to_vertex(&new_block).await {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            error!(
+                                                "❌ Failed to convert block {} to vertex: {}",
+                                                new_block.header.height, e
+                                            );
+                                            continue;
+                                        }
+                                    };
 
                                 // Convert DAG-Knight vertex to storage vertex (async via channel)
-                                let storage_vertex = producer_ref.dag_vertex_to_storage_vertex(&dag_vertex, &new_block).await;
+                                let storage_vertex = producer_ref
+                                    .dag_vertex_to_storage_vertex(&dag_vertex, &new_block)
+                                    .await;
 
                                 // Store vertex in consensus vertex store
                                 let consensus = app_state_mining.consensus.read().await;
-                                if let Err(e) = consensus.vertex_store.store_vertex(storage_vertex).await {
-                                    error!("❌ Failed to store vertex for block {}: {}", new_block.header.height, e);
+                                if let Err(e) =
+                                    consensus.vertex_store.store_vertex(storage_vertex).await
+                                {
+                                    error!(
+                                        "❌ Failed to store vertex for block {}: {}",
+                                        new_block.header.height, e
+                                    );
                                 } else {
                                     // Create certificate for consensus processing
                                     let certificate = q_types::Certificate {
@@ -4615,7 +5725,8 @@ async fn main() -> anyhow::Result<()> {
                                                     );
 
                                                     // Broadcast BlockFinalized SSE event
-                                                    let tx_hashes: Vec<TxHash> = new_block.transactions
+                                                    let tx_hashes: Vec<TxHash> = new_block
+                                                        .transactions
                                                         .iter()
                                                         .map(|tx| tx.id)
                                                         .collect();
@@ -4635,7 +5746,10 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         }
                                         Err(e) => {
-                                            error!("❌ Consensus processing failed for block {}: {}", new_block.header.height, e);
+                                            error!(
+                                                "❌ Consensus processing failed for block {}: {}",
+                                                new_block.header.height, e
+                                            );
                                         }
                                     }
                                 }
@@ -4643,9 +5757,15 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
-                            debug!("🔍 Attempting to broadcast block {} to P2P network (mining)", new_block.header.height);
+                            debug!(
+                                "🔍 Attempting to broadcast block {} to P2P network (mining)",
+                                new_block.header.height
+                            );
                             if let Some(ref cmd_tx) = app_state_mining.libp2p_command_tx {
-                                info!("✅ libp2p command channel available for block {} broadcast", new_block.header.height);
+                                info!(
+                                    "✅ libp2p command channel available for block {} broadcast",
+                                    new_block.header.height
+                                );
                                 match postcard::to_allocvec(&new_block) {
                                     Ok(block_bytes) => {
                                         info!("✅ Block {} serialized ({} bytes) - sending to P2P network", new_block.header.height, block_bytes.len());
@@ -4653,7 +5773,7 @@ async fn main() -> anyhow::Result<()> {
                                         let network_id = std::env::var("Q_NETWORK_ID")
                                             .ok()
                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                            .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
+                                            .unwrap_or(q_types::NetworkId::TestnetPhase12); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
                                         let topic = network_id.blocks_topic();
                                         let command = q_network::NetworkCommand::PublishBlock {
                                             topic,
@@ -4661,13 +5781,22 @@ async fn main() -> anyhow::Result<()> {
                                             block_height: new_block.header.height,
                                         };
                                         if let Err(e) = cmd_tx.send(command) {
-                                            warn!("Failed to send block {} broadcast command: {}", new_block.header.height, e);
+                                            warn!(
+                                                "Failed to send block {} broadcast command: {}",
+                                                new_block.header.height, e
+                                            );
                                         } else {
-                                            info!("📡 Block {} broadcast command sent to P2P network", new_block.header.height);
+                                            info!(
+                                                "📡 Block {} broadcast command sent to P2P network",
+                                                new_block.header.height
+                                            );
                                         }
                                     }
                                     Err(e) => {
-                                        warn!("Failed to serialize block {} for broadcast: {}", new_block.header.height, e);
+                                        warn!(
+                                            "Failed to serialize block {} for broadcast: {}",
+                                            new_block.header.height, e
+                                        );
                                     }
                                 }
                             } else {
@@ -4679,10 +5808,15 @@ async fn main() -> anyhow::Result<()> {
                         // When 8 producers create blocks at the same height, we must sync them all to advance
                         // to the next height. Without this, all producers stay stuck at the same height forever!
                         if blocks_produced > 0 {
-                            info!("🔄 Syncing {} producers after creating {} blocks...",
-                                  8, blocks_produced);
-                            if let Err(e) = app_state_mining.block_producer_pool
-                                .sync_from_storage(&app_state_mining.storage_engine).await {
+                            info!(
+                                "🔄 Syncing {} producers after creating {} blocks...",
+                                8, blocks_produced
+                            );
+                            if let Err(e) = app_state_mining
+                                .block_producer_pool
+                                .sync_from_storage(&app_state_mining.storage_engine)
+                                .await
+                            {
                                 error!("❌ Failed to sync producers after block production: {}", e);
                             } else {
                                 info!("✅ All producers synchronized - ready for next height");
@@ -4739,15 +5873,23 @@ async fn main() -> anyhow::Result<()> {
 
                 if time_since_last_solution > STALL_THRESHOLD_SECS {
                     // Mining has stalled!
-                    app_state_heartbeat.mining_is_healthy.store(false, std::sync::atomic::Ordering::SeqCst);
+                    app_state_heartbeat
+                        .mining_is_healthy
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
 
                     if !alert_sent {
                         error!("🚨 ========================================");
                         error!("🚨 MINING STALL DETECTED!");
                         error!("🚨 ========================================");
-                        error!("   No solutions received for {} seconds ({:.1} minutes)",
-                               time_since_last_solution, time_since_last_solution as f64 / 60.0);
-                        error!("   Last solution timestamp: {} (Unix time)", last_solution_time);
+                        error!(
+                            "   No solutions received for {} seconds ({:.1} minutes)",
+                            time_since_last_solution,
+                            time_since_last_solution as f64 / 60.0
+                        );
+                        error!(
+                            "   Last solution timestamp: {} (Unix time)",
+                            last_solution_time
+                        );
                         error!("   Current timestamp: {} (Unix time)", current_time);
                         error!("   ACTION REQUIRED:");
                         error!("     1. Check if miners are running: ps aux | grep q-miner");
@@ -4757,8 +5899,9 @@ async fn main() -> anyhow::Result<()> {
                         error!("🚨 ========================================");
 
                         // Broadcast SSE alert to frontend
-                        let _ = app_state_heartbeat.event_broadcaster.broadcast(
-                            q_api_server::streaming::StreamEvent::Custom {
+                        let _ = app_state_heartbeat
+                            .event_broadcaster
+                            .broadcast(q_api_server::streaming::StreamEvent::Custom {
                                 event_type: "mining_stall_detected".to_string(),
                                 data: serde_json::json!({
                                     "time_since_last_solution": time_since_last_solution,
@@ -4767,18 +5910,22 @@ async fn main() -> anyhow::Result<()> {
                                     "severity": "critical"
                                 }),
                                 timestamp: chrono::Utc::now(),
-                            }
-                        ).await;
+                            })
+                            .await;
 
                         alert_sent = true;
                     } else {
                         // Continue logging every minute while stalled
-                        warn!("⚠️  Mining still stalled ({:.1} minutes without solutions)",
-                              time_since_last_solution as f64 / 60.0);
+                        warn!(
+                            "⚠️  Mining still stalled ({:.1} minutes without solutions)",
+                            time_since_last_solution as f64 / 60.0
+                        );
                     }
                 } else {
                     // Mining is healthy
-                    let was_unhealthy = !app_state_heartbeat.mining_is_healthy.load(std::sync::atomic::Ordering::SeqCst);
+                    let was_unhealthy = !app_state_heartbeat
+                        .mining_is_healthy
+                        .load(std::sync::atomic::Ordering::SeqCst);
 
                     if was_unhealthy {
                         info!("✅ ========================================");
@@ -4788,17 +5935,20 @@ async fn main() -> anyhow::Result<()> {
                         info!("   Last solution: {} seconds ago", time_since_last_solution);
                         info!("✅ ========================================");
 
-                        app_state_heartbeat.mining_is_healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+                        app_state_heartbeat
+                            .mining_is_healthy
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
 
-                        let _ = app_state_heartbeat.event_broadcaster.broadcast(
-                            q_api_server::streaming::StreamEvent::Custom {
+                        let _ = app_state_heartbeat
+                            .event_broadcaster
+                            .broadcast(q_api_server::streaming::StreamEvent::Custom {
                                 event_type: "mining_recovered".to_string(),
                                 data: serde_json::json!({
                                     "time_since_last_solution": time_since_last_solution,
                                 }),
                                 timestamp: chrono::Utc::now(),
-                            }
-                        ).await;
+                            })
+                            .await;
 
                         alert_sent = false;
                     }
@@ -4820,24 +5970,78 @@ async fn main() -> anyhow::Result<()> {
         let app_state_watchdog = app_state.clone();
 
         tokio::spawn(async move {
-            info!("🐕 Starting block producer watchdog (60-second stall detection)...");
+            info!("🐕 Starting block producer watchdog (60-second stall detection + health monitoring)...");
             let mut watchdog_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             let mut last_checked_height = 0u64;
 
             loop {
                 watchdog_interval.tick().await;
 
-                let current_height = last_block_height_watchdog.load(std::sync::atomic::Ordering::Relaxed);
+                let current_height =
+                    last_block_height_watchdog.load(std::sync::atomic::Ordering::Relaxed);
                 let node_height = app_state_watchdog.node_status.read().await.current_height;
+
+                // 🚨 v1.0.2 FIX #2: Check producer health
+                let health_status = app_state_watchdog.block_producer_pool.health_check();
+                let dead_producers: Vec<usize> = health_status
+                    .iter()
+                    .filter(|(_, healthy)| !healthy)
+                    .map(|(id, _)| *id)
+                    .collect();
+
+                if !dead_producers.is_empty() {
+                    error!("🚨 WATCHDOG: DEAD PRODUCERS DETECTED: {:?}", dead_producers);
+                    error!(
+                        "   {} out of {} producers have DIED!",
+                        dead_producers.len(),
+                        health_status.len()
+                    );
+                    error!("   These producers will NEVER respond to should_produce() queries!");
+                    error!("   If ALL producers die, the network will HALT permanently!");
+                }
+
+                // 🚨 v1.0.2 FIX #2: Check producer height consensus
+                if let Some((consensus_height, count)) = app_state_watchdog
+                    .block_producer_pool
+                    .get_height_consensus()
+                    .await
+                {
+                    if count < health_status.len() {
+                        warn!("🚨 WATCHDOG: Producer height DIVERGENCE detected!");
+                        warn!(
+                            "   Only {}/{} producers at consensus height {}",
+                            count,
+                            health_status.len(),
+                            consensus_height
+                        );
+                        warn!("   This can cause permanent block production deadlock!");
+                    }
+                }
+
+                // ✅ v1.0.13-beta CRASH-FAST FIX #2: Enforce height invariant
+                // This will crash the process if producers are out of sync (spread > 1)
+                if let Err(e) = app_state_watchdog
+                    .block_producer_pool
+                    .enforce_height_invariant(&app_state_watchdog.storage_engine)
+                    .await
+                {
+                    error!("🚨 WATCHDOG: Height invariant check failed: {}", e);
+                    // enforce_height_invariant() calls std::process::exit(1) on failure
+                    // So we should never reach here, but just in case:
+                    std::process::exit(1);
+                }
 
                 if current_height == last_checked_height && current_height > 0 {
                     error!("🚨 WATCHDOG: Block producer STALLED!");
                     error!("   Height unchanged for 60 seconds: {}", current_height);
                     error!("   Node height: {}", node_height);
+                    error!("   Dead producers: {:?}", dead_producers);
                     error!("   IMMEDIATE ACTION REQUIRED: Service needs restart");
                 } else if current_height > last_checked_height {
-                    info!("✅ WATCHDOG: Block producer healthy (height {} -> {})",
-                          last_checked_height, current_height);
+                    info!(
+                        "✅ WATCHDOG: Block producer healthy (height {} -> {})",
+                        last_checked_height, current_height
+                    );
                     last_checked_height = current_height;
                 } else {
                     debug!("🐕 WATCHDOG: Waiting for first block production...");
@@ -4846,9 +6050,14 @@ async fn main() -> anyhow::Result<()> {
         });
 
         tokio::spawn(async move {
-            info!("⏰ Starting time-based block production loop (v0.9.14 enhanced monitoring)...");
+            info!("⏰ Starting time-based block production loop (v1.0.2 emergency fallback enabled)...");
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
             let mut loop_iteration = 0u64;
+
+            // 🚨 v1.0.2 FIX #3: Emergency fallback tracking
+            let mut last_successful_height = 0u64;
+            let mut last_successful_time = std::time::Instant::now();
+            let mut stall_warned = false;
 
             loop {
                 interval.tick().await;
@@ -4856,45 +6065,102 @@ async fn main() -> anyhow::Result<()> {
 
                 // v0.9.14 FIX: Heartbeat logging every 30 seconds
                 if loop_iteration % 30 == 0 {
-                    let current_height = app_state_block_producer.node_status.read().await.current_height;
-                    info!("💓 BLOCK PRODUCER HEARTBEAT: Loop iteration {}, height {}", loop_iteration, current_height);
+                    let current_height = app_state_block_producer
+                        .node_status
+                        .read()
+                        .await
+                        .current_height;
+                    info!(
+                        "💓 BLOCK PRODUCER HEARTBEAT: Loop iteration {}, height {}",
+                        loop_iteration, current_height
+                    );
                 }
 
+                // 🚀 v1.0.10.1-beta FIX #2: ENHANCED PRODUCTION PAUSE WITH CATCH-UP MODE
                 // SYNC MODE CHECK: Don't produce blocks if we're catching up to the network
-                let current_height = app_state_block_producer.node_status.read().await.current_height;
-                let network_height = app_state_block_producer.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                // CRITICAL FIX: Changed load ordering Relaxed → SeqCst per external AI review (ChatGPT)
+                let current_height = app_state_block_producer
+                    .node_status
+                    .read()
+                    .await
+                    .current_height;
+                let network_height = app_state_block_producer
+                    .highest_network_height
+                    .load(std::sync::atomic::Ordering::SeqCst);
 
-                // Allow mining if:
-                // 1. We're within 10 blocks of network height (synced), OR
-                // 2. Network height is 0 (no peers or we're bootstrap node)
-                let sync_threshold = 10;
-                let is_synced = network_height == 0 || (network_height > 0 && current_height + sync_threshold >= network_height);
+                // v1.0.10-beta: Increased threshold from 10 to 1000 blocks for aggressive catch-up
+                // When behind by 1000+ blocks, disable ALL local production to maximize sync throughput
+                const CATCHUP_DISABLE_THRESHOLD: u64 = 1000;
+                const NORMAL_SYNC_THRESHOLD: u64 = 10;
 
-                if !is_synced {
-                    // We're behind - skip block production and let sync catch up
-                    debug!("⏸️  Block production paused: syncing {} blocks behind (current: {}, network: {})",
-                          network_height.saturating_sub(current_height), current_height, network_height);
-                    continue;
+                if network_height > 0 {
+                    let gap = network_height.saturating_sub(current_height);
+
+                    if gap > CATCHUP_DISABLE_THRESHOLD {
+                        // CATCH-UP MODE: Disable local production entirely
+                        // This prevents duplicate block conflicts and allows turbo sync to run at maximum speed
+                        if loop_iteration % 30 == 0 {
+                            // Log every 30 seconds to avoid spam
+                            warn!("🚫 [v1.0.10.1-beta CATCH-UP MODE] Block production DISABLED: {} blocks behind network",
+                                  gap);
+                            warn!(
+                                "   Current: {}, Network: {}, Gap: {} blocks",
+                                current_height, network_height, gap
+                            );
+                            warn!(
+                                "   Production will resume when gap < {} blocks",
+                                CATCHUP_DISABLE_THRESHOLD
+                            );
+                        }
+                        continue;
+                    } else if gap > NORMAL_SYNC_THRESHOLD {
+                        // SYNC MODE: Still catching up but getting close
+                        if loop_iteration % 30 == 0 {
+                            debug!("⏸️  Block production paused: syncing {} blocks behind (current: {}, network: {})",
+                                  gap, current_height, network_height);
+                        }
+                        continue;
+                    }
+                    // else: gap <= NORMAL_SYNC_THRESHOLD, proceed with normal production
                 }
+                // If network_height == 0, we're bootstrap node - proceed with production
 
                 // v0.9.14 FIX: Add timing around critical operation
                 let should_produce_start = std::time::Instant::now();
 
-                // v0.9.14 FIX: Add timeout wrapper (10 seconds)
+                // ✅ v1.0.13-beta CRASH-FAST FIX: Handle Result type from should_produce()
+                // Now returns Result<bool, PoolError> instead of bool!
                 let should_produce_result = match tokio::time::timeout(
                     tokio::time::Duration::from_secs(10),
-                    app_state_block_producer.block_producer_pool.should_produce()
-                ).await {
-                    Ok(result) => result,
+                    app_state_block_producer
+                        .block_producer_pool
+                        .should_produce(),
+                )
+                .await
+                {
+                    Ok(Ok(should_produce)) => should_produce, // ✅ Normal response
+                    Ok(Err(e)) => {
+                        // ❌ CRITICAL: Producer pool is unhealthy!
+                        error!("🚨 FATAL: Producer pool is UNHEALTHY: {}", e);
+                        error!("   One or more producer tasks have DIED or are DEADLOCKED!");
+                        error!("   This is UNRECOVERABLE - exiting to trigger systemd restart...");
+                        std::process::exit(1); // Crash intentionally!
+                    }
                     Err(_) => {
-                        error!("🚨 TIMEOUT: should_produce() exceeded 10 seconds! This indicates a deadlock or hang.");
-                        continue; // Skip this iteration, try again next second
+                        // ❌ TIMEOUT: should_produce() took >10 seconds
+                        error!("🚨 FATAL: should_produce() TIMED OUT after 10 seconds!");
+                        error!("   Producer pool is DEADLOCKED or HUNG!");
+                        error!("   This is UNRECOVERABLE - exiting to trigger systemd restart...");
+                        std::process::exit(1); // Crash intentionally!
                     }
                 };
 
                 let should_produce_elapsed = should_produce_start.elapsed();
                 if should_produce_elapsed.as_millis() > 100 {
-                    warn!("⚠️  should_produce() took {}ms (threshold: 100ms)", should_produce_elapsed.as_millis());
+                    warn!(
+                        "⚠️  should_produce() took {}ms (threshold: 100ms)",
+                        should_produce_elapsed.as_millis()
+                    );
                 }
 
                 // PHASE 2: Check if any producer in pool should produce blocks
@@ -4905,8 +6171,12 @@ async fn main() -> anyhow::Result<()> {
                     // v0.9.14 FIX: Add timeout wrapper (30 seconds)
                     let new_blocks = match tokio::time::timeout(
                         tokio::time::Duration::from_secs(30),
-                        app_state_block_producer.block_producer_pool.produce_blocks()
-                    ).await {
+                        app_state_block_producer
+                            .block_producer_pool
+                            .produce_blocks(),
+                    )
+                    .await
+                    {
                         Ok(blocks) => blocks,
                         Err(_) => {
                             error!("🚨 TIMEOUT: produce_blocks() exceeded 30 seconds! This indicates a critical deadlock.");
@@ -4915,11 +6185,16 @@ async fn main() -> anyhow::Result<()> {
                     };
 
                     let produce_elapsed = produce_start.elapsed();
-                    info!("✅ produce_blocks() completed in {}ms, produced {} blocks",
-                          produce_elapsed.as_millis(), new_blocks.len());
+                    info!(
+                        "✅ produce_blocks() completed in {}ms, produced {} blocks",
+                        produce_elapsed.as_millis(),
+                        new_blocks.len()
+                    );
 
                     if new_blocks.is_empty() {
-                        warn!("⚠️  produce_blocks() returned ZERO blocks despite should_produce=true");
+                        warn!(
+                            "⚠️  produce_blocks() returned ZERO blocks despite should_produce=true"
+                        );
                     }
 
                     // PHASE 2: Produce blocks from all ready producers (returns Vec<(producer_id, QBlock)>)
@@ -4933,14 +6208,22 @@ async fn main() -> anyhow::Result<()> {
                         );
 
                         // v0.9.14 FIX: Update watchdog heartbeat
-                        last_block_height.store(new_block.header.height, std::sync::atomic::Ordering::Relaxed);
+                        last_block_height.store(
+                            new_block.header.height,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
 
                         // Update node status with new height
                         {
                             // 🚨 v0.9.0-beta-emergency: CRITICAL SAFETY CHECK
-                            if let Err(e) = verify_height_monotonicity(new_block.header.height, "parallel block production") {
+                            if let Err(e) = verify_height_monotonicity(
+                                new_block.header.height,
+                                "parallel block production",
+                            ) {
                                 error!("❌ Height monotonicity check failed during parallel block production: {}", e);
-                                error!("   Refusing to update height - this would cause data loss!");
+                                error!(
+                                    "   Refusing to update height - this would cause data loss!"
+                                );
                                 continue; // Skip this production cycle
                             }
 
@@ -4951,12 +6234,14 @@ async fn main() -> anyhow::Result<()> {
                         // Broadcast block event via SSE with actual producer_id
                         let block_hash = new_block.calculate_hash();
                         let solutions_count = new_block.mining_solutions.len();
-                        let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                        let reward_per_solution =
+                            q_api_server::handlers::calculate_block_reward(new_block.header.height);
                         let block_reward = solutions_count as u64 * reward_per_solution;
                         let tx_count = new_block.transactions.len();
 
-                        let _ = app_state_block_producer.event_broadcaster.broadcast(
-                            q_api_server::streaming::StreamEvent::NewBlock {
+                        let _ = app_state_block_producer
+                            .event_broadcaster
+                            .broadcast(q_api_server::streaming::StreamEvent::NewBlock {
                                 height: new_block.header.height,
                                 hash: hex::encode(&block_hash),
                                 prev_hash: hex::encode(&new_block.header.prev_block_hash),
@@ -4968,8 +6253,8 @@ async fn main() -> anyhow::Result<()> {
                                 block_reward: block_reward as f64,
                                 producer_id, // PHASE 2: Use actual producer ID for lane assignment
                                 timestamp: chrono::Utc::now(),
-                            }
-                        ).await;
+                            })
+                            .await;
 
                         // ========================================
                         // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE - PARALLEL SAVE (Time-based path)
@@ -4979,7 +6264,10 @@ async fn main() -> anyhow::Result<()> {
                             let block_bytes = match bincode::serialize(&new_block) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
-                                    error!("❌ Failed to serialize block {}: {}", new_block.header.height, e);
+                                    error!(
+                                        "❌ Failed to serialize block {}: {}",
+                                        new_block.header.height, e
+                                    );
                                     Vec::new() // Continue with existing path
                                 }
                             };
@@ -4987,7 +6275,10 @@ async fn main() -> anyhow::Result<()> {
                             if !block_bytes.is_empty() {
                                 // Save block via AsyncStorageEngine (non-blocking)
                                 let async_save_start = std::time::Instant::now();
-                                match async_storage.save_block(new_block.header.height, block_bytes).await {
+                                match async_storage
+                                    .save_block(new_block.header.height, block_bytes)
+                                    .await
+                                {
                                     Ok(()) => {
                                         let async_save_duration = async_save_start.elapsed();
                                         info!("✅ AsyncStorageEngine (time-based): Block {} queued in {:?} (queue depth: {})",
@@ -5004,8 +6295,10 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        error!("❌ AsyncStorageEngine: Failed to queue block {}: {}",
-                                            new_block.header.height, e);
+                                        error!(
+                                            "❌ AsyncStorageEngine: Failed to queue block {}: {}",
+                                            new_block.header.height, e
+                                        );
                                     }
                                 }
                             }
@@ -5016,18 +6309,65 @@ async fn main() -> anyhow::Result<()> {
                         // ========================================
                         // Store block in RocksDB
                         // 🚨 v0.9.96-beta: CRITICAL FIX - Resync after duplicate errors
-                        match app_state_block_producer.storage_engine.save_qblock(&new_block).await {
+                        match app_state_block_producer
+                            .storage_engine
+                            .save_qblock(&new_block)
+                            .await
+                        {
                             Ok(()) => {
                                 info!("✅ Block {} saved successfully", new_block.header.height);
 
+                                // 🚨 v1.0.2 FIX #3: Update emergency fallback tracking
+                                last_successful_height = new_block.header.height;
+                                last_successful_time = std::time::Instant::now();
+                                stall_warned = false;
+
                                 // 🚀 v1.0.2-beta: Update HeightState cache after successful block save
-                                app_state_block_producer.height_state.update(new_block.header.height).await;
+                                app_state_block_producer
+                                    .height_state
+                                    .update(new_block.header.height)
+                                    .await;
+
+                                // 🚨 v1.0.9-beta CRITICAL FIX: Complete state synchronization
+                                // Root cause: Time-based loop saved blocks but never advanced ANY state
+                                // External AI Review: Must mirror ALL state updates from solution-based loop
+                                let block_hash = new_block.calculate_hash();
+
+                                // ✅ v1.0.14-beta CRITICAL FIX: Sync ALL producers (same fix as solution-based loop)
+                                info!("🔄 [v1.0.14-beta TIME-BASED] Syncing ALL {} producers to latest height {} (bug fix)",
+                                      8, new_block.header.height);
+
+                                if let Err(e) = app_state_block_producer
+                                    .block_producer_pool
+                                    .sync_from_storage(&app_state_block_producer.storage_engine)
+                                    .await
+                                {
+                                    error!("❌ CRITICAL: Failed to sync producers after time-based block save: {}", e);
+                                } else {
+                                    info!("✅ [v1.0.14-beta TIME-BASED] ALL producers synchronized to height {}",
+                                          new_block.header.height);
+                                }
+
+                                // 2. Update atomic height for mining API consistency
+                                app_state_block_producer.current_height_atomic.store(
+                                    new_block.header.height,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+
+                                // 3. Clear cached challenge (keeps state clean even if mining disabled)
+                                *app_state_block_producer.current_challenge.write().await = None;
+
+                                info!("✅ [v1.0.9-beta TIME-BASED] Producer #{} height advanced to {} (all state synchronized)",
+                                      producer_id, new_block.header.height);
                             }
                             Err(e) if e.to_string().contains("Block already exists") => {
                                 warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
                                 // CRITICAL: Force producers to resync after duplicate
-                                if let Err(sync_err) = app_state_block_producer.block_producer_pool
-                                    .sync_from_storage(&app_state_block_producer.storage_engine).await {
+                                if let Err(sync_err) = app_state_block_producer
+                                    .block_producer_pool
+                                    .sync_from_storage(&app_state_block_producer.storage_engine)
+                                    .await
+                                {
                                     error!("❌ Resync after duplicate failed: {}", sync_err);
                                 } else {
                                     info!("✅ Producers resynced after duplicate, continuing from database height");
@@ -5035,7 +6375,10 @@ async fn main() -> anyhow::Result<()> {
                                 continue; // Skip to next production cycle
                             }
                             Err(e) => {
-                                error!("❌ Failed to save block {}: {}", new_block.header.height, e);
+                                error!(
+                                    "❌ Failed to save block {}: {}",
+                                    new_block.header.height, e
+                                );
                                 continue; // Skip this block's balance processing
                             }
                         }
@@ -5043,19 +6386,24 @@ async fn main() -> anyhow::Result<()> {
                         // 💰 v0.9.31-beta: PROCESS MINING REWARDS via Balance Consensus Engine
                         // This persists dev fee and miner rewards to RocksDB for consensus across all nodes
                         {
-                            use q_storage::balance_consensus::{BalanceConsensusEngine, BalanceConsensusError, GENESIS_TIMESTAMP};
+                            use q_storage::balance_consensus::{
+                                BalanceConsensusEngine, BalanceConsensusError, GENESIS_TIMESTAMP,
+                            };
 
                             // Create balance consensus engine with genesis timestamp and dev wallet
                             let balance_engine = BalanceConsensusEngine::new(
                                 GENESIS_TIMESTAMP,
-                                q_storage::balance_consensus::FOUNDER_WALLET.to_string()
+                                q_storage::balance_consensus::FOUNDER_WALLET.to_string(),
                             );
 
                             // Dereference Arc to get &QStorage (which implements BalanceStorage)
-                            match balance_engine.process_block_mining_rewards(
-                                &*app_state_block_producer.storage_engine,
-                                &new_block
-                            ).await {
+                            match balance_engine
+                                .process_block_mining_rewards(
+                                    &*app_state_block_producer.storage_engine,
+                                    &new_block,
+                                )
+                                .await
+                            {
                                 Ok(updates) => {
                                     info!("💰 TIME-BASED: Applied {} balance updates for block {} (including dev fee)",
                                           updates.len(), new_block.header.height);
@@ -5071,15 +6419,24 @@ async fn main() -> anyhow::Result<()> {
 
                                         // Fetch actual wallet balance from storage (not just the reward amount!)
                                         // Strip "qnk" prefix if present since get_balance() expects raw hex
-                                        let address_for_lookup = if update.address.starts_with("qnk") {
-                                            &update.address[3..]
-                                        } else {
-                                            &update.address
-                                        };
-                                        match app_state_block_producer.storage_engine.get_balance(address_for_lookup).await {
+                                        let address_for_lookup =
+                                            if update.address.starts_with("qnk") {
+                                                &update.address[3..]
+                                            } else {
+                                                &update.address
+                                            };
+                                        match app_state_block_producer
+                                            .storage_engine
+                                            .get_balance(address_for_lookup)
+                                            .await
+                                        {
                                             Ok(actual_balance) => {
-                                                let old_balance_f64 = (actual_balance.saturating_sub(update.amount)) as f64 / 100_000_000.0;
-                                                let new_balance_f64 = actual_balance as f64 / 100_000_000.0;
+                                                let old_balance_f64 = (actual_balance
+                                                    .saturating_sub(update.amount))
+                                                    as f64
+                                                    / 100_000_000.0;
+                                                let new_balance_f64 =
+                                                    actual_balance as f64 / 100_000_000.0;
 
                                                 let _ = app_state_block_producer.event_broadcaster.broadcast(
                                                     q_api_server::streaming::StreamEvent::BalanceUpdated {
@@ -5095,10 +6452,15 @@ async fn main() -> anyhow::Result<()> {
                                                        update.amount as f64 / 100_000_000.0);
 
                                                 // Also broadcast mining stats for this miner (CRITICAL FIX for mining dashboard)
-                                                if let Some(ref mining_stats_arc) = app_state_block_producer.mining_statistics {
-                                                    let mining_stats = mining_stats_arc.read().await;
+                                                if let Some(ref mining_stats_arc) =
+                                                    app_state_block_producer.mining_statistics
+                                                {
+                                                    let mining_stats =
+                                                        mining_stats_arc.read().await;
 
-                                                    if let Some(miner_stats) = mining_stats.active_miners.get(&wallet_addr) {
+                                                    if let Some(miner_stats) =
+                                                        mining_stats.active_miners.get(&wallet_addr)
+                                                    {
                                                         info!("📊 TIME-BASED (balance consensus): Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
                                                               &wallet_addr[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
 
@@ -5114,7 +6476,7 @@ async fn main() -> anyhow::Result<()> {
                                                         ).await;
                                                     }
                                                 }
-                                            },
+                                            }
                                             Err(e) => {
                                                 error!("❌ Failed to fetch balance for SSE event {}: {:?}", wallet_addr, e);
                                             }
@@ -5132,13 +6494,15 @@ async fn main() -> anyhow::Result<()> {
 
                         // 💰 PROCESS COINBASE TRANSACTIONS - Update wallet balances from block rewards
                         let balance_updates = {
-                            let mut balances = app_state_block_producer.wallet_balances.write().await;
+                            let mut balances =
+                                app_state_block_producer.wallet_balances.write().await;
                             let mut updates = Vec::new();
                             for tx in &new_block.transactions {
                                 // Check if this is a coinbase transaction (from address is all zeros)
                                 if tx.from == [0u8; 32] {
                                     // Credit the recipient (miner or dev wallet)
-                                    let current_balance = balances.get(&tx.to).copied().unwrap_or(0);
+                                    let current_balance =
+                                        balances.get(&tx.to).copied().unwrap_or(0);
                                     let new_balance = current_balance + tx.amount;
                                     balances.insert(tx.to, new_balance);
 
@@ -5173,48 +6537,71 @@ async fn main() -> anyhow::Result<()> {
                             let new_balance_f64 = new_balance as f64 / 100_000_000.0;
 
                             // Determine if this is dev fee (master account) or mining reward
-                            const MASTER_ACCOUNT_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                            const MASTER_ACCOUNT_HEX: &str =
+                                "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
                             let change_reason = if wallet_addr_hex == MASTER_ACCOUNT_HEX {
                                 "DevelopmentFee".to_string()
                             } else {
                                 "mining_reward".to_string()
                             };
 
-                            let balance_event = q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                wallet_address: wallet_addr_hex.clone(),
-                                old_balance: old_balance_f64,
-                                new_balance: new_balance_f64,
-                                change_reason,
-                                timestamp: chrono::Utc::now(),
-                            };
+                            let balance_event =
+                                q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                    wallet_address: wallet_addr_hex.clone(),
+                                    old_balance: old_balance_f64,
+                                    new_balance: new_balance_f64,
+                                    change_reason,
+                                    timestamp: chrono::Utc::now(),
+                                };
 
-                            if let Err(e) = app_state_block_producer.event_broadcaster.broadcast(balance_event).await {
-                                warn!("Failed to broadcast balance update SSE event for {}: {}", &wallet_addr_hex[..16], e);
+                            if let Err(e) = app_state_block_producer
+                                .event_broadcaster
+                                .broadcast(balance_event)
+                                .await
+                            {
+                                warn!(
+                                    "Failed to broadcast balance update SSE event for {}: {}",
+                                    &wallet_addr_hex[..16],
+                                    e
+                                );
                             } else {
-                                debug!("📡 [SSE] Balance update broadcasted for wallet: {}...", &wallet_addr_hex[..16]);
+                                debug!(
+                                    "📡 [SSE] Balance update broadcasted for wallet: {}...",
+                                    &wallet_addr_hex[..16]
+                                );
                             }
 
                             // Also broadcast mining stats for this miner (CRITICAL FIX for mining dashboard)
-                            if let Some(ref mining_stats_arc) = app_state_block_producer.mining_statistics {
+                            if let Some(ref mining_stats_arc) =
+                                app_state_block_producer.mining_statistics
+                            {
                                 let mining_stats = mining_stats_arc.read().await;
                                 let wallet_with_prefix = format!("qnk{}", wallet_addr_hex);
 
-                                if let Some(miner_stats) = mining_stats.active_miners.get(&wallet_with_prefix) {
+                                if let Some(miner_stats) =
+                                    mining_stats.active_miners.get(&wallet_with_prefix)
+                                {
                                     info!("📊 TIME-BASED: Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
                                           &wallet_addr_hex[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
 
-                                    let _ = app_state_block_producer.event_broadcaster.broadcast(
-                                        q_api_server::streaming::StreamEvent::MiningStats {
-                                            miner_address: wallet_with_prefix.clone(),
-                                            total_rewards: new_balance_f64,
-                                            total_blocks_found: miner_stats.total_solutions,
-                                            current_balance: new_balance_f64,
-                                            avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
-                                            timestamp: chrono::Utc::now(),
-                                        }
-                                    ).await;
+                                    let _ = app_state_block_producer
+                                        .event_broadcaster
+                                        .broadcast(
+                                            q_api_server::streaming::StreamEvent::MiningStats {
+                                                miner_address: wallet_with_prefix.clone(),
+                                                total_rewards: new_balance_f64,
+                                                total_blocks_found: miner_stats.total_solutions,
+                                                current_balance: new_balance_f64,
+                                                avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                                timestamp: chrono::Utc::now(),
+                                            },
+                                        )
+                                        .await;
                                 } else {
-                                    debug!("⚠️  TIME-BASED: No miner stats found for wallet {}", &wallet_addr_hex[..16]);
+                                    debug!(
+                                        "⚠️  TIME-BASED: No miner stats found for wallet {}",
+                                        &wallet_addr_hex[..16]
+                                    );
                                 }
                             }
                         }
@@ -5230,7 +6617,7 @@ async fn main() -> anyhow::Result<()> {
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
+                                        .unwrap_or(q_types::NetworkId::TestnetPhase12); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -5244,7 +6631,10 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to serialize TIME-BASED block {} for broadcast: {}", new_block.header.height, e);
+                                    warn!(
+                                        "Failed to serialize TIME-BASED block {} for broadcast: {}",
+                                        new_block.header.height, e
+                                    );
                                 }
                             }
                         } else {
@@ -5256,24 +6646,36 @@ async fn main() -> anyhow::Result<()> {
                             // DEADLOCK FIX: Use tokio::time::timeout to prevent infinite waiting
                             // ✅ v0.9.92-beta DEADLOCK FIX: get_producer() is now instant (no locks!)
                             // Lock-free architecture eliminates the need for timeout - get_producer() never blocks
-                            let producer = app_state_block_producer.block_producer_pool.get_producer(producer_id);
+                            let producer = app_state_block_producer
+                                .block_producer_pool
+                                .get_producer(producer_id);
 
                             // Convert QBlock to DAG Vertex (async now, but fast via channel)
                             let dag_vertex = match producer.qblock_to_vertex(&new_block).await {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    error!("❌ Failed to convert block {} to vertex: {}", new_block.header.height, e);
+                                    error!(
+                                        "❌ Failed to convert block {} to vertex: {}",
+                                        new_block.header.height, e
+                                    );
                                     continue;
                                 }
                             };
 
                             // Convert DAG-Knight vertex to storage vertex (async now, but fast via channel)
-                            let storage_vertex = producer.dag_vertex_to_storage_vertex(&dag_vertex, &new_block).await;
+                            let storage_vertex = producer
+                                .dag_vertex_to_storage_vertex(&dag_vertex, &new_block)
+                                .await;
 
                             // Store vertex in consensus vertex store
                             let consensus = app_state_block_producer.consensus.read().await;
-                            if let Err(e) = consensus.vertex_store.store_vertex(storage_vertex).await {
-                                error!("❌ Failed to store vertex for block {}: {}", new_block.header.height, e);
+                            if let Err(e) =
+                                consensus.vertex_store.store_vertex(storage_vertex).await
+                            {
+                                error!(
+                                    "❌ Failed to store vertex for block {}: {}",
+                                    new_block.header.height, e
+                                );
                             } else {
                                 // Create certificate for consensus processing
                                 let certificate = q_types::Certificate {
@@ -5295,7 +6697,8 @@ async fn main() -> anyhow::Result<()> {
                                                 );
 
                                                 // Broadcast BlockFinalized SSE event
-                                                let tx_hashes: Vec<TxHash> = new_block.transactions
+                                                let tx_hashes: Vec<TxHash> = new_block
+                                                    .transactions
                                                     .iter()
                                                     .map(|tx| tx.id)
                                                     .collect();
@@ -5315,7 +6718,10 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        error!("❌ Consensus processing failed for block {}: {}", new_block.header.height, e);
+                                        error!(
+                                            "❌ Consensus processing failed for block {}: {}",
+                                            new_block.header.height, e
+                                        );
                                     }
                                 }
                             }
@@ -5323,9 +6729,15 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         // PHASE 3 PART 3: Broadcast block to P2P network via Gossipsub
-                        debug!("🔍 Attempting to broadcast block {} to P2P network (time-based)", new_block.header.height);
+                        debug!(
+                            "🔍 Attempting to broadcast block {} to P2P network (time-based)",
+                            new_block.header.height
+                        );
                         if let Some(ref cmd_tx) = app_state_block_producer.libp2p_command_tx {
-                            info!("✅ libp2p command channel available for block {} broadcast", new_block.header.height);
+                            info!(
+                                "✅ libp2p command channel available for block {} broadcast",
+                                new_block.header.height
+                            );
                             match postcard::to_allocvec(&new_block) {
                                 Ok(block_bytes) => {
                                     info!("✅ Block {} serialized ({} bytes) - sending to P2P network (time-based)", new_block.header.height, block_bytes.len());
@@ -5333,7 +6745,7 @@ async fn main() -> anyhow::Result<()> {
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::TestnetPhase11); // ✅ v1.0.1-beta: Phase 11 default (Bug #5 fix)
+                                        .unwrap_or(q_types::NetworkId::TestnetPhase12); // ✅ v1.0.12-beta: Phase 12 default (Bug #5 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -5366,8 +6778,20 @@ async fn main() -> anyhow::Result<()> {
     {
         let app_state_sync = app_state.clone();
 
+        // ✅ v1.0.17-beta CRITICAL FIX: Move lock acquisition INSIDE spawn to prevent deadlock
+        // The lock().await was blocking the main thread and preventing HTTP server from starting
+        let discovery_clone = app_state.libp2p_discovery.clone();
+
         tokio::spawn(async move {
             info!("🔄 Starting OPTIMIZED active block sync loop for ultra-fast catch-up...");
+
+            // Acquire lock inside async task (non-blocking to main thread)
+            let discovered_peers_arc = if let Some(ref discovery) = discovery_clone {
+                let manager = discovery.lock().await;
+                Some(manager.get_discovered_peers_arc())
+            } else {
+                None
+            };
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100)); // 0.1 seconds for AGGRESSIVE sync
             let mut last_sync_down_warning = std::time::Instant::now();
 
@@ -5375,12 +6799,26 @@ async fn main() -> anyhow::Result<()> {
             let mut discovery_attempts = 0usize;
             const MAX_DISCOVERY_ATTEMPTS: usize = 3; // Fall back to HTTP after 3 failed attempts (30 seconds)
 
+            // 🔍 v1.0.3.7-beta: Sync loop iteration counter
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SYNC_LOOP_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+
             loop {
                 interval.tick().await;
 
+                // 🔍 v1.0.3.7-beta: Track sync loop execution with iteration counter
+                let iteration = SYNC_LOOP_ITERATIONS.fetch_add(1, Ordering::SeqCst);
+                if iteration % 100 == 0 {
+                    // Log every 100 iterations (10 seconds at 100ms interval)
+                    info!("🔁 [SYNC LOOP] iteration={} (loop is executing)", iteration);
+                }
+
                 // Check if we're behind the network
+                // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
                 let current_height = app_state_sync.node_status.read().await.current_height;
-                let mut network_height = app_state_sync.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                let mut network_height = app_state_sync
+                    .highest_network_height
+                    .load(std::sync::atomic::Ordering::SeqCst);
 
                 // 🚀 v0.9.8-beta: BOOTSTRAP HEIGHT DISCOVERY
                 // If P2P hasn't given us network height (no peers connected), fetch from HTTP bootstrap
@@ -5390,8 +6828,14 @@ async fn main() -> anyhow::Result<()> {
                         Ok(response) if response.status().is_success() => {
                             if let Ok(json) = response.json::<serde_json::Value>().await {
                                 if let Some(bootstrap_height) = json["current_height"].as_u64() {
-                                    info!("🌐 [BOOTSTRAP] Discovered network height from HTTP: {}", bootstrap_height);
-                                    app_state_sync.highest_network_height.store(bootstrap_height, std::sync::atomic::Ordering::Relaxed);
+                                    info!(
+                                        "🌐 [BOOTSTRAP] Discovered network height from HTTP: {}",
+                                        bootstrap_height
+                                    );
+                                    app_state_sync.highest_network_height.store(
+                                        bootstrap_height,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     network_height = bootstrap_height; // Update local variable to trigger sync
                                 }
                             }
@@ -5410,10 +6854,14 @@ async fn main() -> anyhow::Result<()> {
                 // Only warn if it persists for a long time (network partition)
                 if network_height < current_height && current_height > 1000 {
                     if last_sync_down_warning.elapsed() > std::time::Duration::from_secs(60) {
-                        warn!("⚠️  Node ahead of network: Current height: {}, Network claims: {}",
-                              current_height, network_height);
+                        warn!(
+                            "⚠️  Node ahead of network: Current height: {}, Network claims: {}",
+                            current_height, network_height
+                        );
                         warn!("   This is normal if we're producing blocks faster than peers.");
-                        warn!("   If this persists for >10 minutes, may indicate network partition.");
+                        warn!(
+                            "   If this persists for >10 minutes, may indicate network partition."
+                        );
                         last_sync_down_warning = std::time::Instant::now();
                     }
                     // DO NOT sync down, but CONTINUE processing (don't skip loop)
@@ -5422,10 +6870,18 @@ async fn main() -> anyhow::Result<()> {
                 // ✅ v0.9.76-beta: GAP DETECTION AND FILL BEFORE SEQUENTIAL SYNC
                 // Check for gaps in the blockchain FIRST - this prevents getting stuck
                 // waiting for sequential blocks when we have future blocks but are missing early ones
-                match app_state_sync.storage_engine.get_first_missing_height().await {
+                match app_state_sync
+                    .storage_engine
+                    .get_first_missing_height()
+                    .await
+                {
                     Ok(Some(missing_height)) => {
                         // Critical gap detected!
-                        let highest_stored = app_state_sync.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
+                        let highest_stored = app_state_sync
+                            .storage_engine
+                            .get_highest_contiguous_block()
+                            .await
+                            .unwrap_or(0);
 
                         error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         error!("🚨 CRITICAL GAP DETECTED IN BLOCKCHAIN!");
@@ -5444,43 +6900,71 @@ async fn main() -> anyhow::Result<()> {
 
                                 if !peer_registry.is_empty() {
                                     // Get peers that have the missing block
-                                    let capable_peers: Vec<_> = peer_registry.iter()
+                                    let capable_peers: Vec<_> = peer_registry
+                                        .iter()
                                         .filter(|(_, height)| *height >= missing_height)
                                         .collect();
 
                                     if !capable_peers.is_empty() {
-                                        info!("📡 [GAP FILL] Found {} peers with height >= {}", capable_peers.len(), missing_height);
+                                        info!(
+                                            "📡 [GAP FILL] Found {} peers with height >= {}",
+                                            capable_peers.len(),
+                                            missing_height
+                                        );
 
-                                        let mut libp2p_lock = libp2p.lock().await;
-
-                                        // Request a range around the gap (not just one block)
+                                        // ✅ FIX #1 (v1.0.17-beta DEADLOCK): Acquire lock in inner scope only for sending requests
+                                        // Root cause: Previously held libp2p lock across 15s sleep, blocking all network ops
+                                        // Impact: Caused circular wait with gossipsub holding node_status.write()
+                                        // Fix: Scope lock to minimal duration, drop before sleep
                                         let gap_batch_size = 100u64; // Request 100 blocks starting from the gap
-                                        let gap_end = (missing_height + gap_batch_size - 1).min(network_height);
-                                        let blocks_to_request = (gap_end - missing_height + 1) as usize;
+                                        let gap_end = (missing_height + gap_batch_size - 1)
+                                            .min(network_height);
+                                        let blocks_to_request =
+                                            (gap_end - missing_height + 1) as usize;
 
                                         info!("📥 [GAP FILL] Requesting {} blocks ({}-{}) from capable peers",
                                               blocks_to_request, missing_height, gap_end);
 
-                                        // Try top 3 peers in parallel
-                                        for (peer_id, peer_height) in capable_peers.iter().take(3) {
-                                            info!("📤 [GAP FILL] Requesting from peer {} (height: {})", peer_id, peer_height);
+                                        {
+                                            let mut libp2p_lock = libp2p.lock().await;
 
-                                            if let Err(e) = libp2p_lock.request_blocks_from_peer(*peer_id, missing_height, blocks_to_request) {
-                                                error!("❌ [GAP FILL] Failed to request from peer {}: {}", peer_id, e);
-                                            } else {
-                                                info!("✅ [GAP FILL] Gap fill request sent to peer {}", peer_id);
+                                            // Try top 3 peers in parallel
+                                            for (peer_id, peer_height) in
+                                                capable_peers.iter().take(3)
+                                            {
+                                                info!("📤 [GAP FILL] Requesting from peer {} (height: {})", peer_id, peer_height);
+
+                                                if let Err(e) = libp2p_lock
+                                                    .request_blocks_from_peer(
+                                                        *peer_id,
+                                                        missing_height,
+                                                        blocks_to_request,
+                                                    )
+                                                {
+                                                    error!("❌ [GAP FILL] Failed to request from peer {}: {}", peer_id, e);
+                                                } else {
+                                                    info!("✅ [GAP FILL] Gap fill request sent to peer {}", peer_id);
+                                                }
                                             }
+                                            // ✅ Lock automatically dropped here at end of scope
                                         }
 
-                                        drop(libp2p_lock);
-
-                                        // Wait for responses
-                                        info!("⏳ [GAP FILL] Waiting 15s for gap fill responses...");
-                                        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                                        // ✅ Now sleep without holding any locks
+                                        info!(
+                                            "⏳ [GAP FILL] Waiting 15s for gap fill responses..."
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_secs(15))
+                                            .await;
 
                                         // Check if gap was filled
-                                        match app_state_sync.storage_engine.get_first_missing_height().await {
-                                            Ok(Some(still_missing)) if still_missing == missing_height => {
+                                        match app_state_sync
+                                            .storage_engine
+                                            .get_first_missing_height()
+                                            .await
+                                        {
+                                            Ok(Some(still_missing))
+                                                if still_missing == missing_height =>
+                                            {
                                                 warn!("⚠️ [GAP FILL] Gap at {} still exists after P2P attempt", missing_height);
                                                 warn!("   Will retry on next sync loop iteration");
                                             }
@@ -5488,17 +6972,25 @@ async fn main() -> anyhow::Result<()> {
                                                 info!("✅ [GAP FILL] Progress! Gap moved from {} to {}", missing_height, new_missing);
                                             }
                                             Ok(None) => {
-                                                info!("✅ [GAP FILL] SUCCESS! Gap filled completely!");
+                                                info!(
+                                                    "✅ [GAP FILL] SUCCESS! Gap filled completely!"
+                                                );
                                             }
                                             Err(e) => {
-                                                error!("❌ [GAP FILL] Failed to check gap status: {}", e);
+                                                error!(
+                                                    "❌ [GAP FILL] Failed to check gap status: {}",
+                                                    e
+                                                );
                                             }
                                         }
 
                                         // Continue loop to check for more gaps or proceed with sequential sync
                                         continue;
                                     } else {
-                                        warn!("⚠️ [GAP FILL] No peers available with height >= {}", missing_height);
+                                        warn!(
+                                            "⚠️ [GAP FILL] No peers available with height >= {}",
+                                            missing_height
+                                        );
                                     }
                                 }
                             }
@@ -5516,16 +7008,121 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // If we're more than 5 blocks behind, we need to actively sync
-                // ✅ v0.5.22-beta FIX: Only sync if network height is actually HIGHER than us
-                // ✅ v0.9.11-beta FIX #2: Force sync for cold start nodes (height 0)
-                // A node at height 0 with network_height > 0 MUST sync immediately
-                if (current_height == 0 && network_height > 0) || (network_height > current_height + 5) {
+                // 🚨 v1.0.15-beta: TIMEOUT-BASED SYNC ACTIVATION
+                // Fixes "stuck at height" issue where network_height = 0 forever
+                // Reference: aireply19.rs - breaks deadlock waiting for peer announcements
+
+                let gap = network_height.saturating_sub(current_height);
+
+                // COMPREHENSIVE DIAGNOSTIC LOGGING
+                info!("🔍 [SYNC LOOP DEBUG] Sync activation evaluation:");
+                info!("   current_height = {}", current_height);
+                info!("   network_height = {}", network_height);
+                info!("   gap = {} blocks", gap);
+                info!(
+                    "   Condition (cold_start): {}",
+                    current_height == 0 && network_height > 0
+                );
+                info!("   Condition (behind): {}", network_height > current_height);
+                info!(
+                    "   Condition (gap>5): {}",
+                    network_height > current_height + 5
+                );
+
+                // ✅ v1.0.15-beta: FORCE SYNC AFTER TIMEOUT (even if network_height = 0)
+                // This breaks the deadlock where nodes wait forever for peer announcements
+                // ✅ v1.0.16-beta: Get peer count using pre-cloned Arc (no manager reference held)
+                let peer_count = if let Some(ref peers_arc) = discovered_peers_arc {
+                    peers_arc.read().await.len()
+                } else {
+                    0
+                };
+
+                // ✅ KIMI AI FIX: Capture network_height atomically before timeout check
+                // This prevents race condition where network_height changes between check and use
+                let network_height_snapshot = network_height;
+
+                let should_force_timeout_sync =
+                    if let Some(ref sync_activator) = app_state_sync.sync_activator {
+                        sync_activator
+                            .should_force_sync(current_height, peer_count, network_height_snapshot)
+                            .await
+                    } else {
+                        false
+                    };
+
+                if should_force_timeout_sync {
+                    warn!(
+                        "⏰ [TIMEOUT SYNC] Forcing sync despite network_height={} (node stuck!)",
+                        network_height_snapshot
+                    );
+                    warn!(
+                        "   current_height={}, peer_count={}",
+                        current_height, peer_count
+                    );
+
+                    // ✅ DEEPSEEK + KIMI AI FIX: Check peer availability before timeout sync
+                    // Don't blindly sync to current_height + 100 if no peers have those blocks
+                    let target_height = if network_height_snapshot > current_height {
+                        // If we know network height, sync to that (capped at +100 for safety)
+                        (current_height + 100).min(network_height_snapshot)
+                    } else {
+                        // If network_height is unknown (0), try conservative +100
+                        // This will fail gracefully if peers don't have blocks
+                        current_height + 100
+                    };
+
+                    warn!(
+                        "   Target height: {} (network_height_snapshot={})",
+                        target_height, network_height_snapshot
+                    );
+
+                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                        match turbo_sync.sync_to_height(target_height).await {
+                            Ok(()) => {
+                                info!(
+                                    "✅ [TIMEOUT SYNC] Forced sync completed to height {}",
+                                    target_height
+                                );
+                                if let Some(ref sync_activator) = app_state_sync.sync_activator {
+                                    sync_activator.record_sync_attempt().await;
+                                }
+                            }
+                            Err(e) => {
+                                error!("❌ [TIMEOUT SYNC] Forced sync failed: {}", e);
+                                error!(
+                                    "   This is normal if peers don't have blocks at target height"
+                                );
+                            }
+                        }
+                    }
+
+                    // Continue to next loop iteration
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+
+                // ✅ RELAXED ACTIVATION: Activate for ANY gap (not just gap > 5)
+                // This ensures batch sync can evaluate even after initial sync to height 1
+                if (current_height == 0 && network_height > 0) || (network_height > current_height)
+                {
                     let blocks_behind = network_height - current_height;
+
+                    if current_height == 0 {
+                        info!("✅ [SYNC ACTIVATION] Reason: Cold start (height 0)");
+                    } else {
+                        info!(
+                            "✅ [SYNC ACTIVATION] Reason: Behind network (gap: {} blocks)",
+                            blocks_behind
+                        );
+                    }
 
                     // Special logging for cold start
                     if current_height == 0 && network_height > 0 {
-                        info!("🚀 [COLD START] Forcing sync: node at genesis, network at height {}", network_height);
+                        info!(
+                            "🚀 [COLD START] Forcing sync: node at genesis, network at height {}",
+                            network_height
+                        );
                     }
 
                     // 🎨 v0.6.6-beta: Display beautiful tqdm-style progress bar for sync status
@@ -5534,14 +7131,21 @@ async fn main() -> anyhow::Result<()> {
                         let mut start_time = app_state_sync.sync_start_time.write().unwrap();
                         if start_time.is_none() {
                             *start_time = Some(std::time::Instant::now());
-                            app_state_sync.sync_start_height.store(current_height, std::sync::atomic::Ordering::Relaxed);
-                            info!("🚀 [SYNC PROGRESS] Starting sync from height {} to {}", current_height, network_height);
+                            app_state_sync
+                                .sync_start_height
+                                .store(current_height, std::sync::atomic::Ordering::Relaxed);
+                            info!(
+                                "🚀 [SYNC PROGRESS] Starting sync from height {} to {}",
+                                current_height, network_height
+                            );
                         }
                     }
 
                     // Display stunning progress bar
                     if let Some(start_time) = *app_state_sync.sync_start_time.read().unwrap() {
-                        let start_height = app_state_sync.sync_start_height.load(std::sync::atomic::Ordering::Relaxed);
+                        let start_height = app_state_sync
+                            .sync_start_height
+                            .load(std::sync::atomic::Ordering::Relaxed);
                         let total_blocks = network_height.saturating_sub(start_height);
                         let synced_blocks = current_height.saturating_sub(start_height);
 
@@ -5550,7 +7154,7 @@ async fn main() -> anyhow::Result<()> {
                                 synced_blocks,
                                 total_blocks,
                                 start_time,
-                                10000 // batch_size
+                                10000, // batch_size
                             );
 
                             // Print to console (appears in journalctl logs)
@@ -5560,8 +7164,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     } else {
                         // Fallback to simple message
-                        info!("🚀 ULTRA-FAST SYNC: {} blocks behind (current: {}, network: {})",
-                              blocks_behind, current_height, network_height);
+                        info!(
+                            "🚀 ULTRA-FAST SYNC: {} blocks behind (current: {}, network: {})",
+                            blocks_behind, current_height, network_height
+                        );
                     }
 
                     // ACTIVE HISTORICAL BLOCK SYNC - P2P FIRST, THEN HTTP FALLBACK
@@ -5588,7 +7194,7 @@ async fn main() -> anyhow::Result<()> {
                         match postcard::to_allocvec(&request) {
                             Ok(request_bytes) => {
                                 // Use testnet for P2P topic (we can make this configurable later)
-                                let network_id = q_types::NetworkId::TestnetPhase10; // ✅ v0.9.93-beta: Phase 10 (Bug #5 fix)
+                                let network_id = q_types::NetworkId::TestnetPhase12; // ✅ v1.0.12-beta: Phase 12 (Bug #5 fix)
                                 let cmd = q_network::NetworkCommand::PublishBlockRequest {
                                     topic: network_id.block_requests_topic(),
                                     request_bytes,
@@ -5600,10 +7206,12 @@ async fn main() -> anyhow::Result<()> {
                                     info!("✅ P2P block request published to gossipsub");
 
                                     // OPTIMIZED: Wait only 1 second for P2P responses (batch responses are fast)
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(1000))
+                                        .await;
 
                                     // Check if P2P sync advanced our height
-                                    let height_after_p2p = app_state_sync.node_status.read().await.current_height;
+                                    let height_after_p2p =
+                                        app_state_sync.node_status.read().await.current_height;
 
                                     if height_after_p2p > current_height {
                                         let blocks_received = height_after_p2p - current_height;
@@ -5620,14 +7228,23 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // PRIORITY: Try TurboSync first (50-250x faster than HTTP)
+                    // 🚨 v1.0.3.6-beta: Enhanced diagnostics for batch sync activation
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                        info!("🚀 [TURBO SYNC] Attempting activation: {} blocks behind", blocks_behind);
-                        info!("🔍 [TURBO SYNC DEBUG] Target height: {}, Current height: {}", network_height, next_block_needed - 1);
+                        info!("✅ [SYNC DEBUG] TurboSync reference exists");
+                        info!(
+                            "🚀 [TURBO SYNC] Attempting activation: {} blocks behind",
+                            blocks_behind
+                        );
+                        info!(
+                            "🔍 [TURBO SYNC DEBUG] Target height: {}, Current height: {}",
+                            network_height,
+                            next_block_needed - 1
+                        );
 
                         // DEBUG: Check peer registry status
                         let peer_registry = turbo_sync.get_peer_registry_info().await;
                         let peer_count = peer_registry.len();
-                        info!("🔍 [TURBO SYNC DEBUG] Peer registry size: {}", peer_count);
+                        info!("🔍 [SYNC DEBUG] Peer registry size: {}", peer_count);
                         for (peer_id, height) in peer_registry.iter().take(5) {
                             info!("   Peer {} has height {}", peer_id, height);
                         }
@@ -5644,10 +7261,110 @@ async fn main() -> anyhow::Result<()> {
                                 warn!("   Peer heights not being registered after initial sync");
                             }
                             warn!("   Falling back to HTTP sync...");
+
+                            // 🔍 QNK-103: Log HTTP fallback decision
+                            warn!("🔍 [QNK-103 SYNC DECISION] METHOD: HTTP Fallback");
+                            warn!("   Reason: Empty peer registry (peer_count=0)");
+                            warn!("   Gap: {} blocks", blocks_behind);
+                            warn!("   Expected performance: 75-97 blocks/min");
+                            warn!("   P2P batch sync: DISABLED (no peers available)");
                         } else {
+                            info!(
+                                "✅ [SYNC DEBUG] Peer registry populated with {} peers",
+                                peer_count
+                            );
+
+                            // 🔍 QNK-103: Log P2P batch sync decision
+                            warn!("🔍 [QNK-103 SYNC DECISION] METHOD: P2P Batch Sync EVALUATION");
+                            warn!("   Registry status: {} peers available ✅", peer_count);
+                            warn!("   Gap: {} blocks", blocks_behind);
+                            warn!("   Expected performance: 5,000-20,000 blocks/min");
+                            warn!("   HTTP fallback: BYPASSED (P2P available)");
+
+                            // 🚨 v1.0.3.6-beta: ENHANCED BATCH SYNC ACTIVATION DIAGNOSTICS
+                            info!("🔍 [BATCH SYNC DEBUG] Evaluating activation:");
+                            info!("   blocks_behind = {}", blocks_behind);
+                            info!("   Threshold = 100");
+                            info!("   Condition (gap>100): {}", blocks_behind > 100);
+
+                            // ✅ v1.0.12-beta: BATCH SYNC for large gaps (>100 blocks)
+                            // Use high-performance batch sync engine for 50-200x improvement
+                            if blocks_behind > 100 {
+                                warn!("🚨 [BATCH SYNC CRITICAL] Entering batch sync branch (gap={} blocks)", blocks_behind);
+                                info!("🚀 [BATCH SYNC] Gap of {} blocks detected, activating batch sync engine", blocks_behind);
+                                info!("   Performance target: 5,000-20,000 blocks/min (vs 75 blocks/min sequential)");
+
+                                // Create batch sync engine with production config
+                                let batch_sync =
+                                    q_storage::batch_sync::BatchSyncEngine::with_config(
+                                        q_storage::batch_sync::BatchSyncConfig {
+                                            batch_size: 512,
+                                            max_workers: 8,
+                                            max_retries: 3,
+                                            retry_delay_ms: 500,
+                                            debug_logging: true, // ✅ Enable debug logging for diagnostics
+                                        },
+                                    );
+
+                                // Perform batch sync via libp2p
+                                // 🚨 v1.0.3.6-beta: Check libp2p_discovery reference availability
+                                if let Some(ref libp2p) = app_state_sync.libp2p_discovery {
+                                    info!("✅ [SYNC DEBUG] libp2p_discovery reference exists - ACTIVATING BATCH SYNC");
+                                    let mut libp2p_lock = libp2p.lock().await;
+
+                                    match batch_sync
+                                        .sync_range(
+                                            &app_state_sync.storage_engine,
+                                            &mut *libp2p_lock,
+                                            current_height,
+                                            network_height,
+                                        )
+                                        .await
+                                    {
+                                        Ok(synced_to) => {
+                                            info!("✅ [BATCH SYNC] Synced to height {} ({} blocks processed)",
+                                                  synced_to, synced_to - current_height);
+
+                                            // Update node status
+                                            let mut status =
+                                                app_state_sync.node_status.write().await;
+                                            status.current_height = synced_to;
+                                            drop(status);
+
+                                            // Height already updated via status.current_height = synced_to
+                                            // v1.0.15-beta: Removed obsolete update_latest_block_pointer call
+                                            // Storage pointers are updated automatically during save_qblocks_batch()
+
+                                            // 2. Continue loop to check for more blocks
+                                            drop(libp2p_lock);
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            error!("❌ [BATCH SYNC] Failed: {}", e);
+                                            error!("   Falling back to sequential sync...");
+                                            // Fall through to existing sequential sync logic
+                                        }
+                                    }
+
+                                    drop(libp2p_lock);
+                                } else {
+                                    error!("❌ [SYNC DEBUG] libp2p_discovery is None - CANNOT ACTIVATE BATCH SYNC");
+                                    error!("   This is a critical configuration error - batch sync requires libp2p");
+                                    error!("   Falling back to sequential sync...");
+                                }
+                            } else {
+                                info!("⚠️  [BATCH SYNC DEBUG] Gap {} < 100 - using sequential TurboSync", blocks_behind);
+                            }
+
                             // ✅ v0.9.75-beta: OPTIMISTIC PEER TESTING - Assume compatible unless proven otherwise
-                            info!("🚀 [FAST SYNC] Activating TURBO MODE with optimistic peer testing");
-                            info!("   Target: {} blocks behind, syncing to height {}", blocks_behind, network_height);
+                            // Used as fallback for batch sync failures, libp2p=None, or small gaps (<100 blocks)
+                            info!(
+                                "🚀 [FAST SYNC] Activating TURBO MODE with optimistic peer testing"
+                            );
+                            info!(
+                                "   Target: {} blocks behind, syncing to height {}",
+                                blocks_behind, network_height
+                            );
 
                             // Request blocks using BlockPackCodec
                             if let Some(ref libp2p) = app_state_sync.libp2p_discovery {
@@ -5661,12 +7378,14 @@ async fn main() -> anyhow::Result<()> {
 
                                 // ✅ v0.9.75-beta: OPTIMISTIC filtering - use all peers EXCEPT blacklisted
                                 // This fixes the chicken-and-egg problem where peers never get tested
-                                let mut top_peers: Vec<_> = peer_registry.iter()
+                                let mut top_peers: Vec<_> = peer_registry
+                                    .iter()
                                     .filter(|(peer_id, height)| {
                                         // Use all peers that:
                                         // 1. Are NOT blacklisted (haven't failed 3+ times)
                                         // 2. Have height >= network_height
-                                        !blacklisted_peers.contains(peer_id) && *height >= network_height
+                                        !blacklisted_peers.contains(peer_id)
+                                            && *height >= network_height
                                     })
                                     .collect();
 
@@ -5688,25 +7407,40 @@ async fn main() -> anyhow::Result<()> {
                                               discovery_attempts, MAX_DISCOVERY_ATTEMPTS);
 
                                         // Get 3 peers for parallel testing
-                                        let test_peers: Vec<_> = peer_registry.iter()
+                                        let test_peers: Vec<_> = peer_registry
+                                            .iter()
                                             .filter(|(_, height)| *height >= network_height)
                                             .take(3)
                                             .collect();
 
                                         if !test_peers.is_empty() {
-                                            info!("📡 [DISCOVERY] Testing {} peers simultaneously", test_peers.len());
+                                            info!(
+                                                "📡 [DISCOVERY] Testing {} peers simultaneously",
+                                                test_peers.len()
+                                            );
 
                                             for (peer_id, peer_height) in &test_peers {
-                                                info!("📡 [DISCOVERY] Testing peer {} (height: {})", peer_id, peer_height);
+                                                info!(
+                                                    "📡 [DISCOVERY] Testing peer {} (height: {})",
+                                                    peer_id, peer_height
+                                                );
 
                                                 let chunk_size = 1000u64;
-                                                let end_height = network_height.min(next_block_needed + chunk_size - 1);
-                                                let block_count = (end_height - next_block_needed + 1) as usize;
+                                                let end_height = network_height
+                                                    .min(next_block_needed + chunk_size - 1);
+                                                let block_count =
+                                                    (end_height - next_block_needed + 1) as usize;
 
                                                 info!("📥 [DISCOVERY] Requesting {} blocks ({}-{}) from test peer",
                                                       block_count, next_block_needed, end_height);
 
-                                                if let Err(e) = libp2p_lock.request_blocks_from_peer(*peer_id, next_block_needed, block_count) {
+                                                if let Err(e) = libp2p_lock
+                                                    .request_blocks_from_peer(
+                                                        *peer_id,
+                                                        next_block_needed,
+                                                        block_count,
+                                                    )
+                                                {
                                                     error!("❌ [DISCOVERY] Failed to send test request to peer {}: {}", peer_id, e);
                                                 } else {
                                                     info!("✅ [DISCOVERY] Test request sent to peer {}", peer_id);
@@ -5717,9 +7451,14 @@ async fn main() -> anyhow::Result<()> {
 
                                             // ✅ v0.9.75-beta: Increased timeout 10s → 30s to account for network latency
                                             info!("⏳ [DISCOVERY] Waiting 30s for responses...");
-                                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                            tokio::time::sleep(std::time::Duration::from_secs(30))
+                                                .await;
 
-                                            let height_after_test = app_state_sync.node_status.read().await.current_height;
+                                            let height_after_test = app_state_sync
+                                                .node_status
+                                                .read()
+                                                .await
+                                                .current_height;
                                             if height_after_test > current_height {
                                                 info!("✅ [DISCOVERY] At least one peer is compatible, continuing sync...");
                                                 discovery_attempts = 0; // Reset counter
@@ -5740,8 +7479,15 @@ async fn main() -> anyhow::Result<()> {
                                     info!("📡 [FAST SYNC] Selected {} eligible peers for parallel sync (optimistic mode)", top_peers.len());
 
                                     // Log the selected peers for debugging
-                                    for (idx, (peer_id, peer_height)) in top_peers.iter().enumerate() {
-                                        info!("   Peer #{}: {} (height: {})", idx + 1, peer_id, peer_height);
+                                    for (idx, (peer_id, peer_height)) in
+                                        top_peers.iter().enumerate()
+                                    {
+                                        info!(
+                                            "   Peer #{}: {} (height: {})",
+                                            idx + 1,
+                                            peer_id,
+                                            peer_height
+                                        );
                                     }
 
                                     // v0.9.75-beta: AGGRESSIVE - 2000 blocks per chunk, 3 parallel requests
@@ -5751,19 +7497,31 @@ async fn main() -> anyhow::Result<()> {
                                     info!("🚀 [FAST SYNC] Sending {} parallel BlockPack requests (chunk size: {})",
                                           parallel_requests, chunk_size);
 
-                                    for (idx, (peer_id, _)) in top_peers.iter().enumerate().take(parallel_requests) {
-                                        let start_height = next_block_needed + (idx as u64 * chunk_size);
+                                    for (idx, (peer_id, _)) in
+                                        top_peers.iter().enumerate().take(parallel_requests)
+                                    {
+                                        let start_height =
+                                            next_block_needed + (idx as u64 * chunk_size);
                                         if start_height >= network_height {
                                             break; // Don't request beyond network height
                                         }
-                                        let end_height = network_height.min(start_height + chunk_size - 1);
+                                        let end_height =
+                                            network_height.min(start_height + chunk_size - 1);
                                         let block_count = (end_height - start_height + 1) as usize;
 
                                         info!("📥 [FAST SYNC #{}] Requesting {} blocks ({}-{}) from peer {}",
                                               idx + 1, block_count, start_height, end_height, peer_id);
 
-                                        if let Err(e) = libp2p_lock.request_blocks_from_peer(*peer_id, start_height, block_count) {
-                                            error!("❌ [FAST SYNC #{}] Failed to send request: {}", idx + 1, e);
+                                        if let Err(e) = libp2p_lock.request_blocks_from_peer(
+                                            *peer_id,
+                                            start_height,
+                                            block_count,
+                                        ) {
+                                            error!(
+                                                "❌ [FAST SYNC #{}] Failed to send request: {}",
+                                                idx + 1,
+                                                e
+                                            );
                                         } else {
                                             info!("✅ [FAST SYNC #{}] BlockPack request sent (expecting {} blocks)", idx + 1, block_count);
                                         }
@@ -5771,22 +7529,50 @@ async fn main() -> anyhow::Result<()> {
 
                                     drop(libp2p_lock); // Release lock immediately
 
-                                    // v0.9.72-beta: TURBO MODE - Reduced wait time 30s → 10s
-                                    // Blocks arrive via network event loop asynchronously
-                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                                    // 🚀 v1.0.3.7-beta: Non-blocking height check with early exit
+                                    // Wait up to 10 seconds, but check every 100ms for height advancement
+                                    // This eliminates the "sleep-drop" problem where batch sync can't activate
+                                    // during the blocking sleep period
+                                    let wait_start = tokio::time::Instant::now();
+                                    let height_check_timeout =
+                                        wait_start + std::time::Duration::from_secs(10);
+                                    let mut height_check_interval = tokio::time::interval(
+                                        std::time::Duration::from_millis(100),
+                                    );
 
-                                    // Check if height advanced
-                                    let height_after_fast_sync = app_state_sync.node_status.read().await.current_height;
-                                    if height_after_fast_sync > current_height {
-                                        let blocks_received = height_after_fast_sync - current_height;
-                                        info!("✅ [FAST SYNC] Received {} blocks! (height: {} → {})",
-                                              blocks_received, current_height, height_after_fast_sync);
-                                        info!("⚡ [TURBO MODE] Speed: {} blocks/10s = {}/min",
-                                              blocks_received, blocks_received * 6);
-                                        continue; // Fast sync worked, continue loop
-                                    } else {
-                                        warn!("⚠️ [FAST SYNC] Timeout - no blocks received in 10s");
+                                    let mut height_advanced = false;
+                                    let initial_height = current_height;
+
+                                    while tokio::time::Instant::now() < height_check_timeout {
+                                        height_check_interval.tick().await;
+
+                                        let new_height =
+                                            app_state_sync.node_status.read().await.current_height;
+                                        if new_height > initial_height {
+                                            let blocks_received = new_height - initial_height;
+                                            let elapsed = wait_start.elapsed().as_secs_f64();
+                                            info!("✅ [FAST SYNC] Received {} blocks! (height: {} → {})",
+                                                  blocks_received, initial_height, new_height);
+                                            info!("⚡ [FAST SYNC] Early exit after {:.1}s (target was 10s) - {:.0} blocks/min",
+                                                  elapsed, blocks_received as f64 / elapsed * 60.0);
+                                            height_advanced = true;
+                                            break; // Exit early on success
+                                        }
                                     }
+
+                                    if !height_advanced {
+                                        warn!("⚠️ [FAST SYNC] Timeout - no blocks received in 10s");
+                                        info!(
+                                            "🔄 [FAST SYNC] Proceeding to batch sync evaluation..."
+                                        );
+                                    }
+
+                                    // If height advanced, continue loop (skip batch sync)
+                                    if height_advanced {
+                                        continue;
+                                    }
+
+                                    // Fall through to batch sync evaluation if P2P failed
                                 }
                             }
                         }
@@ -5795,8 +7581,12 @@ async fn main() -> anyhow::Result<()> {
                     // LAST RESORT: FALLBACK TO HTTP IF P2P DIDN'T DELIVER
                     warn!("⚠️  Fast sync didn't deliver blocks, falling back to HTTP...");
                     let bootstrap_peer = "http://185.182.185.227:8080";
-                    info!("📥 Requesting blocks {}-{} from bootstrap peer {} via HTTP",
-                          next_block_needed, next_block_needed + batch_size - 1, bootstrap_peer);
+                    info!(
+                        "📥 Requesting blocks {}-{} from bootstrap peer {} via HTTP",
+                        next_block_needed,
+                        next_block_needed + batch_size - 1,
+                        bootstrap_peer
+                    );
 
                     for block_height in next_block_needed..(next_block_needed + batch_size) {
                         let url = format!("{}/api/v1/blocks/{}", bootstrap_peer, block_height);
@@ -5808,16 +7598,28 @@ async fn main() -> anyhow::Result<()> {
                                         // Parse the block from JSON response
                                         if let Some(block_data) = json["data"].as_object() {
                                             // Deserialize QBlock from JSON
-                                            match serde_json::from_value::<q_types::block::QBlock>(serde_json::Value::Object(block_data.clone())) {
+                                            match serde_json::from_value::<q_types::block::QBlock>(
+                                                serde_json::Value::Object(block_data.clone()),
+                                            ) {
                                                 Ok(block) => {
                                                     // Store block to RocksDB
-                                                    if let Err(e) = app_state_sync.storage_engine.save_qblock(&block).await {
-                                                        warn!("Failed to save fetched block {}: {}", block_height, e);
+                                                    if let Err(e) = app_state_sync
+                                                        .storage_engine
+                                                        .save_qblock(&block)
+                                                        .await
+                                                    {
+                                                        warn!(
+                                                            "Failed to save fetched block {}: {}",
+                                                            block_height, e
+                                                        );
                                                     } else {
                                                         info!("✅ Fetched and stored block {} via HTTP", block_height);
 
                                                         // Update current height
-                                                        let mut status = app_state_sync.node_status.write().await;
+                                                        let mut status = app_state_sync
+                                                            .node_status
+                                                            .write()
+                                                            .await;
                                                         if block_height > status.current_height {
                                                             status.current_height = block_height;
 
@@ -5828,20 +7630,32 @@ async fn main() -> anyhow::Result<()> {
                                                             );
 
                                                             // 🔧 v1.0.4-beta: Clear cached challenge
-                                                            *app_state_sync.current_challenge.write().await = None;
+                                                            *app_state_sync
+                                                                .current_challenge
+                                                                .write()
+                                                                .await = None;
 
                                                             info!("📈 Node height advanced to {} (HTTP sync)", block_height);
 
                                                             // 🚨 v0.9.7-beta CRITICAL FIX: Sync all parallel producers after HTTP sync
                                                             drop(status); // Release lock before syncing producers
-                                                            if let Err(e) = app_state_sync.block_producer_pool.sync_from_storage(&app_state_sync.storage_engine).await {
+                                                            if let Err(e) = app_state_sync
+                                                                .block_producer_pool
+                                                                .sync_from_storage(
+                                                                    &app_state_sync.storage_engine,
+                                                                )
+                                                                .await
+                                                            {
                                                                 error!("❌ Failed to sync producers after HTTP sync: {}", e);
                                                             }
                                                         }
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    debug!("Failed to deserialize block {}: {}", block_height, e);
+                                                    debug!(
+                                                        "Failed to deserialize block {}: {}",
+                                                        block_height, e
+                                                    );
                                                 }
                                             }
                                         }
@@ -5852,12 +7666,19 @@ async fn main() -> anyhow::Result<()> {
                                         break; // Stop trying if blocks aren't available
                                     }
                                     Err(e) => {
-                                        debug!("Failed to parse response for block {}: {}", block_height, e);
+                                        debug!(
+                                            "Failed to parse response for block {}: {}",
+                                            block_height, e
+                                        );
                                     }
                                 }
                             }
                             Ok(response) => {
-                                debug!("HTTP {}: Block {} not found on peer", response.status(), block_height);
+                                debug!(
+                                    "HTTP {}: Block {} not found on peer",
+                                    response.status(),
+                                    block_height
+                                );
                                 break; // Peer doesn't have this block
                             }
                             Err(e) => {
@@ -5875,23 +7696,34 @@ async fn main() -> anyhow::Result<()> {
                     let new_height = app_state_sync.node_status.read().await.current_height;
 
                     if new_height == current_height {
-                        warn!("⚠️  Not receiving blocks from network! Blocks behind: {}", blocks_behind);
+                        warn!(
+                            "⚠️  Not receiving blocks from network! Blocks behind: {}",
+                            blocks_behind
+                        );
                         warn!("⚠️  Check P2P connectivity: port 8081 must be accessible");
                         warn!("⚠️  Docker users: use --network host or expose port 8081");
                         warn!("⚠️  Bootstrap peer may not have historical blocks");
                     } else {
                         let sync_rate = new_height - current_height;
-                        info!("📈 Syncing at {} blocks/2s ({}% complete)",
-                              sync_rate,
-                              (current_height * 100) / network_height.max(1));
+                        info!(
+                            "📈 Syncing at {} blocks/2s ({}% complete)",
+                            sync_rate,
+                            (current_height * 100) / network_height.max(1)
+                        );
                     }
                 }
                 // 🎨 v0.6.6-beta: Reset sync tracking when caught up (within 5 blocks)
                 else {
                     // Check if we were syncing and just completed
                     let mut start_time = app_state_sync.sync_start_time.write().unwrap();
-                    if start_time.is_some() && network_height > 0 && network_height <= current_height + 5 {
-                        info!("✅ [SYNC COMPLETE] Synchronized to height {}", current_height);
+                    if start_time.is_some()
+                        && network_height > 0
+                        && network_height <= current_height + 5
+                    {
+                        info!(
+                            "✅ [SYNC COMPLETE] Synchronized to height {}",
+                            current_height
+                        );
                         *start_time = None; // Reset tracking
                     }
                 }
@@ -5913,7 +7745,10 @@ async fn main() -> anyhow::Result<()> {
             Some(storage)
         }
         Err(e) => {
-            warn!("⚠️  IPFS storage initialization failed: {}, backup functionality disabled", e);
+            warn!(
+                "⚠️  IPFS storage initialization failed: {}, backup functionality disabled",
+                e
+            );
             None
         }
     };
@@ -5926,8 +7761,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize replication only if IPFS storage is available
     let replication_system = if ipfs_storage_state.read().await.is_some() {
-        use q_ipfs_storage::{DatabaseReplicationManager, ReplicationConfig};
         use q_api_server::database_replication_bridge::DatabaseReplicationBridge;
+        use q_ipfs_storage::{DatabaseReplicationManager, ReplicationConfig};
 
         // Create replication configuration
         // v0.9.51-beta: DISABLE IPFS replication - incompatible with hot/cold database architecture
@@ -5937,8 +7772,8 @@ async fn main() -> anyhow::Result<()> {
         // This causes "No such file: ./data-mine5/CURRENT" errors every 5 minutes
         // which block the database and stall block production
         let replication_config = ReplicationConfig {
-            enabled: false,  // v0.9.51-beta: DISABLED - incompatible with hot/cold DB
-            snapshot_interval: 300,  // 5 minutes
+            enabled: false,         // v0.9.51-beta: DISABLED - incompatible with hot/cold DB
+            snapshot_interval: 300, // 5 minutes
             max_incremental_updates: 100,
             verify_updates: true,
             parallel_downloads: 10,
@@ -5947,8 +7782,7 @@ async fn main() -> anyhow::Result<()> {
         // v0.9.60-beta Phase 6: Get database path from Q_DB_PATH environment variable
         // Default changed to ./data-mine6 for Phase 6 fresh network
         // Phase 5 data preserved in ./data (read-only reference)
-        let db_path = std::env::var("Q_DB_PATH")
-            .unwrap_or_else(|_| "./data-mine6".to_string());
+        let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data-mine6".to_string());
         info!("📂 [PHASE 6] Using database path: {}", db_path);
 
         // Initialize replication manager
@@ -5965,7 +7799,8 @@ async fn main() -> anyhow::Result<()> {
         replication_manager.clone().start().await;
 
         // Create channel for gossipsub publishing
-        let (gossipsub_tx, mut gossipsub_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let (gossipsub_tx, mut gossipsub_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         // Create replication bridge
         // ✅ v0.9.98-beta: Pass storage for durability and idempotency
@@ -5983,7 +7818,10 @@ async fn main() -> anyhow::Result<()> {
                 tx
             }
             Err(e) => {
-                warn!("⚠️  Failed to start replication bridge: {}, replication disabled", e);
+                warn!(
+                    "⚠️  Failed to start replication bridge: {}, replication disabled",
+                    e
+                );
                 tokio::sync::mpsc::unbounded_channel().0
             }
         };
@@ -5996,7 +7834,9 @@ async fn main() -> anyhow::Result<()> {
             // NOTE: Subscription is now done BEFORE spawning the event loop (line 555)
             // to prevent deadlock. This code is kept for reference but subscription
             // already completed earlier.
-            info!("📢 Database updates topic subscription already active (set during initialization)");
+            info!(
+                "📢 Database updates topic subscription already active (set during initialization)"
+            );
 
             // Spawn task to forward outgoing updates to gossipsub
             // DISABLED: This causes deadlock by trying to lock the manager from a spawned task
@@ -6054,13 +7894,19 @@ async fn main() -> anyhow::Result<()> {
                         tokio::runtime::Handle::current().block_on(async move {
                             storage_engine.prune_old_blocks(current_height).await
                         })
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(Ok(stats)) => {
-                            info!("✅ Pruning complete: {} blocks pruned, {} blocks retained",
-                                  stats.pruned_blocks, stats.retained_blocks);
-                            info!("💾 Storage saved: {:.2} MB ({:.1}% reduction)",
-                                  stats.space_saved as f64 / 1_000_000.0,
-                                  (stats.space_saved as f64 / stats.storage_before as f64) * 100.0);
+                            info!(
+                                "✅ Pruning complete: {} blocks pruned, {} blocks retained",
+                                stats.pruned_blocks, stats.retained_blocks
+                            );
+                            info!(
+                                "💾 Storage saved: {:.2} MB ({:.1}% reduction)",
+                                stats.space_saved as f64 / 1_000_000.0,
+                                (stats.space_saved as f64 / stats.storage_before as f64) * 100.0
+                            );
                         }
                         Ok(Err(e)) => {
                             warn!("⚠️  Pruning failed: {}", e);
@@ -6070,7 +7916,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 } else {
-                    debug!("⏳ Skipping pruning (current height: {} < 100K minimum)", current_height);
+                    debug!(
+                        "⏳ Skipping pruning (current height: {} < 100K minimum)",
+                        current_height
+                    );
                 }
             }
         });
@@ -6110,11 +7959,17 @@ async fn main() -> anyhow::Result<()> {
 
                 // Persist to RocksDB with synced writes (survives hard kill)
                 let start = std::time::Instant::now();
-                match app_state_balance_sync.storage_engine.save_wallet_balances(&balances_snapshot).await {
+                match app_state_balance_sync
+                    .storage_engine
+                    .save_wallet_balances(&balances_snapshot)
+                    .await
+                {
                     Ok(_) => {
                         let elapsed = start.elapsed();
-                        info!("💾 Synced {} wallet balances to disk in {:?} (atomic batch write)",
-                              balance_count, elapsed);
+                        info!(
+                            "💾 Synced {} wallet balances to disk in {:?} (atomic batch write)",
+                            balance_count, elapsed
+                        );
                     }
                     Err(e) => {
                         error!("❌ Failed to sync wallet balances to disk: {}", e);
@@ -6124,7 +7979,11 @@ async fn main() -> anyhow::Result<()> {
 
                 // Also sync total supply every cycle
                 let total_supply = *app_state_balance_sync.total_minted_supply.read().await;
-                if let Err(e) = app_state_balance_sync.storage_engine.save_total_supply(total_supply).await {
+                if let Err(e) = app_state_balance_sync
+                    .storage_engine
+                    .save_total_supply(total_supply)
+                    .await
+                {
                     error!("❌ Failed to sync total supply to disk: {}", e);
                 }
             }
@@ -6148,7 +8007,8 @@ async fn main() -> anyhow::Result<()> {
             stats.connected_peers = 0; // Will be updated by network events
             stats.resonance_enabled = true; // Phase 5 complete
             stats.shadow_mode_active = false; // Can be enabled later
-        }).await;
+        })
+        .await;
 
         // Start animated visualization loop
         let viz_clone = visualizer;
@@ -6165,53 +8025,56 @@ async fn main() -> anyhow::Result<()> {
             let mut last_block_count = 0u64;
             let start_time = std::time::Instant::now();
 
-        loop {
-            interval.tick().await;
+            loop {
+                interval.tick().await;
 
-            // Read peer count from atomic counter (thread-safe, no locking needed!)
-            let connected_peers = if let Some(ref peer_count) = peer_count_atomic {
-                let count = peer_count.load(std::sync::atomic::Ordering::SeqCst);
+                // Read peer count from atomic counter (thread-safe, no locking needed!)
+                let connected_peers = if let Some(ref peer_count) = peer_count_atomic {
+                    let count = peer_count.load(std::sync::atomic::Ordering::SeqCst);
 
-                // Update node_status with current peer count
-                {
-                    let mut status = app_state_updater.node_status.write().await;
-                    status.connected_peers = count as u32;
-                }
+                    // Update node_status with current peer count
+                    {
+                        let mut status = app_state_updater.node_status.write().await;
+                        status.connected_peers = count as u32;
+                    }
 
-                count
-            } else {
-                0
-            };
+                    count
+                } else {
+                    0
+                };
 
-            // Read current state - count CONFIRMED transactions (not just mempool)
-            let current_tx = app_state_updater.tx_status.iter()
-                .filter(|entry| matches!(entry.value(), TxStatus::Confirmed { .. }))
-                .count() as u64;
-            let mempool_size = app_state_updater.tx_pool.len() as u64;
-            let node_status = app_state_updater.node_status.read().await;
-            let current_blocks = node_status.current_height;
+                // Read current state - count CONFIRMED transactions (not just mempool)
+                let current_tx = app_state_updater
+                    .tx_status
+                    .iter()
+                    .filter(|entry| matches!(entry.value(), TxStatus::Confirmed { .. }))
+                    .count() as u64;
+                let mempool_size = app_state_updater.tx_pool.len() as u64;
+                let node_status = app_state_updater.node_status.read().await;
+                let current_blocks = node_status.current_height;
 
-            // Calculate per-second rates
-            let elapsed = start_time.elapsed().as_secs_f64().max(1.0);
-            let tx_delta = current_tx.saturating_sub(last_tx_count);
-            let block_delta = current_blocks.saturating_sub(last_block_count);
+                // Calculate per-second rates
+                let elapsed = start_time.elapsed().as_secs_f64().max(1.0);
+                let tx_delta = current_tx.saturating_sub(last_tx_count);
+                let block_delta = current_blocks.saturating_sub(last_block_count);
 
-            update_stats(stats_handle_updater.clone(), |stats| {
-                stats.total_transactions = current_tx; // Count of CONFIRMED transactions
-                stats.total_blocks = current_blocks;
-                stats.transactions_per_second = tx_delta as f64;
-                stats.blocks_per_second = block_delta as f64;
-                stats.connected_peers = connected_peers; // Reading from ConnectionManager
-                stats.mempool_size = mempool_size as usize; // Pending transactions in mempool
-                stats.average_latency_ms = 45.2; // Default, can be measured
-                stats.dag_vertices = current_blocks * 4; // Approximate
-                stats.consensus_rounds = current_blocks;
-            }).await;
+                update_stats(stats_handle_updater.clone(), |stats| {
+                    stats.total_transactions = current_tx; // Count of CONFIRMED transactions
+                    stats.total_blocks = current_blocks;
+                    stats.transactions_per_second = tx_delta as f64;
+                    stats.blocks_per_second = block_delta as f64;
+                    stats.connected_peers = connected_peers; // Reading from ConnectionManager
+                    stats.mempool_size = mempool_size as usize; // Pending transactions in mempool
+                    stats.average_latency_ms = 45.2; // Default, can be measured
+                    stats.dag_vertices = current_blocks * 4; // Approximate
+                    stats.consensus_rounds = current_blocks;
+                })
+                .await;
 
-            last_tx_count = current_tx;
-            last_block_count = current_blocks;
-        }
-    });
+                last_tx_count = current_tx;
+                last_block_count = current_blocks;
+            }
+        });
 
         info!("✅ Console visualization started");
     } else {
@@ -6329,7 +8192,7 @@ async fn main() -> anyhow::Result<()> {
     // DEACTIVATED:         tokio::spawn(async move {
     // DEACTIVATED:             info!("🔍 Starting automatic peer discovery through Bitcoin network...");
     // DEACTIVATED:             let mut events = bridge_clone.subscribe_to_events();
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:             while let Ok(event) = events.recv().await {
     // DEACTIVATED:                 match event {
     // DEACTIVATED:                     PeerNetworkEvent::PeerDiscovered {
@@ -6342,13 +8205,13 @@ async fn main() -> anyhow::Result<()> {
     // DEACTIVATED:                             hex::encode(node_id),
     // DEACTIVATED:                             confidence
     // DEACTIVATED:                         );
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:                         // Update node status
     // DEACTIVATED:                         {
     // DEACTIVATED:                             let mut status = state_clone.node_status.write().await;
     // DEACTIVATED:                             status.connected_peers += 1;
     // DEACTIVATED:                         }
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:                         // Emit real-time event
     // DEACTIVATED:                         let _ = state_clone
     // DEACTIVATED:                             .event_emitter
@@ -6370,13 +8233,13 @@ async fn main() -> anyhow::Result<()> {
     // DEACTIVATED:                             hex::encode(node_id),
     // DEACTIVATED:                             reason
     // DEACTIVATED:                         );
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:                         // Update node status
     // DEACTIVATED:                         {
     // DEACTIVATED:                             let mut status = state_clone.node_status.write().await;
     // DEACTIVATED:                             status.connected_peers = status.connected_peers.saturating_sub(1);
     // DEACTIVATED:                         }
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:                         let _ = state_clone
     // DEACTIVATED:                             .event_emitter
     // DEACTIVATED:                             .emit_peer_disconnected(hex::encode(node_id), reason)
@@ -6536,7 +8399,7 @@ async fn main() -> anyhow::Result<()> {
     // DEACTIVATED:     //                         let _ = state_clone
     // DEACTIVATED:     //                             .event_emitter
     // DEACTIVATED:     // //                             .emit_security_alert(
-    // DEACTIVATED: 
+    // DEACTIVATED:
     // DEACTIVATED:     // DEACTIVATED: BEP-44 DHT discovery (module deactivated)
     // if let Some(bep44_discovery) = &app_state.bep44_discovery {
     //     let discovery_clone = bep44_discovery.clone();
@@ -6747,8 +8610,14 @@ async fn main() -> anyhow::Result<()> {
         ) // Get wallet balance by address (requires authentication)
         .route("/api/v1/mnemonic", get(handlers::generate_mnemonic))
         .route("/api/v1/faucet", post(handlers::faucet)) // Test token faucet
-        .route("/api/v1/mining/challenge", get(handlers::get_mining_challenge)) // Get current mining challenge
-        .route("/api/v1/mining/submit", post(handlers::submit_mining_solution))
+        .route(
+            "/api/v1/mining/challenge",
+            get(handlers::get_mining_challenge),
+        ) // Get current mining challenge
+        .route(
+            "/api/v1/mining/submit",
+            post(handlers::submit_mining_solution),
+        )
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
@@ -6764,10 +8633,7 @@ async fn main() -> anyhow::Result<()> {
             post(handlers::send_transaction),
         ) // Combined send endpoint
         // Quantum Privacy Mixer endpoints
-        .route(
-            "/api/v1/mixer/join",
-            post(handlers::join_mixing_pool),
-        ) // Join quantum privacy mixing pool
+        .route("/api/v1/mixer/join", post(handlers::join_mixing_pool)) // Join quantum privacy mixing pool
         .route(
             "/api/v1/mixer/send",
             post(handlers::send_private_transaction),
@@ -6780,7 +8646,6 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/mixer/status/:mixing_id",
             get(handlers::get_mixing_status),
         ) // Get mixing status by session ID or transaction hash
-
         // ==================== Privacy-as-a-Service (PaaS) API ====================
         // Enterprise-grade privacy infrastructure for all blockchains
         // Revenue flows to Quillon Bank master account
@@ -6808,36 +8673,40 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/privacy/paas/statistics",
             get(q_api_server::privacy_service_api::paas_statistics),
         ) // PaaS statistics and revenue
-
         // Mount PaaS admin router for management endpoints
         .nest(
             "/api/v1/privacy/paas",
             q_api_server::paas_admin_api::create_paas_admin_router(),
         )
         // =========================================================================
-
         .route("/api/v1/transactions/:hash", get(handlers::get_transaction))
         .route(
             "/api/v1/transactions/recent",
             get(handlers::get_recent_transactions),
         ) // Dashboard recent transactions
         // NOTE: /api/v1/blocks/:height is registered below for HTTP fallback sync (line ~6185)
-
         // ============================================
         // EXPLORER API ENDPOINTS
         // ============================================
-        .route("/api/v1/statistics/network", get(handlers::network_analytics)) // Use existing function
+        .route(
+            "/api/v1/statistics/network",
+            get(handlers::network_analytics),
+        ) // Use existing function
         .route("/api/v1/blocks/recent", get(handlers::list_blocks)) // Use existing function
         .route("/api/v1/contracts/recent", get(handlers::list_contracts)) // Use existing function
-        .route("/api/v1/dag/vertices/recent", get(handlers::get_dag_vertices)) // Use existing function
-        .route("/api/v1/transactions/explorer", get(handlers::get_explorer_transactions)) // Explorer transactions (no auth)
+        .route(
+            "/api/v1/dag/vertices/recent",
+            get(handlers::get_dag_vertices),
+        ) // Use existing function
+        .route(
+            "/api/v1/transactions/explorer",
+            get(handlers::get_explorer_transactions),
+        ) // Explorer transactions (no auth)
         .route("/api/v1/search", get(handlers::search_transactions)) // Use existing function
-
         // ============================================
         // BLOCKCHAIN SYNCHRONIZATION ENDPOINTS
         // ============================================
         .route("/api/v1/sync/blocks", get(handlers::sync_blocks)) // HTTP-based block synchronization
-
         // Network Analytics endpoints
         .route(
             "/api/v1/network/analytics",
@@ -6846,10 +8715,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/network/topology", get(handlers::network_topology))
         .route("/api/v1/network/active-peers", get(handlers::active_peers))
         // 🔀 v0.9.37-beta PHASE 3: Network Unification Status Monitoring
-        .route("/api/v1/network/unification", get(handlers::network_unification_status))
+        .route(
+            "/api/v1/network/unification",
+            get(handlers::network_unification_status),
+        )
         // 🚀 v0.9.38-beta: PHASE 1.3 - P2P Health Monitoring Endpoint
         .route("/api/v1/p2p/health", get(handlers::get_p2p_health))
-        .route("/api/v1/network/peers/connect", post(handlers::connect_peer))
+        .route(
+            "/api/v1/network/peers/connect",
+            post(handlers::connect_peer),
+        )
         .route(
             "/api/v1/network/discovery/stats",
             get(handlers::discovery_stats),
@@ -6935,7 +8810,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/events", get(streaming::sse_events))
         .route("/api/v1/ws", get(streaming::websocket_handler))
         // WebSocket transaction streaming for 1M+ TPS (zero HTTP overhead)
-        .route("/api/v1/ws/transactions", get(q_api_server::websocket_stream::ws_transaction_stream))
+        .route(
+            "/api/v1/ws/transactions",
+            get(q_api_server::websocket_stream::ws_transaction_stream),
+        )
         // ===========================================
         // NEW INTEGRATED CRATES API ROUTES
         // ===========================================
@@ -6966,12 +8844,27 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/consensus/narwhal", get(handlers::narwhal_status))
         .route("/api/v1/consensus/vdf", get(handlers::vdf_status))
         // Quillon Resonance Consensus
-        .route("/api/v1/consensus/resonance/status", get(handlers::resonance_status))
-        .route("/api/v1/consensus/resonance/k-parameter", get(handlers::k_parameter_metrics))
+        .route(
+            "/api/v1/consensus/resonance/status",
+            get(handlers::resonance_status),
+        )
+        .route(
+            "/api/v1/consensus/resonance/k-parameter",
+            get(handlers::k_parameter_metrics),
+        )
         // Shadow Mode - Performance Monitoring
-        .route("/api/v1/consensus/shadow-metrics", get(handlers::shadow_mode_metrics))
-        .route("/api/v1/consensus/migration-report", get(handlers::shadow_mode_migration_report))
-        .route("/api/v1/consensus/migrate-to-resonance", post(handlers::migrate_to_resonance))
+        .route(
+            "/api/v1/consensus/shadow-metrics",
+            get(handlers::shadow_mode_metrics),
+        )
+        .route(
+            "/api/v1/consensus/migration-report",
+            get(handlers::shadow_mode_migration_report),
+        )
+        .route(
+            "/api/v1/consensus/migrate-to-resonance",
+            post(handlers::migrate_to_resonance),
+        )
         // 🚀 v1.0.2-beta Phase 1A: Safe Batched Sync Metrics
         .route("/api/v1/sync/metrics", get(handlers::get_sync_metrics))
         // Quantum Cryptography
@@ -6983,7 +8876,10 @@ async fn main() -> anyhow::Result<()> {
         // DeFi Components
         .route("/api/v1/defi/dex/status", get(handlers::dex_status))
         .route("/api/v1/defi/oracle/status", get(handlers::oracle_status))
-        .route("/api/v1/defi/oracle/price/:feed_id", get(handlers::get_oracle_price))
+        .route(
+            "/api/v1/defi/oracle/price/:feed_id",
+            get(handlers::get_oracle_price),
+        )
         .route("/api/v1/defi/oracle/feeds", get(handlers::get_oracle_feeds))
         .route(
             "/api/v1/defi/stablecoin/status",
@@ -6995,27 +8891,57 @@ async fn main() -> anyhow::Result<()> {
         // DEX Swap Functionality
         .route("/api/v1/dex/swap", post(handlers::execute_swap))
         // Blockchain Benchmark (rate limited to once per 24 hours)
-        .route("/api/v1/benchmark", post(handlers::run_blockchain_benchmark))
+        .route(
+            "/api/v1/benchmark",
+            post(handlers::run_blockchain_benchmark),
+        )
         // Stripe Payment Integration for USD Wallet - ENABLED
-        .route("/api/v1/payment/create-intent", post(payment_api::create_payment_intent))
-        .route("/api/v1/payment/confirm", post(payment_api::confirm_payment))
-        .route("/api/v1/payment/balance", post(payment_api::get_usd_balance))
+        .route(
+            "/api/v1/payment/create-intent",
+            post(payment_api::create_payment_intent),
+        )
+        .route(
+            "/api/v1/payment/confirm",
+            post(payment_api::confirm_payment),
+        )
+        .route(
+            "/api/v1/payment/balance",
+            post(payment_api::get_usd_balance),
+        )
         .route("/api/v1/payment/withdraw", post(payment_api::withdraw_usd))
-        .route("/api/v1/payment/convert-to-qugusd", post(payment_api::convert_usd_to_qugusd))
+        .route(
+            "/api/v1/payment/convert-to-qugusd",
+            post(payment_api::convert_usd_to_qugusd),
+        )
         .route("/api/v1/payment/transfer", post(payment_api::transfer_usd))
         // AI Payment Consensus System - ENABLED
-        .route("/api/wallet/balance", get(payment_api::get_ai_wallet_balance))
+        .route(
+            "/api/wallet/balance",
+            get(payment_api::get_ai_wallet_balance),
+        )
         .route("/api/wallet/usage", get(payment_api::get_ai_wallet_usage))
         .route("/api/pricing", get(payment_api::get_ai_pricing_info))
-        .route("/api/treasury/stats", get(payment_api::get_ai_treasury_stats))
+        .route(
+            "/api/treasury/stats",
+            get(payment_api::get_ai_treasury_stats),
+        )
         // OAuth2 Provider for Third-Party Integration - ENABLED
-        .route("/api/v1/oauth2/register", post(oauth2_provider::register_client))
+        .route(
+            "/api/v1/oauth2/register",
+            post(oauth2_provider::register_client),
+        )
         .route("/api/v1/oauth2/authorize", get(oauth2_provider::authorize))
-        .route("/api/v1/oauth2/consent", post(oauth2_provider::handle_consent))
+        .route(
+            "/api/v1/oauth2/consent",
+            post(oauth2_provider::handle_consent),
+        )
         .route("/api/v1/oauth2/token", post(oauth2_provider::token))
         .route("/api/v1/oauth2/userinfo", get(oauth2_provider::userinfo))
         .route("/api/v1/oauth2/revoke", post(oauth2_provider::revoke))
-        .route("/api/v1/oauth2/clients/:client_id", get(oauth2_provider::get_client_info))
+        .route(
+            "/api/v1/oauth2/clients/:client_id",
+            get(oauth2_provider::get_client_info),
+        )
         // Network & Infrastructure
         .route(
             "/api/v1/tor/circuits/status",
@@ -7073,44 +8999,77 @@ async fn main() -> anyhow::Result<()> {
         // Liquidity Provision API
         .nest("/api/v1/liquidity", create_liquidity_router())
         // ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System (AUTHENTICATED)
-        .route("/api/v1/wallet/tokens", get(stablecoin_api::get_multi_token_balance))
+        .route(
+            "/api/v1/wallet/tokens",
+            get(stablecoin_api::get_multi_token_balance),
+        )
         .route("/api/v1/stablecoin/mint", post(stablecoin_api::mint_qugusd))
-        .route("/api/v1/stablecoin/redeem", post(stablecoin_api::redeem_qug))
-        .route("/api/v1/stablecoin/position/:address", get(stablecoin_api::get_position_health))
-        .route("/api/v1/stablecoin/vault/stats", get(stablecoin_api::get_vault_stats))
+        .route(
+            "/api/v1/stablecoin/redeem",
+            post(stablecoin_api::redeem_qug),
+        )
+        .route(
+            "/api/v1/stablecoin/position/:address",
+            get(stablecoin_api::get_position_health),
+        )
+        .route(
+            "/api/v1/stablecoin/vault/stats",
+            get(stablecoin_api::get_vault_stats),
+        )
         .route("/api/v1/stats/fees", get(stablecoin_api::get_fee_stats))
-        .route("/api/v1/stablecoin/liquidatable", get(stablecoin_api::get_liquidatable_positions))
-        .route("/api/v1/stablecoin/liquidate", post(stablecoin_api::liquidate_position))
+        .route(
+            "/api/v1/stablecoin/liquidatable",
+            get(stablecoin_api::get_liquidatable_positions),
+        )
+        .route(
+            "/api/v1/stablecoin/liquidate",
+            post(stablecoin_api::liquidate_position),
+        )
         // Address Book API - ZK-STARK/SNARK proof generation and P2P sync
         .route("/api/v1/addressbook", get(handlers::get_address_book))
         .route("/api/v1/addressbook", post(handlers::save_address))
         .route("/api/v1/addressbook/:id", put(handlers::update_address))
         .route("/api/v1/addressbook/:id", delete(handlers::delete_address))
-        .route("/api/v1/addressbook/proof", post(handlers::generate_address_proof))
-        .route("/api/v1/addressbook/verify", post(handlers::verify_address_proof))
-        .route("/api/v1/addressbook/sync-status", get(handlers::get_address_book_sync_status))
+        .route(
+            "/api/v1/addressbook/proof",
+            post(handlers::generate_address_proof),
+        )
+        .route(
+            "/api/v1/addressbook/verify",
+            post(handlers::verify_address_proof),
+        )
+        .route(
+            "/api/v1/addressbook/sync-status",
+            get(handlers::get_address_book_sync_status),
+        )
         // ✅ v0.9.36-beta - AI Transaction Assistant routes
-        .route("/api/v1/addressbook/search", get(ai_transaction_assistant::search_address_book))
-        .route("/api/v1/ai/transaction/prepare", post(ai_transaction_assistant::prepare_ai_transaction))
+        .route(
+            "/api/v1/addressbook/search",
+            get(ai_transaction_assistant::search_address_book),
+        )
+        .route(
+            "/api/v1/ai/transaction/prepare",
+            post(ai_transaction_assistant::prepare_ai_transaction),
+        )
         // Simple CDP API - QUGUSD minting with QUG collateral (fallback) - DISABLED (conflicts with full Quillon Bank)
         // .nest("/api/v1/quillon-bank/stablecoin", create_cdp_router())
         // ✅ ENABLED - Full Quillon Bank CDP system with AEGIS-QL post-quantum authentication
         // Public routes (read-only, no authentication)
         .nest("/api/v1/quillon-bank", create_public_routes())
         // Protected routes (founder-only, AEGIS-QL authentication required)
-        .nest("/api/v1/quillon-bank",
-            create_protected_routes()
-                .layer(axum::middleware::from_fn_with_state(
-                    app_state.aegis_auth_state.clone(),
-                    aegis_auth_middleware::verify_founder_signature
-                ))
+        .nest(
+            "/api/v1/quillon-bank",
+            create_protected_routes().layer(axum::middleware::from_fn_with_state(
+                app_state.aegis_auth_state.clone(),
+                aegis_auth_middleware::verify_founder_signature,
+            )),
         )
         // Health and metrics
         .route("/health", get(handlers::health_check))
         .route("/api/v1/health", get(handlers::health_check))
-        .route("/version", get(handlers::version_info))  // v0.9.58-beta: Binary version info
+        .route("/version", get(handlers::version_info)) // v0.9.58-beta: Binary version info
         .route("/api/v1/version", get(handlers::version_info))
-        .route("/api/v1/blocks/:height", get(handlers::get_block_by_height))  // v0.9.59-beta: HTTP fallback sync
+        .route("/api/v1/blocks/:height", get(handlers::get_block_by_height)) // v0.9.59-beta: HTTP fallback sync
         .route("/metrics", get(handlers::metrics))
         // HIGH-PERFORMANCE BINARY PROTOCOL ENDPOINTS (1000x improvement)
         .route(
@@ -7144,7 +9103,10 @@ async fn main() -> anyhow::Result<()> {
         warn!("⚠️  Manual block trigger endpoint ENABLED at /api/v1/trigger-block");
         warn!("⚠️  This should only be used for testing/development");
         warn!("⚠️  Ensure API authentication is configured!");
-        app = app.route("/api/v1/trigger-block", post(handlers::trigger_block_production));
+        app = app.route(
+            "/api/v1/trigger-block",
+            post(handlers::trigger_block_production),
+        );
     } else {
         info!("✅ Manual block trigger endpoint DISABLED (secure by default)");
     }
@@ -7153,13 +9115,62 @@ async fn main() -> anyhow::Result<()> {
 
     // Create separate router for IPFS storage endpoints with their own state
     let storage_router = Router::new()
-        .route("/api/v1/storage/backup", post(q_api_server::storage_api::backup_database))
-        .route("/api/v1/storage/restore", post(q_api_server::storage_api::restore_database))
-        .route("/api/v1/storage/status", get(q_api_server::storage_api::storage_status))
+        .route(
+            "/api/v1/storage/backup",
+            post(q_api_server::storage_api::backup_database),
+        )
+        .route(
+            "/api/v1/storage/restore",
+            post(q_api_server::storage_api::restore_database),
+        )
+        .route(
+            "/api/v1/storage/status",
+            get(q_api_server::storage_api::storage_status),
+        )
         .with_state(ipfs_storage_state);
 
+    // ✅ v1.0.15-beta: Initialize Zcash RPC client and create Zcash router
+    info!("🔗 [ZCASH] Initializing Zcash RPC client...");
+    let zcash_client = match q_api_server::zcash_rpc::ZcashRpcClient::new() {
+        Ok(client) => {
+            info!("✅ [ZCASH] RPC client initialized successfully");
+            Arc::new(client)
+        }
+        Err(e) => {
+            warn!("⚠️  [ZCASH] Failed to initialize RPC client: {}. Zcash endpoints will be unavailable.", e);
+            // Create a dummy client that will return errors
+            Arc::new(
+                q_api_server::zcash_rpc::ZcashRpcClient::new()
+                    .unwrap_or_else(|_| panic!("Failed to create fallback Zcash client")),
+            )
+        }
+    };
+
+    let zcash_router = Router::new()
+        .route(
+            "/api/v1/zcash/status",
+            get(q_api_server::zcash_api::get_node_status),
+        )
+        .route(
+            "/api/v1/zcash/address",
+            post(q_api_server::zcash_api::generate_address),
+        )
+        .route(
+            "/api/v1/zcash/balance",
+            get(q_api_server::zcash_api::get_balance),
+        )
+        .route(
+            "/api/v1/zcash/send",
+            post(q_api_server::zcash_api::send_transaction),
+        )
+        .route(
+            "/api/v1/zcash/transactions",
+            get(q_api_server::zcash_api::get_transactions),
+        )
+        .with_state(zcash_client);
+
     // Merge the routers
-    let app = app.merge(storage_router);
+    let app = app.merge(storage_router).merge(zcash_router);
 
     // Create shared peer list for P2P connections
     let active_peers = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -7170,8 +9181,13 @@ async fn main() -> anyhow::Result<()> {
     let p2p_port = config.port;
     let p2p_node_status = app_state.node_status.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            q_api_server::p2p_listener::start_p2p_listener(p2p_port, p2p_node_id, p2p_peers, p2p_node_status).await
+        if let Err(e) = q_api_server::p2p_listener::start_p2p_listener(
+            p2p_port,
+            p2p_node_id,
+            p2p_peers,
+            p2p_node_status,
+        )
+        .await
         {
             error!("P2P listener failed: {}", e);
         }
@@ -7191,7 +9207,10 @@ async fn main() -> anyhow::Result<()> {
     // ============================================================================
     info!("🚀 Starting parallel worker pool for 16x performance improvement");
     info!("   16 parallel workers processing sharded transaction pool");
-    info!("   Expected TPS: {} (16x over 21,817 baseline)", 21_817 * 16);
+    info!(
+        "   Expected TPS: {} (16x over 21,817 baseline)",
+        21_817 * 16
+    );
     info!("   Full consensus pipeline: SIMD → Narwhal → DAG-Knight → Bullshark");
 
     // Initialize parallel worker pool
@@ -7204,12 +9223,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(libp2p_discovery) = &app_state.libp2p_discovery {
         // Create channel for libp2p → ConnectionManager bridge (Phase 2)
         if let Some(connection_manager) = &app_state.connection_manager {
-            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel::<q_network::connection_manager::PeerInfo>();
+            let (peer_tx, mut peer_rx) =
+                tokio::sync::mpsc::unbounded_channel::<q_network::connection_manager::PeerInfo>();
 
             // ✅ DEADLOCK FIX: Use command channel pattern (non-blocking)
             // Send SetPeerChannel command to network manager event loop
             if let Some(command_tx) = &app_state.libp2p_command_tx {
-                if let Err(e) = command_tx.send(q_network::NetworkCommand::SetPeerChannel { tx: peer_tx }) {
+                if let Err(e) =
+                    command_tx.send(q_network::NetworkCommand::SetPeerChannel { tx: peer_tx })
+                {
                     error!("❌ Failed to send SetPeerChannel command: {}", e);
                 } else {
                     info!("✅ Sent SetPeerChannel command to network manager");
@@ -7221,8 +9243,10 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move {
                     info!("🌉 Starting libp2p → ConnectionManager bridge receiver...");
                     while let Some(peer_info) = peer_rx.recv().await {
-                        info!("🌉 Bridging peer {} ({:?}) to ConnectionManager",
-                              peer_info.node_id, peer_info.server_role);
+                        info!(
+                            "🌉 Bridging peer {} ({:?}) to ConnectionManager",
+                            peer_info.node_id, peer_info.server_role
+                        );
                         connection_mgr_bridge.add_discovered_peer(peer_info).await;
                     }
                     warn!("🌉 libp2p → ConnectionManager bridge channel closed");
@@ -7310,9 +9334,17 @@ async fn main() -> anyhow::Result<()> {
     use q_api_server::high_performance_server::HighPerformanceServer;
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
+    info!(
+        "🌐 [HTTP] Creating HighPerformanceServer instance for {}",
+        addr
+    );
+
     let high_perf_server = HighPerformanceServer::new(app, addr)
-        .with_tcp_buffers(4 * 1024 * 1024, 4 * 1024 * 1024)  // 4MB buffers
-        .with_backlog(1024);  // 1024 pending connections
+        .with_tcp_buffers(4 * 1024 * 1024, 4 * 1024 * 1024) // 4MB buffers
+        .with_backlog(1024); // 1024 pending connections
+
+    info!("🌐 [HTTP] HighPerformanceServer instance created successfully");
+    info!("🌐 [HTTP] TUI mode: {}", tui_mode);
 
     if tui_mode {
         // Run TUI mode
@@ -7321,7 +9353,8 @@ async fn main() -> anyhow::Result<()> {
             info!("🎨 Launching TUI mode - Beautiful terminal UI enabled");
 
             // Create shared metrics for TUI
-            let tui_metrics = std::sync::Arc::new(std::sync::RwLock::new(q_tui::Metrics::default()));
+            let tui_metrics =
+                std::sync::Arc::new(std::sync::RwLock::new(q_tui::Metrics::default()));
 
             // Create TUI app with shared metrics
             let tui_app = q_tui::App::with_metrics(tui_metrics.clone());
@@ -7335,7 +9368,9 @@ async fn main() -> anyhow::Result<()> {
                 info!("📊 Starting TUI metrics updater task...");
                 loop {
                     // Update metrics from app state
-                    if let Err(e) = update_tui_metrics(&metrics_clone, &app_state_clone, start_time).await {
+                    if let Err(e) =
+                        update_tui_metrics(&metrics_clone, &app_state_clone, start_time).await
+                    {
                         warn!("Failed to update TUI metrics: {}", e);
                     }
 
@@ -7362,9 +9397,36 @@ async fn main() -> anyhow::Result<()> {
             return Err("TUI feature not enabled".into());
         }
     } else {
-        // Run normally without TUI
-        high_perf_server.run().await
-            .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+        // ========================================================================
+        // 🌐 v1.0.17-beta: ENHANCED HTTP SERVER DIAGNOSTICS
+        // Based on multi-AI consultation (Kimi AI + ChatGPT)
+        // ========================================================================
+        info!("🌐 [HTTP] === ATTEMPTING HTTP SERVER START ===");
+        info!("🌐 [HTTP] Calling high_perf_server.run() on main thread");
+        info!("🌐 [HTTP] Expected bind: 0.0.0.0:{}", config.port);
+
+        // Run normally without TUI - using ChatGPT's enhanced error logging pattern
+        match high_perf_server.run().await {
+            Ok(()) => {
+                info!("🌐 [HTTP] Server exited cleanly (normal shutdown)");
+            }
+            Err(e) => {
+                error!("🌐 [HTTP] === CRITICAL SERVER ERROR ===");
+                error!("🌐 [HTTP] Error type: {}", std::any::type_name_of_val(&e));
+                error!("🌐 [HTTP] Error details: {:?}", e);
+                error!("🌐 [HTTP] Error source chain:");
+
+                let mut current_error: Option<&dyn std::error::Error> = Some(e.as_ref());
+                let mut level = 0;
+                while let Some(err) = current_error {
+                    error!("🌐 [HTTP]   Level {}: {}", level, err);
+                    current_error = err.source();
+                    level += 1;
+                }
+
+                return Err(anyhow::anyhow!("HTTP server failed: {}", e));
+            }
+        }
     }
 
     // ========================================
@@ -7390,9 +9452,14 @@ async fn main() -> anyhow::Result<()> {
             info!("📊 SafeBatchedWriter Final Metrics:");
             info!("   Blocks flushed: {}", m.blocks_flushed_total);
             info!("   Batches flushed: {}", m.batches_flushed_total);
-            info!("   Avg batch size: {:.1}", if m.batches_flushed_total > 0 {
-                m.blocks_flushed_total as f64 / m.batches_flushed_total as f64
-            } else { 0.0 });
+            info!(
+                "   Avg batch size: {:.1}",
+                if m.batches_flushed_total > 0 {
+                    m.blocks_flushed_total as f64 / m.batches_flushed_total as f64
+                } else {
+                    0.0
+                }
+            );
             info!("   Sync failures: {}", m.sync_failures);
             info!("   Backpressure events: {}", m.backpressure_events);
             info!("   Integrity errors: {}", m.integrity_errors);

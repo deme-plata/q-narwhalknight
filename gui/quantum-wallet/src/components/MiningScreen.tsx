@@ -124,7 +124,7 @@ export default function MiningScreen() {
           <div className="space-y-4 mb-6">
             <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
               <Download className="w-5 h-5 text-quantum-cyan" />
-              Download Latest Miner (v0.9.18-beta)
+              Download Latest Miner (v1.0.2-beta)
             </h3>
 
             <div className="grid md:grid-cols-2 gap-4">
@@ -138,7 +138,7 @@ export default function MiningScreen() {
                   <Terminal className="w-5 h-5" />
                   <span>Linux x86_64</span>
                 </div>
-                <span className="text-xs text-quantum-cyan/80">v0.9.18-beta • Network Hashrate Reporting</span>
+                <span className="text-xs text-quantum-cyan/80">v1.0.2-beta • High-Core-Count CPU Fix</span>
               </motion.button>
 
               <motion.button
@@ -151,7 +151,7 @@ export default function MiningScreen() {
                   <Download className="w-5 h-5" />
                   <span>Windows x64</span>
                 </div>
-                <span className="text-xs text-quantum-purple/80">v0.9.18-beta • Network Hashrate Reporting</span>
+                <span className="text-xs text-quantum-purple/80">v1.0.2-beta • High-Core-Count CPU Fix</span>
               </motion.button>
 
               <motion.button
@@ -164,7 +164,7 @@ export default function MiningScreen() {
                   <Download className="w-5 h-5" />
                   <span>macOS Intel (x64)</span>
                 </div>
-                <span className="text-xs text-quantum-green/80">v0.9.18-beta • Network Hashrate Reporting</span>
+                <span className="text-xs text-quantum-green/80">v1.0.2-beta • High-Core-Count CPU Fix</span>
               </motion.button>
 
               <motion.button
@@ -177,7 +177,7 @@ export default function MiningScreen() {
                   <Download className="w-5 h-5" />
                   <span>macOS Apple Silicon (ARM64)</span>
                 </div>
-                <span className="text-xs text-quantum-orange/80">v0.9.18-beta • Network Hashrate Reporting</span>
+                <span className="text-xs text-quantum-orange/80">v1.0.2-beta • High-Core-Count CPU Fix</span>
               </motion.button>
             </div>
           </div>
@@ -309,13 +309,13 @@ export default function MiningScreen() {
             GitHub Repository
           </a>
           <a
-            href="/quantum-physics-whitepaper-full.pdf"
+            href="https://drive.proton.me/urls/ZDQQ98GHKW#JpPgzckdlaGw"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 text-quantum-cyan hover:text-quantum-cyan/80 transition-colors"
           >
             <ExternalLink className="w-4 h-4" />
-            Quantum Consensus Whitepaper
+            Mainnet Rewards Whitepaper
           </a>
         </div>
       </motion.div>

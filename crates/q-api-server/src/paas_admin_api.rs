@@ -10,7 +10,6 @@
 /// - API key lifecycle
 ///
 /// All endpoints require admin authentication.
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -178,22 +177,22 @@ pub async fn get_audit_records(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> impl IntoResponse {
-    info!("PaaS audit query: wallet={:?}, service={:?}, limit={:?}",
-          params.wallet, params.service, params.limit);
+    info!(
+        "PaaS audit query: wallet={:?}, service={:?}, limit={:?}",
+        params.wallet, params.service, params.limit
+    );
 
     // In production, this would query the audit manager
     // For now, return mock data structure
-    let records = vec![
-        AuditRecord {
-            trace_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            wallet_address: "0x1234...5678".to_string(),
-            service_type: "tor_relay".to_string(),
-            amount_qug: 100_000,
-            timestamp: chrono::Utc::now().timestamp(),
-            status: "completed".to_string(),
-            latency_ms: Some(145),
-        },
-    ];
+    let records = vec![AuditRecord {
+        trace_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        wallet_address: "0x1234...5678".to_string(),
+        service_type: "tor_relay".to_string(),
+        amount_qug: 100_000,
+        timestamp: chrono::Utc::now().timestamp(),
+        status: "completed".to_string(),
+        latency_ms: Some(145),
+    }];
 
     let response = ApiResponse {
         success: true,
@@ -214,18 +213,16 @@ pub async fn get_reservations(
     info!("PaaS reservations query: wallet={:?}", params.wallet);
 
     // In production, query paas_billing_manager
-    let reservations = vec![
-        ReservationRecord {
-            reservation_id: "res_abc123".to_string(),
-            wallet_address: "0x1234...5678".to_string(),
-            amount_qug: 500_000,
-            service: "tor_relay".to_string(),
-            status: "pending".to_string(),
-            created_at: chrono::Utc::now().timestamp(),
-            expires_at: chrono::Utc::now().timestamp() + 300,
-            nonce: 1,
-        },
-    ];
+    let reservations = vec![ReservationRecord {
+        reservation_id: "res_abc123".to_string(),
+        wallet_address: "0x1234...5678".to_string(),
+        amount_qug: 500_000,
+        service: "tor_relay".to_string(),
+        status: "pending".to_string(),
+        created_at: chrono::Utc::now().timestamp(),
+        expires_at: chrono::Utc::now().timestamp() + 300,
+        nonce: 1,
+    }];
 
     let response = ApiResponse {
         success: true,
@@ -239,9 +236,7 @@ pub async fn get_reservations(
 
 /// GET /api/v1/privacy/paas/billing/stats
 /// Billing system statistics
-pub async fn get_billing_stats(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_billing_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("PaaS billing statistics requested");
 
     // In production, query paas_billing_manager
@@ -251,7 +246,7 @@ pub async fn get_billing_stats(
         released_count: 42,
         expired_count: 12,
         total_revenue_qug: 45_600_000_000, // 456 QUG
-        double_charge_rate: 0.000001, // 0.0001% - target: <0.001%
+        double_charge_rate: 0.000001,      // 0.0001% - target: <0.001%
         avg_reservation_time_ms: 2_340.5,
     };
 
@@ -267,9 +262,7 @@ pub async fn get_billing_stats(
 
 /// GET /api/v1/privacy/paas/idempotency/stats
 /// Idempotency cache statistics
-pub async fn get_idempotency_stats(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_idempotency_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("PaaS idempotency statistics requested");
 
     // In production, query paas_idempotency_manager
@@ -294,9 +287,7 @@ pub async fn get_idempotency_stats(
 
 /// GET /api/v1/privacy/paas/pricing
 /// Current dynamic pricing information
-pub async fn get_pricing(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_pricing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("PaaS pricing information requested");
 
     // In production, query paas_pricing_manager
@@ -325,24 +316,20 @@ pub async fn get_pricing(
 
 /// GET /api/v1/privacy/paas/api-keys
 /// List all API keys
-pub async fn list_api_keys(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_api_keys(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("PaaS API keys list requested");
 
     // In production, query paas_api_key_manager
-    let keys = vec![
-        ApiKeyRecord {
-            key_id: "key_abc123".to_string(),
-            wallet_address: "0x1234...5678".to_string(),
-            tier: "professional".to_string(),
-            created_at: chrono::Utc::now().timestamp() - 86400 * 30,
-            expires_at: Some(chrono::Utc::now().timestamp() + 86400 * 60),
-            status: "active".to_string(),
-            last_used: Some(chrono::Utc::now().timestamp() - 3600),
-            request_count: 12_450,
-        },
-    ];
+    let keys = vec![ApiKeyRecord {
+        key_id: "key_abc123".to_string(),
+        wallet_address: "0x1234...5678".to_string(),
+        tier: "professional".to_string(),
+        created_at: chrono::Utc::now().timestamp() - 86400 * 30,
+        expires_at: Some(chrono::Utc::now().timestamp() + 86400 * 60),
+        status: "active".to_string(),
+        last_used: Some(chrono::Utc::now().timestamp() - 3600),
+        request_count: 12_450,
+    }];
 
     let response = ApiResponse {
         success: true,
@@ -360,16 +347,19 @@ pub async fn generate_api_key(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GenerateApiKeyRequest>,
 ) -> impl IntoResponse {
-    info!("Generating new API key: tier={}, wallet={}", req.tier, req.wallet_address);
+    info!(
+        "Generating new API key: tier={}, wallet={}",
+        req.tier, req.wallet_address
+    );
 
     // In production, call paas_api_key_manager.generate_key()
     let response_data = GenerateApiKeyResponse {
         key_id: "key_new123".to_string(),
         api_key: "paas_1234567890abcdef1234567890abcdef12345678_checksum".to_string(),
         tier: req.tier,
-        expires_at: req.expires_days.map(|days| {
-            chrono::Utc::now().timestamp() + (days as i64 * 86400)
-        }),
+        expires_at: req
+            .expires_days
+            .map(|days| chrono::Utc::now().timestamp() + (days as i64 * 86400)),
     };
 
     let response = ApiResponse {
@@ -434,7 +424,10 @@ pub async fn revoke_api_key(
 // Router Setup
 // ============================================================================
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
 /// Create PaaS admin router
 pub fn create_paas_admin_router() -> Router<Arc<AppState>> {
@@ -445,7 +438,6 @@ pub fn create_paas_admin_router() -> Router<Arc<AppState>> {
         .route("/billing/stats", get(get_billing_stats))
         .route("/idempotency/stats", get(get_idempotency_stats))
         .route("/pricing", get(get_pricing))
-
         // API key management
         .route("/api-keys", get(list_api_keys))
         .route("/api-keys/generate", post(generate_api_key))

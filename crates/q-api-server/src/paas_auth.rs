@@ -12,12 +12,7 @@
 // 3. Public key hash becomes wallet address for balance checks
 // 4. Rate limiting applied based on account tier
 
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -149,7 +144,12 @@ impl PaaSAuthManager {
                 let dilithium5_valid = self.verify_dilithium5_signature(token).await?;
                 ecdsa_valid && dilithium5_valid
             }
-            _ => return Err(format!("Unsupported signature type: {}", token.signature_type)),
+            _ => {
+                return Err(format!(
+                    "Unsupported signature type: {}",
+                    token.signature_type
+                ))
+            }
         };
 
         if !verified {
@@ -202,7 +202,10 @@ impl PaaSAuthManager {
         let message_hash = Sha256::digest(&token.signed_message);
 
         // Create secp256k1 context
-        use secp256k1::{ecdsa::{RecoverableSignature, RecoveryId}, Message, Secp256k1};
+        use secp256k1::{
+            ecdsa::{RecoverableSignature, RecoveryId},
+            Message, Secp256k1,
+        };
 
         let secp = Secp256k1::new();
 
@@ -223,7 +226,8 @@ impl PaaSAuthManager {
             .map_err(|e| format!("Invalid message hash: {}", e))?;
 
         // Recover public key from signature
-        let recovered_pubkey = secp.recover_ecdsa(&message, &signature)
+        let recovered_pubkey = secp
+            .recover_ecdsa(&message, &signature)
             .map_err(|e| format!("Failed to recover public key: {}", e))?;
 
         // Serialize recovered public key and hash it to get wallet address
@@ -278,7 +282,7 @@ impl PaaSAuthManager {
 
         // Use pqcrypto-dilithium for verification
         use pqcrypto_dilithium::dilithium5;
-        use pqcrypto_traits::sign::{PublicKey as _, DetachedSignature as _};
+        use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 
         // Parse public key
         let public_key = dilithium5::PublicKey::from_bytes(public_key_bytes)
@@ -289,11 +293,8 @@ impl PaaSAuthManager {
             .map_err(|e| format!("Invalid Dilithium5 signature: {:?}", e))?;
 
         // Verify signature
-        let verification_result = dilithium5::verify_detached_signature(
-            &signature,
-            &token.signed_message,
-            &public_key
-        );
+        let verification_result =
+            dilithium5::verify_detached_signature(&signature, &token.signed_message, &public_key);
 
         match verification_result {
             Ok(_) => {
@@ -316,17 +317,18 @@ impl PaaSAuthManager {
                 Ok(true)
             }
             Err(e) => {
-                warn!(
-                    "🔐 Dilithium5 signature verification failed: {:?}",
-                    e
-                );
+                warn!("🔐 Dilithium5 signature verification failed: {:?}", e);
                 Ok(false)
             }
         }
     }
 
     /// Check rate limit for wallet address
-    pub async fn check_rate_limit(&self, wallet_address: &[u8; 32], tier: AccountTier) -> Result<(), String> {
+    pub async fn check_rate_limit(
+        &self,
+        wallet_address: &[u8; 32],
+        tier: AccountTier,
+    ) -> Result<(), String> {
         // Enterprise tier has no rate limits
         if tier == AccountTier::Enterprise {
             return Ok(());
@@ -443,10 +445,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_account_tier_from_balance() {
-        assert_eq!(AccountTier::from_balance_qnk(50_00000000), AccountTier::Free);
-        assert_eq!(AccountTier::from_balance_qnk(500_00000000), AccountTier::Standard);
-        assert_eq!(AccountTier::from_balance_qnk(5000_00000000), AccountTier::Premium);
-        assert_eq!(AccountTier::from_balance_qnk(50000_00000000), AccountTier::Enterprise);
+        assert_eq!(
+            AccountTier::from_balance_qnk(50_00000000),
+            AccountTier::Free
+        );
+        assert_eq!(
+            AccountTier::from_balance_qnk(500_00000000),
+            AccountTier::Standard
+        );
+        assert_eq!(
+            AccountTier::from_balance_qnk(5000_00000000),
+            AccountTier::Premium
+        );
+        assert_eq!(
+            AccountTier::from_balance_qnk(50000_00000000),
+            AccountTier::Enterprise
+        );
     }
 
     #[tokio::test]
@@ -456,12 +470,16 @@ mod tests {
 
         // Free tier: 100 requests/minute
         for i in 0..100 {
-            let result = auth_manager.check_rate_limit(&wallet, AccountTier::Free).await;
+            let result = auth_manager
+                .check_rate_limit(&wallet, AccountTier::Free)
+                .await;
             assert!(result.is_ok(), "Request {} should succeed", i);
         }
 
         // 101st request should fail
-        let result = auth_manager.check_rate_limit(&wallet, AccountTier::Free).await;
+        let result = auth_manager
+            .check_rate_limit(&wallet, AccountTier::Free)
+            .await;
         assert!(result.is_err(), "101st request should exceed rate limit");
     }
 
@@ -472,7 +490,9 @@ mod tests {
 
         // Enterprise tier: unlimited requests
         for i in 0..10000 {
-            let result = auth_manager.check_rate_limit(&wallet, AccountTier::Enterprise).await;
+            let result = auth_manager
+                .check_rate_limit(&wallet, AccountTier::Enterprise)
+                .await;
             assert!(result.is_ok(), "Enterprise request {} should succeed", i);
         }
     }

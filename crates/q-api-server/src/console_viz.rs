@@ -109,11 +109,7 @@ impl ConsoleVisualizer {
 
         for round in (0..rounds_to_show).rev() {
             let round_num = stats.consensus_rounds.saturating_sub(round);
-            let prefix = if round == 0 {
-                "   ▶ "
-            } else {
-                "     "
-            };
+            let prefix = if round == 0 { "   ▶ " } else { "     " };
 
             info!("{}Round {}: ", prefix, round_num);
 
@@ -139,8 +135,10 @@ impl ConsoleVisualizer {
         }
 
         info!("");
-        info!("  Total Vertices: {} | Consensus Rounds: {}",
-              stats.dag_vertices, stats.consensus_rounds);
+        info!(
+            "  Total Vertices: {} | Consensus Rounds: {}",
+            stats.dag_vertices, stats.consensus_rounds
+        );
     }
 
     /// Render consensus metrics
@@ -150,33 +148,47 @@ impl ConsoleVisualizer {
 
         // Transaction throughput with bar graph
         let tps_bar = Self::create_bar_graph(stats.transactions_per_second, 100_000.0, 40);
-        info!("  Transactions/sec: {:>8.0} TPS  {}",
-              stats.transactions_per_second, tps_bar);
+        info!(
+            "  Transactions/sec: {:>8.0} TPS  {}",
+            stats.transactions_per_second, tps_bar
+        );
 
         // Block production rate
         let bps_bar = Self::create_bar_graph(stats.blocks_per_second * 10.0, 10.0, 40);
-        info!("  Blocks/sec:       {:>8.2} BPS  {}",
-              stats.blocks_per_second, bps_bar);
+        info!(
+            "  Blocks/sec:       {:>8.2} BPS  {}",
+            stats.blocks_per_second, bps_bar
+        );
 
         // Consensus latency
-        let latency_bar = Self::create_bar_graph(100.0 - stats.average_latency_ms.min(100.0), 100.0, 40);
-        info!("  Avg Latency:      {:>8.2} ms   {}",
-              stats.average_latency_ms, latency_bar);
+        let latency_bar =
+            Self::create_bar_graph(100.0 - stats.average_latency_ms.min(100.0), 100.0, 40);
+        info!(
+            "  Avg Latency:      {:>8.2} ms   {}",
+            stats.average_latency_ms, latency_bar
+        );
 
         // Mempool status
         let mempool_bar = Self::create_bar_graph(stats.mempool_size as f64, 100_000.0, 40);
-        info!("  Mempool Size:     {:>8} txs  {}",
-              stats.mempool_size, mempool_bar);
+        info!(
+            "  Mempool Size:     {:>8} txs  {}",
+            stats.mempool_size, mempool_bar
+        );
 
         info!("");
-        info!("  Total Transactions: {:>12} | Total Blocks: {:>8}",
-              stats.total_transactions, stats.total_blocks);
+        info!(
+            "  Total Transactions: {:>12} | Total Blocks: {:>8}",
+            stats.total_transactions, stats.total_blocks
+        );
 
         // Shadow mode status (if enabled)
         if stats.shadow_mode_active {
             info!("");
             info!("🎭 SHADOW MODE STATUS:");
-            info!("  Mode: Active | Agreement Rate: {:.1}%", stats.agreement_rate * 100.0);
+            info!(
+                "  Mode: Active | Agreement Rate: {:.1}%",
+                stats.agreement_rate * 100.0
+            );
 
             let agreement_bar = Self::create_bar_graph(stats.agreement_rate * 100.0, 100.0, 40);
             info!("  DAG-Knight vs Resonance: {}", agreement_bar);
@@ -209,14 +221,28 @@ impl ConsoleVisualizer {
 
         // Connected peers
         if stats.connected_peers > 0 {
-            info!("         ┌{}{}{}{}{}┼{}{}{}{}{}┐",
-                  conn_symbol, conn_symbol, conn_symbol, conn_symbol, conn_symbol,
-                  conn_symbol, conn_symbol, conn_symbol, conn_symbol, conn_symbol);
+            info!(
+                "         ┌{}{}{}{}{}┼{}{}{}{}{}┐",
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol,
+                conn_symbol
+            );
 
             // Show up to 5 peers
             let peers_to_show = stats.connected_peers.min(5);
             for i in 0..peers_to_show {
-                let symbol = if i == frame % peers_to_show { "◉" } else { "●" };
+                let symbol = if i == frame % peers_to_show {
+                    "◉"
+                } else {
+                    "●"
+                };
                 if i == 0 && peers_to_show == 1 {
                     info!("         │");
                     info!("      ┌──▼──┐");
@@ -228,13 +254,25 @@ impl ConsoleVisualizer {
                 if peers_to_show <= 3 {
                     print!("      │ {} {} │", symbol, format!("P{}", i + 1));
                     if i < peers_to_show - 1 {
-                        print!("    │ {} {} │",
-                              if (i + 1) == frame % peers_to_show { "◉" } else { "●" },
-                              format!("P{}", i + 2));
+                        print!(
+                            "    │ {} {} │",
+                            if (i + 1) == frame % peers_to_show {
+                                "◉"
+                            } else {
+                                "●"
+                            },
+                            format!("P{}", i + 2)
+                        );
                         if peers_to_show > 2 {
-                            print!("    │ {} {} │",
-                                  if (i + 2) == frame % peers_to_show { "◉" } else { "●" },
-                                  format!("P{}", i + 3));
+                            print!(
+                                "    │ {} {} │",
+                                if (i + 2) == frame % peers_to_show {
+                                    "◉"
+                                } else {
+                                    "●"
+                                },
+                                format!("P{}", i + 3)
+                            );
                         }
                     }
                     println!();
@@ -256,11 +294,17 @@ impl ConsoleVisualizer {
         }
 
         info!("");
-        info!("  Connected Peers: {} | Network Status: {}",
-              stats.connected_peers,
-              if stats.connected_peers >= 4 { "✅ Healthy" }
-              else if stats.connected_peers >= 1 { "⚠ Limited" }
-              else { "❌ Isolated" });
+        info!(
+            "  Connected Peers: {} | Network Status: {}",
+            stats.connected_peers,
+            if stats.connected_peers >= 4 {
+                "✅ Healthy"
+            } else if stats.connected_peers >= 1 {
+                "⚠ Limited"
+            } else {
+                "❌ Isolated"
+            }
+        );
     }
 
     /// Create a text-based bar graph
@@ -309,7 +353,8 @@ mod tests {
         update_stats(stats_handle.clone(), |stats| {
             stats.total_transactions = 1000;
             stats.transactions_per_second = 50_000.0;
-        }).await;
+        })
+        .await;
 
         let stats = stats_handle.read().await;
         assert_eq!(stats.total_transactions, 1000);

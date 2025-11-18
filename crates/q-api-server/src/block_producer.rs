@@ -1,3 +1,4 @@
+use crossbeam::queue::SegQueue;
 /// Block Producer - Aggregates mining solutions into QBlocks
 ///
 /// This module is responsible for:
@@ -14,12 +15,10 @@
 /// Phase 3.1 Optimization: SIMD-accelerated Merkle tree computation
 /// Performance gain: 8x (AVX-512) or 4x (AVX2) over scalar
 /// Target capacity: ~80 BPS, ~80,000 TPS
-
 use q_types::*;
-use crossbeam::queue::SegQueue;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;  // Still need RwLock for SharedBlockProducer wrapper
+use tokio::sync::RwLock; // Still need RwLock for SharedBlockProducer wrapper
 use tracing::{debug, error, info, warn};
 
 /// Block production configuration
@@ -67,6 +66,7 @@ impl Default for BlockProducerConfig {
 /// Phase 2.2: Lock-free solution queue for high-throughput block production
 /// Phase 3.1: SIMD-accelerated Merkle tree computation
 /// v0.9.99-beta: Adaptive rewards integration with BalanceConsensusEngine
+/// v1.0.16-beta: PQC block signing with ValidatorKeypair
 pub struct BlockProducer {
     /// Configuration
     config: BlockProducerConfig,
@@ -99,6 +99,14 @@ pub struct BlockProducer {
     /// Provides throughput-independent emission (82,031 QUG/year regardless of bps)
     /// Activates at block 200,000 for gradual migration
     balance_consensus: Option<Arc<q_storage::BalanceConsensusEngine>>,
+
+    /// ✨ v1.0.16-beta: PQC Validator Keypair - Post-Quantum Block Signing
+    /// When present, blocks will be signed with Dilithium5 or hybrid Ed25519+Dilithium5
+    validator_keypair: Option<Arc<q_types::ValidatorKeypair>>,
+
+    /// 🔔 v1.0.17-beta: Event emitter for real-time SSE updates (mining rewards, etc.)
+    /// When present, emits events to connected SSE/WebSocket clients
+    event_emitter: Option<Arc<crate::streaming::HighPerformanceEmitter>>,
 }
 
 impl BlockProducer {
@@ -106,6 +114,7 @@ impl BlockProducer {
     /// Phase 2.2: Initialize with lock-free SegQueue
     /// Phase 3.1: SIMD Merkle disabled (use new_with_simd for Phase 3.1)
     /// v0.9.99-beta: Optional adaptive rewards (backward compatible)
+    /// v1.0.16-beta: PQC signing disabled (use set_validator_keypair to enable)
     pub fn new(config: BlockProducerConfig) -> Self {
         Self {
             config,
@@ -115,13 +124,16 @@ impl BlockProducer {
             current_height: 0,
             total_difficulty: 0,
             dag_round: 0,
-            simd_merkle: None,  // Scalar fallback
-            balance_consensus: None,  // v0.9.99-beta: Use fixed rewards (legacy mode)
+            simd_merkle: None,       // Scalar fallback
+            balance_consensus: None, // v0.9.99-beta: Use fixed rewards (legacy mode)
+            validator_keypair: None, // v1.0.16-beta: PQC signing disabled
+            event_emitter: None,     // v1.0.17-beta: SSE events disabled
         }
     }
 
     /// Create new block producer with adaptive rewards
     /// ✅ v0.9.99-beta: Recommended constructor for mainnet/testnet
+    /// v1.0.16-beta: PQC signing disabled (use set_validator_keypair to enable)
     pub fn new_with_adaptive_rewards(
         config: BlockProducerConfig,
         balance_consensus: Arc<q_storage::BalanceConsensusEngine>,
@@ -135,7 +147,9 @@ impl BlockProducer {
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: None,
-            balance_consensus: Some(balance_consensus),  // ✅ Adaptive rewards enabled!
+            balance_consensus: Some(balance_consensus), // ✅ Adaptive rewards enabled!
+            validator_keypair: None,                    // v1.0.16-beta: PQC signing disabled
+            event_emitter: None,                        // v1.0.17-beta: SSE events disabled
         }
     }
 
@@ -146,14 +160,11 @@ impl BlockProducer {
         let cpu_features = q_crypto_simd::detect_cpu_features();
 
         // Initialize SIMD hasher
-        let simd_hasher = Arc::new(
-            q_crypto_simd::SimdHasher::new(&cpu_features, 128).await?
-        );
+        let simd_hasher = Arc::new(q_crypto_simd::SimdHasher::new(&cpu_features, 128).await?);
 
         // Initialize SIMD Merkle tree
-        let simd_merkle = Arc::new(
-            q_crypto_simd::SimdMerkleTree::new(&cpu_features, simd_hasher).await?
-        );
+        let simd_merkle =
+            Arc::new(q_crypto_simd::SimdMerkleTree::new(&cpu_features, simd_hasher).await?);
 
         info!("🚀 Phase 3.1: SIMD Merkle tree initialized");
         info!("   AVX-512: {}", cpu_features.has_avx512);
@@ -169,7 +180,9 @@ impl BlockProducer {
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: Some(simd_merkle),
-            balance_consensus: None,  // v0.9.99-beta: Use fixed rewards (legacy mode)
+            balance_consensus: None, // v0.9.99-beta: Use fixed rewards (legacy mode)
+            validator_keypair: None, // v1.0.16-beta: PQC signing disabled
+            event_emitter: None,     // v1.0.17-beta: SSE events disabled
         })
     }
 
@@ -180,8 +193,10 @@ impl BlockProducer {
         &mut self,
         storage: &Arc<q_storage::QStorage>,
     ) -> anyhow::Result<()> {
-        info!("📂 Loading blockchain state from storage for producer (validator_index={})...",
-            self.config.validator_index);
+        info!(
+            "📂 Loading blockchain state from storage for producer (validator_index={})...",
+            self.config.validator_index
+        );
 
         // ✅ v0.9.17-beta FIX: Use get_highest_contiguous_block() as single source of truth
         // This method is used by crash recovery, TurboSync, and peer height sync
@@ -193,7 +208,10 @@ impl BlockProducer {
             return Ok(());
         }
 
-        info!("🔍 Found highest block at height {} in storage", highest_height);
+        info!(
+            "🔍 Found highest block at height {} in storage",
+            highest_height
+        );
 
         // Try to load full block metadata if possible
         match storage.get_qblock_by_height(highest_height).await? {
@@ -206,20 +224,29 @@ impl BlockProducer {
 
                 info!("✅ Loaded blockchain state from storage:");
                 info!("   Height: {}", self.current_height);
-                info!("   Latest hash: {}", hex::encode(&self.latest_block_hash[..8]));
+                info!(
+                    "   Latest hash: {}",
+                    hex::encode(&self.latest_block_hash[..8])
+                );
                 info!("   Total difficulty: {}", self.total_difficulty);
                 info!("   DAG round: {}", self.dag_round);
             }
             None => {
                 // Block metadata missing or corrupt - use height-only mode
-                warn!("⚠️  Block #{} exists but cannot load metadata - using height-only mode", highest_height);
+                warn!(
+                    "⚠️  Block #{} exists but cannot load metadata - using height-only mode",
+                    highest_height
+                );
 
                 self.current_height = highest_height;
                 self.latest_block_hash = [0u8; 32]; // Placeholder
                 self.total_difficulty = 0;
                 self.dag_round = highest_height;
 
-                warn!("✅ Loaded height {} from storage (metadata unavailable)", highest_height);
+                warn!(
+                    "✅ Loaded height {} from storage (metadata unavailable)",
+                    highest_height
+                );
             }
         }
 
@@ -230,7 +257,8 @@ impl BlockProducer {
     /// Phase 2.2: NO LOCK NEEDED - instant enqueue!
     /// Performance: Zero lock contention, O(1) push operation
     pub fn queue_solution(&mut self, solution: MiningSolution) {
-        debug!("📦 Queued mining solution: nonce={}, miner={:?}",
+        debug!(
+            "📦 Queued mining solution: nonce={}, miner={:?}",
             solution.nonce,
             hex::encode(&solution.miner_address[..8])
         );
@@ -247,13 +275,14 @@ impl BlockProducer {
     /// Phase 2.2: Estimate queue size without locks (lock-free approximation)
     /// v0.1.5-beta FIX: Don't rely on is_empty() - always drain available solutions
     pub fn should_produce_block(&self) -> bool {
-        let time_elapsed = self.last_block_time.elapsed().as_secs() >= self.config.block_interval_secs;
+        let time_elapsed =
+            self.last_block_time.elapsed().as_secs() >= self.config.block_interval_secs;
 
         // CRITICAL FIX: Always produce when time elapsed if we're a validator
         // The produce_block() method will drain whatever solutions exist
         // Don't rely on is_empty() which is unreliable with lock-free SegQueue
         if time_elapsed && self.config.is_validator {
-            return true;  // Always produce - drain available solutions
+            return true; // Always produce - drain available solutions
         }
 
         false
@@ -276,7 +305,7 @@ impl BlockProducer {
             if let Some(solution) = self.pending_solutions.pop() {
                 solutions.push(solution);
             } else {
-                break;  // Queue is empty
+                break; // Queue is empty
             }
         }
 
@@ -285,13 +314,15 @@ impl BlockProducer {
             debug!("📦 Producing empty block for DAG continuity (no mining solutions)");
         }
 
-        info!("🏗️  Producing block: height={}, solutions={} (Phase 2.2 lock-free drain)",
+        info!(
+            "🏗️  Producing block: height={}, solutions={} (Phase 2.2 lock-free drain)",
             self.current_height + 1,
             solutions.len()
         );
 
         // Calculate block difficulty from solutions
-        let block_difficulty: u128 = solutions.iter()
+        let block_difficulty: u128 = solutions
+            .iter()
             .map(|s| Self::calculate_solution_difficulty(&s.difficulty_target))
             .sum();
 
@@ -313,6 +344,7 @@ impl BlockProducer {
             iterations: 100 + (self.current_height / 10) as u64,
             challenge: self.latest_block_hash.to_vec(),
             generated_at: timestamp,
+            adaptive_params: None, // v1.0.16: Will implement adaptive VDF parameters
         };
 
         // Generate quantum metadata
@@ -326,11 +358,10 @@ impl BlockProducer {
 
         // Create coinbase transactions (block rewards + dev fee)
         // ✅ v0.9.99-beta: Adaptive rewards with fail-fast error handling
-        let coinbase_transactions = match self.create_coinbase_transactions(
-            &solutions,
-            self.current_height + 1,
-            timestamp,
-        ).await {
+        let coinbase_transactions = match self
+            .create_coinbase_transactions(&solutions, self.current_height + 1, timestamp)
+            .await
+        {
             Ok(txs) => txs,
             Err(e) => {
                 error!("🚨 CRITICAL: Failed to create coinbase transactions: {}", e);
@@ -343,8 +374,8 @@ impl BlockProducer {
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 11, // Phase 11 testnet - Data Loss FIX (0.05 QUG/block, 672 QUG/day)
-                network_id: "testnet-phase11".to_string(), // ✅ v1.0.1-beta: Phase 11 - CRITICAL Bug #4 fix
+                phase: 12, // Phase 12 testnet - Post-Quantum Security (0.05 QUG/block, 672 QUG/day)
+                network_id: "testnet-phase12".to_string(), // ✅ v1.0.12-beta: Phase 12 - CRITICAL Bug #4 fix
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -362,7 +393,7 @@ impl BlockProducer {
             quantum_metadata,
             transactions: coinbase_transactions,
             balance_updates: vec![], // v0.9.0-beta: Balance consensus (empty for now, full implementation later)
-            size_bytes: 0, // Will be calculated
+            size_bytes: 0,           // Will be calculated
         };
 
         // Calculate block hash
@@ -381,14 +412,18 @@ impl BlockProducer {
         // Height advancement is now done by caller AFTER storage confirmation.
         // See: advance_height() method (must be called after save_qblock succeeds)
 
-        info!("📦 BLOCK CREATED (NOT YET SAVED): Height {}, Hash {}, Solutions {}, Difficulty {}",
+        info!(
+            "📦 BLOCK CREATED (NOT YET SAVED): Height {}, Hash {}, Solutions {}, Difficulty {}",
             block.header.height,
             hex::encode(&block_hash[..8]),
             solutions.len(),
             block_difficulty
         );
 
-        warn!("⚠️  [v1.0.1-beta] Block created but height NOT advanced - caller MUST call advance_height() after save_qblock()");
+        debug!(
+            "🔧 [v1.0.10-beta] Block created at height {}, will advance after successful save",
+            block.header.height
+        );
 
         Some(block)
     }
@@ -433,10 +468,11 @@ impl BlockProducer {
         block_timestamp: u64,
     ) -> Result<Vec<Transaction>, anyhow::Error> {
         use chrono::Utc;
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         const DEV_FEE_PERCENT: f64 = 0.01; // 1%
-        const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        const FOUNDER_WALLET_HEX: &str =
+            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
         const ADAPTIVE_ACTIVATION_HEIGHT: u64 = 200_000; // ~90 days at 5-10 bps
         const LEGACY_FIXED_REWARD: u64 = 5_000_000; // 0.05 QUG (Phase 1-10 legacy)
 
@@ -449,7 +485,10 @@ impl BlockProducer {
         // ✅ v0.9.99-beta: MIGRATION STRATEGY - Gradual transition from fixed to adaptive
         let total_reward = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
             // Phase 1 (Bootstrap): Fixed 0.05 QUG reward for backward compatibility
-            info!("📊 Block #{}: Using FIXED reward (0.05 QUG) - Phase 1 Bootstrap", block_height);
+            info!(
+                "📊 Block #{}: Using FIXED reward (0.05 QUG) - Phase 1 Bootstrap",
+                block_height
+            );
             LEGACY_FIXED_REWARD
         } else {
             // Phase 2 (Adaptive): Calculate reward based on throughput
@@ -457,7 +496,9 @@ impl BlockProducer {
                 Some(bc) => {
                     // Get approximate total supply for reward calculation
                     // Uses emission controller stats (fast, no storage I/O)
-                    let total_supply = bc.get_total_supply_approx().await
+                    let total_supply = bc
+                        .get_total_supply_approx()
+                        .await
                         .map_err(|e| anyhow::anyhow!("Failed to get total supply: {}", e))?;
 
                     // Calculate adaptive reward
@@ -468,8 +509,11 @@ impl BlockProducer {
                             anyhow::anyhow!("Adaptive reward calculation failed: {}", e)
                         })?;
 
-                    info!("📊 Block #{}: Adaptive reward = {} QUG (throughput-adjusted)",
-                        block_height, reward as f64 / 100_000_000.0);
+                    info!(
+                        "📊 Block #{}: Adaptive reward = {} QUG (throughput-adjusted)",
+                        block_height,
+                        reward as f64 / 100_000_000.0
+                    );
                     reward
                 }
                 None => {
@@ -484,7 +528,8 @@ impl BlockProducer {
         let miner_reward_per_solution = ((total_reward - dev_fee_amount) / solutions.len() as u64);
 
         // Decode founder wallet
-        let founder_wallet_bytes = hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
+        let founder_wallet_bytes =
+            hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
         let mut founder_wallet = [0u8; 32];
         founder_wallet.copy_from_slice(&founder_wallet_bytes);
 
@@ -547,6 +592,28 @@ impl BlockProducer {
                 token_type: TokenType::QUG,
                 fee_token_type: TokenType::QUGUSD,
             });
+
+            // ✨ v1.0.17-beta: Emit SSE event for mining reward
+            if let Some(ref emitter) = self.event_emitter {
+                let miner_address_hex = hex::encode(solution.miner_address);
+                let reward_qnk = miner_reward_per_solution as f64 / 100_000_000.0;
+
+                // Use the emit_mining_reward helper method from HighPerformanceEmitter
+                if let Err(e) = emitter
+                    .emit_mining_reward(
+                        miner_address_hex,
+                        reward_qnk,
+                        solution.nonce,
+                        block_height,
+                        hex::encode(solution.difficulty_target),
+                        solution.hash_rate_hs as f64,
+                    )
+                    .await
+                {
+                    warn!("Failed to emit mining reward SSE event: {}", e);
+                    // Don't fail block production if SSE fails - it's non-critical
+                }
+            }
         }
 
         // ✅ v0.9.99-beta: Enhanced logging for adaptive rewards
@@ -560,9 +627,18 @@ impl BlockProducer {
             "ADAPTIVE (Phase 2 - Throughput Independent)"
         };
 
-        info!("💎 [v0.9.99-beta - {}] Created {} coinbase transactions:", reward_type, transactions.len());
-        info!("   📊 Block #{}: {} solutions, Total: {:.9} QUG ({} atomic units)",
-            block_height, solutions.len(), qug_total, total_reward);
+        info!(
+            "💎 [v0.9.99-beta - {}] Created {} coinbase transactions:",
+            reward_type,
+            transactions.len()
+        );
+        info!(
+            "   📊 Block #{}: {} solutions, Total: {:.9} QUG ({} atomic units)",
+            block_height,
+            solutions.len(),
+            qug_total,
+            total_reward
+        );
         info!("   🏦 Dev Fee (1%): {:.9} QUG → founder", qug_dev_fee);
         info!("   ⛏️  Each Miner Gets: {:.9} QUG", qug_per_miner);
         if block_height >= ADAPTIVE_ACTIVATION_HEIGHT {
@@ -573,7 +649,11 @@ impl BlockProducer {
     }
 
     /// Generate quantum metadata for block
-    fn generate_quantum_metadata(&self, solutions: &[MiningSolution], difficulty: u128) -> Result<QuantumMetadata, String> {
+    fn generate_quantum_metadata(
+        &self,
+        solutions: &[MiningSolution],
+        difficulty: u128,
+    ) -> Result<QuantumMetadata, String> {
         // Calculate quantum entropy from VDF
         let quantum_entropy = self.calculate_quantum_entropy(solutions);
 
@@ -601,23 +681,225 @@ impl BlockProducer {
             finality: 0.0, // TODO: Calculate from DAG depth
         };
 
-        let energy = energy_components.coupling +
-                     energy_components.potential +
-                     energy_components.ordering +
-                     energy_components.fault_tolerance +
-                     energy_components.temporal +
-                     energy_components.finality;
+        let energy = energy_components.coupling
+            + energy_components.potential
+            + energy_components.ordering
+            + energy_components.fault_tolerance
+            + energy_components.temporal
+            + energy_components.finality;
+
+        // ✨ v1.0.16-beta: Generate spectral signatures with PQC support
+        // Sign the block if validator keypair is available
+        let spectral_signatures = if let Some(keypair) = &self.validator_keypair {
+            // Generate block hash for signing (using difficulty + entropy as unique identifier)
+            let block_hash = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&difficulty.to_le_bytes());
+                hasher.update(&quantum_entropy.to_le_bytes());
+                hasher.update(&self.current_height.to_le_bytes());
+                let hash = hasher.finalize();
+                let mut block_hash = [0u8; 32];
+                block_hash.copy_from_slice(&hash);
+                block_hash
+            };
+
+            match self.sign_block_with_keypair(&block_hash, &keypair) {
+                Ok(signature) => {
+                    info!("🔐 [PQC] Block signed with {:?}", signature.crypto_phase);
+                    vec![signature]
+                }
+                Err(e) => {
+                    error!("🚨 [PQC] Failed to sign block: {}", e);
+                    vec![] // Empty signatures on error
+                }
+            }
+        } else {
+            vec![] // No validator keypair - blocks unsigned
+        };
 
         Ok(QuantumMetadata {
             vertex_coordinates,
             k_parameter: Self::sanitize_f64(k_parameter)?,
             energy: Self::sanitize_f64(energy)?,
             energy_components,
-            spectral_signatures: vec![], // TODO: Collect validator signatures
+            spectral_signatures,
             wavefunction_phase: Self::sanitize_f64(quantum_entropy * std::f64::consts::PI)?,
             entropy_variance: Self::sanitize_f64(quantum_entropy * 0.1)?,
             byzantine_scores: std::collections::HashMap::new(),
         })
+    }
+
+    /// Sign a block with ValidatorKeypair
+    /// ✨ v1.0.16-beta: ACTIVE PQC block signing
+    ///
+    /// # Arguments
+    /// * `block_hash` - Hash of the block to sign
+    /// * `keypair` - Validator keypair containing both Ed25519 and Dilithium5 keys
+    ///
+    /// # Returns
+    /// * `Ok(SpectralSignature)` - Signed spectral signature using keypair's preferred phase
+    /// * `Err` - If signing fails
+    fn sign_block_with_keypair(
+        &self,
+        block_hash: &[u8; 32],
+        keypair: &q_types::ValidatorKeypair,
+    ) -> Result<SpectralSignature, String> {
+        use ed25519_dalek::Signer;
+        use pqcrypto_traits::sign::SecretKey as PQSecretKey;
+
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+
+        // Use the keypair's preferred phase
+        match keypair.preferred_phase {
+            SignaturePhase::Phase0Ed25519 => {
+                // Sign with Ed25519 only
+                let signature = keypair.ed25519_signing.sign(block_hash);
+                let classical_sig = signature.to_bytes().to_vec();
+
+                info!("🔐 [PQC] Signed block with Ed25519 (Phase 0)");
+
+                Ok(SpectralSignature {
+                    validator: keypair.node_id,
+                    crypto_phase: SignaturePhase::Phase0Ed25519,
+                    classical_sig,
+                    pqc_sig: None,
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+
+            SignaturePhase::Phase1Dilithium5 => {
+                // Sign with Dilithium5 only
+                use pqcrypto_dilithium::dilithium5;
+                use pqcrypto_traits::sign::SignedMessage;
+                let signed_message = dilithium5::sign(block_hash, &keypair.dilithium5_secret);
+                let pqc_sig = signed_message.as_bytes().to_vec();
+
+                info!(
+                    "🔐 [PQC] Signed block with Dilithium5 (Phase 1) - {} bytes",
+                    pqc_sig.len()
+                );
+
+                Ok(SpectralSignature {
+                    validator: keypair.node_id,
+                    crypto_phase: SignaturePhase::Phase1Dilithium5,
+                    classical_sig: vec![], // Not used in Phase1
+                    pqc_sig: Some(pqc_sig),
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+
+            SignaturePhase::HybridEd25519Dilithium5 => {
+                // Sign with both Ed25519 and Dilithium5
+                let ed_signature = keypair.ed25519_signing.sign(block_hash);
+                let classical_sig = ed_signature.to_bytes().to_vec();
+
+                use pqcrypto_dilithium::dilithium5;
+                use pqcrypto_traits::sign::SignedMessage;
+                let signed_message = dilithium5::sign(block_hash, &keypair.dilithium5_secret);
+                let pqc_sig = signed_message.as_bytes().to_vec();
+
+                info!("🔐 [PQC] Signed block with Hybrid Ed25519+Dilithium5");
+                info!("   Ed25519 signature: {} bytes", classical_sig.len());
+                info!("   Dilithium5 signature: {} bytes", pqc_sig.len());
+
+                Ok(SpectralSignature {
+                    validator: keypair.node_id,
+                    crypto_phase: SignaturePhase::HybridEd25519Dilithium5,
+                    classical_sig,
+                    pqc_sig: Some(pqc_sig),
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+        }
+    }
+
+    /// Sign a block with the appropriate crypto phase
+    /// ✨ v1.0.15-beta: PQC signature integration
+    ///
+    /// # Arguments
+    /// * `block_hash` - Hash of the block to sign
+    /// * `crypto_phase` - Cryptographic phase to use (Ed25519, Dilithium5, or Hybrid)
+    /// * `ed25519_key` - Optional Ed25519 signing key (required for Phase0 and Hybrid)
+    /// * `dilithium5_key` - Optional Dilithium5 signing key (required for Phase1 and Hybrid)
+    ///
+    /// # Returns
+    /// * `Ok(SpectralSignature)` - Signed spectral signature
+    /// * `Err` - If required keys are missing or signing fails
+    ///
+    /// **NOTE**: This method is feature-gated behind the "signing" feature in q-types.
+    /// The current implementation creates unsigned placeholders until key management is implemented.
+    #[cfg(feature = "signing")]
+    fn sign_block(
+        &self,
+        block_hash: &[u8; 32],
+        crypto_phase: SignaturePhase,
+        ed25519_key: Option<&ed25519_dalek::SigningKey>,
+        dilithium5_key: Option<&pqcrypto_dilithium::dilithium5::SecretKey>,
+    ) -> Result<SpectralSignature, String> {
+        use q_types::signature_verification::{sign_dilithium5, sign_ed25519};
+
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+
+        match crypto_phase {
+            SignaturePhase::Phase0Ed25519 => {
+                let key = ed25519_key
+                    .ok_or_else(|| "Ed25519 signing key required for Phase0".to_string())?;
+                let classical_sig = sign_ed25519(block_hash, key);
+
+                Ok(SpectralSignature {
+                    validator: self.config.node_id,
+                    crypto_phase: SignaturePhase::Phase0Ed25519,
+                    classical_sig,
+                    pqc_sig: None,
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+
+            SignaturePhase::Phase1Dilithium5 => {
+                let key = dilithium5_key
+                    .ok_or_else(|| "Dilithium5 signing key required for Phase1".to_string())?;
+                let pqc_sig = sign_dilithium5(block_hash, key);
+
+                Ok(SpectralSignature {
+                    validator: self.config.node_id,
+                    crypto_phase: SignaturePhase::Phase1Dilithium5,
+                    classical_sig: vec![], // Not used in Phase1
+                    pqc_sig: Some(pqc_sig),
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+
+            SignaturePhase::HybridEd25519Dilithium5 => {
+                let ed_key = ed25519_key
+                    .ok_or_else(|| "Ed25519 signing key required for Hybrid".to_string())?;
+                let pqc_key = dilithium5_key
+                    .ok_or_else(|| "Dilithium5 signing key required for Hybrid".to_string())?;
+
+                let classical_sig = sign_ed25519(block_hash, ed_key);
+                let pqc_sig = sign_dilithium5(block_hash, pqc_key);
+
+                Ok(SpectralSignature {
+                    validator: self.config.node_id,
+                    crypto_phase: SignaturePhase::HybridEd25519Dilithium5,
+                    classical_sig,
+                    pqc_sig: Some(pqc_sig),
+                    spectral_coefficient: 1.0,
+                    phase_deviation: 0.0,
+                    timestamp,
+                })
+            }
+        }
     }
 
     /// Ensure f64 values are valid (not NaN or Infinity) for P2P serialization
@@ -681,10 +963,7 @@ impl BlockProducer {
 
     /// Compute Merkle root of mining solutions
     /// Phase 3.1: Uses SIMD acceleration if available (8x speedup)
-    async fn compute_solutions_merkle_root_simd(
-        &self,
-        solutions: &[MiningSolution]
-    ) -> BlockHash {
+    async fn compute_solutions_merkle_root_simd(&self, solutions: &[MiningSolution]) -> BlockHash {
         if solutions.is_empty() {
             return [0u8; 32];
         }
@@ -692,7 +971,8 @@ impl BlockProducer {
         // Try SIMD path first (Phase 3.1)
         if let Some(simd_merkle) = &self.simd_merkle {
             // Serialize solutions for hashing
-            let serialized: Vec<Vec<u8>> = solutions.iter()
+            let serialized: Vec<Vec<u8>> = solutions
+                .iter()
                 .map(|s| bincode::serialize(s).unwrap())
                 .collect();
 
@@ -700,14 +980,18 @@ impl BlockProducer {
             match simd_merkle.compute_solutions_root(&serialized).await {
                 Ok(root) => return root,
                 Err(e) => {
-                    warn!("SIMD Merkle computation failed, falling back to scalar: {}", e);
+                    warn!(
+                        "SIMD Merkle computation failed, falling back to scalar: {}",
+                        e
+                    );
                     // Fall through to scalar implementation
                 }
             }
         }
 
         // Scalar fallback (Phase 2.2 and earlier)
-        let hashes: Vec<_> = solutions.iter()
+        let hashes: Vec<_> = solutions
+            .iter()
             .map(|s| blake3::hash(&bincode::serialize(s).unwrap()))
             .collect();
 
@@ -720,7 +1004,8 @@ impl BlockProducer {
             return [0u8; 32];
         }
 
-        let hashes: Vec<_> = solutions.iter()
+        let hashes: Vec<_> = solutions
+            .iter()
             .map(|s| blake3::hash(&bincode::serialize(s).unwrap()))
             .collect();
 
@@ -774,12 +1059,62 @@ impl BlockProducer {
         self.pending_solutions.len()
     }
 
+    /// Set validator keypair for PQC block signing
+    /// ✨ v1.0.16-beta: Enable post-quantum block signing
+    ///
+    /// When a validator keypair is set, all produced blocks will be signed with:
+    /// - Ed25519 (Phase 0)
+    /// - Dilithium5 (Phase 1)
+    /// - Hybrid Ed25519+Dilithium5 (during transition)
+    ///
+    /// # Arguments
+    /// * `keypair` - Validator keypair containing Ed25519 and Dilithium5 keys
+    pub fn set_validator_keypair(&mut self, keypair: Arc<q_types::ValidatorKeypair>) {
+        info!("🔐 [PQC] Setting validator keypair for block signing");
+        info!("   Node ID: {}...", hex::encode(&keypair.node_id[..8]));
+        info!("   Preferred phase: {:?}", keypair.preferred_phase);
+        self.validator_keypair = Some(keypair);
+    }
+
+    /// Set event emitter for real-time SSE updates
+    /// ✨ v1.0.17-beta: Enable mining reward notifications to frontend
+    ///
+    /// When an event emitter is configured, the block producer will emit:
+    /// - MiningReward events when blocks are produced
+    /// - MiningStats updates for connected miners
+    ///
+    /// # Arguments
+    /// * `emitter` - High-performance event emitter for SSE/WebSocket streaming
+    pub fn set_event_emitter(&mut self, emitter: Arc<crate::streaming::HighPerformanceEmitter>) {
+        info!("🔔 [SSE] Setting event emitter for block producer");
+        info!("   Mining rewards will be broadcast in real-time");
+        self.event_emitter = Some(emitter);
+    }
+
     /// Set latest block (for initialization from storage)
+    ///
+    /// 🚨 v1.0.3-beta CRITICAL FIX: Reset last_block_time to allow immediate production
+    ///
+    /// **BUG FIXED**: After restart/sync, producers would wait `block_interval_secs` from
+    /// startup time instead of producing immediately. This caused the node to appear "stuck"
+    /// even though it was healthy - it was just waiting for the timer!
+    ///
+    /// **FIX**: Reset `last_block_time` to (now - block_interval_secs) so the next
+    /// `should_produce()` check returns true immediately, allowing block production to resume.
     pub fn set_latest_block(&mut self, height: u64, hash: BlockHash, difficulty: u128) {
         self.current_height = height;
         self.latest_block_hash = hash;
         self.total_difficulty = difficulty;
         self.dag_round = height; // Sync DAG round with height
+
+        // 🔥 CRITICAL FIX: Reset timer to allow immediate block production
+        // Subtract block_interval to ensure should_produce() returns true on next check
+        self.last_block_time =
+            Instant::now() - std::time::Duration::from_secs(self.config.block_interval_secs);
+        debug!(
+            "🔄 Producer synced to height {} - timer reset for immediate production",
+            height
+        );
     }
 
     /// ✅ v1.0.1-beta CRITICAL FIX: Advance height ONLY after block storage confirms
@@ -804,8 +1139,10 @@ impl BlockProducer {
         self.dag_round += 1;
         self.last_block_time = Instant::now();
 
-        info!("✅ [v1.0.1-beta FIX] Height advanced to {} AFTER storage confirmation",
-              self.current_height);
+        info!(
+            "✅ [v1.0.1-beta FIX] Height advanced to {} AFTER storage confirmation",
+            self.current_height
+        );
     }
     // ==========================================
     // PHASE 3: DAG-KNIGHT CONSENSUS INTEGRATION
@@ -828,14 +1165,13 @@ impl BlockProducer {
     pub fn qblock_to_vertex(&self, block: &block::QBlock) -> anyhow::Result<q_dag_knight::Vertex> {
         use q_dag_knight::vertex_creator::Vertex;
 
-        debug!("🔄 Converting QBlock {} to DAG Vertex for consensus",
-            block.header.height);
+        debug!(
+            "🔄 Converting QBlock {} to DAG Vertex for consensus",
+            block.header.height
+        );
 
         // Extract transaction hashes from block
-        let tx_hashes: Vec<TxHash> = block.transactions
-            .iter()
-            .map(|tx| tx.hash())
-            .collect();
+        let tx_hashes: Vec<TxHash> = block.transactions.iter().map(|tx| tx.hash()).collect();
 
         // Determine parent vertices
         // For now, use prev_block_hash as the single parent
@@ -849,7 +1185,8 @@ impl BlockProducer {
         // Generate vertex ID from block hash
         let vertex_id = block.calculate_hash();
 
-        info!("✅ Converted QBlock {} → Vertex (ID: {}, {} txs, {} parents)",
+        info!(
+            "✅ Converted QBlock {} → Vertex (ID: {}, {} txs, {} parents)",
             block.header.height,
             hex::encode(&vertex_id[..8]),
             tx_hashes.len(),
@@ -868,7 +1205,9 @@ impl BlockProducer {
                 proof
             },
             quantum_seed: None, // TODO: Extract from block quantum metadata
-            computation_time: std::time::Duration::from_secs(block.header.vdf_proof.iterations / 100),
+            computation_time: std::time::Duration::from_secs(
+                block.header.vdf_proof.iterations / 100,
+            ),
             difficulty: block.header.vdf_proof.iterations,
             entropy_estimate: 0.85, // TODO: Calculate from quantum metadata
             parallel_witnesses: vec![], // TODO: Add witnesses if available
@@ -947,10 +1286,11 @@ mod tests {
         let solution = MiningSolution {
             nonce: 12345,
             hash: [0u8; 32],
-            difficulty_target: [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            difficulty_target: [
+                0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF,
+            ],
             miner_address: [1u8; 32],
             timestamp: 1234567890,
             pool_id: None,
@@ -980,10 +1320,11 @@ mod tests {
             let solution = MiningSolution {
                 nonce: i,
                 hash: [0u8; 32],
-                difficulty_target: [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                difficulty_target: [
+                    0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                ],
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
@@ -998,10 +1339,11 @@ mod tests {
             let solution = MiningSolution {
                 nonce: i,
                 hash: [0u8; 32],
-                difficulty_target: [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                difficulty_target: [
+                    0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                ],
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
@@ -1022,10 +1364,11 @@ mod tests {
             let solution = MiningSolution {
                 nonce: i,
                 hash: [0u8; 32],
-                difficulty_target: [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                difficulty_target: [
+                    0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                ],
                 miner_address: [1u8; 32],
                 timestamp: 1234567890,
                 pool_id: None,
@@ -1076,7 +1419,10 @@ impl ParallelBlockProducerPool {
     /// * `num_producers` - Number of parallel producers (typically 8-16)
     /// * `base_config` - Base configuration to clone for each producer
     pub fn new(num_producers: usize, base_config: BlockProducerConfig) -> Self {
-        info!("🚀 Initializing Parallel Block Producer Pool with {} producers", num_producers);
+        info!(
+            "🚀 Initializing Parallel Block Producer Pool with {} producers",
+            num_producers
+        );
 
         let producers = (0..num_producers)
             .map(|producer_id| {
@@ -1085,8 +1431,10 @@ impl ParallelBlockProducerPool {
                 config.validator_index = producer_id as u64;
                 config.total_validators = num_producers as u64;
 
-                info!("  ✅ Producer #{} initialized (validator_index={})",
-                    producer_id, config.validator_index);
+                info!(
+                    "  ✅ Producer #{} initialized (validator_index={})",
+                    producer_id, config.validator_index
+                );
 
                 Arc::new(RwLock::new(BlockProducer::new(config)))
             })
@@ -1112,7 +1460,10 @@ impl ParallelBlockProducerPool {
         base_config: BlockProducerConfig,
         storage: &Arc<q_storage::QStorage>,
     ) -> anyhow::Result<Self> {
-        info!("🚀 Initializing Parallel Block Producer Pool with {} producers (LOADING FROM STORAGE)", num_producers);
+        info!(
+            "🚀 Initializing Parallel Block Producer Pool with {} producers (LOADING FROM STORAGE)",
+            num_producers
+        );
 
         let mut producers = Vec::new();
 
@@ -1122,7 +1473,7 @@ impl ParallelBlockProducerPool {
             config.validator_index = producer_id as u64;
             config.total_validators = num_producers as u64;
 
-            let validator_idx = config.validator_index;  // Save before move
+            let validator_idx = config.validator_index; // Save before move
 
             // Create producer
             let mut producer = BlockProducer::new(config);
@@ -1130,8 +1481,10 @@ impl ParallelBlockProducerPool {
             // CRITICAL: Load blockchain state from storage
             producer.load_from_storage(storage).await?;
 
-            info!("  ✅ Producer #{} initialized and loaded from storage (validator_index={})",
-                producer_id, validator_idx);
+            info!(
+                "  ✅ Producer #{} initialized and loaded from storage (validator_index={})",
+                producer_id, validator_idx
+            );
 
             producers.push(Arc::new(RwLock::new(producer)));
         }
@@ -1147,11 +1500,16 @@ impl ParallelBlockProducerPool {
     pub async fn queue_solution(&self, solution: MiningSolution) {
         // Round-robin distribution across all producers
         let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % self.num_producers;
-        debug!("🔄 ParallelBlockProducerPool: Distributing solution to producer #{} (nonce={})",
-            index, solution.nonce);
+        debug!(
+            "🔄 ParallelBlockProducerPool: Distributing solution to producer #{} (nonce={})",
+            index, solution.nonce
+        );
         let mut producer = self.producers[index].write().await;
         producer.queue_solution(solution);
-        debug!("✅ ParallelBlockProducerPool: Solution distributed to producer #{}", index);
+        debug!(
+            "✅ ParallelBlockProducerPool: Solution distributed to producer #{}",
+            index
+        );
     }
 
     /// Produce blocks from all producers that are ready
@@ -1168,8 +1526,10 @@ impl ParallelBlockProducerPool {
             let mut producer = producer_arc.write().await;
 
             if let Some(block) = producer.produce_block().await {
-                info!("🎉 Producer #{} created block at height {}",
-                    producer_id, block.header.height);
+                info!(
+                    "🎉 Producer #{} created block at height {}",
+                    producer_id, block.header.height
+                );
                 blocks.push((producer_id, block));
             }
         }
@@ -1194,7 +1554,10 @@ impl ParallelBlockProducerPool {
     }
 
     /// Get a read-locked reference to a specific producer (for utility methods)
-    pub async fn get_producer(&self, index: usize) -> tokio::sync::RwLockReadGuard<'_, BlockProducer> {
+    pub async fn get_producer(
+        &self,
+        index: usize,
+    ) -> tokio::sync::RwLockReadGuard<'_, BlockProducer> {
         self.producers[index % self.num_producers].read().await
     }
 
@@ -1220,11 +1583,16 @@ impl ParallelBlockProducerPool {
     ///
     /// This new method properly acquires a write lock to call advance_height().
     pub async fn advance_producer_height(&self, producer_id: usize, block_hash: BlockHash) {
-        let mut producer = self.producers[producer_id % self.num_producers].write().await;
+        let mut producer = self.producers[producer_id % self.num_producers]
+            .write()
+            .await;
         producer.advance_height(block_hash);
 
-        info!("✅ [v1.0.8-beta FIX] Producer #{} height advanced to {} AFTER storage confirmation",
-              producer_id, producer.get_height());
+        info!(
+            "✅ [v1.0.8-beta FIX] Producer #{} height advanced to {} AFTER storage confirmation",
+            producer_id,
+            producer.get_height()
+        );
     }
 
     /// Synchronize all producers' blockchain state from storage after sync events
@@ -1242,8 +1610,14 @@ impl ParallelBlockProducerPool {
     /// // After turbo sync completes:
     /// app_state.block_producer_pool.sync_from_storage(&storage).await?;
     /// ```
-    pub async fn sync_from_storage(&self, storage: &Arc<q_storage::QStorage>) -> anyhow::Result<()> {
-        info!("🔄 [PRODUCER SYNC] Synchronizing all {} producers with blockchain state...", self.num_producers);
+    pub async fn sync_from_storage(
+        &self,
+        storage: &Arc<q_storage::QStorage>,
+    ) -> anyhow::Result<()> {
+        info!(
+            "🔄 [PRODUCER SYNC] Synchronizing all {} producers with blockchain state...",
+            self.num_producers
+        );
 
         // ✅ v0.9.12-beta FIX: Use get_highest_contiguous_block() as authoritative source
         // This is the same method used by crash recovery and peer height announcements.
@@ -1255,7 +1629,10 @@ impl ParallelBlockProducerPool {
             return Ok(());
         }
 
-        info!("🔍 [PRODUCER SYNC] Found highest block at height {} in storage", highest_height);
+        info!(
+            "🔍 [PRODUCER SYNC] Found highest block at height {} in storage",
+            highest_height
+        );
 
         // Try to load the actual block for full metadata
         match storage.get_qblock_by_height(highest_height).await? {
@@ -1266,8 +1643,11 @@ impl ParallelBlockProducerPool {
                 let new_difficulty = latest_block.header.total_difficulty;
                 let new_dag_round = latest_block.header.dag_round;
 
-                info!("   Latest block metadata: height={}, hash={}",
-                    new_height, hex::encode(&new_hash[..8]));
+                info!(
+                    "   Latest block metadata: height={}, hash={}",
+                    new_height,
+                    hex::encode(&new_hash[..8])
+                );
 
                 // Update all producers atomically
                 for (i, producer_arc) in self.producers.iter().enumerate() {
@@ -1278,7 +1658,10 @@ impl ParallelBlockProducerPool {
                     debug!("   ✅ Producer #{} synchronized: height={}", i, new_height);
                 }
 
-                info!("✅ [PRODUCER SYNC] All producers synchronized to height {} (full metadata)", new_height);
+                info!(
+                    "✅ [PRODUCER SYNC] All producers synchronized to height {} (full metadata)",
+                    new_height
+                );
             }
             None => {
                 // Block data missing or corrupt - use height-only sync
@@ -1288,18 +1671,24 @@ impl ParallelBlockProducerPool {
                 // This prevents height regression when blocks can't be deserialized.
                 // Producers will create the next block with placeholder metadata, which will be
                 // corrected when the next valid block arrives from the network.
-                let zero_hash = [0u8; 32];  // Placeholder hash
-                let zero_difficulty = 0u128;  // Will be updated when next block arrives
+                let zero_hash = [0u8; 32]; // Placeholder hash
+                let zero_difficulty = 0u128; // Will be updated when next block arrives
 
                 for (i, producer_arc) in self.producers.iter().enumerate() {
                     let mut producer = producer_arc.write().await;
                     producer.set_latest_block(highest_height, zero_hash, zero_difficulty);
-                    producer.dag_round = highest_height;  // Use height as DAG round
+                    producer.dag_round = highest_height; // Use height as DAG round
 
-                    debug!("   ⚠️  Producer #{} synchronized to height {} (height-only)", i, highest_height);
+                    debug!(
+                        "   ⚠️  Producer #{} synchronized to height {} (height-only)",
+                        i, highest_height
+                    );
                 }
 
-                info!("✅ [PRODUCER SYNC] All producers synchronized to height {} (height-only mode)", highest_height);
+                info!(
+                    "✅ [PRODUCER SYNC] All producers synchronized to height {} (height-only mode)",
+                    highest_height
+                );
             }
         }
 

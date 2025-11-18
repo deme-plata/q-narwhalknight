@@ -14,8 +14,8 @@ use axum::{
 };
 use axum_extra::{headers, TypedHeader};
 use futures_util::{sink::SinkExt, stream::StreamExt as FuturesStreamExt};
-use q_types::*;
 use q_storage::BalanceStorage; // Import trait for get_balance method
+use q_types::*;
 use serde_json;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -256,7 +256,8 @@ pub enum PeerEventType {
 pub struct EventBroadcaster {
     tx: broadcast::Sender<StreamEvent>,
     // Deduplication cache: stores (wallet_address, balance) with timestamp to prevent duplicate broadcasts
-    recent_balance_broadcasts: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>>,
+    recent_balance_broadcasts:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>>,
 }
 
 impl EventBroadcaster {
@@ -264,7 +265,9 @@ impl EventBroadcaster {
         let (tx, _rx) = broadcast::channel(100000); // CRITICAL FIX: Increased from 10k to 100k to handle high mining activity
         Self {
             tx,
-            recent_balance_broadcasts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            recent_balance_broadcasts: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -276,14 +279,24 @@ impl EventBroadcaster {
         let subscriber_count = self.tx.receiver_count();
 
         // 🔒 DEDUPLICATION: Skip duplicate balance updates within 500ms window
-        if let StreamEvent::BalanceUpdated { wallet_address, new_balance, .. } = &event {
+        if let StreamEvent::BalanceUpdated {
+            wallet_address,
+            new_balance,
+            ..
+        } = &event
+        {
             let mut cache = self.recent_balance_broadcasts.lock().await;
             let now = std::time::Instant::now();
 
             // Check if we recently broadcast this exact balance
             if let Some((last_balance, last_time)) = cache.get(wallet_address) {
-                if (*last_balance - new_balance).abs() < 0.00000001 && now.duration_since(*last_time).as_millis() < 500 {
-                    debug!("📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 500ms)", &wallet_address[..16]);
+                if (*last_balance - new_balance).abs() < 0.00000001
+                    && now.duration_since(*last_time).as_millis() < 500
+                {
+                    debug!(
+                        "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 500ms)",
+                        &wallet_address[..16]
+                    );
                     return Ok(());
                 }
             }
@@ -298,10 +311,16 @@ impl EventBroadcaster {
         // 🔒 PRIVACY: Log aggregate statistics only, no individual wallet data
         match &event {
             StreamEvent::BalanceUpdated { change_reason, .. } => {
-                debug!("📡 [SSE] Broadcasting BalanceUpdated: reason={}, subscribers={}",
-                    change_reason, subscriber_count);
+                debug!(
+                    "📡 [SSE] Broadcasting BalanceUpdated: reason={}, subscribers={}",
+                    change_reason, subscriber_count
+                );
             }
-            StreamEvent::PrivacyMixingCompleted { transaction_hash, mixing_session_id, .. } => {
+            StreamEvent::PrivacyMixingCompleted {
+                transaction_hash,
+                mixing_session_id,
+                ..
+            } => {
                 info!("📡 [SSE] Broadcasting PrivacyMixingCompleted: tx={}, session={}, subscribers={}",
                     hex::encode(&transaction_hash[..8]), &mixing_session_id[..8], subscriber_count);
             }
@@ -371,7 +390,10 @@ pub async fn sse_events(
         // 🔒 PRIVACY: Hash wallet address for logging
         use blake3::hash;
         let wallet_hash = hash(wallet.as_bytes());
-        debug!("🔐 SSE connection established: wallet_hash={}", hex::encode(&wallet_hash.as_bytes()[..8]));
+        debug!(
+            "🔐 SSE connection established: wallet_hash={}",
+            hex::encode(&wallet_hash.as_bytes()[..8])
+        );
     } else {
         warn!("⚠️ SSE connection without wallet filter - will receive all events (privacy risk)");
     }
@@ -408,7 +430,7 @@ pub async fn sse_events(
                 let to_hex = hex::encode(&transaction.to);
 
                 from_hex == normalized_filter || to_hex == normalized_filter
-            },
+            }
 
             // Transaction status updates - need to check transaction details
             // For now, allow all status updates (they're small events)
@@ -422,7 +444,7 @@ pub async fn sse_events(
                     wallet_address.clone()
                 };
                 normalized_event == normalized_filter
-            },
+            }
 
             // Faucet events - only send if it's for this wallet
             StreamEvent::FaucetDispensed { wallet_address, .. } => {
@@ -432,7 +454,7 @@ pub async fn sse_events(
                     wallet_address.clone()
                 };
                 normalized_event == normalized_filter
-            },
+            }
 
             // Mining rewards - only send if it's for this wallet
             StreamEvent::MiningReward { miner_address, .. } => {
@@ -442,7 +464,7 @@ pub async fn sse_events(
                     miner_address.clone()
                 };
                 normalized_event == normalized_filter
-            },
+            }
 
             // Mining stats - only send if it's for this wallet
             StreamEvent::MiningStats { miner_address, .. } => {
@@ -452,7 +474,7 @@ pub async fn sse_events(
                     miner_address.clone()
                 };
                 normalized_event == normalized_filter
-            },
+            }
 
             // Swap events - only send if it's for this wallet
             StreamEvent::SwapExecuted { wallet_address, .. } => {
@@ -462,16 +484,16 @@ pub async fn sse_events(
                     wallet_address.clone()
                 };
                 normalized_event == normalized_filter
-            },
+            }
 
             // Public events that everyone should see
-            StreamEvent::NodeStatusUpdate { .. } |
-            StreamEvent::BlockFinalized { .. } |
-            StreamEvent::NewBlock { .. } |
-            StreamEvent::MetricsUpdate { .. } |
-            StreamEvent::TokenPriceUpdate { .. } |
-            StreamEvent::LiquidityPoolUpdate { .. } |
-            StreamEvent::NitroBoostsUpdate { .. } => true,
+            StreamEvent::NodeStatusUpdate { .. }
+            | StreamEvent::BlockFinalized { .. }
+            | StreamEvent::NewBlock { .. }
+            | StreamEvent::MetricsUpdate { .. }
+            | StreamEvent::TokenPriceUpdate { .. }
+            | StreamEvent::LiquidityPoolUpdate { .. }
+            | StreamEvent::NitroBoostsUpdate { .. } => true,
 
             // All other events are private - filter them out
             _ => false,
@@ -482,95 +504,105 @@ pub async fn sse_events(
     let state_clone = state.clone();
     let wallet_filter_clone = wallet_filter.clone();
 
-    let stream = futures_util::stream::unfold((rx, wallet_filter, Some(state_clone), wallet_filter_clone), move |(mut rx, filter, state_opt, wallet_filter_for_initial)| async move {
-        // CRITICAL FIX: Send initial balance event on SSE connection
-        // This eliminates the "wait minutes for balance" issue
-        if let (Some(state), Some(ref wallet_filter_value)) = (&state_opt, &wallet_filter_for_initial) {
-            debug!("📡 SSE: Sending initial balance");
+    let stream = futures_util::stream::unfold(
+        (rx, wallet_filter, Some(state_clone), wallet_filter_clone),
+        move |(mut rx, filter, state_opt, wallet_filter_for_initial)| async move {
+            // CRITICAL FIX: Send initial balance event on SSE connection
+            // This eliminates the "wait minutes for balance" issue
+            if let (Some(state), Some(ref wallet_filter_value)) =
+                (&state_opt, &wallet_filter_for_initial)
+            {
+                debug!("📡 SSE: Sending initial balance");
 
-            // Fetch current balance from storage engine
-            // get_balance() expects raw hex (strip "qnk" prefix if present)
-            let wallet_hex = wallet_filter_value.strip_prefix("qnk").unwrap_or(wallet_filter_value);
-            match state.storage_engine.get_balance(wallet_hex).await {
-                Ok(balance) => {
-                    // v0.9.36-beta FIX: Convert base units to QNK (balance / 100_000_000.0)
-                    // This fixes the 10x discrepancy between TopBar and wallet card balances
-                    let balance_qnk = balance as f64 / 100_000_000.0;
-                    // 🔒 PRIVACY: No logging of balances or addresses
-                    debug!("💰 SSE: Initial balance fetched successfully");
+                // Fetch current balance from storage engine
+                // get_balance() expects raw hex (strip "qnk" prefix if present)
+                let wallet_hex = wallet_filter_value
+                    .strip_prefix("qnk")
+                    .unwrap_or(wallet_filter_value);
+                match state.storage_engine.get_balance(wallet_hex).await {
+                    Ok(balance) => {
+                        // v0.9.36-beta FIX: Convert base units to QNK (balance / 100_000_000.0)
+                        // This fixes the 10x discrepancy between TopBar and wallet card balances
+                        let balance_qnk = balance as f64 / 100_000_000.0;
+                        // 🔒 PRIVACY: No logging of balances or addresses
+                        debug!("💰 SSE: Initial balance fetched successfully");
 
-                    // Create initial balance event
-                    let initial_balance_event = serde_json::json!({
-                        "type": "BalanceUpdated",
-                        "data": {
-                            "wallet_address": wallet_filter_value.clone(),
-                            "old_balance": balance_qnk,
-                            "new_balance": balance_qnk,
-                            "change_reason": "SSE connection established",
-                            "timestamp": chrono::Utc::now().to_rfc3339()
-                        }
-                    });
+                        // Create initial balance event
+                        let initial_balance_event = serde_json::json!({
+                            "type": "BalanceUpdated",
+                            "data": {
+                                "wallet_address": wallet_filter_value.clone(),
+                                "old_balance": balance_qnk,
+                                "new_balance": balance_qnk,
+                                "change_reason": "SSE connection established",
+                                "timestamp": chrono::Utc::now().to_rfc3339()
+                            }
+                        });
 
-                    if let Ok(json) = serde_json::to_string(&initial_balance_event) {
-                        // Return initial balance event, then continue with normal stream
-                        // Set state_opt to None so we don't send initial balance again
-                        return Some((
-                            Ok(Event::default().event("balance-updated").data(json)),
-                            (rx, filter, None, None),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️ SSE: Failed to fetch initial balance: {}", e);
-                }
-            }
-        }
-
-        // Normal SSE event loop (continues after initial balance sent)
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    // Filter event based on wallet address
-                    if !is_event_relevant(&event, &filter) {
-                        // Skip this event, continue to next
-                        continue;
-                    }
-
-                    match serde_json::to_string(&event) {
-                        Ok(json) => {
-                            debug!("SSE sending filtered event: {} to wallet: {:?}",
-                                event_type_name(&event), filter);
+                        if let Ok(json) = serde_json::to_string(&initial_balance_event) {
+                            // Return initial balance event, then continue with normal stream
+                            // Set state_opt to None so we don't send initial balance again
                             return Some((
-                                Ok(Event::default().event(event_type_name(&event)).data(json)),
+                                Ok(Event::default().event("balance-updated").data(json)),
                                 (rx, filter, None, None),
                             ));
                         }
-                        Err(e) => {
-                            error!("Failed to serialize event: {}", e);
-                            return Some((Err(axum::Error::new(e)), (rx, filter, None, None)));
-                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️ SSE: Failed to fetch initial balance: {}", e);
                     }
                 }
-                Err(e) => {
-                    return match e {
-                        tokio::sync::broadcast::error::RecvError::Lagged(n) => {
-                            warn!("SSE client lagged behind by {} events, continuing", n);
-                            Some((
-                                Ok(Event::default()
-                                    .event("sse-lag")
-                                    .data(format!("{{\"lagged_events\": {}}}", n))),
-                                (rx, filter, None, None),
-                            ))
+            }
+
+            // Normal SSE event loop (continues after initial balance sent)
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // Filter event based on wallet address
+                        if !is_event_relevant(&event, &filter) {
+                            // Skip this event, continue to next
+                            continue;
                         }
-                        tokio::sync::broadcast::error::RecvError::Closed => {
-                            debug!("SSE broadcast channel closed");
-                            None // End the stream
+
+                        match serde_json::to_string(&event) {
+                            Ok(json) => {
+                                debug!(
+                                    "SSE sending filtered event: {} to wallet: {:?}",
+                                    event_type_name(&event),
+                                    filter
+                                );
+                                return Some((
+                                    Ok(Event::default().event(event_type_name(&event)).data(json)),
+                                    (rx, filter, None, None),
+                                ));
+                            }
+                            Err(e) => {
+                                error!("Failed to serialize event: {}", e);
+                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None)));
+                            }
                         }
-                    };
+                    }
+                    Err(e) => {
+                        return match e {
+                            tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+                                warn!("SSE client lagged behind by {} events, continuing", n);
+                                Some((
+                                    Ok(Event::default()
+                                        .event("sse-lag")
+                                        .data(format!("{{\"lagged_events\": {}}}", n))),
+                                    (rx, filter, None, None),
+                                ))
+                            }
+                            tokio::sync::broadcast::error::RecvError::Closed => {
+                                debug!("SSE broadcast channel closed");
+                                None // End the stream
+                            }
+                        };
+                    }
                 }
             }
-        }
-    });
+        },
+    );
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()

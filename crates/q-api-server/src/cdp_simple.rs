@@ -1,6 +1,5 @@
 /// Simple CDP (Collateralized Debt Position) System
 /// Allows users to lock QUG as collateral to mint QUGUSD stablecoin
-
 use axum::{
     extract::State,
     http::StatusCode,
@@ -35,9 +34,9 @@ pub fn create_cdp_router() -> Router<Arc<AppState>> {
 
 #[derive(Deserialize)]
 struct MintRequest {
-    amount: f64,              // QUGUSD amount to mint
-    collateral_type: String,  // Should be "QUG"
-    collateral_amount: f64,   // QUG amount to lock
+    amount: f64,             // QUGUSD amount to mint
+    collateral_type: String, // Should be "QUG"
+    collateral_amount: f64,  // QUG amount to lock
     reason: Option<String>,
 }
 
@@ -53,11 +52,15 @@ async fn mint_qugusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MintRequest>,
 ) -> Result<Json<ApiResponse<MintResponse>>, StatusCode> {
-    info!("💵 Minting {} QUGUSD with {} QUG collateral",
-        request.amount, request.collateral_amount);
+    info!(
+        "💵 Minting {} QUGUSD with {} QUG collateral",
+        request.amount, request.collateral_amount
+    );
 
     // Validate collateral type
-    if request.collateral_type.to_uppercase() != "QUG" && request.collateral_type.to_uppercase() != "ORB" {
+    if request.collateral_type.to_uppercase() != "QUG"
+        && request.collateral_type.to_uppercase() != "ORB"
+    {
         error!("Invalid collateral type: {}", request.collateral_type);
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -72,8 +75,10 @@ async fn mint_qugusd(
 
     // Validate collateral ratio
     if collateral_ratio < MIN_COLLATERAL_RATIO {
-        error!("Insufficient collateral ratio: {:.2}% < {:.2}%",
-            collateral_ratio, MIN_COLLATERAL_RATIO);
+        error!(
+            "Insufficient collateral ratio: {:.2}% < {:.2}%",
+            collateral_ratio, MIN_COLLATERAL_RATIO
+        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -93,8 +98,10 @@ async fn mint_qugusd(
         collateral_ratio,
     };
 
-    info!("✅ Minted {} QUGUSD with {}% collateral ratio",
-        request.amount, collateral_ratio);
+    info!(
+        "✅ Minted {} QUGUSD with {}% collateral ratio",
+        request.amount, collateral_ratio
+    );
 
     Ok(Json(ApiResponse::success(response)))
 }

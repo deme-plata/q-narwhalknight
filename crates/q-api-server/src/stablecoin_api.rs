@@ -7,14 +7,13 @@
 /// - Position health monitoring
 /// - Liquidation interface
 /// - Fee statistics
-
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use q_types::{ApiResponse, TokenType, TokenInfo, QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS};
-use q_vm::contracts::{CollateralVault, MintResult, RedeemResult, PositionHealth, VaultStats};
+use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS};
+use q_vm::contracts::{CollateralVault, MintResult, PositionHealth, RedeemResult, VaultStats};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -40,17 +39,17 @@ pub struct TokenBalances {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBalance {
-    pub balance: String,              // Human-readable (e.g., "1234.56789012")
-    pub balance_base_units: u64,      // Raw base units
-    pub usd_value: f64,                // USD value
+    pub balance: String,         // Human-readable (e.g., "1234.56789012")
+    pub balance_base_units: u64, // Raw base units
+    pub usd_value: f64,          // USD value
 }
 
 /// Mint QUGUSD request
 #[derive(Debug, Deserialize)]
 pub struct MintQUGUSDRequest {
-    pub qug_amount: String,           // Human-readable QUG amount (e.g., "1000.0")
+    pub qug_amount: String, // Human-readable QUG amount (e.g., "1000.0")
     #[serde(default)]
-    pub slippage_tolerance: f64,      // Default 0.01 (1%)
+    pub slippage_tolerance: f64, // Default 0.01 (1%)
 }
 
 /// Mint QUGUSD response
@@ -65,7 +64,7 @@ pub struct MintQUGUSDResponse {
 /// Redeem QUG request
 #[derive(Debug, Deserialize)]
 pub struct RedeemQUGRequest {
-    pub qugusd_amount: String,         // Human-readable QUGUSD amount
+    pub qugusd_amount: String, // Human-readable QUGUSD amount
 }
 
 /// Redeem QUG response
@@ -83,7 +82,7 @@ pub struct PositionHealthResponse {
     pub qug_locked: String,
     pub qugusd_minted: String,
     pub collateral_ratio: f64,
-    pub health_status: String,          // "healthy", "warning", "danger", "liquidatable"
+    pub health_status: String, // "healthy", "warning", "danger", "liquidatable"
     pub liquidation_price: f64,
     pub qug_price_current: f64,
 }
@@ -192,11 +191,16 @@ pub async fn mint_qugusd(
     Json(request): Json<MintQUGUSDRequest>,
 ) -> Result<Json<ApiResponse<MintQUGUSDResponse>>, StatusCode> {
     let user_address = auth.address;
-    info!("🏦 [AUTHENTICATED] Minting QUGUSD with {} QUG for wallet {}",
-        request.qug_amount, hex::encode(&user_address[..8]));
+    info!(
+        "🏦 [AUTHENTICATED] Minting QUGUSD with {} QUG for wallet {}",
+        request.qug_amount,
+        hex::encode(&user_address[..8])
+    );
 
     // Parse QUG amount
-    let qug_amount_f64: f64 = request.qug_amount.parse()
+    let qug_amount_f64: f64 = request
+        .qug_amount
+        .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let qug_amount_base_units = (qug_amount_f64 * 1e8) as u64;
 
@@ -233,11 +237,16 @@ pub async fn redeem_qug(
     Json(request): Json<RedeemQUGRequest>,
 ) -> Result<Json<ApiResponse<RedeemQUGResponse>>, StatusCode> {
     let user_address = auth.address;
-    info!("🔓 [AUTHENTICATED] Redeeming {} QUGUSD for QUG for wallet {}",
-        request.qugusd_amount, hex::encode(&user_address[..8]));
+    info!(
+        "🔓 [AUTHENTICATED] Redeeming {} QUGUSD for QUG for wallet {}",
+        request.qugusd_amount,
+        hex::encode(&user_address[..8])
+    );
 
     // Parse QUGUSD amount
-    let qugusd_amount_f64: f64 = request.qugusd_amount.parse()
+    let qugusd_amount_f64: f64 = request
+        .qugusd_amount
+        .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let qugusd_amount_base_units = (qugusd_amount_f64 * 1e8) as u64;
 
@@ -282,7 +291,7 @@ pub async fn get_position_health(
         }
         _ => {
             return Ok(Json(ApiResponse::error(
-                "Invalid address format".to_string()
+                "Invalid address format".to_string(),
             )));
         }
     };
@@ -291,12 +300,16 @@ pub async fn get_position_health(
 
     // Get position data
     let qug_locked = vault_read.locked_qug.get(&addr_bytes).copied().unwrap_or(0);
-    let qugusd_minted = vault_read.minted_qugusd.get(&addr_bytes).copied().unwrap_or(0);
+    let qugusd_minted = vault_read
+        .minted_qugusd
+        .get(&addr_bytes)
+        .copied()
+        .unwrap_or(0);
 
-    let collateral_ratio = vault_read.get_collateral_ratio(&addr_bytes)
-        .unwrap_or(0.0);
+    let collateral_ratio = vault_read.get_collateral_ratio(&addr_bytes).unwrap_or(0.0);
 
-    let health_status = vault_read.get_position_health(&addr_bytes)
+    let health_status = vault_read
+        .get_position_health(&addr_bytes)
         .unwrap_or(PositionHealth::Healthy);
 
     // Calculate liquidation price
@@ -383,12 +396,13 @@ pub async fn get_liquidatable_positions(
     let liquidatable = vault_read.get_liquidatable_positions();
 
     // Convert to hex strings
-    let liquidatable_addrs: Vec<String> = liquidatable
-        .iter()
-        .map(|addr| hex::encode(addr))
-        .collect();
+    let liquidatable_addrs: Vec<String> =
+        liquidatable.iter().map(|addr| hex::encode(addr)).collect();
 
-    info!("⚡ Found {} liquidatable positions", liquidatable_addrs.len());
+    info!(
+        "⚡ Found {} liquidatable positions",
+        liquidatable_addrs.len()
+    );
 
     Ok(Json(ApiResponse::success(liquidatable_addrs)))
 }
@@ -409,7 +423,7 @@ pub async fn liquidate_position(
         }
         _ => {
             return Ok(Json(ApiResponse::error(
-                "Invalid liquidated address format".to_string()
+                "Invalid liquidated address format".to_string(),
             )));
         }
     };
@@ -423,7 +437,10 @@ pub async fn liquidate_position(
         Ok(result) => result,
         Err(e) => {
             warn!("❌ Liquidation failed: {}", e);
-            return Ok(Json(ApiResponse::error(format!("Liquidation failed: {}", e))));
+            return Ok(Json(ApiResponse::error(format!(
+                "Liquidation failed: {}",
+                e
+            ))));
         }
     };
 

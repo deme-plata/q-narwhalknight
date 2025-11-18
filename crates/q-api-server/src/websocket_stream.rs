@@ -20,17 +20,17 @@ use axum::{
     },
     response::Response,
 };
+use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
 use futures::{SinkExt, StreamExt};
 use q_types::Transaction;
+use rayon::prelude::*;
 use rmp_serde;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use sha3::{Digest, Sha3_256};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
-use rayon::prelude::*;
-use ed25519_dalek::{Verifier, VerifyingKey, Signature as DalekSignature};
-use sha3::{Digest, Sha3_256};
 
 /// Transaction batch for WebSocket streaming
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,7 +94,8 @@ impl WebSocketProcessor {
         // Use rayon for CPU-bound parallel processing (faster than tokio::spawn for CPU work)
         let (accepted, rejected) = tokio::task::spawn_blocking(move || {
             // Process transactions in parallel using rayon
-            batch.transactions
+            batch
+                .transactions
                 .par_iter()
                 .map(|tx| Self::validate_transaction_fast(tx))
                 .fold(
@@ -105,11 +106,11 @@ impl WebSocketProcessor {
                         } else {
                             (acc, rej + 1)
                         }
-                    }
+                    },
                 )
                 .reduce(
                     || (0, 0),
-                    |(acc1, rej1), (acc2, rej2)| (acc1 + acc2, rej1 + rej2)
+                    |(acc1, rej1), (acc2, rej2)| (acc1 + acc2, rej1 + rej2),
                 )
         })
         .await
@@ -119,8 +120,10 @@ impl WebSocketProcessor {
 
         // Update statistics (lock-free atomic operations)
         self.total_batches.fetch_add(1, Ordering::Relaxed);
-        self.total_transactions.fetch_add(tx_count as u64, Ordering::Relaxed);
-        self.total_processing_time_us.fetch_add(processing_time_us, Ordering::Relaxed);
+        self.total_transactions
+            .fetch_add(tx_count as u64, Ordering::Relaxed);
+        self.total_processing_time_us
+            .fetch_add(processing_time_us, Ordering::Relaxed);
 
         if batch.batch_id % 10 == 0 {
             info!(
@@ -207,9 +210,7 @@ impl Clone for ProcessorStats {
 }
 
 /// WebSocket handler for transaction streaming
-pub async fn ws_transaction_stream(
-    ws: WebSocketUpgrade,
-) -> Response {
+pub async fn ws_transaction_stream(ws: WebSocketUpgrade) -> Response {
     // Create processor with 16 workers (matches main.rs configuration)
     let processor = Arc::new(WebSocketProcessor::new(16));
     ws.on_upgrade(|socket| handle_socket(socket, processor))
@@ -249,7 +250,11 @@ async fn handle_socket(socket: WebSocket, processor: Arc<WebSocketProcessor>) {
                 // Deserialize batch from MessagePack
                 match rmp_serde::from_slice::<TransactionBatch>(&data) {
                     Ok(batch) => {
-                        debug!("Received batch {} with {} transactions", batch.batch_id, batch.transactions.len());
+                        debug!(
+                            "Received batch {} with {} transactions",
+                            batch.batch_id,
+                            batch.transactions.len()
+                        );
 
                         // Process batch with parallel workers
                         let ack = processor.process_batch(batch).await;
@@ -266,7 +271,10 @@ async fn handle_socket(socket: WebSocket, processor: Arc<WebSocketProcessor>) {
                 }
             }
             Ok(Message::Close(_)) => {
-                info!("WebSocket connection closed by client after {} batches", batch_count);
+                info!(
+                    "WebSocket connection closed by client after {} batches",
+                    batch_count
+                );
                 break;
             }
             Ok(Message::Ping(data)) => {

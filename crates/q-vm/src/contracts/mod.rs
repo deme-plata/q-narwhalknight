@@ -154,4 +154,21 @@ impl ContractRegistry {
             .get_form_definition(contract_type)
             .await
     }
+
+    /// Iterate over all deployed contracts
+    ///
+    /// Returns a vector of (address, contract) tuples for all deployed contracts.
+    /// This is useful for enumerating contracts for DEX token discovery, analytics, etc.
+    pub fn iter_contracts(&self) -> Vec<([u8; 32], std::sync::Arc<Contract>)> {
+        let contracts = self.contracts.read().unwrap();
+        contracts.iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
+    /// Get count of deployed contracts
+    pub fn contract_count(&self) -> usize {
+        let contracts = self.contracts.read().unwrap();
+        contracts.len()
+    }
 }

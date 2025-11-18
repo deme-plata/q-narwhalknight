@@ -22,8 +22,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::privacy_service_api::PaaSService;
+use crate::AppState;
 
 /// Reservation status state machine
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,7 +256,8 @@ impl PaaSBillingManager {
         drop(reservations);
 
         // Debit customer wallet (actual charge)
-        self.debit_wallet(state, &wallet_address, amount_qug).await?;
+        self.debit_wallet(state, &wallet_address, amount_qug)
+            .await?;
 
         // Credit Quillon Bank master account
         self.credit_quillon_bank(state, amount_qug, service, wallet_address)
@@ -432,7 +433,7 @@ impl PaaSBillingManager {
 
         let master_account = accounts.entry(master_address.clone()).or_insert_with(|| {
             use q_quillon_bank::{
-                BankAccount, CreditScore, RiskTier, QuantumCreditData, QuantumAccountFeatures,
+                BankAccount, CreditScore, QuantumAccountFeatures, QuantumCreditData, RiskTier,
             };
             BankAccount {
                 address: master_address.clone(),
@@ -517,7 +518,9 @@ impl PaaSBillingManager {
                         reservation.error_message = Some("Reservation timeout".to_string());
 
                         // Update reserved balance
-                        if let Some(reserved) = wallet_reserved_write.get_mut(&reservation.wallet_address) {
+                        if let Some(reserved) =
+                            wallet_reserved_write.get_mut(&reservation.wallet_address)
+                        {
                             *reserved = reserved.saturating_sub(reservation.amount_qug);
                             if *reserved == 0 {
                                 wallet_reserved_write.remove(&reservation.wallet_address);
@@ -536,10 +539,7 @@ impl PaaSBillingManager {
                 }
 
                 if expired_count > 0 {
-                    info!(
-                        "🧹 Cleaned up {} expired reservations",
-                        expired_count
-                    );
+                    info!("🧹 Cleaned up {} expired reservations", expired_count);
                 }
             }
         });
@@ -616,10 +616,7 @@ mod tests {
         drop(reserved);
 
         // Release second reservation
-        manager
-            .release_reservation(&res2, None)
-            .await
-            .unwrap();
+        manager.release_reservation(&res2, None).await.unwrap();
 
         // Check reserved balance decreased
         let reserved = manager.wallet_reserved_balances.read().await;

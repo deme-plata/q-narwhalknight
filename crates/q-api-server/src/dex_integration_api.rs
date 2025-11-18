@@ -27,23 +27,22 @@
 /// ## Usage:
 /// All endpoints are available under `/api/v1/dex/` and return standardized
 /// DexApiResponse<T> wrappers with success/error status, timestamps, and metadata.
-
 use axum::{
     extract::{Path, Query, State},
+    http::Request,
     http::{HeaderMap, StatusCode},
     middleware::Next,
-    http::Request,
     response::Json,
     routing::{get, post},
     Router,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use rand::Rng;
 
 use crate::AppState;
 use q_types::*;
@@ -72,7 +71,7 @@ impl RateLimiter {
     pub async fn is_allowed(&self, client_id: &str) -> bool {
         let mut calls = self.calls.write().await;
         let now = Instant::now();
-        
+
         match calls.get_mut(client_id) {
             Some((count, window_start)) => {
                 if now.duration_since(*window_start) >= self.window_duration {
@@ -126,20 +125,20 @@ impl ApiKey {
         if !self.is_active {
             return false;
         }
-        
+
         if let Some(expires_at) = self.expires_at {
             let now = chrono::Utc::now().timestamp() as u64;
             if now > expires_at {
                 return false;
             }
         }
-        
+
         true
     }
 
     pub fn has_permission(&self, permission: &str) -> bool {
-        self.permissions.contains(&permission.to_string()) || 
-        self.permissions.contains(&"admin".to_string())
+        self.permissions.contains(&permission.to_string())
+            || self.permissions.contains(&"admin".to_string())
     }
 }
 
@@ -165,7 +164,8 @@ pub fn validate_api_key(api_key: &str) -> bool {
 
 /// Extract client IP from headers
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
-    headers.get("x-forwarded-for")
+    headers
+        .get("x-forwarded-for")
         .or_else(|| headers.get("x-real-ip"))
         .and_then(|h| h.to_str().ok())
         .unwrap_or("127.0.0.1")
@@ -179,9 +179,12 @@ pub fn extract_client_ip(headers: &HeaderMap) -> String {
 /// Add security headers to response
 pub fn add_security_headers(headers: &mut HeaderMap) {
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
-    headers.insert("X-Frame-Options", "DENY".parse().unwrap()); 
+    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
     headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
-    headers.insert("Strict-Transport-Security", "max-age=31536000; includeSubDomains".parse().unwrap());
+    headers.insert(
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains".parse().unwrap(),
+    );
     headers.insert("X-API-Version", "1.0.0".parse().unwrap());
     headers.insert("X-RateLimit-Limit", "5000".parse().unwrap());
 }
@@ -224,34 +227,29 @@ impl<T> DexApiResponse<T> {
 /// DEX Integration Router with security middleware
 pub fn create_dex_integration_router() -> Router<Arc<AppState>> {
     use axum::middleware::from_fn;
-    
+
     Router::new()
         // Core DEX Integration Endpoints
         .route("/info", get(get_node_info))
         .route("/supported-tokens", get(get_supported_tokens))
         .route("/tokens", get(get_supported_tokens)) // Shorter alias for frontend compatibility
         .route("/token/:address/info", get(get_token_info))
-        
         // Liquidity Pool Endpoints
         .route("/pools", get(get_all_pools))
         .route("/pools/:address", get(get_pool_info))
         .route("/pools/:address/reserves", get(get_pool_reserves))
         .route("/pools/create", post(create_liquidity_pool))
-        
-        // Swap/Trade Endpoints  
+        // Swap/Trade Endpoints
         .route("/swap/quote", post(get_swap_quote))
         .route("/swap/execute", post(execute_swap))
         .route("/swap/:tx_hash/status", get(get_swap_status))
-        
         // Price Oracle Endpoints
         .route("/prices", get(get_all_prices))
         .route("/prices/:token", get(get_token_price))
         .route("/prices/historical/:token", get(get_historical_prices))
-        
         // Security & Compliance Endpoints
         .route("/security/audit/:contract", get(get_contract_audit))
         .route("/compliance/check", post(compliance_check))
-        
         // Integration Helper Endpoints
         .route("/integration/webhook", post(setup_webhook))
         .route("/integration/api-key", post(generate_api_key))
@@ -303,7 +301,7 @@ pub async fn get_node_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<NodeIntegrationInfo>>, StatusCode> {
     let node_status = state.node_status.read().await;
-    
+
     let info = NodeIntegrationInfo {
         node_id: hex::encode(&state.node_id),
         network: "Q-NarwhalKnight-Mainnet".to_string(),
@@ -360,10 +358,10 @@ pub struct TokenInfo {
 }
 
 pub async fn get_supported_tokens(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<Vec<TokenInfo>>>, StatusCode> {
-    // Return both QUG and QUGUSD tokens
-    let tokens = vec![
+    // Start with native QUG and QUGUSD tokens
+    let mut tokens = vec![
         TokenInfo {
             address: hex::encode(q_types::QUG_TOKEN_ADDRESS),
             name: "Quillon".to_string(),
@@ -385,6 +383,18 @@ pub async fn get_supported_tokens(
             audit_report: Some("https://audits.q-narwhalknight.dev/qugusd".to_string()),
         },
     ];
+
+    // TODO: Add custom tokens from deployed contracts
+    // The ContractRegistry needs to be enhanced to expose deployed contract metadata
+    // for token discovery. For now, return just the native QUG and QUGUSD tokens.
+    //
+    // Future enhancement: Implement contract metadata iteration in OrobitSmartContractEcosystem
+    // to enumerate all deployed token contracts with their symbol, name, decimals, and supply.
+
+    tracing::info!(
+        "📋 Returning {} supported tokens (native only, custom tokens TBD)",
+        tokens.len()
+    );
 
     Ok(Json(DexApiResponse::success(tokens)))
 }
@@ -424,7 +434,10 @@ pub async fn get_token_info(
         };
         Ok(Json(DexApiResponse::success(token)))
     } else {
-        Ok(Json(DexApiResponse::error(format!("Token '{}' not found", address))))
+        Ok(Json(DexApiResponse::error(format!(
+            "Token '{}' not found",
+            address
+        ))))
     }
 }
 
@@ -488,24 +501,32 @@ pub async fn get_swap_quote(
 ) -> Result<Json<DexApiResponse<SwapQuote>>, StatusCode> {
     // Input validation
     if request.token_in.is_empty() || request.token_out.is_empty() {
-        return Ok(Json(DexApiResponse::error("token_in and token_out are required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "token_in and token_out are required".to_string(),
+        )));
     }
-    
+
     if request.token_in == request.token_out {
-        return Ok(Json(DexApiResponse::error("Cannot swap token for itself".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "Cannot swap token for itself".to_string(),
+        )));
     }
-    
+
     // Validate amount_in or amount_out is provided
     if request.amount_in.is_none() && request.amount_out.is_none() {
-        return Ok(Json(DexApiResponse::error("Either amount_in or amount_out must be specified".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "Either amount_in or amount_out must be specified".to_string(),
+        )));
     }
-    
+
     // Validate slippage tolerance
     let slippage = request.slippage_tolerance.unwrap_or(0.5);
     if slippage < 0.0 || slippage > 10.0 {
-        return Ok(Json(DexApiResponse::error("Slippage tolerance must be between 0% and 10%".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "Slippage tolerance must be between 0% and 10%".to_string(),
+        )));
     }
-    
+
     // For demonstration, return a mock quote
     let amount_in = request.amount_in.unwrap_or_else(|| "1000000".to_string()); // 1 QNK
     let amount_out = "950000".to_string(); // 0.95 of the other token (accounting for fees)
@@ -514,21 +535,26 @@ pub async fn get_swap_quote(
         let slippage_adjusted = base as f64 * (1.0 - slippage / 100.0);
         (slippage_adjusted as u64).to_string()
     };
-    
+
     let quote = SwapQuote {
         amount_in,
         amount_out: amount_out.clone(),
         minimum_amount_out,
-        price_impact: 0.02, // 2% price impact
-        gas_estimate: 120000, // Estimated gas for DEX swap
+        price_impact: 0.02,                       // 2% price impact
+        gas_estimate: 120000,                     // Estimated gas for DEX swap
         route: vec!["pool_qnk_usdc".to_string()], // Route through QNK/USDC pool
         execution_price: 0.95,
         valid_until: current_timestamp() + 300, // Valid for 5 minutes
     };
-    
-    tracing::info!("Generated swap quote: {} {} -> {} {}", 
-        quote.amount_in, request.token_in, quote.amount_out, request.token_out);
-    
+
+    tracing::info!(
+        "Generated swap quote: {} {} -> {} {}",
+        quote.amount_in,
+        request.token_in,
+        quote.amount_out,
+        request.token_out
+    );
+
     Ok(Json(DexApiResponse::success(quote)))
 }
 
@@ -558,61 +584,77 @@ pub async fn execute_swap(
 ) -> Result<Json<DexApiResponse<SwapResult>>, StatusCode> {
     // Comprehensive input validation
     if request.token_in.is_empty() || request.token_out.is_empty() {
-        return Ok(Json(DexApiResponse::error("token_in and token_out are required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "token_in and token_out are required".to_string(),
+        )));
     }
-    
+
     if request.amount_in.is_empty() || request.minimum_amount_out.is_empty() {
-        return Ok(Json(DexApiResponse::error("amount_in and minimum_amount_out are required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "amount_in and minimum_amount_out are required".to_string(),
+        )));
     }
-    
+
     if request.recipient.is_empty() {
-        return Ok(Json(DexApiResponse::error("recipient address is required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "recipient address is required".to_string(),
+        )));
     }
-    
+
     if request.signature.is_empty() {
-        return Ok(Json(DexApiResponse::error("transaction signature is required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "transaction signature is required".to_string(),
+        )));
     }
-    
+
     // Validate deadline (must be in the future)
     let now = chrono::Utc::now().timestamp() as u64;
     if request.deadline <= now {
-        return Ok(Json(DexApiResponse::error("transaction deadline has passed".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "transaction deadline has passed".to_string(),
+        )));
     }
-    
+
     // Validate recipient address format (basic check)
     if request.recipient.len() != 42 || !request.recipient.starts_with("0x") {
-        return Ok(Json(DexApiResponse::error("invalid recipient address format".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "invalid recipient address format".to_string(),
+        )));
     }
-    
+
     // Parse and validate amounts
     let amount_in: u64 = match request.amount_in.parse() {
         Ok(amount) if amount > 0 => amount,
         _ => return Ok(Json(DexApiResponse::error("invalid amount_in".to_string()))),
     };
-    
+
     let _minimum_out: u64 = match request.minimum_amount_out.parse() {
         Ok(amount) if amount > 0 => amount,
-        _ => return Ok(Json(DexApiResponse::error("invalid minimum_amount_out".to_string()))),
+        _ => {
+            return Ok(Json(DexApiResponse::error(
+                "invalid minimum_amount_out".to_string(),
+            )))
+        }
     };
-    
+
     // Create mock transaction for demonstration
     let tx_hash = format!("0x{}", hex::encode(&rand::random::<[u8; 32]>()));
-    
+
     // In production, this would:
     // 1. Verify the signature
     // 2. Check token balances
     // 3. Execute the swap through the VM
     // 4. Update balances
     // 5. Emit events
-    
+
     let swap_result = SwapResult {
         transaction_hash: tx_hash.clone(),
         status: "pending".to_string(), // Would start as pending
         amount_in: request.amount_in,
         amount_out: (amount_in * 95 / 100).to_string(), // Mock 5% fee
-        gas_used: 125000, // Estimated gas used
+        gas_used: 125000,                               // Estimated gas used
     };
-    
+
     // Update transaction pool with pending transaction
     // DashMap doesn't need .write() - it's concurrent by default
     {
@@ -642,13 +684,13 @@ pub async fn execute_swap(
             }
         }
     }
-    
+
     tracing::info!("Swap transaction submitted: {} (pending)", tx_hash);
-    
+
     // Emit real-time event
     // Transaction submitted event would be emitted here if the method existed
     // let _ = state.event_emitter.emit_transaction_submitted(tx_hash.clone()).await;
-    
+
     Ok(Json(DexApiResponse::success(swap_result)))
 }
 
@@ -707,7 +749,9 @@ pub async fn setup_webhook(
     Json(_request): Json<WebhookSetup>,
 ) -> Result<Json<DexApiResponse<String>>, StatusCode> {
     // TODO: Implement webhook registration
-    Ok(Json(DexApiResponse::success("Webhook registered".to_string())))
+    Ok(Json(DexApiResponse::success(
+        "Webhook registered".to_string(),
+    )))
 }
 
 #[derive(Serialize)]
@@ -724,7 +768,7 @@ pub async fn generate_api_key(
     // Generate secure API key with QNK prefix for easy identification
     let key_uuid = Uuid::new_v4().to_string().replace("-", "");
     let api_key = format!("qnk_{}", key_uuid);
-    
+
     let info = ApiKeyInfo {
         api_key: api_key.clone(),
         permissions: vec![
@@ -739,7 +783,10 @@ pub async fn generate_api_key(
     };
 
     // TODO: In production, store this API key in the database with proper encryption
-    tracing::info!("Generated new DEX API key: {} (expires in 1 year)", &api_key[..16]);
+    tracing::info!(
+        "Generated new DEX API key: {} (expires in 1 year)",
+        &api_key[..16]
+    );
 
     Ok(Json(DexApiResponse::success(info)))
 }
@@ -756,9 +803,9 @@ pub async fn get_rate_limits(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<RateLimits>>, StatusCode> {
     let limits = RateLimits {
-        requests_per_hour: 1_000_000,  // 1 million requests per hour
-        requests_per_minute: 10_000,    // 10k requests per minute
-        current_usage: 42, // TODO: Implement actual tracking
+        requests_per_hour: 1_000_000, // 1 million requests per hour
+        requests_per_minute: 10_000,  // 10k requests per minute
+        current_usage: 42,            // TODO: Implement actual tracking
         reset_time: chrono::Utc::now().timestamp() as u64 + 3600,
     };
 
@@ -777,7 +824,7 @@ pub async fn get_pool_reserves(
         if address_bytes.len() == 32 {
             let mut address_array = [0u8; 32];
             address_array.copy_from_slice(&address_bytes);
-            
+
             if let Some(_contract) = state.contract_registry.get(&address_array) {
                 // This is a valid contract, return pool info
                 // In a real implementation, we would extract pool data from the contract
@@ -796,8 +843,10 @@ pub async fn get_pool_reserves(
             }
         }
     }
-    
-    Ok(Json(DexApiResponse::error("Pool not found or invalid contract address".to_string())))
+
+    Ok(Json(DexApiResponse::error(
+        "Pool not found or invalid contract address".to_string(),
+    )))
 }
 
 pub async fn create_liquidity_pool(
@@ -805,13 +854,24 @@ pub async fn create_liquidity_pool(
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<DexApiResponse<String>>, StatusCode> {
     // Extract pool creation parameters
-    let token0 = request.get("token0").and_then(|v| v.as_str()).unwrap_or("QNK");
+    let token0 = request
+        .get("token0")
+        .and_then(|v| v.as_str())
+        .unwrap_or("QNK");
     let token1 = request.get("token1").and_then(|v| v.as_str()).unwrap_or("");
-    let initial_reserve0 = request.get("initial_reserve0").and_then(|v| v.as_str()).unwrap_or("0");
-    let initial_reserve1 = request.get("initial_reserve1").and_then(|v| v.as_str()).unwrap_or("0");
-    
+    let initial_reserve0 = request
+        .get("initial_reserve0")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let initial_reserve1 = request
+        .get("initial_reserve1")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+
     if token1.is_empty() {
-        return Ok(Json(DexApiResponse::error("token1 is required".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "token1 is required".to_string(),
+        )));
     }
 
     // Create liquidity pool contract through the VM
@@ -828,7 +888,9 @@ pub async fn create_liquidity_pool(
     let contract_metadata = if let serde_json::Value::Object(map) = contract_metadata_json {
         map.into_iter().collect()
     } else {
-        return Ok(Json(DexApiResponse::error("Failed to create contract metadata".to_string())));
+        return Ok(Json(DexApiResponse::error(
+            "Failed to create contract metadata".to_string(),
+        )));
     };
 
     // Create deployment options
@@ -840,19 +902,22 @@ pub async fn create_liquidity_pool(
         deploy_with_proxy: false,
         gas_limit: Some(1_000_000),
     };
-    
-    match state.orobit_ecosystem.deploy_contract(
-        ContractType::LiquidityPool,
-        [0u8; 32], // Deployer address (would be from authenticated user)
-        contract_metadata,
-        options
-    ).await {
-        Ok((contract_id, _address)) => {
-            Ok(Json(DexApiResponse::success(contract_id)))
-        }
-        Err(e) => {
-            Ok(Json(DexApiResponse::error(format!("Failed to create pool: {}", e))))
-        }
+
+    match state
+        .orobit_ecosystem
+        .deploy_contract(
+            ContractType::LiquidityPool,
+            [0u8; 32], // Deployer address (would be from authenticated user)
+            contract_metadata,
+            options,
+        )
+        .await
+    {
+        Ok((contract_id, _address)) => Ok(Json(DexApiResponse::success(contract_id))),
+        Err(e) => Ok(Json(DexApiResponse::error(format!(
+            "Failed to create pool: {}",
+            e
+        )))),
     }
 }
 
@@ -877,16 +942,18 @@ pub async fn get_swap_status(
                         TxStatus::Failed { .. } => "failed".to_string(),
                         TxStatus::Mixing => "mixing".to_string(), // Quantum mixing in progress
                     },
-                    amount_in: "0".to_string(),  // TODO: Extract from transaction
+                    amount_in: "0".to_string(), // TODO: Extract from transaction
                     amount_out: "0".to_string(), // TODO: Extract from transaction
-                    gas_used: 21000, // TODO: Get actual gas used
+                    gas_used: 21000,            // TODO: Get actual gas used
                 };
                 return Ok(Json(DexApiResponse::success(swap_result)));
             }
         }
     }
-    
-    Ok(Json(DexApiResponse::error("Transaction not found".to_string())))
+
+    Ok(Json(DexApiResponse::error(
+        "Transaction not found".to_string(),
+    )))
 }
 
 pub async fn get_token_price(
@@ -904,18 +971,18 @@ pub async fn get_token_price(
         TokenPrice {
             token: "QUG".to_string(),
             price_usd: qug_price_usd,
-            price_qnk: 1.0, // QUG is the base token
-            change_24h: 0.0, // TODO: Calculate from historical data
+            price_qnk: 1.0,              // QUG is the base token
+            change_24h: 0.0,             // TODO: Calculate from historical data
             volume_24h: "0".to_string(), // TODO: Calculate from DEX activity
             last_updated: current_timestamp(),
         }
     } else if token == qugusd_address || token_upper == "QUGUSD" {
         TokenPrice {
             token: "QUGUSD".to_string(),
-            price_usd: 1.0, // Always $1.00 (stablecoin peg)
+            price_usd: 1.0,                 // Always $1.00 (stablecoin peg)
             price_qnk: 1.0 / qug_price_usd, // QUGUSD price in QUG terms
-            change_24h: 0.0, // Stablecoin should have minimal change
-            volume_24h: "0".to_string(), // TODO: Calculate from DEX activity
+            change_24h: 0.0,                // Stablecoin should have minimal change
+            volume_24h: "0".to_string(),    // TODO: Calculate from DEX activity
             last_updated: current_timestamp(),
         }
     } else {
@@ -939,7 +1006,7 @@ pub async fn get_historical_prices(
 ) -> Result<Json<DexApiResponse<Vec<TokenPrice>>>, StatusCode> {
     let _timeframe = params.get("timeframe").unwrap_or(&"24h".to_string());
     let _interval = params.get("interval").unwrap_or(&"1h".to_string());
-    
+
     // For now, return a simple mock historical data
     let historical_prices = vec![
         TokenPrice {
@@ -959,7 +1026,7 @@ pub async fn get_historical_prices(
             last_updated: current_timestamp(), // now
         },
     ];
-    
+
     Ok(Json(DexApiResponse::success(historical_prices)))
 }
 
@@ -967,9 +1034,12 @@ pub async fn compliance_check(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<DexApiResponse<serde_json::Value>>, StatusCode> {
-    let address = request.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let address = request
+        .get("address")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let transaction_type = request.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    
+
     // Basic compliance checks
     let mut compliance_result = serde_json::json!({
         "address": address,

@@ -1,0 +1,34 @@
+# Dockerfile for Q-NarwhalKnight Bootstrap Node (Second Instance)
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy the binary from host
+COPY target/release/q-api-server /app/q-api-server
+
+# Make it executable
+RUN chmod +x /app/q-api-server
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Environment variables for second bootstrap node
+ENV Q_NETWORK_ID=testnet-phase12
+ENV Q_DB_PATH=/app/data
+ENV Q_P2P_PORT=9002
+ENV RUST_LOG=info
+
+# Expose ports
+# HTTP API on 8081 (different from main node's 8080)
+# P2P on 9002 (different from main node's 9001)
+EXPOSE 8081 9002
+
+# Run the server
+CMD ["/app/q-api-server", "--port", "8081", "--node-id", "bootstrap-node-2"]

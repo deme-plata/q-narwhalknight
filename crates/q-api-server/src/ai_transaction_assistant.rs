@@ -6,7 +6,6 @@
 /// - Natural language transaction parsing
 /// - Fraud detection
 /// - Transaction preview with security checks
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -33,18 +32,24 @@ use q_storage::BalanceStorage;
 /// Fuzzy search query parameters
 #[derive(Debug, Deserialize)]
 pub struct FuzzySearchQuery {
-    pub q: String,                      // Search query
+    pub q: String, // Search query
     #[serde(default = "default_true")]
-    pub fuzzy: bool,                    // Enable fuzzy matching
+    pub fuzzy: bool, // Enable fuzzy matching
     #[serde(default = "default_confidence")]
-    pub min_confidence: f64,            // Minimum match confidence (0-1)
+    pub min_confidence: f64, // Minimum match confidence (0-1)
     #[serde(default = "default_limit")]
-    pub limit: usize,                   // Max results
+    pub limit: usize, // Max results
 }
 
-fn default_true() -> bool { true }
-fn default_confidence() -> f64 { 0.75 }
-fn default_limit() -> usize { 5 }
+fn default_true() -> bool {
+    true
+}
+fn default_confidence() -> f64 {
+    0.75
+}
+fn default_limit() -> usize {
+    5
+}
 
 /// Address book search result with confidence score
 #[derive(Debug, Serialize)]
@@ -57,19 +62,19 @@ pub struct AddressMatch {
 /// AI transaction preparation request
 #[derive(Debug, Deserialize)]
 pub struct AITransactionRequest {
-    pub natural_language_query: String,  // "Send 50 QUG to Alice for coffee"
-    pub user_wallet: Option<String>,     // Optional wallet override
+    pub natural_language_query: String, // "Send 50 QUG to Alice for coffee"
+    pub user_wallet: Option<String>,    // Optional wallet override
 }
 
 /// Parsed transaction intent from natural language
 #[derive(Debug, Serialize)]
 pub struct TransactionIntent {
-    pub action: String,                  // "send", "pay", "transfer"
-    pub recipient: Option<String>,       // Contact name or address
+    pub action: String,                    // "send", "pay", "transfer"
+    pub recipient: Option<String>,         // Contact name or address
     pub recipient_address: Option<String>, // Resolved address
-    pub amount: Option<f64>,             // QUG amount
-    pub memo: Option<String>,            // Transaction note
-    pub priority: String,                // "low", "medium", "high"
+    pub amount: Option<f64>,               // QUG amount
+    pub memo: Option<String>,              // Transaction note
+    pub priority: String,                  // "low", "medium", "high"
 }
 
 /// Transaction preview with security checks
@@ -90,7 +95,7 @@ pub struct TransactionPreview {
 pub struct SecurityChecks {
     pub recipient_verified: bool,
     pub balance_sufficient: bool,
-    pub fraud_score: f64,              // 0-1, higher = more risky
+    pub fraud_score: f64, // 0-1, higher = more risky
     pub warnings: Vec<String>,
     pub recommendations: Vec<String>,
 }
@@ -107,8 +112,12 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let len1 = s1_lower.chars().count();
     let len2 = s2_lower.chars().count();
 
-    if len1 == 0 { return len2; }
-    if len2 == 0 { return len1; }
+    if len1 == 0 {
+        return len2;
+    }
+    if len2 == 0 {
+        return len1;
+    }
 
     let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
 
@@ -124,13 +133,17 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 
     for i in 1..=len1 {
         for j in 1..=len2 {
-            let cost = if s1_chars[i-1] == s2_chars[j-1] { 0 } else { 1 };
+            let cost = if s1_chars[i - 1] == s2_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             matrix[i][j] = std::cmp::min(
                 std::cmp::min(
-                    matrix[i-1][j] + 1,      // deletion
-                    matrix[i][j-1] + 1       // insertion
+                    matrix[i - 1][j] + 1, // deletion
+                    matrix[i][j - 1] + 1, // insertion
                 ),
-                matrix[i-1][j-1] + cost      // substitution
+                matrix[i - 1][j - 1] + cost, // substitution
             );
         }
     }
@@ -193,23 +206,25 @@ pub async fn search_address_book(
 ) -> Result<Json<ApiResponse<Vec<AddressMatch>>>, StatusCode> {
     let wallet_hex = hex::encode(&auth.address);
 
-    info!("🔍 AI Search: Fuzzy search for '{}' (wallet: {}, min_confidence: {})",
-        params.q, wallet_hex, params.min_confidence);
+    info!(
+        "🔍 AI Search: Fuzzy search for '{}' (wallet: {}, min_confidence: {})",
+        params.q, wallet_hex, params.min_confidence
+    );
 
     // Load user's address book
     let address_book_key = format!("addressbook:{}", wallet_hex);
-    let addresses: Vec<AddressBookEntry> = match state.storage_engine
-        .db_get("address_book", address_book_key.as_bytes()).await
+    let addresses: Vec<AddressBookEntry> = match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
     {
-        Ok(Some(data)) => {
-            match serde_json::from_slice(&data) {
-                Ok(addrs) => addrs,
-                Err(e) => {
-                    warn!("Failed to deserialize address book: {}", e);
-                    vec![]
-                }
+        Ok(Some(data)) => match serde_json::from_slice(&data) {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                warn!("Failed to deserialize address book: {}", e);
+                vec![]
             }
-        }
+        },
         Ok(None) | Err(_) => vec![],
     };
 
@@ -225,7 +240,9 @@ pub async fn search_address_book(
         let label_confidence = calculate_confidence(&params.q, &entry.label);
 
         // Match against tags
-        let tag_confidence = entry.tags.iter()
+        let tag_confidence = entry
+            .tags
+            .iter()
             .map(|tag| calculate_confidence(&params.q, tag))
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0);
@@ -234,7 +251,10 @@ pub async fn search_address_book(
         let notes_confidence = calculate_confidence(&params.q, &entry.notes);
 
         // Match against address (partial)
-        let address_match = entry.address.to_lowercase().contains(&params.q.to_lowercase());
+        let address_match = entry
+            .address
+            .to_lowercase()
+            .contains(&params.q.to_lowercase());
         let address_confidence = if address_match { 0.85 } else { 0.0 };
 
         // Take best match
@@ -245,17 +265,26 @@ pub async fn search_address_book(
 
         if best_confidence >= params.min_confidence {
             let match_reason = if label_confidence == best_confidence {
-                format!("Label match: '{}' ({}% confidence)",
-                    entry.label, (best_confidence * 100.0) as u32)
+                format!(
+                    "Label match: '{}' ({}% confidence)",
+                    entry.label,
+                    (best_confidence * 100.0) as u32
+                )
             } else if tag_confidence == best_confidence {
-                format!("Tag match ({}% confidence)",
-                    (best_confidence * 100.0) as u32)
+                format!(
+                    "Tag match ({}% confidence)",
+                    (best_confidence * 100.0) as u32
+                )
             } else if address_match {
-                format!("Address match ({}% confidence)",
-                    (best_confidence * 100.0) as u32)
+                format!(
+                    "Address match ({}% confidence)",
+                    (best_confidence * 100.0) as u32
+                )
             } else {
-                format!("Notes match ({}% confidence)",
-                    (best_confidence * 100.0) as u32)
+                format!(
+                    "Notes match ({}% confidence)",
+                    (best_confidence * 100.0) as u32
+                )
             };
 
             matches.push(AddressMatch {
@@ -270,7 +299,11 @@ pub async fn search_address_book(
     matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
     matches.truncate(params.limit);
 
-    info!("✅ AI Search: Found {} matches for '{}'", matches.len(), params.q);
+    info!(
+        "✅ AI Search: Found {} matches for '{}'",
+        matches.len(),
+        params.q
+    );
 
     Ok(Json(ApiResponse::success(matches)))
 }
@@ -296,13 +329,18 @@ pub async fn prepare_ai_transaction(
 ) -> Result<Json<ApiResponse<TransactionPreview>>, StatusCode> {
     let wallet_hex = hex::encode(&auth.address);
 
-    info!("🤖 AI Transaction: Parsing '{}'", req.natural_language_query);
+    info!(
+        "🤖 AI Transaction: Parsing '{}'",
+        req.natural_language_query
+    );
 
     // Step 1: Parse natural language to extract intent
     let intent = parse_transaction_intent(&req.natural_language_query);
 
-    info!("🎯 AI Transaction: Parsed intent - action: {}, recipient: {:?}, amount: {:?}",
-        intent.action, intent.recipient, intent.amount);
+    info!(
+        "🎯 AI Transaction: Parsed intent - action: {}, recipient: {:?}, amount: {:?}",
+        intent.action, intent.recipient, intent.amount
+    );
 
     // Step 2: Resolve recipient name to address
     let resolved_address = if let Some(ref recipient_name) = intent.recipient {
@@ -313,11 +351,17 @@ pub async fn prepare_ai_transaction(
             // Search address book
             match resolve_contact_name(&state, &wallet_hex, recipient_name).await {
                 Some(addr) => {
-                    info!("✅ AI Transaction: Resolved '{}' to address: {}", recipient_name, addr);
+                    info!(
+                        "✅ AI Transaction: Resolved '{}' to address: {}",
+                        recipient_name, addr
+                    );
                     Some(addr)
                 }
                 None => {
-                    warn!("⚠️ AI Transaction: Could not resolve recipient '{}'", recipient_name);
+                    warn!(
+                        "⚠️ AI Transaction: Could not resolve recipient '{}'",
+                        recipient_name
+                    );
                     None
                 }
             }
@@ -339,7 +383,8 @@ pub async fn prepare_ai_transaction(
         resolved_address.as_deref(),
         intent.amount.unwrap_or(0.0),
         balance,
-    ).await;
+    )
+    .await;
 
     // Step 5: Build transaction preview
     let amount = intent.amount.unwrap_or(0.0);
@@ -356,8 +401,10 @@ pub async fn prepare_ai_transaction(
         requires_confirmation: true,
     };
 
-    info!("✅ AI Transaction: Preview generated - amount: {} QUG, fraud_score: {}",
-        preview.amount, preview.security_checks.fraud_score);
+    info!(
+        "✅ AI Transaction: Preview generated - amount: {} QUG, fraud_score: {}",
+        preview.amount, preview.security_checks.fraud_score
+    );
 
     Ok(Json(ApiResponse::success(preview)))
 }
@@ -379,7 +426,8 @@ fn parse_transaction_intent(query: &str) -> TransactionIntent {
         "transfer"
     } else {
         "unknown"
-    }.to_string();
+    }
+    .to_string();
 
     // Extract amount (simple regex-like parsing)
     let mut amount = None;
@@ -430,8 +478,10 @@ async fn resolve_contact_name(
 ) -> Option<String> {
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
-    let addresses: Vec<AddressBookEntry> = match state.storage_engine
-        .db_get("address_book", address_book_key.as_bytes()).await
+    let addresses: Vec<AddressBookEntry> = match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
     {
         Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
         Ok(None) | Err(_) => return None,
@@ -480,7 +530,11 @@ async fn perform_security_checks(
     // Check 2: Sufficient balance
     let balance_sufficient = amount + 0.001 <= balance; // Include fee
     if !balance_sufficient {
-        warnings.push(format!("Insufficient balance (need {}, have {})", amount + 0.001, balance));
+        warnings.push(format!(
+            "Insufficient balance (need {}, have {})",
+            amount + 0.001,
+            balance
+        ));
         fraud_score += 0.3;
     }
 

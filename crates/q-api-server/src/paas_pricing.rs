@@ -94,7 +94,7 @@ impl PaaSPricingManager {
             usd_pricing: PaaSPricingUSD::default(),
             cached_price: Arc::new(RwLock::new(None)),
             fallback_qug_usd: 0.50, // $0.50 per QUG (default)
-            cache_ttl: 30, // 30 second cache
+            cache_ttl: 30,          // 30 second cache
         }
     }
 
@@ -124,7 +124,10 @@ impl PaaSPricingManager {
                 price
             }
             Err(e) => {
-                warn!("⚠️ Failed to fetch QUG/USD from oracle: {}. Using fallback price: ${:.6}", e, self.fallback_qug_usd);
+                warn!(
+                    "⚠️ Failed to fetch QUG/USD from oracle: {}. Using fallback price: ${:.6}",
+                    e, self.fallback_qug_usd
+                );
                 self.fallback_qug_usd
             }
         }
@@ -178,7 +181,8 @@ impl PaaSPricingManager {
     /// Calculate mixing fee in QUG (atomic units)
     pub async fn calculate_mixing_fee(&self, tx_value_qug: u64) -> u64 {
         // 0.1% of transaction value
-        let fee_qug = (tx_value_qug as u128 * self.usd_pricing.mixing_fee_basis_points as u128 / 10000) as u64;
+        let fee_qug = (tx_value_qug as u128 * self.usd_pricing.mixing_fee_basis_points as u128
+            / 10000) as u64;
 
         // Convert minimum USD fee to QUG
         let min_fee_qug = self.usd_to_qug(self.usd_pricing.mixing_min_fee_usd).await;
@@ -189,7 +193,8 @@ impl PaaSPricingManager {
 
     /// Calculate ring signature fee in QUG (atomic units)
     pub async fn calculate_ring_signature_fee(&self) -> u64 {
-        self.usd_to_qug(self.usd_pricing.ring_signature_fee_usd).await
+        self.usd_to_qug(self.usd_pricing.ring_signature_fee_usd)
+            .await
     }
 
     /// Calculate stealth address fee in QUG (atomic units)
@@ -200,7 +205,8 @@ impl PaaSPricingManager {
 
     /// Calculate ZK-STARK proof fee in QUG (atomic units)
     pub async fn calculate_zk_stark_fee(&self) -> u64 {
-        self.usd_to_qug(self.usd_pricing.zk_stark_proof_fee_usd).await
+        self.usd_to_qug(self.usd_pricing.zk_stark_proof_fee_usd)
+            .await
     }
 
     /// Calculate atomic swap fee in QUG (atomic units)

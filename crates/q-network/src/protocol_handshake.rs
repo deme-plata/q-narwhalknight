@@ -3,7 +3,32 @@
 // Protocol version negotiation and compatibility checking
 
 use anyhow::{Context, Result};
+use q_types::Phase;
 use serde::{Deserialize, Serialize};
+
+/// Cryptographic phase capability for post-quantum readiness
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CryptoPhase {
+    /// Phase 0: Classical cryptography (Ed25519 + QUIC)
+    Phase0,
+    /// Phase 1: Post-quantum cryptography (Dilithium5 + Kyber1024)
+    Phase1,
+    /// Phase 2: Quantum Key Distribution (QKD)
+    Phase2,
+    /// Phase 3: Quantum VDF / Lattice VRF
+    Phase3,
+}
+
+impl From<Phase> for CryptoPhase {
+    fn from(phase: Phase) -> Self {
+        match phase {
+            Phase::Phase0 => CryptoPhase::Phase0,
+            Phase::Phase1 => CryptoPhase::Phase1,
+            Phase::Phase2 => CryptoPhase::Phase2,
+            Phase::Phase3 | Phase::Phase4 => CryptoPhase::Phase3,
+        }
+    }
+}
 
 /// Protocol handshake exchanged when peers connect
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -32,6 +57,14 @@ pub struct ProtocolHandshake {
 
     /// Feature flags for capability negotiation
     pub features: Vec<String>,
+
+    /// ✨ v1.0.15-beta: Post-quantum cryptography capability
+    /// Supported cryptographic phases (ordered from strongest to weakest)
+    /// Peers will negotiate the strongest common phase
+    pub supported_crypto_phases: Vec<CryptoPhase>,
+
+    /// Current active crypto phase
+    pub active_crypto_phase: CryptoPhase,
 }
 
 impl ProtocolHandshake {
@@ -46,6 +79,17 @@ impl ProtocolHandshake {
             .unwrap_or("unknown")
             .to_string();
 
+        // ✨ v1.0.15-beta: Support both Phase 0 (Ed25519) and Phase 1 (Dilithium5)
+        // Phase 1 is preferred, but we fall back to Phase 0 for compatibility
+        let supported_crypto_phases = vec![
+            CryptoPhase::Phase1, // Dilithium5 + Kyber1024 (preferred)
+            CryptoPhase::Phase0, // Ed25519 + QUIC (fallback)
+        ];
+
+        // Start with Phase 0 for backward compatibility
+        // Will upgrade to Phase 1 after handshake negotiation
+        let active_crypto_phase = CryptoPhase::Phase0;
+
         Self {
             binary_version: env!("CARGO_PKG_VERSION").to_string(),
             turbo_sync_version: 1, // NEW format with protocol_version field
@@ -59,7 +103,11 @@ impl ProtocolHandshake {
                 "balance-consensus".to_string(),
                 "distributed-ai".to_string(),
                 "aegis-ql".to_string(),
+                "pqc-dilithium5".to_string(), // ✨ NEW: Post-quantum signatures
+                "pqc-kyber1024".to_string(),  // ✨ NEW: Post-quantum key exchange
             ],
+            supported_crypto_phases,
+            active_crypto_phase,
         }
     }
 
@@ -104,6 +152,50 @@ impl ProtocolHandshake {
 
         // Return highest common version, or 0 if no overlap
         *common_versions.iter().max().unwrap_or(&0)
+    }
+
+    /// ✨ v1.0.15-beta: Negotiate the strongest common cryptographic phase
+    ///
+    /// This enables gradual network-wide migration to post-quantum cryptography:
+    /// - Phase 0 (Ed25519) nodes can only use Phase 0
+    /// - Phase 1 (Dilithium5) nodes prefer Phase 1 but fall back to Phase 0
+    /// - No hard fork required - organic upgrade path
+    ///
+    /// # Returns
+    /// The strongest crypto phase supported by both peers, or None if no overlap
+    pub fn negotiate_crypto_phase(&self, peer: &ProtocolHandshake) -> Option<CryptoPhase> {
+        // Find intersection of supported phases
+        let mut common_phases: Vec<CryptoPhase> = self
+            .supported_crypto_phases
+            .iter()
+            .filter(|phase| peer.supported_crypto_phases.contains(phase))
+            .copied()
+            .collect();
+
+        if common_phases.is_empty() {
+            return None;
+        }
+
+        // Sort by strength (Phase1 > Phase0) and return strongest
+        common_phases.sort_by(|a, b| b.cmp(a)); // Descending order
+        Some(common_phases[0])
+    }
+
+    /// Check if peer supports post-quantum cryptography
+    pub fn supports_pqc(&self) -> bool {
+        self.supported_crypto_phases.contains(&CryptoPhase::Phase1)
+            || self.supported_crypto_phases.contains(&CryptoPhase::Phase2)
+            || self.supported_crypto_phases.contains(&CryptoPhase::Phase3)
+    }
+
+    /// Check if we can establish a PQC connection with this peer
+    pub fn can_use_pqc_with(&self, peer: &ProtocolHandshake) -> bool {
+        match self.negotiate_crypto_phase(peer) {
+            Some(CryptoPhase::Phase1) | Some(CryptoPhase::Phase2) | Some(CryptoPhase::Phase3) => {
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Serialize handshake to bytes for network transmission
@@ -161,6 +253,8 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "testnet-phase5".to_string(),
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         let old_peer = ProtocolHandshake {
@@ -171,6 +265,8 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "testnet-phase5".to_string(),
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         let new_peer = ProtocolHandshake {
@@ -181,6 +277,8 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "testnet-phase5".to_string(),
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         // Should negotiate to version 0 with old peer (highest common)
@@ -206,6 +304,8 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "mainnet".to_string(), // Different network!
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         // Should be incompatible due to network ID mismatch
@@ -222,6 +322,8 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "testnet-phase5".to_string(),
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         let old_only = ProtocolHandshake {
@@ -232,9 +334,119 @@ mod tests {
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
             network_id: "testnet-phase5".to_string(),
             features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
         };
 
         // Should be incompatible - no common versions
         assert!(us.is_compatible(&old_only).is_err());
+    }
+
+    #[test]
+    fn test_pqc_phase_negotiation() {
+        // Phase 1 node (supports both Phase0 and Phase1)
+        let phase1_node = ProtocolHandshake {
+            binary_version: "1.0.15-beta".to_string(),
+            turbo_sync_version: 1,
+            supported_turbo_sync_versions: vec![0, 1],
+            build_timestamp: 1700000000,
+            build_date: "2025-11-15 00:00:00 UTC".to_string(),
+            network_id: "testnet-phase11".to_string(),
+            features: vec!["pqc-dilithium5".to_string(), "pqc-kyber1024".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase1, CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
+        };
+
+        // Phase 0 only node (legacy)
+        let phase0_node = ProtocolHandshake {
+            binary_version: "0.9.80-beta".to_string(),
+            turbo_sync_version: 1,
+            supported_turbo_sync_versions: vec![0, 1],
+            build_timestamp: 1690000000,
+            build_date: "2025-10-01 00:00:00 UTC".to_string(),
+            network_id: "testnet-phase11".to_string(),
+            features: vec!["turbo-sync".to_string()],
+            supported_crypto_phases: vec![CryptoPhase::Phase0],
+            active_crypto_phase: CryptoPhase::Phase0,
+        };
+
+        // Test 1: Phase1 + Phase1 = Phase1 (strongest)
+        let negotiated = phase1_node.negotiate_crypto_phase(&phase1_node);
+        assert_eq!(negotiated, Some(CryptoPhase::Phase1));
+
+        // Test 2: Phase1 + Phase0 = Phase0 (fallback)
+        let negotiated = phase1_node.negotiate_crypto_phase(&phase0_node);
+        assert_eq!(negotiated, Some(CryptoPhase::Phase0));
+
+        // Test 3: Phase0 + Phase1 = Phase0 (fallback)
+        let negotiated = phase0_node.negotiate_crypto_phase(&phase1_node);
+        assert_eq!(negotiated, Some(CryptoPhase::Phase0));
+
+        // Test 4: PQC capability checks
+        assert!(phase1_node.supports_pqc());
+        assert!(!phase0_node.supports_pqc());
+
+        // Test 5: Can use PQC together?
+        assert!(phase1_node.can_use_pqc_with(&phase1_node)); // Both Phase1
+        assert!(!phase1_node.can_use_pqc_with(&phase0_node)); // One is Phase0
+        assert!(!phase0_node.can_use_pqc_with(&phase1_node)); // One is Phase0
+    }
+
+    #[test]
+    fn test_pqc_gradual_migration() {
+        // Simulate network upgrade scenario
+        let old_network = vec![
+            // 70% Phase 0 nodes
+            ProtocolHandshake {
+                binary_version: "0.9.80-beta".to_string(),
+                turbo_sync_version: 1,
+                supported_turbo_sync_versions: vec![0, 1],
+                build_timestamp: 1690000000,
+                build_date: "2025-10-01 00:00:00 UTC".to_string(),
+                network_id: "testnet-phase11".to_string(),
+                features: vec![],
+                supported_crypto_phases: vec![CryptoPhase::Phase0],
+                active_crypto_phase: CryptoPhase::Phase0,
+            },
+            // 30% Phase 1 nodes
+            ProtocolHandshake {
+                binary_version: "1.0.15-beta".to_string(),
+                turbo_sync_version: 1,
+                supported_turbo_sync_versions: vec![0, 1],
+                build_timestamp: 1700000000,
+                build_date: "2025-11-15 00:00:00 UTC".to_string(),
+                network_id: "testnet-phase11".to_string(),
+                features: vec!["pqc-dilithium5".to_string()],
+                supported_crypto_phases: vec![CryptoPhase::Phase1, CryptoPhase::Phase0],
+                active_crypto_phase: CryptoPhase::Phase0,
+            },
+        ];
+
+        // New Phase 1 node joins network
+        let new_node = ProtocolHandshake::current();
+
+        // Should be able to connect to ALL nodes (via Phase0 fallback)
+        for peer in &old_network {
+            let negotiated = new_node.negotiate_crypto_phase(peer);
+            assert!(negotiated.is_some(), "Should negotiate with all peers");
+
+            // Phase1 nodes upgrade to Phase1 together
+            // Phase0 nodes stay at Phase0
+            if peer.supports_pqc() {
+                assert_eq!(negotiated, Some(CryptoPhase::Phase1));
+            } else {
+                assert_eq!(negotiated, Some(CryptoPhase::Phase0));
+            }
+        }
+
+        // ✅ No hard fork required - gradual organic upgrade!
+    }
+
+    #[test]
+    fn test_crypto_phase_ordering() {
+        // Verify Phase1 is stronger than Phase0
+        assert!(CryptoPhase::Phase1 > CryptoPhase::Phase0);
+        assert!(CryptoPhase::Phase2 > CryptoPhase::Phase1);
+        assert!(CryptoPhase::Phase3 > CryptoPhase::Phase2);
     }
 }

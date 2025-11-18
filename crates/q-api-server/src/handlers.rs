@@ -1,23 +1,23 @@
 use axum::{
     extract::{Path, State},
-    http::{StatusCode, HeaderMap},
+    http::{HeaderMap, StatusCode},
     response::Json,
 };
+use base64::{engine::general_purpose, Engine};
+use bcrypt::{hash, verify, DEFAULT_COST};
 use blake3;
 use chrono::{DateTime, Utc};
 use hex;
 use q_types::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use base64::{Engine, engine::general_purpose};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use bcrypt::{hash, verify, DEFAULT_COST};
 
-use crate::{AppState, PendingMixingRequest, StreamEvent};
 pub use crate::wallet_auth::AuthenticatedWallet;
+use crate::{AppState, PendingMixingRequest, StreamEvent};
 use q_storage::BalanceStorage; // Import trait for get_balance method
 
 // ============================================================================
@@ -79,13 +79,10 @@ pub struct VersionInfo {
 pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
     let info = VersionInfo {
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
-        build_timestamp: env!("BUILD_TIMESTAMP")
-            .parse()
-            .unwrap_or(0),
+        build_timestamp: env!("BUILD_TIMESTAMP").parse().unwrap_or(0),
         build_date: env!("BUILD_DATE").to_string(),
         turbo_sync_version: 1, // NEW format
-        network_id: std::env::var("Q_NETWORK_ID")
-            .unwrap_or_else(|_| "testnet-phase5".to_string()),
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase5".to_string()),
         features: vec![
             "turbo-sync".to_string(),
             "balance-consensus".to_string(),
@@ -129,7 +126,9 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Result<String, Statu
     metrics.push_str("# HELP qnk_node_height Current blockchain height\n");
     metrics.push_str("# TYPE qnk_node_height gauge\n");
 
-    let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    let current_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
     metrics.push_str(&format!("qnk_node_height {}\n", current_height));
 
     // ✅ v1.0.7-beta: AsyncStorageEngine metrics
@@ -144,19 +143,25 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Result<String, Statu
 
         metrics.push_str("# HELP qnk_storage_congested Storage queue congestion status (1=congested, 0=normal)\n");
         metrics.push_str("# TYPE qnk_storage_congested gauge\n");
-        metrics.push_str(&format!("qnk_storage_congested {}\n", if is_congested { 1 } else { 0 }));
+        metrics.push_str(&format!(
+            "qnk_storage_congested {}\n",
+            if is_congested { 1 } else { 0 }
+        ));
     }
 
     Ok(metrics)
 }
 
 /// Node status endpoint
-pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn node_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let status = state.node_status.read().await.clone();
 
     // ✅ v0.9.30-beta: Get master account (dev fee wallet) balance for node status display
     // Master account receives 1% of all mining rewards as development fee
-    const MASTER_ACCOUNT_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const MASTER_ACCOUNT_HEX: &str =
+        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
     let balance = {
         // Check in-memory balances first (updated in real-time during mining)
         let balances = state.wallet_balances.read().await;
@@ -191,7 +196,7 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
         (true, true) => "Maximum (SIMD+Kernel I/O)",
         (true, false) => "High (SIMD Cryptography)",
         (false, true) => "High (Kernel I/O)",
-        (false, false) => "Standard"
+        (false, false) => "Standard",
     };
     #[cfg(not(target_os = "linux"))]
     let optimization_level = if simd_enabled {
@@ -228,13 +233,17 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
     };
 
     // Get real-time peer count from atomic counter (lock-free, zero-cost)
-    let connected_peers = state.libp2p_peer_count
+    let connected_peers = state
+        .libp2p_peer_count
         .as_ref()
         .map(|count| count.load(std::sync::atomic::Ordering::Relaxed) as u32)
         .unwrap_or(status.connected_peers);
 
     // Get sync status for miners
-    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
+    let network_height = state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::SeqCst);
     let is_syncing = network_height > 0 && status.current_height + 10 < network_height;
     let blocks_behind = if network_height > status.current_height {
         network_height - status.current_height
@@ -292,7 +301,7 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
             "listen_addresses": libp2p_addrs,
         }
     });
-    
+
     Ok(Json(ApiResponse::success(dashboard_status)))
 }
 
@@ -321,10 +330,7 @@ pub async fn node_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
 /// - ASIC-resistant VDF mining at any speed
 /// - Predictable calendar-based halvings
 /// - Fair distribution regardless of network conditions
-pub fn calculate_block_reward_time_based(
-    genesis_timestamp: u64,
-    current_timestamp: u64,
-) -> u64 {
+pub fn calculate_block_reward_time_based(genesis_timestamp: u64, current_timestamp: u64) -> u64 {
     const SECONDS_PER_YEAR: u64 = 31_536_000; // 365 days
     const BASE_REWARD: u64 = 100_000; // 0.001 QNK in base units
 
@@ -372,7 +378,9 @@ pub const GENESIS_TIMESTAMP: u64 = 1761436800; // Unix timestamp for Oct 26, 202
 /// Bootstrap peer discovery endpoint
 /// Returns dynamic bootstrap peer information with fast timeout (no blocking locks)
 /// This endpoint is used by nodes to discover the bootstrap peer for initial network connection
-pub async fn bootstrap_peers(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn bootstrap_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     // Bootstrap node network information (Server Beta - 185.182.185.227)
     const BOOTSTRAP_IP: &str = "185.182.185.227";
     const BOOTSTRAP_P2P_PORT: u16 = 9001;
@@ -411,14 +419,17 @@ pub async fn bootstrap_peers(State(state): State<Arc<AppState>>) -> Result<Json<
 }
 
 /// Network supply statistics endpoint - max supply, mined coins, total hashrate
-pub async fn network_supply(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn network_supply(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     // QNK tokenomics constants
     const MAX_SUPPLY: u64 = 21_000_000; // 21 million QNK max supply (like Bitcoin)
     const QNK_TO_BASE_UNITS: u64 = 100_000_000; // 1 QNK = 100,000,000 base units
 
     // Use time-based halving (independent of BPS - works at 0.067 BPS or 100,000 BPS!)
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
-    let block_reward_base_units = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
+    let block_reward_base_units =
+        calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
     let block_reward = block_reward_base_units as f64 / QNK_TO_BASE_UNITS as f64;
 
     // Calculate total mined coins from persistent storage (not in-memory)
@@ -511,7 +522,9 @@ pub async fn network_supply(State(state): State<Arc<AppState>>) -> Result<Json<A
 }
 
 /// Get libp2p peer ID endpoint (for dynamic bootstrap peer discovery)
-pub async fn get_peer_id(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn get_peer_id(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting libp2p peer ID for bootstrap discovery");
 
     // Get peer ID from libp2p UnifiedNetworkManager
@@ -536,7 +549,9 @@ pub async fn get_peer_id(State(state): State<Arc<AppState>>) -> Result<Json<ApiR
     }
 
     warn!("⚠️ libp2p discovery not initialized - cannot provide peer ID");
-    Ok(Json(ApiResponse::error("libp2p discovery not initialized".to_string())))
+    Ok(Json(ApiResponse::error(
+        "libp2p discovery not initialized".to_string(),
+    )))
 }
 
 /// Create a new wallet
@@ -603,7 +618,7 @@ pub async fn import_wallet(
     if password.is_empty() {
         error!("Password cannot be empty");
         return Ok(Json(ApiResponse::error(
-            "Password is required for wallet security".to_string()
+            "Password is required for wallet security".to_string(),
         )));
     }
 
@@ -615,7 +630,10 @@ pub async fn import_wallet(
     let private_key_bytes = hasher.finalize();
 
     // Derive Ed25519 public key from private key (same as frontend)
-    let public_key = match ed25519_dalek::SigningKey::from_bytes(&private_key_bytes.into()).verifying_key().to_bytes() {
+    let public_key = match ed25519_dalek::SigningKey::from_bytes(&private_key_bytes.into())
+        .verifying_key()
+        .to_bytes()
+    {
         bytes => bytes,
     };
 
@@ -641,7 +659,7 @@ pub async fn import_wallet(
             Err(e) => {
                 error!("Password verification error: {}", e);
                 return Ok(Json(ApiResponse::error(
-                    "Password verification failed".to_string()
+                    "Password verification failed".to_string(),
                 )));
             }
         }
@@ -655,7 +673,7 @@ pub async fn import_wallet(
             Err(e) => {
                 error!("Failed to hash password: {}", e);
                 return Ok(Json(ApiResponse::error(
-                    "Failed to hash password".to_string()
+                    "Failed to hash password".to_string(),
                 )));
             }
         };
@@ -669,10 +687,14 @@ pub async fn import_wallet(
         drop(password_hashes); // Release lock before async storage operation
 
         // Persist password hash to storage (critical for security!)
-        if let Err(e) = state.storage_engine.save_password_hash(&address, &password_hash).await {
+        if let Err(e) = state
+            .storage_engine
+            .save_password_hash(&address, &password_hash)
+            .await
+        {
             error!("Failed to persist password hash to storage: {}", e);
             return Ok(Json(ApiResponse::error(
-                "Failed to save password securely".to_string()
+                "Failed to save password securely".to_string(),
             )));
         }
         info!("✅ Password hash stored and persisted for new wallet");
@@ -727,7 +749,11 @@ pub async fn get_wallet(
 ) -> Result<Json<ApiResponse<WalletInfo>>, StatusCode> {
     debug!("Getting wallet info for ID: {}", wallet_id);
 
-    match state.wallet_manager.get_wallet(&wallet_id.to_string()).await {
+    match state
+        .wallet_manager
+        .get_wallet(&wallet_id.to_string())
+        .await
+    {
         Ok(Some(wallet)) => {
             let address = Address::default();
 
@@ -745,7 +771,7 @@ pub async fn get_wallet(
                 created_at: chrono::Utc::now(),
             };
             Ok(Json(ApiResponse::success(wallet_info)))
-        },
+        }
         Ok(None) => Ok(Json(ApiResponse::error("Wallet not found".to_string()))),
         Err(e) => {
             error!("Failed to get wallet: {}", e);
@@ -769,7 +795,7 @@ pub async fn list_wallets(
             // Wallet manager returns JSON values, just pass them through
             // The frontend doesn't actually use this endpoint
             Ok(Json(ApiResponse::success(vec![])))
-        },
+        }
         Err(e) => {
             error!("Failed to list wallets: {}", e);
             Ok(Json(ApiResponse::error(format!(
@@ -788,19 +814,15 @@ pub async fn sign_transaction(
 ) -> Result<Json<ApiResponse<Transaction>>, StatusCode> {
     debug!("Signing transaction for wallet: {}", wallet_id);
 
-    // Create transaction  
+    // Create transaction
     let tx_request = serde_json::json!({
         "wallet_id": wallet_id,
         "to": request.to,
         "amount": request.amount,
         "fee": request.fee
     });
-    
-    let transaction = match state
-        .wallet_manager
-        .create_transaction(tx_request)
-        .await
-    {
+
+    let transaction = match state.wallet_manager.create_transaction(tx_request).await {
         Ok(tx) => tx,
         Err(e) => {
             error!("Failed to create transaction: {}", e);
@@ -877,7 +899,11 @@ pub async fn submit_transaction(
                     if let Err(e) = nm.publish_topic(&topic, tx_bytes) {
                         tracing::warn!("Failed to publish transaction to network: {}", e);
                     } else {
-                        tracing::info!("📤 Transaction {} broadcast to {} network", hex::encode(&tx_hash), nm.network_config().network_id.as_str());
+                        tracing::info!(
+                            "📤 Transaction {} broadcast to {} network",
+                            hex::encode(&tx_hash),
+                            nm.network_config().network_id.as_str()
+                        );
                     }
                 });
             }
@@ -918,7 +944,12 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
     // CRITICAL FIX: Atomically extract and remove transactions from pool
     // This prevents multiple workers from processing the same transaction
     // We must remove BEFORE processing to avoid race conditions
-    let pool_keys: Vec<_> = state.tx_pool.iter().take(batch_size).map(|e| *e.key()).collect();
+    let pool_keys: Vec<_> = state
+        .tx_pool
+        .iter()
+        .take(batch_size)
+        .map(|e| *e.key())
+        .collect();
 
     for tx_hash in pool_keys {
         if let Some((_, tx)) = state.tx_pool.remove(&tx_hash) {
@@ -927,13 +958,19 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
         }
     }
 
-    tracing::info!("🚀 Processing transaction batch: {} transactions", batch.len());
+    tracing::info!(
+        "🚀 Processing transaction batch: {} transactions",
+        batch.len()
+    );
 
     // ============================================================================
     // STEP 1: SIMD BATCH SIGNATURE VERIFICATION (8x faster with TRUE PARALLEL)
     // ============================================================================
     if let Some(simd_engine) = &state.simd_crypto_engine {
-        tracing::info!("🔐 SIMD batch signature verification: {} transactions", batch.len());
+        tracing::info!(
+            "🔐 SIMD batch signature verification: {} transactions",
+            batch.len()
+        );
 
         // Prepare signatures, messages, and public keys for batch verification
         // For Ed25519 verification, we need:
@@ -948,13 +985,19 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
         for tx in &batch {
             // Only process transactions with valid 64-byte signatures
             if tx.signature.len() != 64 {
-                tracing::warn!("Transaction has invalid signature length: {} bytes", tx.signature.len());
+                tracing::warn!(
+                    "Transaction has invalid signature length: {} bytes",
+                    tx.signature.len()
+                );
                 continue;
             }
 
             // Extract public key from transaction data field (first 32 bytes)
             if tx.data.len() < 32 {
-                tracing::warn!("Transaction missing public key in data field (len={})", tx.data.len());
+                tracing::warn!(
+                    "Transaction missing public key in data field (len={})",
+                    tx.data.len()
+                );
                 continue;
             }
 
@@ -996,22 +1039,35 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
 
         // TRUE PARALLEL SIMD verification (8x faster than sequential)
         let verification_start = std::time::Instant::now();
-        match simd_engine.batch_verify_signatures(&signatures, &message_refs, &public_keys).await {
+        match simd_engine
+            .batch_verify_signatures(&signatures, &message_refs, &public_keys)
+            .await
+        {
             Ok(result) => {
                 let verification_time = verification_start.elapsed();
-                tracing::info!("✅ SIMD verification: {}/{} valid in {:?} ({:.0} sigs/sec)",
-                               result.valid_signatures, result.total_signatures,
-                               verification_time, result.throughput_sigs_per_sec);
+                tracing::info!(
+                    "✅ SIMD verification: {}/{} valid in {:?} ({:.0} sigs/sec)",
+                    result.valid_signatures,
+                    result.total_signatures,
+                    verification_time,
+                    result.throughput_sigs_per_sec
+                );
 
                 // Filter out invalid transactions
                 if result.invalid_signatures > 0 {
-                    tracing::warn!("❌ Rejected {} invalid signatures", result.invalid_signatures);
+                    tracing::warn!(
+                        "❌ Rejected {} invalid signatures",
+                        result.invalid_signatures
+                    );
                     // Mark invalid transactions as failed
                     for (i, tx_hash) in tx_hashes.iter().enumerate() {
                         if i >= result.valid_signatures {
-                            state.tx_status.insert(*tx_hash, TxStatus::Failed {
-                                error: "Invalid signature".to_string()
-                            });
+                            state.tx_status.insert(
+                                *tx_hash,
+                                TxStatus::Failed {
+                                    error: "Invalid signature".to_string(),
+                                },
+                            );
                         }
                     }
                     // Keep only valid transactions
@@ -1023,9 +1079,12 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                 tracing::error!("❌ SIMD signature verification failed: {}", e);
                 // Mark all as failed if batch verification fails
                 for tx_hash in &tx_hashes {
-                    state.tx_status.insert(*tx_hash, TxStatus::Failed {
-                        error: format!("Batch verification error: {}", e)
-                    });
+                    state.tx_status.insert(
+                        *tx_hash,
+                        TxStatus::Failed {
+                            error: format!("Batch verification error: {}", e),
+                        },
+                    );
                 }
                 return Err(e);
             }
@@ -1073,10 +1132,13 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                 // Update transaction status to confirmed
                 let current_round = *dag_knight.current_round.read().await;
                 for (tx, tx_hash) in batch.iter().zip(tx_hashes.iter()) {
-                    state.tx_status.insert(*tx_hash, TxStatus::Confirmed {
-                        block_height: current_round,
-                        round: current_round,
-                    });
+                    state.tx_status.insert(
+                        *tx_hash,
+                        TxStatus::Confirmed {
+                            block_height: current_round,
+                            round: current_round,
+                        },
+                    );
 
                     // Emit transaction-confirmed event for real-time frontend updates
                     let confirmed_event = crate::streaming::StreamEvent::TransactionStatusUpdate {
@@ -1256,7 +1318,7 @@ pub async fn get_transaction(
 #[derive(Debug, Deserialize)]
 pub struct SendTransactionRequest {
     pub from: String, // Sender address as hex string
-    pub to: String, // Recipient address as hex string
+    pub to: String,   // Recipient address as hex string
     pub amount: f64,
     pub memo: Option<String>,
     pub password: Option<String>,
@@ -1290,7 +1352,7 @@ pub async fn send_transaction(
             )));
         }
     };
-    
+
     // Parse sender address from request (handle 'qnk' prefix)
     let from_hex = if request.from.starts_with("qnk") {
         &request.from[3..]
@@ -1305,11 +1367,15 @@ pub async fn send_transaction(
                 addr.copy_from_slice(&bytes);
                 addr
             }
-            _ => return Ok(Json(ApiResponse::error("Invalid sender address format".to_string()))),
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "Invalid sender address format".to_string(),
+                )))
+            }
         }
     } else {
         // Handle short addresses - hash the FULL address string (with qnk prefix)
-        use q_types::{Sha3_256, Digest};
+        use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(request.from.as_bytes());
         hasher.finalize().into()
@@ -1318,12 +1384,17 @@ pub async fn send_transaction(
     // SECURITY: Verify authenticated wallet matches transaction sender
     // This prevents authenticated user A from sending transactions on behalf of user B
     if from_address != auth_wallet.address {
-        warn!("🚫 Authentication mismatch: Authenticated wallet {} attempting to send from {}",
-            hex::encode(&auth_wallet.address), hex::encode(from_address));
-        return Ok(Json(ApiResponse::error(
-            format!("Authentication mismatch: You are authenticated as {} but trying to send from {}. \
-            You can only send transactions from your own wallet.", hex::encode(&auth_wallet.address), request.from)
-        )));
+        warn!(
+            "🚫 Authentication mismatch: Authenticated wallet {} attempting to send from {}",
+            hex::encode(&auth_wallet.address),
+            hex::encode(from_address)
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: You are authenticated as {} but trying to send from {}. \
+            You can only send transactions from your own wallet.",
+            hex::encode(&auth_wallet.address),
+            request.from
+        ))));
     }
 
     // Parse recipient address (handle 'qnk' prefix)
@@ -1340,11 +1411,15 @@ pub async fn send_transaction(
                 addr.copy_from_slice(&bytes);
                 addr
             }
-            _ => return Ok(Json(ApiResponse::error("Invalid recipient address format".to_string()))),
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "Invalid recipient address format".to_string(),
+                )))
+            }
         }
     } else {
         // Handle short addresses - hash the FULL address string (with qnk prefix)
-        use q_types::{Sha3_256, Digest};
+        use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(request.to.as_bytes());
         hasher.finalize().into()
@@ -1360,23 +1435,26 @@ pub async fn send_transaction(
         _ => q_types::TokenType::QUG, // Default to QUG for any other value
     };
 
-    debug!("💰 Creating transaction: amount={} token_type={:?}", request.amount, token_type);
+    debug!(
+        "💰 Creating transaction: amount={} token_type={:?}",
+        request.amount, token_type
+    );
 
     // Create transaction
     let transaction = Transaction {
         id: TxHash::default(), // Will be computed based on content
-        from: from_address,  // Use actual from address from request
+        from: from_address,    // Use actual from address from request
         to: to_address,
         amount: amount_u64,
         fee: fee_u64,
-        nonce: 0, // TODO: Get actual nonce from wallet state
+        nonce: 0,          // TODO: Get actual nonce from wallet state
         signature: vec![], // Will be filled by signing process
         timestamp: chrono::Utc::now(),
         data: vec![], // Empty data for simple transfers
-        token_type, // Use the parsed token type from request
+        token_type,   // Use the parsed token type from request
         fee_token_type: q_types::TokenType::QUGUSD,
     };
-    
+
     // Compute actual transaction hash
     let tx_hash = transaction.hash();
     let mut signed_transaction = transaction;
@@ -1391,22 +1469,24 @@ pub async fn send_transaction(
         Some(ref m) if !m.is_empty() => m,
         _ => {
             return Ok(Json(ApiResponse::error(
-                "Mnemonic required for transaction signing. Please provide your BIP39 seed phrase.".to_string()
+                "Mnemonic required for transaction signing. Please provide your BIP39 seed phrase."
+                    .to_string(),
             )));
         }
     };
 
     // Parse and derive Ed25519 signing key from BIP39 mnemonic
-    use bip39::{Mnemonic, Language};
+    use bip39::{Language, Mnemonic};
     use q_types::{SecretKey, Signature};
 
     let mnemonic = match Mnemonic::parse_in(Language::English, mnemonic_str) {
         Ok(m) => m,
         Err(e) => {
             error!("Invalid mnemonic phrase: {}", e);
-            return Ok(Json(ApiResponse::error(
-                format!("Invalid mnemonic phrase: {}", e)
-            )));
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid mnemonic phrase: {}",
+                e
+            ))));
         }
     };
 
@@ -1424,7 +1504,7 @@ pub async fn send_transaction(
     let verifying_key = signing_key.verifying_key();
     let derived_public_key = verifying_key.to_bytes();
     let derived_address = {
-        use q_types::{Sha3_256, Digest};
+        use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(&derived_public_key);
         let hash: [u8; 32] = hasher.finalize().into();
@@ -1441,7 +1521,8 @@ pub async fn send_transaction(
     };
 
     if from_address != derived_address && from_address != mnemonic_hash_address {
-        warn!("Address mismatch! From: {} vs Derived: {} vs MnemonicHash: {}",
+        warn!(
+            "Address mismatch! From: {} vs Derived: {} vs MnemonicHash: {}",
             hex::encode(from_address),
             hex::encode(derived_address),
             hex::encode(mnemonic_hash_address)
@@ -1464,7 +1545,10 @@ pub async fn send_transaction(
     // Format: first 32 bytes = Ed25519 public key
     signed_transaction.data = derived_public_key.to_vec();
 
-    info!("✅ Transaction signed with Ed25519: {} bytes, public key stored", signed_transaction.signature.len());
+    info!(
+        "✅ Transaction signed with Ed25519: {} bytes, public key stored",
+        signed_transaction.signature.len()
+    );
     // ============================================================================
 
     // Check sender has sufficient balance (but don't update balances yet)
@@ -1475,7 +1559,9 @@ pub async fn send_transaction(
 
         // Check balance for all possible address representations
         // (handles compatibility between derived address and mnemonic hash address)
-        let sender_balance = balances.get(&sender_address).copied()
+        let sender_balance = balances
+            .get(&sender_address)
+            .copied()
             .or_else(|| balances.get(&derived_address).copied())
             .or_else(|| balances.get(&mnemonic_hash_address).copied())
             .unwrap_or(0);
@@ -1483,11 +1569,16 @@ pub async fn send_transaction(
         let total_cost = signed_transaction.amount + signed_transaction.fee;
 
         // Privacy: Don't log exact transaction amounts, addresses, or balances in production
-        let balance_check = if sender_balance >= total_cost { "sufficient" } else { "insufficient" };
+        let balance_check = if sender_balance >= total_cost {
+            "sufficient"
+        } else {
+            "insufficient"
+        };
         info!("💳 Transaction validation: balance check {}", balance_check);
 
         if sender_balance < total_cost {
-            warn!("Insufficient balance! Sender has {} QUG but needs {} QUG",
+            warn!(
+                "Insufficient balance! Sender has {} QUG but needs {} QUG",
                 sender_balance as f64 / 100_000_000.0,
                 total_cost as f64 / 100_000_000.0
             );
@@ -1506,7 +1597,11 @@ pub async fn send_transaction(
     state.tx_pool.insert(tx_hash, signed_transaction.clone());
 
     // Persist transaction to storage for durability across restarts
-    if let Err(e) = state.storage_engine.save_transaction(&signed_transaction).await {
+    if let Err(e) = state
+        .storage_engine
+        .save_transaction(&signed_transaction)
+        .await
+    {
         warn!("Failed to persist transaction to storage: {}", e);
     } else {
         debug!("💳 Transaction persisted: {}", hex::encode(&tx_hash));
@@ -1580,9 +1675,11 @@ pub async fn send_transaction(
                             if let Err(e) = nm.publish_topic(&topic, tx_bytes) {
                                 tracing::warn!("Failed to broadcast transaction to network: {}", e);
                             } else {
-                                tracing::info!("📤 Transaction {} broadcast to {} P2P network via gossipsub",
-                                               hex::encode(&tx_hash[..8]),
-                                               nm.network_config().network_id.as_str());
+                                tracing::info!(
+                                    "📤 Transaction {} broadcast to {} P2P network via gossipsub",
+                                    hex::encode(&tx_hash[..8]),
+                                    nm.network_config().network_id.as_str()
+                                );
                             }
                         }
                         Err(_) => {
@@ -1601,7 +1698,7 @@ pub async fn send_transaction(
     }
 
     info!("Successfully sent transaction: {:?}", tx_hash);
-    
+
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "status": "submitted",
@@ -1616,7 +1713,7 @@ pub async fn send_transaction(
         "stark_proof": stark_proof,
         "message": "Transaction successfully submitted to quantum consensus network"
     });
-    
+
     Ok(Json(ApiResponse::success(response)))
 }
 
@@ -1648,11 +1745,16 @@ pub async fn get_recent_transactions(
 
     // Load confirmed transactions from persistent storage
     // SECURITY: Filter to show ONLY transactions involving the authenticated wallet
-    let mut recent_txs: Vec<Transaction> = match state.storage_engine.load_all_transactions().await {
+    let mut recent_txs: Vec<Transaction> = match state.storage_engine.load_all_transactions().await
+    {
         Ok(mut txs) => {
             // ALWAYS filter by authenticated wallet address (sender OR recipient)
             txs.retain(|tx| tx.from == wallet_address_bytes || tx.to == wallet_address_bytes);
-            info!("📜 Loaded {} transactions for authenticated wallet {}", txs.len(), wallet_address_hex);
+            info!(
+                "📜 Loaded {} transactions for authenticated wallet {}",
+                txs.len(),
+                wallet_address_hex
+            );
             txs
         }
         Err(e) => {
@@ -1668,22 +1770,25 @@ pub async fn get_recent_transactions(
     recent_txs.truncate(100);
 
     // Convert to dashboard-friendly format
-    let dashboard_txs: Vec<serde_json::Value> = recent_txs.into_iter().map(|tx| {
-        serde_json::json!({
-            "id": hex::encode(&tx.id),
-            "hash": hex::encode(&tx.id), // Use ID as hash for compatibility
-            "amount": tx.amount,
-            "gas_used": 21000, // Mock gas values
-            "gas_price": 20,
-            "timestamp": tx.timestamp.timestamp(),
-            "timestamp_formatted": tx.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-            "status": "confirmed", // Mock status
-            "from": hex::encode(&tx.from),
-            "to": hex::encode(&tx.to),
-            "nonce": tx.nonce,
-            "size": 128 // Mock transaction size
+    let dashboard_txs: Vec<serde_json::Value> = recent_txs
+        .into_iter()
+        .map(|tx| {
+            serde_json::json!({
+                "id": hex::encode(&tx.id),
+                "hash": hex::encode(&tx.id), // Use ID as hash for compatibility
+                "amount": tx.amount,
+                "gas_used": 21000, // Mock gas values
+                "gas_price": 20,
+                "timestamp": tx.timestamp.timestamp(),
+                "timestamp_formatted": tx.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                "status": "confirmed", // Mock status
+                "from": hex::encode(&tx.from),
+                "to": hex::encode(&tx.to),
+                "nonce": tx.nonce,
+                "size": 128 // Mock transaction size
+            })
         })
-    }).collect();
+        .collect();
 
     // Return only real transactions that belong to the wallet (no mock data)
     // Empty array if no transactions - this maintains privacy
@@ -1709,7 +1814,10 @@ pub async fn get_block(
         }
         Err(e) => {
             warn!("Error retrieving block {}: {}", height, e);
-            Ok(Json(ApiResponse::error(format!("Error loading block: {}", e))))
+            Ok(Json(ApiResponse::error(format!(
+                "Error loading block: {}",
+                e
+            ))))
         }
     }
 }
@@ -1735,11 +1843,13 @@ pub struct NetworkAnalytics {
 }
 
 /// Get comprehensive network analytics
-pub async fn network_analytics(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<NetworkAnalytics>>, StatusCode> {
+pub async fn network_analytics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<NetworkAnalytics>>, StatusCode> {
     debug!("Getting network analytics");
-    
+
     let node_status = state.node_status.read().await;
-    
+
     // Get stats from Bitcoin bridge if available
     // DEACTIVATED: bitcoin_bridge is currently disabled
     let (bitcoin_active, bitcoin_peers) = (false, 0);
@@ -1766,7 +1876,7 @@ pub async fn network_analytics(State(state): State<Arc<AppState>>) -> Result<Jso
         (false, 0)
     };
     */
-    
+
     let analytics = NetworkAnalytics {
         node_id: hex::encode(state.node_id),
         uptime: node_status.uptime.as_secs(),
@@ -1775,12 +1885,16 @@ pub async fn network_analytics(State(state): State<Arc<AppState>>) -> Result<Jso
         dns_phantom_active: dns_phantom_active,
         tor_active: state.tor_client.is_some(),
         total_peers_discovered: bitcoin_peers + phantom_peers,
-        total_messages_sent: 0, // TODO: Track from network components
+        total_messages_sent: 0,     // TODO: Track from network components
         total_messages_received: 0, // TODO: Track from network components
-        network_health_score: calculate_network_health_score(&*node_status, bitcoin_active, dns_phantom_active),
+        network_health_score: calculate_network_health_score(
+            &*node_status,
+            bitcoin_active,
+            dns_phantom_active,
+        ),
         last_updated: Utc::now(),
     };
-    
+
     Ok(Json(ApiResponse::success(analytics)))
 }
 
@@ -1823,12 +1937,14 @@ pub struct MeshConnection {
 }
 
 /// Get network topology
-pub async fn network_topology(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<NetworkTopology>>, StatusCode> {
+pub async fn network_topology(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<NetworkTopology>>, StatusCode> {
     debug!("Getting network topology");
-    
+
     let direct_peers = Vec::new();
     let phantom_peers = Vec::new();
-    
+
     // Get Bitcoin bridge peers
     // DEACTIVATED: bitcoin_bridge is currently disabled
     /*
@@ -1865,26 +1981,28 @@ pub async fn network_topology(State(state): State<Arc<AppState>>) -> Result<Json
         }
     }
     */
-    
+
     let topology = NetworkTopology {
         center_node: hex::encode(state.node_id),
         direct_peers,
         phantom_peers,
-        mesh_connections: vec![], // TODO: Calculate mesh connections
-        total_nodes: 1, // TODO: Calculate total known nodes
-        network_diameter: 0, // TODO: Calculate network diameter
+        mesh_connections: vec![],    // TODO: Calculate mesh connections
+        total_nodes: 1,              // TODO: Calculate total known nodes
+        network_diameter: 0,         // TODO: Calculate network diameter
         clustering_coefficient: 0.0, // TODO: Calculate clustering coefficient
     };
-    
+
     Ok(Json(ApiResponse::success(topology)))
 }
 
 /// Get active peers
-pub async fn active_peers(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<PeerNode>>>, StatusCode> {
+pub async fn active_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<PeerNode>>>, StatusCode> {
     debug!("Getting active peers");
-    
+
     let peers = Vec::new();
-    
+
     // Get Bitcoin bridge peers
     // DEACTIVATED: bitcoin_bridge is currently disabled
     /*
@@ -1918,9 +2036,11 @@ pub struct DiscoveryStats {
 }
 
 /// Get discovery statistics
-pub async fn discovery_stats(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<DiscoveryStats>>, StatusCode> {
+pub async fn discovery_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DiscoveryStats>>, StatusCode> {
     debug!("Getting discovery statistics");
-    
+
     // DEACTIVATED: bitcoin_bridge and dns_phantom currently disabled
     let bitcoin_peers = 0;
     let dns_phantom_peers = 0;
@@ -1940,17 +2060,17 @@ pub async fn discovery_stats(State(state): State<Arc<AppState>>) -> Result<Json<
         0
     };
     */
-    
+
     let stats = DiscoveryStats {
         total_peers_discovered: bitcoin_peers + dns_phantom_peers,
         bitcoin_peers,
         dns_phantom_peers,
         successful_connections: bitcoin_peers, // TODO: Track successful connections
-        failed_connections: 0, // TODO: Track failed connections
-        discovery_rate_per_hour: 0.0, // TODO: Calculate discovery rate
-        last_discovery: Some(Utc::now()), // TODO: Track last discovery time
+        failed_connections: 0,                 // TODO: Track failed connections
+        discovery_rate_per_hour: 0.0,          // TODO: Calculate discovery rate
+        last_discovery: Some(Utc::now()),      // TODO: Track last discovery time
     };
-    
+
     Ok(Json(ApiResponse::success(stats)))
 }
 
@@ -1992,7 +2112,10 @@ pub async fn get_p2p_health(
     let turbo_sync_available = state.turbo_sync.is_some();
 
     // Get network height
-    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
+    let network_height = state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::SeqCst);
     let current_height = node_status.current_height;
 
     // Calculate sync progress
@@ -2015,7 +2138,8 @@ pub async fn get_p2p_health(
     let bootstrap_peer_configured = std::env::var("Q_BOOTSTRAP_PEER").is_ok();
 
     // Get network ID for gossipsub topics
-    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string());
+    let network_id =
+        std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string());
 
     let health = P2PHealthStatus {
         libp2p_manager_active: state.libp2p_discovery.is_some(),
@@ -2054,7 +2178,9 @@ pub struct BitcoinBridgeStatus {
 }
 
 /// Get Bitcoin bridge status
-pub async fn bitcoin_bridge_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<BitcoinBridgeStatus>>, StatusCode> {
+pub async fn bitcoin_bridge_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<BitcoinBridgeStatus>>, StatusCode> {
     debug!("Getting Bitcoin bridge status");
 
     // DEACTIVATED: bitcoin_bridge currently disabled
@@ -2098,9 +2224,11 @@ pub async fn bitcoin_bridge_status(State(state): State<Arc<AppState>>) -> Result
 }
 
 /// Get Bitcoin bridge peers
-pub async fn bitcoin_bridge_peers(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<PeerNode>>>, StatusCode> {
+pub async fn bitcoin_bridge_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<PeerNode>>>, StatusCode> {
     debug!("Getting Bitcoin bridge peers");
-    
+
     if let Some(_bridge) = &state.bitcoin_bridge {
         // Bitcoin bridge is deactivated (Arc<()>), return empty result
         Ok(Json(ApiResponse::success(vec![])))
@@ -2110,9 +2238,11 @@ pub async fn bitcoin_bridge_peers(State(state): State<Arc<AppState>>) -> Result<
 }
 
 /// Get Bitcoin bridge connection statistics
-pub async fn bitcoin_bridge_stats(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn bitcoin_bridge_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting Bitcoin bridge connection stats");
-    
+
     if let Some(_bridge) = &state.bitcoin_bridge {
         // Bitcoin bridge is deactivated (Arc<()>), return empty stats
         let empty_stats = serde_json::json!({
@@ -2145,7 +2275,7 @@ pub async fn connect_to_peer(
     Path(node_id_str): Path<String>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     debug!("Attempting to connect to peer: {}", node_id_str);
-    
+
     // Parse node ID
     let _node_id_bytes = match hex::decode(&node_id_str) {
         Ok(bytes) if bytes.len() == 32 => {
@@ -2154,15 +2284,21 @@ pub async fn connect_to_peer(
             node_id
         }
         _ => {
-            return Ok(Json(ApiResponse::error("Invalid node ID format".to_string())));
+            return Ok(Json(ApiResponse::error(
+                "Invalid node ID format".to_string(),
+            )));
         }
     };
-    
+
     if let Some(_bridge) = &state.bitcoin_bridge {
         // Bitcoin bridge is deactivated (Arc<()>), return error
-        Ok(Json(ApiResponse::error("Bitcoin bridge not active (deactivated)".to_string())))
+        Ok(Json(ApiResponse::error(
+            "Bitcoin bridge not active (deactivated)".to_string(),
+        )))
     } else {
-        Ok(Json(ApiResponse::error("Bitcoin bridge not active".to_string())))
+        Ok(Json(ApiResponse::error(
+            "Bitcoin bridge not active".to_string(),
+        )))
     }
 }
 
@@ -2184,20 +2320,22 @@ pub struct DNSPhantomStatus {
 }
 
 /// Get DNS-Phantom network status
-pub async fn dns_phantom_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<DNSPhantomStatus>>, StatusCode> {
+pub async fn dns_phantom_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DNSPhantomStatus>>, StatusCode> {
     debug!("Getting DNS-Phantom network status");
 
     if let Some(_phantom) = &state.dns_phantom {
         // DNS Phantom is currently deactivated (Arc<()> placeholder)
         let status = DNSPhantomStatus {
-            active: false,  // Deactivated
+            active: false, // Deactivated
             providers_active: vec![],
             discovered_peers: 0,
-            active_channels: 0, // TODO: Get from phantom network
-            messages_sent: 0, // TODO: Track messages sent
-            messages_received: 0, // TODO: Track messages received
+            active_channels: 0,              // TODO: Get from phantom network
+            messages_sent: 0,                // TODO: Track messages sent
+            messages_received: 0,            // TODO: Track messages received
             steganographic_queries_today: 0, // TODO: Track daily queries
-            cache_anomalies_detected: 0, // TODO: Track anomalies
+            cache_anomalies_detected: 0,     // TODO: Track anomalies
         };
         Ok(Json(ApiResponse::success(status)))
     } else {
@@ -2216,9 +2354,11 @@ pub async fn dns_phantom_status(State(state): State<Arc<AppState>>) -> Result<Js
 }
 
 /// Get DNS-Phantom discovered peers
-pub async fn dns_phantom_peers(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<PhantomPeerNode>>>, StatusCode> {
+pub async fn dns_phantom_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<PhantomPeerNode>>>, StatusCode> {
     debug!("Getting DNS-Phantom peers");
-    
+
     if let Some(_phantom) = &state.dns_phantom {
         // DNS-Phantom is deactivated (Arc<()>), return empty peers
         Ok(Json(ApiResponse::success(vec![])))
@@ -2241,7 +2381,7 @@ pub async fn send_phantom_message(
     Json(request): Json<SendPhantomMessageRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     debug!("Sending phantom message");
-    
+
     if let Some(_phantom) = &state.dns_phantom {
         // Parse recipient if provided
         let _recipient = if let Some(recipient_str) = &request.recipient {
@@ -2251,18 +2391,26 @@ pub async fn send_phantom_message(
                     node_id.copy_from_slice(&bytes);
                     Some(node_id)
                 }
-                _ => return Ok(Json(ApiResponse::error("Invalid recipient node ID".to_string()))),
+                _ => {
+                    return Ok(Json(ApiResponse::error(
+                        "Invalid recipient node ID".to_string(),
+                    )))
+                }
             }
         } else {
             None
         };
-        
+
         // Decode content
         let _content = match base64::engine::general_purpose::STANDARD.decode(&request.content) {
             Ok(data) => data,
-            Err(_) => return Ok(Json(ApiResponse::error("Invalid base64 content".to_string()))),
+            Err(_) => {
+                return Ok(Json(ApiResponse::error(
+                    "Invalid base64 content".to_string(),
+                )))
+            }
         };
-        
+
         // DEACTIVATED: DNS-Phantom crate is currently disabled in Cargo.toml
         // TODO: Re-enable when q-dns-phantom is activated
         /*
@@ -2316,7 +2464,9 @@ pub async fn send_phantom_message(
         // Return error since DNS-Phantom is currently deactivated
         Ok(Json(ApiResponse::error("DNS-Phantom network is currently deactivated. Please use libp2p peer discovery instead.".to_string())))
     } else {
-        Ok(Json(ApiResponse::error("DNS-Phantom network not active".to_string())))
+        Ok(Json(ApiResponse::error(
+            "DNS-Phantom network not active".to_string(),
+        )))
     }
 }
 
@@ -2332,9 +2482,11 @@ pub struct DNSProviderStatus {
 }
 
 /// Get DNS providers status
-pub async fn dns_providers_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<DNSProviderStatus>>>, StatusCode> {
+pub async fn dns_providers_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<DNSProviderStatus>>>, StatusCode> {
     debug!("Getting DNS providers status");
-    
+
     // Mock DNS provider status for now
     let providers = vec![
         DNSProviderStatus {
@@ -2362,14 +2514,16 @@ pub async fn dns_providers_status(State(state): State<Arc<AppState>>) -> Result<
             last_query: Some(Utc::now()),
         },
     ];
-    
+
     Ok(Json(ApiResponse::success(providers)))
 }
 
 /// Generated domains for steganography
-pub async fn generated_domains(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
+pub async fn generated_domains(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
     debug!("Getting generated domains");
-    
+
     // Mock generated domains
     let domains = vec![
         "api42.cdn-assets.example.com".to_string(),
@@ -2378,7 +2532,7 @@ pub async fn generated_domains(State(state): State<Arc<AppState>>) -> Result<Jso
         "media3.blob-storage.example.com".to_string(),
         "auth-v1.api.example.com".to_string(),
     ];
-    
+
     Ok(Json(ApiResponse::success(domains)))
 }
 
@@ -2387,19 +2541,23 @@ pub async fn generated_domains(State(state): State<Arc<AppState>>) -> Result<Jso
 // ============================================================================
 
 /// Security anomalies
-pub async fn security_anomalies(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
+pub async fn security_anomalies(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
     debug!("Getting security anomalies");
-    
+
     // Mock security anomalies
     let anomalies = vec![];
-    
+
     Ok(Json(ApiResponse::success(anomalies)))
 }
 
 /// Threat analysis
-pub async fn threat_analysis(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn threat_analysis(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting threat analysis");
-    
+
     let analysis = serde_json::json!({
         "threat_level": "LOW",
         "active_threats": 0,
@@ -2408,14 +2566,16 @@ pub async fn threat_analysis(State(state): State<Arc<AppState>>) -> Result<Json<
         "correlation_attacks_detected": 0,
         "last_threat_detected": Value::Null
     });
-    
+
     Ok(Json(ApiResponse::success(analysis)))
 }
 
 /// Tor status
-pub async fn tor_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn tor_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting Tor status");
-    
+
     let tor_status = if state.tor_client.is_some() {
         serde_json::json!({
             "active": true,
@@ -2437,14 +2597,16 @@ pub async fn tor_status(State(state): State<Arc<AppState>>) -> Result<Json<ApiRe
             "latency_ms": Value::Null
         })
     };
-    
+
     Ok(Json(ApiResponse::success(tor_status)))
 }
 
 /// Tor circuits information
-pub async fn tor_circuits(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
+pub async fn tor_circuits(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
     debug!("Getting Tor circuits");
-    
+
     let circuits = if state.tor_client.is_some() {
         vec![
             serde_json::json!({
@@ -2459,7 +2621,7 @@ pub async fn tor_circuits(State(state): State<Arc<AppState>>) -> Result<Json<Api
             serde_json::json!({
                 "circuit_id": 2,
                 "purpose": "general",
-                "state": "BUILT", 
+                "state": "BUILT",
                 "path": ["GuardNode2", "MiddleNode2", "ExitNode2"],
                 "created": Utc::now(),
                 "bytes_sent": 512000,
@@ -2469,7 +2631,7 @@ pub async fn tor_circuits(State(state): State<Arc<AppState>>) -> Result<Json<Api
     } else {
         vec![]
     };
-    
+
     Ok(Json(ApiResponse::success(circuits)))
 }
 
@@ -2478,11 +2640,13 @@ pub async fn tor_circuits(State(state): State<Arc<AppState>>) -> Result<Json<Api
 // ============================================================================
 
 /// Performance metrics
-pub async fn performance_metrics(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn performance_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting performance metrics");
-    
+
     let node_status = state.node_status.read().await;
-    
+
     let metrics = serde_json::json!({
         "consensus_latency_ms": 245,
         "transaction_throughput_tps": 1250,
@@ -2494,14 +2658,16 @@ pub async fn performance_metrics(State(state): State<Arc<AppState>>) -> Result<J
         "uptime_seconds": node_status.uptime.as_secs(),
         "peer_count": node_status.connected_peers
     });
-    
+
     Ok(Json(ApiResponse::success(metrics)))
 }
 
 /// Steganography statistics
-pub async fn steganography_stats(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn steganography_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting steganography statistics");
-    
+
     let stats = serde_json::json!({
         "total_steganographic_queries": 1247,
         "queries_today": 89,
@@ -2516,14 +2682,16 @@ pub async fn steganography_stats(State(state): State<Arc<AppState>>) -> Result<J
         "dns_providers_utilized": 4,
         "cover_traffic_ratio": 12.5
     });
-    
+
     Ok(Json(ApiResponse::success(stats)))
 }
 
 /// Mesh network statistics
-pub async fn mesh_network_stats(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn mesh_network_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting mesh network statistics");
-    
+
     let stats = serde_json::json!({
         "total_nodes": 47,
         "direct_connections": 8,
@@ -2534,14 +2702,16 @@ pub async fn mesh_network_stats(State(state): State<Arc<AppState>>) -> Result<Js
         "path_diversity_index": 2.1,
         "fault_tolerance_score": 0.91
     });
-    
+
     Ok(Json(ApiResponse::success(stats)))
 }
 
 /// Network timeline
-pub async fn network_timeline(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
+pub async fn network_timeline(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
     debug!("Getting network timeline");
-    
+
     let timeline = vec![
         serde_json::json!({
             "timestamp": Utc::now(),
@@ -2574,7 +2744,7 @@ pub async fn network_timeline(State(state): State<Arc<AppState>>) -> Result<Json
             }
         }),
     ];
-    
+
     Ok(Json(ApiResponse::success(timeline)))
 }
 
@@ -2589,12 +2759,12 @@ fn calculate_network_health_score(
     dns_phantom_active: bool,
 ) -> f64 {
     let mut score: f64 = 0.0;
-    
+
     // Base connectivity score
     if node_status.connected_peers > 0 {
         score += 0.3;
     }
-    
+
     // Multi-layer anonymity bonus
     if bitcoin_active {
         score += 0.3;
@@ -2602,42 +2772,44 @@ fn calculate_network_health_score(
     if dns_phantom_active {
         score += 0.3;
     }
-    
+
     // Uptime bonus
     let uptime_hours = node_status.uptime.as_secs() / 3600;
     if uptime_hours > 24 {
         score += 0.1;
     }
-    
+
     score.min(1.0)
 }
 
 /// Generate quantum-enhanced mnemonic phrase
-pub async fn generate_mnemonic(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    use bip39::{Mnemonic, Language};
+pub async fn generate_mnemonic(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use bip39::{Language, Mnemonic};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
-    
+
     // Generate high-quality entropy using quantum-enhanced randomness
     let mut entropy = [0u8; 16]; // 128 bits for 12-word mnemonic
-    
+
     // Use system time nanoseconds as seed
     let time_seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
-    
+
     // Use thread RNG for additional entropy
     let mut thread_rng = rand::thread_rng();
     let random_seed: u64 = thread_rng.gen();
-    
+
     // Combine entropy sources using quantum-resistant mixing
     let combined_seed = time_seed.wrapping_add(random_seed);
     let mut rng = ChaCha20Rng::seed_from_u64(combined_seed);
-    
+
     // Fill entropy array with high-quality randomness
     rng.fill(&mut entropy);
-    
+
     // Generate BIP39 mnemonic from entropy
     let mnemonic = match Mnemonic::from_entropy(&entropy) {
         Ok(m) => m,
@@ -2646,11 +2818,11 @@ pub async fn generate_mnemonic(State(state): State<Arc<AppState>>) -> Result<Jso
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
-    
+
     // Extract words from the mnemonic
     let words: Vec<&str> = mnemonic.words().collect();
     let mnemonic_phrase = mnemonic.to_string();
-    
+
     // Derive a wallet address from the mnemonic (simplified approach)
     use sha3::{Digest, Sha3_256};
     let mut hasher = Sha3_256::new();
@@ -2658,7 +2830,7 @@ pub async fn generate_mnemonic(State(state): State<Arc<AppState>>) -> Result<Jso
     let hash_result = hasher.finalize();
     let mut wallet_address = [0u8; 32];
     wallet_address.copy_from_slice(&hash_result[..32]);
-    
+
     let response = serde_json::json!({
         "mnemonic": mnemonic_phrase,
         "words": words,
@@ -2669,10 +2841,13 @@ pub async fn generate_mnemonic(State(state): State<Arc<AppState>>) -> Result<Jso
         "standard": "BIP39",
         "wallet_address": hex::encode(&wallet_address)
     });
-    
-    info!("Generated BIP39 mnemonic with {} words and {} bits of entropy", 
-          words.len(), entropy.len() * 8);
-    
+
+    info!(
+        "Generated BIP39 mnemonic with {} words and {} bits of entropy",
+        words.len(),
+        entropy.len() * 8
+    );
+
     Ok(Json(ApiResponse::success(response)))
 }
 
@@ -2683,9 +2858,12 @@ pub struct FaucetRequest {
 }
 
 /// Request free test tokens from faucet
-pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<FaucetRequest>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+pub async fn faucet(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<FaucetRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Processing faucet request");
-    
+
     // Use provided wallet address or default to node_id
     // FIXED: Use same address parsing logic as transactions for consistency
     let wallet_address = if let Some(addr_str) = &request.wallet_address {
@@ -2695,7 +2873,7 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
         } else {
             addr_str
         };
-        
+
         if hex_part.len() == 64 {
             // Full 32-byte hex address
             match hex::decode(hex_part) {
@@ -2704,11 +2882,15 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
                     addr.copy_from_slice(&bytes);
                     addr
                 }
-                _ => return Ok(Json(ApiResponse::error("Invalid wallet address format".to_string()))),
+                _ => {
+                    return Ok(Json(ApiResponse::error(
+                        "Invalid wallet address format".to_string(),
+                    )))
+                }
             }
         } else {
             // Handle ENS-style addresses or short addresses - hash the string like send_transaction does
-            use q_types::{Sha3_256, Digest};
+            use q_types::{Digest, Sha3_256};
             let mut hasher = Sha3_256::new();
             hasher.update(addr_str.as_bytes());
             hasher.finalize().into()
@@ -2716,13 +2898,13 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
     } else {
         state.node_id // Fallback to node_id for backward compatibility
     };
-    
+
     // Check if already has tokens
     let current_balance = {
         let balances = state.wallet_balances.read().await;
         balances.get(&wallet_address).copied().unwrap_or(0)
     };
-    
+
     // Give small faucet amount suitable for testing (enough for ~10 transactions)
     let faucet_amount = 1_000_000_000u64; // 10 QNK (enough for 5x2 transactions)
 
@@ -2734,15 +2916,21 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
     };
 
     // Persist the new balance to storage
-    if let Err(e) = state.save_wallet_balance(&wallet_address, new_balance).await {
+    if let Err(e) = state
+        .save_wallet_balance(&wallet_address, new_balance)
+        .await
+    {
         warn!("Failed to persist wallet balance to storage: {}", e);
     }
-    
+
     // 🔒 PRIVACY: No logging of wallet addresses or amounts
     debug!("💰 Faucet dispensed successfully");
-    
+
     // Emit faucet dispensed event for real-time updates
-    let event_wallet_address = request.wallet_address.clone().unwrap_or_else(|| hex::encode(wallet_address));
+    let event_wallet_address = request
+        .wallet_address
+        .clone()
+        .unwrap_or_else(|| hex::encode(wallet_address));
     let event = crate::streaming::StreamEvent::FaucetDispensed {
         wallet_address: event_wallet_address.clone(),
         amount_qnk: faucet_amount as f64 / 100_000_000.0,
@@ -2778,7 +2966,7 @@ pub async fn faucet(State(state): State<Arc<AppState>>, Json(request): Json<Fauc
         "new_balance": new_balance,
         "new_balance_qnk": new_balance as f64 / 100_000_000.0
     });
-    
+
     Ok(Json(ApiResponse::success(response)))
 }
 
@@ -2810,11 +2998,15 @@ pub async fn get_wallet_balance(
                 addr.copy_from_slice(&bytes);
                 addr
             }
-            _ => return Ok(Json(ApiResponse::error("Invalid wallet address format".to_string()))),
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "Invalid wallet address format".to_string(),
+                )))
+            }
         }
     } else {
         // Handle short addresses - hash the string like faucet does
-        use q_types::{Sha3_256, Digest};
+        use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(wallet_address.as_bytes());
         hasher.finalize().into()
@@ -2824,7 +3016,10 @@ pub async fn get_wallet_balance(
     // Reject all unauthenticated balance queries for security
     let _authenticated_address = match auth_wallet {
         Some(ref wallet) => {
-            debug!("✅ Authenticated wallet: {}", hex::encode(&wallet.address[..8]));
+            debug!(
+                "✅ Authenticated wallet: {}",
+                hex::encode(&wallet.address[..8])
+            );
 
             // PRIVACY CHECK: Only allow querying your own balance when authenticated
             if wallet.address != requested_address {
@@ -2843,7 +3038,10 @@ pub async fn get_wallet_balance(
         }
         None => {
             // SECURITY: Reject unauthenticated balance queries
-            warn!("🚫 Unauthorized balance query attempt for {}", wallet_address);
+            warn!(
+                "🚫 Unauthorized balance query attempt for {}",
+                wallet_address
+            );
             return Ok(Json(ApiResponse::error(
                 "🔒 Authentication Required: Balance queries require cryptographic signature proof. \
                 Please provide X-Wallet-Auth header with Ed25519/Dilithium5 signature. \
@@ -2878,7 +3076,9 @@ pub async fn get_wallet_balance(
                             let balance_key = (address_bytes, token_address);
 
                             // Only restore if balance is missing or zero
-                            if !token_balances.contains_key(&balance_key) || token_balances.get(&balance_key) == Some(&0) {
+                            if !token_balances.contains_key(&balance_key)
+                                || token_balances.get(&balance_key) == Some(&0)
+                            {
                                 token_balances.insert(balance_key, initial_supply);
                                 tracing::info!(
                                     "💰 Auto-restored {} token balance for deployer {}: {} tokens",
@@ -2899,8 +3099,9 @@ pub async fn get_wallet_balance(
     // CRITICAL FIX: Use get_balance() with full 64-char hex address like SSE streaming.rs line 465
     // Using get_consensus_balance() with only first 8 bytes was returning 0!
     let balance = {
-        let full_address_hex = hex::encode(&address_bytes);  // Full 32-byte address (64 hex chars)
-        state.storage_engine
+        let full_address_hex = hex::encode(&address_bytes); // Full 32-byte address (64 hex chars)
+        state
+            .storage_engine
             .get_balance(&full_address_hex)
             .await
             .unwrap_or(0)
@@ -2910,7 +3111,10 @@ pub async fn get_wallet_balance(
         "🔐 Authenticated balance query: {} has {} QUG (using {:?})",
         hex::encode(&address_bytes[..8]),
         balance as f64 / 100_000_000.0,
-        auth_wallet.as_ref().map(|w| w.scheme).unwrap_or(crate::wallet_auth::AuthScheme::Ed25519)
+        auth_wallet
+            .as_ref()
+            .map(|w| w.scheme)
+            .unwrap_or(crate::wallet_auth::AuthScheme::Ed25519)
     );
 
     let response = serde_json::json!({
@@ -2938,75 +3142,99 @@ pub async fn stark_generate_proof(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"proof": "stark_proof_placeholder"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"proof": "stark_proof_placeholder"}),
+    )))
 }
 
 pub async fn groth16_generate_proof(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"proof": "groth16_proof_placeholder"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"proof": "groth16_proof_placeholder"}),
+    )))
 }
 
 pub async fn plonk_generate_proof(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"proof": "plonk_proof_placeholder"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"proof": "plonk_proof_placeholder"}),
+    )))
 }
 
 pub async fn sharding_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"status": "active", "shards": 4}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"status": "active", "shards": 4}),
+    )))
 }
 
 pub async fn cache_performance(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"hit_rate": 0.95, "size": "100MB"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"hit_rate": 0.95, "size": "100MB"}),
+    )))
 }
 
 pub async fn dag_knight_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"consensus": "active", "round": 12345}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"consensus": "active", "round": 12345}),
+    )))
 }
 
 pub async fn narwhal_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"mempool": "active", "vertices": 100}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"mempool": "active", "vertices": 100}),
+    )))
 }
 
 pub async fn vdf_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"vdf": "active", "iterations": 1000}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"vdf": "active", "iterations": 1000}),
+    )))
 }
 
 pub async fn quantum_crypto_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"quantum_crypto": "ready", "phase": "Phase1"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"quantum_crypto": "ready", "phase": "Phase1"}),
+    )))
 }
 
 pub async fn bb84_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"bb84": "active", "key_rate": "1Mbps"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"bb84": "active", "key_rate": "1Mbps"}),
+    )))
 }
 
 pub async fn dex_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"dex": "active", "pools": 5}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"dex": "active", "pools": 5}),
+    )))
 }
 
 pub async fn oracle_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"oracle": "active", "feeds": 10}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"oracle": "active", "feeds": 10}),
+    )))
 }
 
 /// Get oracle price for a specific feed (e.g., QUG/USD, QUGUSD/USD, or custom token address)
@@ -3020,31 +3248,42 @@ pub async fn get_oracle_price(
     let (price, change_24h, volume_24h, confidence) = match feed_id.as_str() {
         "QUG/USD" | "QUG-USD" | "QUGUSD" => {
             // Native QUG token - get from oracle or use network valuation
-            let qug_price = match quillon_bank.oracle_integration.get_price(&q_quillon_bank::AssetType::ORB).await {
+            let qug_price = match quillon_bank
+                .oracle_integration
+                .get_price(&q_quillon_bank::AssetType::ORB)
+                .await
+            {
                 Ok(oracle_price) => {
                     let price_f64 = oracle_price.to_string().parse::<f64>().unwrap_or(42.50);
                     tracing::info!("📊 Fetched QUG price from oracle: ${}", price_f64);
                     price_f64
-                },
+                }
                 Err(e) => {
                     tracing::warn!("⚠️ Oracle fetch failed for QUG, using default: {}", e);
                     42.50 // Fallback
                 }
             };
             (qug_price, 12.8, 1_850_000.0, 0.99)
-        },
+        }
         "QUGUSD/USD" | "QUGUSD-USD" => {
             // QUGUSD stablecoin - pegged to $1 (fetch from oracle for USDC as reference)
-            let usdc_price = match quillon_bank.oracle_integration.get_price(&q_quillon_bank::AssetType::USDC).await {
+            let usdc_price = match quillon_bank
+                .oracle_integration
+                .get_price(&q_quillon_bank::AssetType::USDC)
+                .await
+            {
                 Ok(oracle_price) => {
                     let price_f64 = oracle_price.to_string().parse::<f64>().unwrap_or(1.00);
-                    tracing::info!("📊 Fetched QUGUSD price from oracle (USDC ref): ${}", price_f64);
+                    tracing::info!(
+                        "📊 Fetched QUGUSD price from oracle (USDC ref): ${}",
+                        price_f64
+                    );
                     price_f64
-                },
-                Err(_) => 1.00 // Stablecoin always $1
+                }
+                Err(_) => 1.00, // Stablecoin always $1
             };
             (usdc_price, 0.02, 950_000.0, 0.9999)
-        },
+        }
         _ => {
             // Custom tokens or unknown feeds - check if it's a contract address
             if feed_id.len() > 20 {
@@ -3058,10 +3297,7 @@ pub async fn get_oracle_price(
 
                 for pool in pools.values() {
                     // Check if token is in this pool (as token0 or token1)
-                    let (is_token0, is_token1) = (
-                        pool.token0 == feed_id,
-                        pool.token1 == feed_id
-                    );
+                    let (is_token0, is_token1) = (pool.token0 == feed_id, pool.token1 == feed_id);
 
                     if is_token0 || is_token1 {
                         // Calculate price based on AMM constant product formula: x * y = k
@@ -3157,19 +3393,25 @@ pub async fn get_oracle_feeds(
 pub async fn stablecoin_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"stablecoin": "pegged", "price": 1.00}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"stablecoin": "pegged", "price": 1.00}),
+    )))
 }
 
 pub async fn tor_circuit_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"tor_circuits": 4, "status": "healthy"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"tor_circuits": 4, "status": "healthy"}),
+    )))
 }
 
 pub async fn robot_swarm_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"robots": 12, "status": "coordinated"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"robots": 12, "status": "coordinated"}),
+    )))
 }
 
 pub async fn p2p_network_status(
@@ -3178,14 +3420,20 @@ pub async fn p2p_network_status(
     // Get actual peer count from libp2p
     let peer_count = if let Some(libp2p_manager) = &state.libp2p_discovery {
         let manager = libp2p_manager.lock().await;
-        let count = manager.get_peer_count_atomic().load(std::sync::atomic::Ordering::Relaxed);
+        let count = manager
+            .get_peer_count_atomic()
+            .load(std::sync::atomic::Ordering::Relaxed);
         drop(manager);
         count
     } else {
         0
     };
 
-    let status = if peer_count > 0 { "connected" } else { "disconnected" };
+    let status = if peer_count > 0 {
+        "connected"
+    } else {
+        "disconnected"
+    };
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "peers": peer_count,
@@ -3204,12 +3452,10 @@ pub async fn connect_peer(
     debug!("Attempting to manually connect to peer");
 
     // Extract multiaddr from request
-    let multiaddr_str = payload["multiaddr"]
-        .as_str()
-        .ok_or_else(|| {
-            warn!("Missing multiaddr in request");
-            StatusCode::BAD_REQUEST
-        })?;
+    let multiaddr_str = payload["multiaddr"].as_str().ok_or_else(|| {
+        warn!("Missing multiaddr in request");
+        StatusCode::BAD_REQUEST
+    })?;
 
     // Parse multiaddr
     let multiaddr: libp2p::Multiaddr = multiaddr_str.parse().map_err(|e| {
@@ -3230,7 +3476,9 @@ pub async fn connect_peer(
 
         if command_tx.send(command).is_err() {
             error!("❌ Failed to send dial command - network manager not running");
-            return Ok(Json(ApiResponse::error("Network manager not responding".to_string())));
+            return Ok(Json(ApiResponse::error(
+                "Network manager not responding".to_string(),
+            )));
         }
 
         // Wait for response from network manager
@@ -3245,112 +3493,149 @@ pub async fn connect_peer(
             }
             Ok(Ok(Err(e))) => {
                 error!("❌ Failed to dial peer {}: {}", multiaddr, e);
-                Ok(Json(ApiResponse::error(format!("Failed to dial peer: {}", e))))
+                Ok(Json(ApiResponse::error(format!(
+                    "Failed to dial peer: {}",
+                    e
+                ))))
             }
             Ok(Err(_)) => {
                 error!("❌ Network manager dropped response channel");
-                Ok(Json(ApiResponse::error("Network manager error".to_string())))
+                Ok(Json(ApiResponse::error(
+                    "Network manager error".to_string(),
+                )))
             }
             Err(_) => {
                 error!("❌ Timeout waiting for network manager response");
-                Ok(Json(ApiResponse::error("Dial operation timed out".to_string())))
+                Ok(Json(ApiResponse::error(
+                    "Dial operation timed out".to_string(),
+                )))
             }
         }
     } else {
         warn!("⚠️ libp2p command channel not initialized");
-        Ok(Json(ApiResponse::error("libp2p not initialized".to_string())))
+        Ok(Json(ApiResponse::error(
+            "libp2p not initialized".to_string(),
+        )))
     }
 }
 
 pub async fn plugin_system_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"plugins": 8, "status": "active"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"plugins": 8, "status": "active"}),
+    )))
 }
 
 pub async fn install_plugin(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"installed": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"installed": true}),
+    )))
 }
 
 pub async fn execute_plugin(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"executed": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"executed": true}),
+    )))
 }
 
 pub async fn plugin_metrics(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"cpu_usage": "5%", "memory": "10MB"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"cpu_usage": "5%", "memory": "10MB"}),
+    )))
 }
 
 pub async fn configure_plugin(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"configured": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"configured": true}),
+    )))
 }
 
 pub async fn plugin_dev_toolkit(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"toolkit": "ready", "templates": 5}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"toolkit": "ready", "templates": 5}),
+    )))
 }
 
 pub async fn get_mesh_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"mesh": "active", "nodes": 20}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"mesh": "active", "nodes": 20}),
+    )))
 }
 
 pub async fn start_mesh(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"mesh_started": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"mesh_started": true}),
+    )))
 }
 
 pub async fn stop_mesh(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"mesh_stopped": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"mesh_stopped": true}),
+    )))
 }
 
 pub async fn get_mesh_peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"peers": ["peer1", "peer2", "peer3"]}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"peers": ["peer1", "peer2", "peer3"]}),
+    )))
 }
 
 pub async fn force_mesh_connect(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"connected": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"connected": true}),
+    )))
 }
 
 pub async fn get_mesh_health(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"health": "good", "latency": "5ms"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"health": "good", "latency": "5ms"}),
+    )))
 }
 
 pub async fn get_mesh_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"messages": 1000, "bandwidth": "10Mbps"}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"messages": 1000, "bandwidth": "10Mbps"}),
+    )))
 }
 
 pub async fn trigger_mesh_discovery(
     State(state): State<Arc<AppState>>,
     Json(_payload): Json<Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"discovery_triggered": true}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"discovery_triggered": true}),
+    )))
 }
 
 // ============================================================================
@@ -3360,11 +3645,11 @@ pub async fn trigger_mesh_discovery(
 /// Request to join privacy mixing pool
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JoinMixingPoolRequest {
-    pub amount: f64,                    // Amount in QNK to mix
-    pub output_addresses: Vec<String>,  // Destination addresses after mixing
-    pub privacy_level: String,          // "standard", "high", "maximum"
-    pub decoy_count: Option<u32>,       // Number of decoy transactions
-    pub mixer_fee: Option<f64>,         // Optional custom mixer fee
+    pub amount: f64,                   // Amount in QNK to mix
+    pub output_addresses: Vec<String>, // Destination addresses after mixing
+    pub privacy_level: String,         // "standard", "high", "maximum"
+    pub decoy_count: Option<u32>,      // Number of decoy transactions
+    pub mixer_fee: Option<f64>,        // Optional custom mixer fee
 }
 
 /// Response from joining mixing pool
@@ -3384,9 +3669,9 @@ pub struct JoinMixingPoolResponse {
 /// Privacy mixer transaction request
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PrivacyMixTransactionRequest {
-    pub from: Option<String>, // Sender wallet address
-    pub to: String,           // Destination address
-    pub amount: f64,          // Amount in QNK
+    pub from: Option<String>,  // Sender wallet address
+    pub to: String,            // Destination address
+    pub amount: f64,           // Amount in QNK
     pub privacy_level: String, // "standard", "high", "maximum"
     pub enable_quantum_mixing: Option<bool>,
     pub decoy_multiplier: Option<f64>, // Multiplier for decoy transactions (default 15x)
@@ -3428,9 +3713,9 @@ pub async fn join_mixing_pool(
 
     // Estimate completion time based on pool size and privacy level
     let estimated_completion_time = match privacy_level {
-        q_types::PrivacyLevel::Standard => 15.0,  // 15 seconds
-        q_types::PrivacyLevel::High => 30.0,      // 30 seconds
-        q_types::PrivacyLevel::Maximum => 60.0,   // 1 minute
+        q_types::PrivacyLevel::Standard => 15.0, // 15 seconds
+        q_types::PrivacyLevel::High => 30.0,     // 30 seconds
+        q_types::PrivacyLevel::Maximum => 60.0,  // 1 minute
     };
 
     // Store mixing request in pending pool
@@ -3459,8 +3744,12 @@ pub async fn join_mixing_pool(
         quantum_enhanced: true, // Q-NarwhalKnight always uses quantum enhancement
     };
 
-    info!("🌪️ Joined quantum mixing pool: {} (amount: {:.6} QNK, privacy: {:?})",
-          &participant_id[..8], request.amount, privacy_level);
+    info!(
+        "🌪️ Joined quantum mixing pool: {} (amount: {:.6} QNK, privacy: {:?})",
+        &participant_id[..8],
+        request.amount,
+        privacy_level
+    );
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -3483,11 +3772,15 @@ pub async fn send_private_transaction(
                 addr.copy_from_slice(&bytes);
                 addr
             }
-            _ => return Ok(Json(ApiResponse::error("Invalid recipient address format".to_string()))),
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "Invalid recipient address format".to_string(),
+                )))
+            }
         }
     } else {
         // Handle ENS-style addresses (only if NOT a hex address with qnk prefix)
-        use q_types::{Sha3_256, Digest};
+        use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(to_str.as_bytes());
         hasher.finalize().into()
@@ -3521,11 +3814,15 @@ pub async fn send_private_transaction(
                     addr.copy_from_slice(&bytes);
                     addr
                 }
-                _ => return Ok(Json(ApiResponse::error("Invalid sender address format".to_string()))),
+                _ => {
+                    return Ok(Json(ApiResponse::error(
+                        "Invalid sender address format".to_string(),
+                    )))
+                }
             }
         } else {
             // Handle ENS-style addresses (only if NOT a hex address with qnk prefix)
-            use q_types::{Sha3_256, Digest};
+            use q_types::{Digest, Sha3_256};
             let mut hasher = Sha3_256::new();
             hasher.update(from_str_clean.as_bytes());
             hasher.finalize().into()
@@ -3598,7 +3895,10 @@ pub async fn send_private_transaction(
             wallet_balances_write.insert(addr, bal);
         }
         drop(wallet_balances_write);
-        debug!("📊 Reloaded {} wallet balances from RocksDB for mixer", balance_count);
+        debug!(
+            "📊 Reloaded {} wallet balances from RocksDB for mixer",
+            balance_count
+        );
     }
 
     // Check balance (but don't deduct yet - wait for consensus confirmation)
@@ -3650,8 +3950,12 @@ pub async fn send_private_transaction(
         warn!("Failed to emit mixing started event: {}", e);
     }
 
-    info!("🔒 Started quantum privacy mixing: {} (session: {}, decoys: {})",
-          hex::encode(tx_hash), &mixing_session_id[..8], decoy_count);
+    info!(
+        "🔒 Started quantum privacy mixing: {} (session: {}, decoys: {})",
+        hex::encode(tx_hash),
+        &mixing_session_id[..8],
+        decoy_count
+    );
 
     // CRITICAL: Spawn background task to complete mixing after delay (varies by privacy level)
     // Pass sender address directly (don't retrieve from tx_pool later, as tx may be removed by consensus)
@@ -3662,17 +3966,20 @@ pub async fn send_private_transaction(
         complete_mixing_process(
             state_clone,
             tx_hash,
-            from_address,  // Pass sender address directly
+            from_address, // Pass sender address directly
             to_address,
             amount_u64,
             mixing_session_id_clone,
-            privacy_level_clone,  // Pass privacy level to determine mixing duration
-        ).await;
+            privacy_level_clone, // Pass privacy level to determine mixing duration
+        )
+        .await;
     });
-    info!("🚀 [MIXER] Background mixing task spawned for session: {} (from: {}, to: {})",
+    info!(
+        "🚀 [MIXER] Background mixing task spawned for session: {} (from: {}, to: {})",
         &mixing_session_id[..8],
         hex::encode(&from_address[..8]),
-        hex::encode(&to_address[..8]));
+        hex::encode(&to_address[..8])
+    );
 
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
@@ -3775,7 +4082,10 @@ pub async fn get_mixing_status(
     State(state): State<Arc<AppState>>,
     Path(mixing_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    debug!("Getting mixing status for session: {}", &mixing_session_id[..8]);
+    debug!(
+        "Getting mixing status for session: {}",
+        &mixing_session_id[..8]
+    );
 
     // Check if this is actually a transaction hash instead of mixing session ID
     let is_tx_hash = mixing_session_id.len() == 64;
@@ -3847,11 +4157,13 @@ pub async fn get_mixing_status(
 fn generate_quantum_participant_id() -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"Q_NARWHAL_MIXING_PARTICIPANT");
-    hasher.update(&std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_le_bytes());
+    hasher.update(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_le_bytes(),
+    );
     hasher.update(uuid::Uuid::new_v4().as_bytes());
     let hash = hasher.finalize();
     hex::encode(&hash.as_bytes()[..16])
@@ -3861,11 +4173,13 @@ fn generate_quantum_participant_id() -> String {
 fn generate_quantum_mixing_id() -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"Q_NARWHAL_QUANTUM_MIXING");
-    hasher.update(&std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_le_bytes());
+    hasher.update(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_le_bytes(),
+    );
     let hash = hasher.finalize();
     hex::encode(&hash.as_bytes()[..16])
 }
@@ -3873,18 +4187,16 @@ fn generate_quantum_mixing_id() -> String {
 /// Determine appropriate mixing pool for amount
 fn determine_mixing_pool(amount: u64) -> String {
     match amount {
-        1_000_000..=10_000_000 => "micro_pool".to_string(),      // 0.001 - 0.01 QNK
-        10_000_001..=100_000_000 => "small_pool".to_string(),     // 0.01 - 0.1 QNK
+        1_000_000..=10_000_000 => "micro_pool".to_string(), // 0.001 - 0.01 QNK
+        10_000_001..=100_000_000 => "small_pool".to_string(), // 0.01 - 0.1 QNK
         100_000_001..=1_000_000_000 => "medium_pool".to_string(), // 0.1 - 1 QNK
-        _ => "large_pool".to_string(),                             // 1+ QNK
+        _ => "large_pool".to_string(),                      // 1+ QNK
     }
 }
 
 /// Generate mock key images for demonstration
 fn generate_mock_key_images(count: u32) -> Vec<String> {
-    (0..count)
-        .map(|i| hex::encode([i as u8; 32]))
-        .collect()
+    (0..count).map(|i| hex::encode([i as u8; 32])).collect()
 }
 
 /// Generate mock view keys
@@ -3911,20 +4223,28 @@ async fn complete_mixing_process(
     mixing_session_id: String,
     privacy_level: q_types::PrivacyLevel,
 ) {
-    info!("🌪️ [MIXER] Starting mixing process for tx: {}", hex::encode(tx_hash));
+    info!(
+        "🌪️ [MIXER] Starting mixing process for tx: {}",
+        hex::encode(tx_hash)
+    );
 
     // Simulate mixing time based on privacy level
     let mixing_duration = match privacy_level {
-        q_types::PrivacyLevel::Standard => 15,  // 15 seconds
-        q_types::PrivacyLevel::High => 30,      // 30 seconds
-        q_types::PrivacyLevel::Maximum => 60,   // 60 seconds
+        q_types::PrivacyLevel::Standard => 15, // 15 seconds
+        q_types::PrivacyLevel::High => 30,     // 30 seconds
+        q_types::PrivacyLevel::Maximum => 60,  // 60 seconds
     };
-    info!("⏱️ [MIXER] Privacy level: {:?}, mixing duration: {}s", privacy_level, mixing_duration);
+    info!(
+        "⏱️ [MIXER] Privacy level: {:?}, mixing duration: {}s",
+        privacy_level, mixing_duration
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(mixing_duration)).await;
 
-    info!("🌪️ [MIXER] Mixing complete, transferring funds from {} to {}",
+    info!(
+        "🌪️ [MIXER] Mixing complete, transferring funds from {} to {}",
         hex::encode(&sender_address[..8]),
-        hex::encode(&recipient[..8]));
+        hex::encode(&recipient[..8])
+    );
 
     // CRITICAL FIX: Mixer transactions do NOT go through consensus!
     // We removed tx_pool.insert to prevent double transfers.
@@ -3943,9 +4263,11 @@ async fn complete_mixing_process(
 
         // Deduct from sender (amount + fee)
         if old_sender < total_deduction {
-            error!("❌ [MIXER] Insufficient balance! Sender has {} QUG but needs {} QUG",
+            error!(
+                "❌ [MIXER] Insufficient balance! Sender has {} QUG but needs {} QUG",
                 old_sender as f64 / 100_000_000.0,
-                total_deduction as f64 / 100_000_000.0);
+                total_deduction as f64 / 100_000_000.0
+            );
             return; // Early return if insufficient funds
         }
 
@@ -3975,19 +4297,28 @@ async fn complete_mixing_process(
     // Update transaction status to Confirmed (not just InMempool)
     // Use current_height from state, or 0 if not available
     let current_height = 0; // TODO: Get from state.current_height
-    let current_round = 0;  // TODO: Get from state.current_round
-    state.tx_status.insert(tx_hash, TxStatus::Confirmed {
-        block_height: current_height,
-        round: current_round,
-    });
+    let current_round = 0; // TODO: Get from state.current_round
+    state.tx_status.insert(
+        tx_hash,
+        TxStatus::Confirmed {
+            block_height: current_height,
+            round: current_round,
+        },
+    );
     info!("✅ [MIXER] Transaction status: Confirmed");
 
     // Get final balances for events
-    let final_sender_balance = state.wallet_balances.read().await
+    let final_sender_balance = state
+        .wallet_balances
+        .read()
+        .await
         .get(&sender_address)
         .copied()
         .unwrap_or(0);
-    let final_recipient_balance = state.wallet_balances.read().await
+    let final_recipient_balance = state
+        .wallet_balances
+        .read()
+        .await
         .get(&recipient)
         .copied()
         .unwrap_or(0);
@@ -4030,11 +4361,14 @@ async fn complete_mixing_process(
         warn!("Failed to emit mixing completed event: {}", e);
     }
 
-    info!("✅ [MIXER] Quantum privacy mixing completed: {}", hex::encode(tx_hash));
+    info!(
+        "✅ [MIXER] Quantum privacy mixing completed: {}",
+        hex::encode(tx_hash)
+    );
 }
 
 // =============================
-// Production Peer Discovery API Handlers  
+// Production Peer Discovery API Handlers
 // =============================
 
 /// Get production peer discovery status
@@ -4044,7 +4378,7 @@ pub async fn production_discovery_status(
     if let Some(discovery) = &state.production_peer_discovery {
         let discovery_guard = discovery.lock().await;
         let stats = discovery_guard.get_stats().await;
-        
+
         let status = serde_json::json!({
             "enabled": true,
             "active": true,
@@ -4065,7 +4399,7 @@ pub async fn production_discovery_status(
             },
             "timestamp": Utc::now()
         });
-        
+
         Ok(Json(ApiResponse::success(status)))
     } else {
         let status = serde_json::json!({
@@ -4074,7 +4408,7 @@ pub async fn production_discovery_status(
             "message": "Production peer discovery is not enabled. Start the server with --production flag.",
             "timestamp": Utc::now()
         });
-        
+
         Ok(Json(ApiResponse::success(status)))
     }
 }
@@ -4086,7 +4420,7 @@ pub async fn production_discovery_peers(
     if let Some(discovery) = &state.production_peer_discovery {
         let discovery_guard = discovery.lock().await;
         let discovered_peers = discovery_guard.get_discovered_peers().await;
-        
+
         let peers_json: Vec<serde_json::Value> = discovered_peers
             .iter()
             .map(|(peer_id, peer_info)| {
@@ -4103,13 +4437,13 @@ pub async fn production_discovery_peers(
                 })
             })
             .collect();
-        
+
         let response = serde_json::json!({
             "total_peers": discovered_peers.len(),
             "peers": peers_json,
             "timestamp": Utc::now()
         });
-        
+
         Ok(Json(ApiResponse::success(response)))
     } else {
         let response = serde_json::json!({
@@ -4118,7 +4452,7 @@ pub async fn production_discovery_peers(
             "message": "Production peer discovery is not enabled",
             "timestamp": Utc::now()
         });
-        
+
         Ok(Json(ApiResponse::success(response)))
     }
 }
@@ -4183,16 +4517,15 @@ pub async fn test_production_peer_connectivity(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     if let Some(discovery) = &state.production_peer_discovery {
         // Parse peer ID from hex
-        let peer_id_bytes = hex::decode(&peer_id_hex)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+        let peer_id_bytes = hex::decode(&peer_id_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
+
         if peer_id_bytes.len() != 32 {
             return Err(StatusCode::BAD_REQUEST);
         }
-        
+
         let mut peer_id = [0u8; 32];
         peer_id.copy_from_slice(&peer_id_bytes);
-        
+
         let _discovery_guard = discovery.lock().await;
 
         // TODO: Implement test_peer_connectivity method
@@ -4205,7 +4538,10 @@ pub async fn test_production_peer_connectivity(
             "test_type": "production_connectivity"
         });
 
-        warn!("⚠️ Connectivity test not implemented for peer {}", peer_id_hex);
+        warn!(
+            "⚠️ Connectivity test not implemented for peer {}",
+            peer_id_hex
+        );
         Ok(Json(ApiResponse::success(result)))
     } else {
         let result = serde_json::json!({
@@ -4214,7 +4550,7 @@ pub async fn test_production_peer_connectivity(
             "message": "Production peer discovery is not enabled",
             "timestamp": Utc::now()
         });
-        
+
         Ok(Json(ApiResponse::success(result)))
     }
 }
@@ -4229,7 +4565,11 @@ pub async fn submit_mining_solution(
     // Decode hash from hex string
     let hash_bytes = match hex::decode(&request.hash) {
         Ok(bytes) if bytes.len() == 32 => bytes,
-        _ => return Ok(Json(ApiResponse::error("Invalid hash format. Must be 32-byte hex string".to_string()))),
+        _ => {
+            return Ok(Json(ApiResponse::error(
+                "Invalid hash format. Must be 32-byte hex string".to_string(),
+            )))
+        }
     };
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&hash_bytes);
@@ -4237,14 +4577,20 @@ pub async fn submit_mining_solution(
     // Decode difficulty target from hex string
     let target_bytes = match hex::decode(&request.difficulty_target) {
         Ok(bytes) if bytes.len() == 32 => bytes,
-        _ => return Ok(Json(ApiResponse::error("Invalid difficulty target format. Must be 32-byte hex string".to_string()))),
+        _ => {
+            return Ok(Json(ApiResponse::error(
+                "Invalid difficulty target format. Must be 32-byte hex string".to_string(),
+            )))
+        }
     };
     let mut difficulty_target = [0u8; 32];
     difficulty_target.copy_from_slice(&target_bytes);
 
     // Validate wallet address format (qnk + 64 hex chars = 67 total)
     if !request.miner_address.starts_with("qnk") || request.miner_address.len() != 67 {
-        return Ok(Json(ApiResponse::error("Invalid miner address format. Must start with 'qnk' and be 67 characters".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Invalid miner address format. Must start with 'qnk' and be 67 characters".to_string(),
+        )));
     }
 
     // Extract hex part after "qnk" prefix
@@ -4253,11 +4599,17 @@ pub async fn submit_mining_solution(
     // Decode miner address from hex string to [u8; 32]
     let miner_address_bytes = match hex::decode(hex_part) {
         Ok(bytes) => bytes,
-        Err(_) => return Ok(Json(ApiResponse::error("Invalid hexadecimal in miner address".to_string()))),
+        Err(_) => {
+            return Ok(Json(ApiResponse::error(
+                "Invalid hexadecimal in miner address".to_string(),
+            )))
+        }
     };
 
     if miner_address_bytes.len() != 32 {
-        return Ok(Json(ApiResponse::error("Miner address must be 32 bytes after qnk prefix".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Miner address must be 32 bytes after qnk prefix".to_string(),
+        )));
     }
 
     let mut miner_address = [0u8; 32];
@@ -4265,7 +4617,9 @@ pub async fn submit_mining_solution(
 
     // Verify the VDF proof meets difficulty
     if !verify_mining_difficulty(&hash, &difficulty_target) {
-        return Ok(Json(ApiResponse::error("Solution does not meet difficulty target".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Solution does not meet difficulty target".to_string(),
+        )));
     }
 
     // ========================================
@@ -4274,88 +4628,115 @@ pub async fn submit_mining_solution(
     // Prevents unauthorized forks and enforces 1% development fee at protocol level
     // ========================================
     // TODO: Re-enable when q_mining::dev_fee module is fully implemented
-    if false { // Temporarily disabled due to missing q_mining::dev_fee
-    // Miner auth check disabled
-    let _state = &state; // Keep state reference
-    if false { // Inner condition also disabled
-        // Both signature and public key must be present
-        if let (Some(sig_hex), Some(pk_hex)) = (&request.aegis_signature, &request.aegis_public_key) {
-            // Decode hex strings
-            let sig_bytes = match hex::decode(sig_hex) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    return Ok(Json(ApiResponse::error("Invalid signature hex encoding".to_string())));
-                }
-            };
+    if false {
+        // Temporarily disabled due to missing q_mining::dev_fee
+        // Miner auth check disabled
+        let _state = &state; // Keep state reference
+        if false {
+            // Inner condition also disabled
+            // Both signature and public key must be present
+            if let (Some(sig_hex), Some(pk_hex)) =
+                (&request.aegis_signature, &request.aegis_public_key)
+            {
+                // Decode hex strings
+                let sig_bytes = match hex::decode(sig_hex) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Ok(Json(ApiResponse::error(
+                            "Invalid signature hex encoding".to_string(),
+                        )));
+                    }
+                };
 
-            let pk_bytes = match hex::decode(pk_hex) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    return Ok(Json(ApiResponse::error("Invalid public key hex encoding".to_string())));
-                }
-            };
+                let pk_bytes = match hex::decode(pk_hex) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Ok(Json(ApiResponse::error(
+                            "Invalid public key hex encoding".to_string(),
+                        )));
+                    }
+                };
 
-            // Convert to AEGIS-KL types using postcard deserialization
-            let public_key = match postcard::from_bytes::<q_aegis_ql::PublicKey>(&pk_bytes) {
-                Ok(pk) => pk,
-                Err(_) => {
-                    return Ok(Json(ApiResponse::error("Invalid AEGIS-KL public key format".to_string())));
-                }
-            };
+                // Convert to AEGIS-KL types using postcard deserialization
+                let public_key = match postcard::from_bytes::<q_aegis_ql::PublicKey>(&pk_bytes) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        return Ok(Json(ApiResponse::error(
+                            "Invalid AEGIS-KL public key format".to_string(),
+                        )));
+                    }
+                };
 
-            let signature = match postcard::from_bytes::<q_aegis_ql::Signature>(&sig_bytes) {
-                Ok(sig) => sig,
-                Err(_) => {
-                    return Ok(Json(ApiResponse::error("Invalid AEGIS-KL signature format".to_string())));
-                }
-            };
+                let signature = match postcard::from_bytes::<q_aegis_ql::Signature>(&sig_bytes) {
+                    Ok(sig) => sig,
+                    Err(_) => {
+                        return Ok(Json(ApiResponse::error(
+                            "Invalid AEGIS-KL signature format".to_string(),
+                        )));
+                    }
+                };
 
-            // Create solution data for verification (hash + nonce + miner_address)
-            let solution_data = format!("{}{}{}", hex::encode(hash), nonce, request.miner_address).into_bytes();
+                // Create solution data for verification (hash + nonce + miner_address)
+                let solution_data =
+                    format!("{}{}{}", hex::encode(hash), nonce, request.miner_address).into_bytes();
 
-            // Create miner credentials
-            // TODO: Re-enable when q_mining::dev_fee module is complete
-            // let credentials = q_mining::dev_fee::MinerCredentials {
-            //     wallet_address: request.miner_address.clone(),
-            //     aegis_public_key: public_key,
-            // };
+                // Create miner credentials
+                // TODO: Re-enable when q_mining::dev_fee module is complete
+                // let credentials = q_mining::dev_fee::MinerCredentials {
+                //     wallet_address: request.miner_address.clone(),
+                //     aegis_public_key: public_key,
+                // };
 
-            // Temporary: Just log the authentication attempt
-            info!("⚠️  AEGIS-KL authentication temporarily disabled - q_mining::dev_fee module incomplete");
-            let _public_key = public_key; // Suppress unused warning
-            let _signature = signature; // Suppress unused warning
-            let _solution_data = solution_data; // Suppress unused warning
+                // Temporary: Just log the authentication attempt
+                info!("⚠️  AEGIS-KL authentication temporarily disabled - q_mining::dev_fee module incomplete");
+                let _public_key = public_key; // Suppress unused warning
+                let _signature = signature; // Suppress unused warning
+                let _solution_data = solution_data; // Suppress unused warning
 
-            // Verify the AEGIS-KL signature
-            // DISABLED - credentials not available
-            if false {
-            let _dummy: Result<bool, ()> = Ok(true); // Dummy value
-            match _dummy { // miner_auth.verify_miner_auth(&_public_key, &_solution_data, &_signature) {
-                Ok(true) => {
-                    info!("✅ [AEGIS-KL] Miner {} authenticated successfully", &request.miner_address[..16]);
-                }
-                Ok(false) => {
-                    warn!("❌ [AEGIS-KL] Invalid signature from miner {}", &request.miner_address[..16]);
-                    return Ok(Json(ApiResponse::error(
-                        "Invalid AEGIS-KL signature - mining submission rejected".to_string()
-                    )));
-                }
-                Err(_e) => {
-                    warn!("❌ [AEGIS-KL] Verification error for miner {}", &request.miner_address[..16]);
-                    return Ok(Json(ApiResponse::error(
+                // Verify the AEGIS-KL signature
+                // DISABLED - credentials not available
+                if false {
+                    let _dummy: Result<bool, ()> = Ok(true); // Dummy value
+                    match _dummy {
+                        // miner_auth.verify_miner_auth(&_public_key, &_solution_data, &_signature) {
+                        Ok(true) => {
+                            info!(
+                                "✅ [AEGIS-KL] Miner {} authenticated successfully",
+                                &request.miner_address[..16]
+                            );
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "❌ [AEGIS-KL] Invalid signature from miner {}",
+                                &request.miner_address[..16]
+                            );
+                            return Ok(Json(ApiResponse::error(
+                                "Invalid AEGIS-KL signature - mining submission rejected"
+                                    .to_string(),
+                            )));
+                        }
+                        Err(_e) => {
+                            warn!(
+                                "❌ [AEGIS-KL] Verification error for miner {}",
+                                &request.miner_address[..16]
+                            );
+                            return Ok(Json(ApiResponse::error(
                         "AEGIS-KL authentication failed - please check your miner configuration".to_string()
                     )));
-                }
-            }
-            } // End disabled verification
-        } else {
-            // AEGIS-KL signature is REQUIRED when authentication is enabled
-            warn!("❌ [AEGIS-KL] Missing signature/public key from miner {}", &request.miner_address[..16]);
-            return Ok(Json(ApiResponse::error(
+                        }
+                    }
+                } // End disabled verification
+            } else {
+                // AEGIS-KL signature is REQUIRED when authentication is enabled
+                warn!(
+                    "❌ [AEGIS-KL] Missing signature/public key from miner {}",
+                    &request.miner_address[..16]
+                );
+                return Ok(Json(ApiResponse::error(
                 "AEGIS-KL signature required for mining submissions (upgrade your miner software)".to_string()
             )));
+            }
         }
-    }
     } // End of AEGIS-KL disabled block
 
     // 🚀 ASYNC QUEUE: Send to background processor instead of blocking here
@@ -4372,41 +4753,55 @@ pub async fn submit_mining_solution(
         // ✅ v1.0.2-beta Layer 3 FIX: Bounded channel send is async and requires await
         match tx.send(submission).await {
             Ok(_) => {
-                info!("⚡ Mining submission queued (non-blocking): Miner: {}, Nonce: {}",
-                      &request.miner_address[..16], nonce);
+                info!(
+                    "⚡ Mining submission queued (non-blocking): Miner: {}, Nonce: {}",
+                    &request.miner_address[..16],
+                    nonce
+                );
 
                 // Update mining statistics with miner's hash rate
                 if let Some(ref mining_stats_arc) = state.mining_statistics {
                     let mut mining_stats = mining_stats_arc.write().await;
                     let hash_rate_khash = request.hash_rate.unwrap_or(0.0);
-                    mining_stats.update_miner(
-                        request.miner_address.clone(),
-                        hash_rate_khash
-                    );
+                    mining_stats.update_miner(request.miner_address.clone(), hash_rate_khash);
                     mining_stats.total_solutions_submitted += 1;
                 }
             }
             Err(e) => {
-                warn!("❌ Failed to queue mining submission (backpressure or channel closed): {:?}", e);
-                return Ok(Json(ApiResponse::error("Mining queue temporarily unavailable".to_string())));
+                warn!(
+                    "❌ Failed to queue mining submission (backpressure or channel closed): {:?}",
+                    e
+                );
+                return Ok(Json(ApiResponse::error(
+                    "Mining queue temporarily unavailable".to_string(),
+                )));
             }
         }
     } else {
         warn!("⚠️ Mining queue not initialized");
-        return Ok(Json(ApiResponse::error("Mining system not ready".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Mining system not ready".to_string(),
+        )));
     }
 
     // Return success immediately (non-blocking)
     // Background processor will handle balance update, persistence, and broadcasting
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
-    let block_reward_total = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
+    let block_reward_total =
+        calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
 
     // Apply 1% development fee (transparent funding for ongoing development)
     const DEV_FEE_PERCENT: f64 = 0.01; // 1%
     let dev_fee_amount = (block_reward_total as f64 * DEV_FEE_PERCENT) as u64;
     let miner_reward = block_reward_total - dev_fee_amount;
 
-    let current_balance = state.wallet_balances.read().await.get(&miner_address).copied().unwrap_or(0);
+    let current_balance = state
+        .wallet_balances
+        .read()
+        .await
+        .get(&miner_address)
+        .copied()
+        .unwrap_or(0);
     let estimated_new_balance = current_balance + miner_reward;
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
@@ -4416,7 +4811,9 @@ pub async fn submit_mining_solution(
         new_balance: estimated_new_balance,
         new_balance_qnk: estimated_new_balance as f64 / 100_000_000.0,
         block_height: state.node_status.read().await.current_height,
-        message: "Mining solution queued for processing (1% dev fee applied for sustainable development)".to_string(),
+        message:
+            "Mining solution queued for processing (1% dev fee applied for sustainable development)"
+                .to_string(),
     })))
 }
 
@@ -4426,7 +4823,9 @@ pub async fn get_mining_challenge(
 ) -> Result<Json<ApiResponse<MiningChallengeResponse>>, StatusCode> {
     // ✅ P0 HOTFIX: Load height once at the top with proper memory ordering
     // Using Acquire ordering ensures visibility of all state updates that happened-before the height write
-    let local_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
+    let local_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Acquire);
 
     // ✅ P0 HOTFIX: Validate sync health BEFORE cache lookup or challenge generation
     // This prevents all stale-height scenarios by blocking mining when node is unhealthy
@@ -4441,26 +4840,38 @@ pub async fn get_mining_challenge(
             node_status.connected_peers as usize
         };
 
-        if peer_count == 0 {
+        // ✅ v1.0.13-beta: Allow mining on bootstrap nodes even with 0 peers
+        // Check environment variable Q_ALLOW_SOLO_MINING to enable genesis block production
+        let allow_solo_mining = std::env::var("Q_ALLOW_SOLO_MINING")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
+
+        if peer_count == 0 && !allow_solo_mining {
             return Ok(Json(ApiResponse::error(
-                "Node has no connected peers. Mining is disabled until at least one peer is connected. Check firewall (port 9001) and bootstrap configuration.".to_string()
+                "Node has no connected peers. Mining is disabled until at least one peer is connected. Check firewall (port 9001) and bootstrap configuration. To enable solo mining on bootstrap node, set Q_ALLOW_SOLO_MINING=true".to_string()
             )));
         }
 
         // Check 2: Is network height known? (discovery phase)
         // Use highest_network_height from AppState (atomic, tracks highest seen from peers)
-        let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Acquire);
+        let network_height = state
+            .highest_network_height
+            .load(std::sync::atomic::Ordering::Acquire);
 
-        if network_height == 0 {
+        // ✅ v1.0.13-beta: Skip network height check if solo mining is enabled
+        if network_height == 0 && !allow_solo_mining {
             return Ok(Json(ApiResponse::error(
-                "Network height unknown. Node is still discovering peers. Try again in 30 seconds.".to_string()
+                "Network height unknown. Node is still discovering peers. Try again in 30 seconds."
+                    .to_string(),
             )));
         }
 
         // Check 3: Are we synced? (sync validation)
+        // ✅ v1.0.13-beta: Skip sync check if solo mining is enabled
         let blocks_behind = network_height.saturating_sub(local_height);
 
-        if blocks_behind > 100 {
+        if blocks_behind > 100 && !allow_solo_mining {
             return Ok(Json(ApiResponse::error(format!(
                 "Node is syncing: {} blocks behind network. Mining will resume after sync completes. Current: {}, Network: {}",
                 blocks_behind, local_height, network_height
@@ -4528,7 +4939,10 @@ pub async fn get_mining_challenge(
     }
 
     // No cached challenge or it's expired/wrong height - generate new one
-    info!("🎯 Generating fresh mining challenge for height {}", block_height);
+    info!(
+        "🎯 Generating fresh mining challenge for height {}",
+        block_height
+    );
 
     let issued_at = chrono::Utc::now();
 
@@ -4551,15 +4965,18 @@ pub async fn get_mining_challenge(
 
     let challenge_hash = h.finalize().as_bytes().clone();
 
-    info!("✅ Generated consensus-bound challenge for height {} (deterministic, no timestamp)",
-          block_height);
+    info!(
+        "✅ Generated consensus-bound challenge for height {} (deterministic, no timestamp)",
+        block_height
+    );
 
     // VDF iterations
     let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
 
     // Block reward
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
-    let block_reward_base_units = calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
+    let block_reward_base_units =
+        calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
     let block_reward = block_reward_base_units as f64 / 100_000_000.0;
 
     // Challenge expires in 120 seconds (increased from 60 for stability)
@@ -4601,7 +5018,9 @@ pub async fn trigger_block_production(
 
     if new_blocks.is_empty() {
         warn!("⚠️  Manual block trigger called but no producers were ready");
-        return Ok(Json(ApiResponse::error("Block production failed - no producers ready (may need mining solutions)".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Block production failed - no producers ready (may need mining solutions)".to_string(),
+        )));
     }
 
     // Process all blocks produced by parallel producers
@@ -4615,7 +5034,8 @@ pub async fn trigger_block_production(
         let tx_count = block.transactions.len();
         let prev_hash = hex::encode(&block.header.prev_block_hash);
 
-        info!("✅ PHASE 2: Manual block produced by Producer #{}: Height {}, Hash {}, Solutions {}",
+        info!(
+            "✅ PHASE 2: Manual block produced by Producer #{}: Height {}, Hash {}, Solutions {}",
             producer_id,
             block_height,
             hex::encode(&block_hash[..8]),
@@ -4623,21 +5043,21 @@ pub async fn trigger_block_production(
         );
 
         // Broadcast NewBlock event via SSE with actual producer_id
-        let _ = state.event_broadcaster.broadcast(
-            crate::streaming::StreamEvent::NewBlock {
+        let _ = state
+            .event_broadcaster
+            .broadcast(crate::streaming::StreamEvent::NewBlock {
                 height: block_height,
                 hash: hex::encode(&block_hash),
                 prev_hash: prev_hash.clone(),
                 solutions_count,
                 total_difficulty: block_height as u128, // Cumulative difficulty
-                dag_round: block_height, // DAG round number
-                miner_count: solutions_count, // Number of miners who contributed
+                dag_round: block_height,                // DAG round number
+                miner_count: solutions_count,           // Number of miners who contributed
                 tx_count,
                 block_reward,
                 producer_id, // PHASE 2: Use actual producer ID for lane assignment
                 timestamp: chrono::Utc::now(),
-            }
-        );
+            });
 
         // Collect block info for response
         block_info.push(serde_json::json!({
@@ -4679,18 +5099,18 @@ pub struct MiningChallengeResponse {
 pub struct MiningSolutionRequest {
     pub miner_address: String,
     pub nonce: u64,
-    pub hash: String,  // Hex-encoded hash from miner
-    pub difficulty_target: String,  // Hex-encoded target
+    pub hash: String,              // Hex-encoded hash from miner
+    pub difficulty_target: String, // Hex-encoded target
     #[serde(default)]
-    pub challenge_hash: Option<String>,  // Optional challenge hash for server-side verification
+    pub challenge_hash: Option<String>, // Optional challenge hash for server-side verification
     #[serde(default)]
-    pub hash_rate: Option<f64>,  // Optional hash rate in KH/s from miner
+    pub hash_rate: Option<f64>, // Optional hash rate in KH/s from miner
 
     // 🔐 AEGIS-KL Authentication (v0.5.7+) - REQUIRED for 1% dev fee enforcement
     #[serde(default)]
-    pub aegis_signature: Option<String>,  // Hex-encoded AEGIS-KL signature
+    pub aegis_signature: Option<String>, // Hex-encoded AEGIS-KL signature
     #[serde(default)]
-    pub aegis_public_key: Option<String>,  // Hex-encoded AEGIS-KL public key
+    pub aegis_public_key: Option<String>, // Hex-encoded AEGIS-KL public key
 }
 
 #[derive(Debug, Serialize)]
@@ -4714,7 +5134,7 @@ mod tests {
     async fn create_test_server() -> TestServer {
         let config = Config::default();
         let state = Arc::new(AppState::new(config).await.unwrap());
-        
+
         let app = axum::Router::new()
             .route("/health", axum::routing::get(health_check))
             .route("/api/v1/wallets", axum::routing::post(create_wallet))
@@ -4734,19 +5154,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_wallet() {
         let server = create_test_server().await;
-        
+
         let request = CreateWalletRequest {
             password: Some("test123".to_string()),
             mnemonic: None,
         };
 
-        let response = server
-            .post("/api/v1/wallets")
-            .json(&request)
-            .await;
-        
+        let response = server.post("/api/v1/wallets").json(&request).await;
+
         assert_eq!(response.status_code(), StatusCode::OK);
-        
+
         let body: ApiResponse<WalletInfo> = response.json();
         assert!(body.success);
         assert!(body.data.is_some());
@@ -4779,7 +5196,9 @@ pub async fn k_parameter_metrics(
 
         Ok(Json(ApiResponse::success(metrics)))
     } else {
-        Ok(Json(ApiResponse::error("K-Parameter analyzer not initialized".to_string())))
+        Ok(Json(ApiResponse::error(
+            "K-Parameter analyzer not initialized".to_string(),
+        )))
     }
 }
 
@@ -4850,19 +5269,21 @@ pub async fn add_nitro_boost(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddNitroBoostRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("Adding Nitro boost: {} points to token {} by wallet {}",
-        request.points, request.token_id, request.wallet_address);
+    info!(
+        "Adding Nitro boost: {} points to token {} by wallet {}",
+        request.points, request.token_id, request.wallet_address
+    );
 
     // Validate request
     if request.points < 50 {
         return Ok(Json(ApiResponse::error(
-            "Minimum boost is 50 points".to_string()
+            "Minimum boost is 50 points".to_string(),
         )));
     }
 
     if request.points > 500 {
         return Ok(Json(ApiResponse::error(
-            "Maximum boost is 500 points per transaction".to_string()
+            "Maximum boost is 500 points per transaction".to_string(),
         )));
     }
 
@@ -4881,7 +5302,10 @@ pub async fn add_nitro_boost(
         *boosts.get(&boost.token_id).unwrap()
     };
 
-    info!("✅ Nitro boost added successfully: {} points to {} (total: {})", request.points, request.token_id, total_points);
+    info!(
+        "✅ Nitro boost added successfully: {} points to {} (total: {})",
+        request.points, request.token_id, total_points
+    );
 
     // Broadcast SSE event for real-time updates using proper NitroBoost event
     let sse_event = crate::StreamEvent::NitroBoost {
@@ -4895,7 +5319,10 @@ pub async fn add_nitro_boost(
     if let Err(e) = state.event_broadcaster.broadcast(sse_event).await {
         warn!("Failed to broadcast Nitro boost SSE event: {}", e);
     } else {
-        debug!("🚀 Broadcasted Nitro boost SSE event to {} subscribers", state.event_broadcaster.subscriber_count());
+        debug!(
+            "🚀 Broadcasted Nitro boost SSE event to {} subscribers",
+            state.event_broadcaster.subscriber_count()
+        );
     }
 
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -4909,10 +5336,10 @@ pub async fn add_nitro_boost(
 /// Swap request structure
 #[derive(Debug, Deserialize)]
 pub struct SwapRequest {
-    pub from_token: String,   // Token ID or "QUG" for native
-    pub to_token: String,      // Token ID
-    pub amount_in: u64,        // Amount to swap (base units)
-    pub min_amount_out: u64,   // Minimum expected output (slippage protection)
+    pub from_token: String,     // Token ID or "QUG" for native
+    pub to_token: String,       // Token ID
+    pub amount_in: u64,         // Amount to swap (base units)
+    pub min_amount_out: u64,    // Minimum expected output (slippage protection)
     pub wallet_address: String, // User's wallet address
 }
 
@@ -4932,7 +5359,8 @@ pub struct SwapEvent {
 
 /// Extract client IP from request headers for rate limiting
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    headers.get("x-forwarded-for")
+    headers
+        .get("x-forwarded-for")
         .or_else(|| headers.get("x-real-ip"))
         .and_then(|h| h.to_str().ok())
         .unwrap_or("127.0.0.1")
@@ -4958,12 +5386,18 @@ fn sanitize_token_symbol(symbol: &str) -> Result<String, String> {
     // For token symbols (not addresses), enforce strict rules
     // Only allow alphanumeric characters and hyphens
     if !symbol.chars().all(|c| c.is_alphanumeric() || c == '-') {
-        return Err(format!("Invalid token symbol '{}': contains illegal characters", symbol));
+        return Err(format!(
+            "Invalid token symbol '{}': contains illegal characters",
+            symbol
+        ));
     }
 
     // Limit symbol length to prevent DoS
     if symbol.len() > 20 {
-        return Err(format!("Invalid token symbol '{}': too long (max 20 characters)", symbol));
+        return Err(format!(
+            "Invalid token symbol '{}': too long (max 20 characters)",
+            symbol
+        ));
     }
 
     Ok(symbol.to_uppercase())
@@ -4972,28 +5406,38 @@ fn sanitize_token_symbol(symbol: &str) -> Result<String, String> {
 /// Execute token swap through liquidity pools
 pub async fn execute_swap(
     State(state): State<Arc<AppState>>,
-    wallet_auth: AuthenticatedWallet,  // ✅ ADD AUTHENTICATION
+    wallet_auth: AuthenticatedWallet, // ✅ ADD AUTHENTICATION
     Json(request): Json<SwapRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("💱 Executing swap: {} {} for {} (authenticated: {})",
-          request.amount_in, request.from_token, request.to_token,
-          hex::encode(&wallet_auth.address));
+    info!(
+        "💱 Executing swap: {} {} for {} (authenticated: {})",
+        request.amount_in,
+        request.from_token,
+        request.to_token,
+        hex::encode(&wallet_auth.address)
+    );
 
     // Parse wallet address
     let wallet_addr = match parse_wallet_address(&request.wallet_address) {
         Ok(addr) => addr,
         Err(e) => {
             warn!("Invalid wallet address: {}", e);
-            return Ok(Json(ApiResponse::error(format!("Invalid wallet address: {}", e))));
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid wallet address: {}",
+                e
+            ))));
         }
     };
 
     // ✅ CRITICAL: Ensure authenticated wallet matches request wallet
     if wallet_auth.address != wallet_addr {
-        warn!("🚨 Authentication mismatch! Authenticated: {}, Requested: {}",
-              hex::encode(&wallet_auth.address), hex::encode(&wallet_addr));
+        warn!(
+            "🚨 Authentication mismatch! Authenticated: {}, Requested: {}",
+            hex::encode(&wallet_auth.address),
+            hex::encode(&wallet_addr)
+        );
         return Ok(Json(ApiResponse::error(
-            "Unauthorized: You can only swap from your own wallet".to_string()
+            "Unauthorized: You can only swap from your own wallet".to_string(),
         )));
     }
 
@@ -5001,25 +5445,27 @@ pub async fn execute_swap(
 
     // Validate amount
     if request.amount_in == 0 {
-        return Ok(Json(ApiResponse::error("Amount must be greater than 0".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Amount must be greater than 0".to_string(),
+        )));
     }
 
     // ✅ SANITIZE TOKEN SYMBOLS
-    let from_token_normalized = sanitize_token_symbol(&request.from_token)
-        .map_err(|e| {
-            warn!("Invalid from_token: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let from_token_normalized = sanitize_token_symbol(&request.from_token).map_err(|e| {
+        warn!("Invalid from_token: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
-    let to_token_normalized = sanitize_token_symbol(&request.to_token)
-        .map_err(|e| {
-            warn!("Invalid to_token: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let to_token_normalized = sanitize_token_symbol(&request.to_token).map_err(|e| {
+        warn!("Invalid to_token: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     // Check for same-token swap
     if from_token_normalized == to_token_normalized {
-        return Ok(Json(ApiResponse::error("Cannot swap token to itself".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Cannot swap token to itself".to_string(),
+        )));
     }
 
     // Determine if tokens are native QUG
@@ -5027,7 +5473,8 @@ pub async fn execute_swap(
     let to_is_native = to_token_normalized == "QUG" || to_token_normalized == "NATIVE-QUG";
 
     // Determine if tokens are QUGUSD stablecoin (matches "QUGUSD" or "QUGUSD-STABLE")
-    let from_is_qugusd = from_token_normalized == "QUGUSD" || from_token_normalized == "QUGUSD-STABLE";
+    let from_is_qugusd =
+        from_token_normalized == "QUGUSD" || from_token_normalized == "QUGUSD-STABLE";
     let to_is_qugusd = to_token_normalized == "QUGUSD" || to_token_normalized == "QUGUSD-STABLE";
 
     // Resolve token addresses for non-native tokens (QUGUSD gets special address)
@@ -5039,7 +5486,12 @@ pub async fn execute_swap(
     } else {
         match resolve_token_address(&state, &from_token_normalized).await {
             Ok(addr) => addr,
-            Err(e) => return Ok(Json(ApiResponse::error(format!("From token not found: {}", e)))),
+            Err(e) => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "From token not found: {}",
+                    e
+                ))))
+            }
         }
     };
 
@@ -5051,7 +5503,12 @@ pub async fn execute_swap(
     } else {
         match resolve_token_address(&state, &to_token_normalized).await {
             Ok(addr) => addr,
-            Err(e) => return Ok(Json(ApiResponse::error(format!("To token not found: {}", e)))),
+            Err(e) => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "To token not found: {}",
+                    e
+                ))))
+            }
         }
     };
 
@@ -5060,12 +5517,19 @@ pub async fn execute_swap(
         let balance_count = db_balances.len();
         let mut wallet_balances_write = state.wallet_balances.write().await;
         for (addr, bal) in &db_balances {
-            debug!("🔍 [SWAP DEBUG] Loading balance for {}: {} base units ({} QUG)",
-                hex::encode(&addr[..8]), bal, *bal as f64 / 100_000_000.0);
+            debug!(
+                "🔍 [SWAP DEBUG] Loading balance for {}: {} base units ({} QUG)",
+                hex::encode(&addr[..8]),
+                bal,
+                *bal as f64 / 100_000_000.0
+            );
             wallet_balances_write.insert(*addr, *bal);
         }
         drop(wallet_balances_write);
-        debug!("📊 Reloaded {} wallet balances from RocksDB for swap", balance_count);
+        debug!(
+            "📊 Reloaded {} wallet balances from RocksDB for swap",
+            balance_count
+        );
     }
 
     // Check user balance for from_token
@@ -5076,7 +5540,10 @@ pub async fn execute_swap(
         if from_is_native {
             let balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
             // 🔒 PRIVACY: No logging of wallet addresses or exact balances
-            debug!("🔍 [SWAP] Balance check: sufficient={}", balance >= request.amount_in);
+            debug!(
+                "🔍 [SWAP] Balance check: sufficient={}",
+                balance >= request.amount_in
+            );
             if balance < request.amount_in {
                 return Ok(Json(ApiResponse::error(format!(
                     "Insufficient QUG balance. Required: {}, Available: {}",
@@ -5116,21 +5583,23 @@ pub async fn execute_swap(
             let pool_token1_normalized = p.token1.to_uppercase();
 
             // Check if pool matches (either direction)
-            let forward_match =
-                (from_is_native && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG") ||
-                 from_is_qugusd && pool_token0_normalized == "QUGUSD" ||
-                 !from_is_native && !from_is_qugusd && p.token0 == request.from_token) &&
-                (to_is_native && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG") ||
-                 to_is_qugusd && pool_token1_normalized == "QUGUSD" ||
-                 !to_is_native && !to_is_qugusd && p.token1 == request.to_token);
+            let forward_match = (from_is_native
+                && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG")
+                || from_is_qugusd && pool_token0_normalized == "QUGUSD"
+                || !from_is_native && !from_is_qugusd && p.token0 == request.from_token)
+                && (to_is_native
+                    && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG")
+                    || to_is_qugusd && pool_token1_normalized == "QUGUSD"
+                    || !to_is_native && !to_is_qugusd && p.token1 == request.to_token);
 
-            let reverse_match =
-                (to_is_native && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG") ||
-                 to_is_qugusd && pool_token0_normalized == "QUGUSD" ||
-                 !to_is_native && !to_is_qugusd && p.token0 == request.to_token) &&
-                (from_is_native && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG") ||
-                 from_is_qugusd && pool_token1_normalized == "QUGUSD" ||
-                 !from_is_native && !from_is_qugusd && p.token1 == request.from_token);
+            let reverse_match = (to_is_native
+                && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG")
+                || to_is_qugusd && pool_token0_normalized == "QUGUSD"
+                || !to_is_native && !to_is_qugusd && p.token0 == request.to_token)
+                && (from_is_native
+                    && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG")
+                    || from_is_qugusd && pool_token1_normalized == "QUGUSD"
+                    || !from_is_native && !from_is_qugusd && p.token1 == request.from_token);
 
             if forward_match {
                 matching_pool = Some((id.clone(), p.clone(), false));
@@ -5142,24 +5611,24 @@ pub async fn execute_swap(
         }
 
         match matching_pool {
-            Some((id, p, reversed)) => {
-                Some((id, p, reversed))
-            }
-            None => None
+            Some((id, p, reversed)) => Some((id, p, reversed)),
+            None => None,
         }
     };
 
     // ✅ FIX: If no pool exists for QUG<->QUGUSD, use oracle price directly
-    let (use_oracle, final_amount_out) = if pool_id.is_none() &&
-        ((from_is_native && to_is_qugusd) || (from_is_qugusd && to_is_native)) {
+    let (use_oracle, final_amount_out) = if pool_id.is_none()
+        && ((from_is_native && to_is_qugusd) || (from_is_qugusd && to_is_native))
+    {
         // Use oracle-based pricing for QUG<->QUGUSD swaps when no pool exists
         let vault = state.collateral_vault.read().await;
-        let qug_price_usd = vault.qug_price_usd;  // e.g., $42.50
+        let qug_price_usd = vault.qug_price_usd; // e.g., $42.50
         drop(vault);
 
         // Calculate swap with 0.3% fee
         let fee = 3u64; // 0.3%
-        let amount_in_with_fee = request.amount_in
+        let amount_in_with_fee = request
+            .amount_in
             .checked_mul(1000 - fee)
             .and_then(|v| v.checked_div(1000))
             .unwrap_or(0);
@@ -5178,8 +5647,14 @@ pub async fn execute_swap(
             (qug_amount_decimal * 100_000_000.0) as u64
         };
 
-        info!("💱 Using oracle price for QUG<->QUGUSD swap: 1 QUG = ${:.2}", qug_price_usd);
-        info!("   Input: {} (with fee) -> Output: {}", amount_in_with_fee, calculated_out);
+        info!(
+            "💱 Using oracle price for QUG<->QUGUSD swap: 1 QUG = ${:.2}",
+            qug_price_usd
+        );
+        info!(
+            "   Input: {} (with fee) -> Output: {}",
+            amount_in_with_fee, calculated_out
+        );
 
         (true, calculated_out)
     } else if pool_id.is_none() {
@@ -5189,89 +5664,98 @@ pub async fn execute_swap(
             request.from_token, request.to_token
         ))));
     } else {
-        (false, 0)  // Will be calculated from pool below
+        (false, 0) // Will be calculated from pool below
     };
 
     // Get pool details if using pool-based swap
-    let (pool_id_str, mut pool, is_reversed, reserve_in, reserve_out, pool_final_amount_out) = if !use_oracle {
-        let (id, p, reversed) = pool_id.clone().unwrap();
+    let (pool_id_str, mut pool, is_reversed, reserve_in, reserve_out, pool_final_amount_out) =
+        if !use_oracle {
+            let (id, p, reversed) = pool_id.clone().unwrap();
 
-        // Calculate swap amount using constant product formula (x * y = k)
-        // final_amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
-        // Apply 0.3% trading fee
+            // Calculate swap amount using constant product formula (x * y = k)
+            // final_amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
+            // Apply 0.3% trading fee
 
-        // ✅ SAFE: Use checked arithmetic to prevent overflow
-        let fee = 3u64; // 0.3% = 3/1000
+            // ✅ SAFE: Use checked arithmetic to prevent overflow
+            let fee = 3u64; // 0.3% = 3/1000
 
-        // Calculate amount after fee with overflow protection
-        let amount_in_with_fee = request.amount_in
-            .checked_mul(1000 - fee)
-            .and_then(|v| v.checked_div(1000))
-            .ok_or_else(|| {
-                warn!("Overflow in fee calculation for amount: {}", request.amount_in);
-                StatusCode::BAD_REQUEST
-            })?;
-
-        // Calculate swap output with overflow protection
-        let (res_in, res_out, amt_out) = if !reversed {
-            // Forward: from_token = token0, to_token = token1
-            let numerator = amount_in_with_fee
-                .checked_mul(p.reserve1)
+            // Calculate amount after fee with overflow protection
+            let amount_in_with_fee = request
+                .amount_in
+                .checked_mul(1000 - fee)
+                .and_then(|v| v.checked_div(1000))
                 .ok_or_else(|| {
+                    warn!(
+                        "Overflow in fee calculation for amount: {}",
+                        request.amount_in
+                    );
+                    StatusCode::BAD_REQUEST
+                })?;
+
+            // Calculate swap output with overflow protection
+            let (res_in, res_out, amt_out) = if !reversed {
+                // Forward: from_token = token0, to_token = token1
+                let numerator = amount_in_with_fee.checked_mul(p.reserve1).ok_or_else(|| {
                     warn!("Overflow in swap numerator calculation");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            let denominator = p.reserve0
-                .checked_add(amount_in_with_fee)
-                .ok_or_else(|| {
+                let denominator = p.reserve0.checked_add(amount_in_with_fee).ok_or_else(|| {
                     warn!("Overflow in swap denominator calculation");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            let amt_out = numerator.checked_div(denominator).unwrap_or(0);
-            (p.reserve0, p.reserve1, amt_out)
-        } else {
-            // Reversed: from_token = token1, to_token = token0
-            let numerator = amount_in_with_fee
-                .checked_mul(p.reserve0)
-                .ok_or_else(|| {
+                let amt_out = numerator.checked_div(denominator).unwrap_or(0);
+                (p.reserve0, p.reserve1, amt_out)
+            } else {
+                // Reversed: from_token = token1, to_token = token0
+                let numerator = amount_in_with_fee.checked_mul(p.reserve0).ok_or_else(|| {
                     warn!("Overflow in swap numerator calculation (reversed)");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            let denominator = p.reserve1
-                .checked_add(amount_in_with_fee)
-                .ok_or_else(|| {
+                let denominator = p.reserve1.checked_add(amount_in_with_fee).ok_or_else(|| {
                     warn!("Overflow in swap denominator calculation (reversed)");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            let amt_out = numerator.checked_div(denominator).unwrap_or(0);
-            (p.reserve1, p.reserve0, amt_out)
+                let amt_out = numerator.checked_div(denominator).unwrap_or(0);
+                (p.reserve1, p.reserve0, amt_out)
+            };
+
+            (id, p, reversed, res_in, res_out, amt_out)
+        } else {
+            // Dummy values for oracle-based swaps (won't be used)
+            (
+                String::new(),
+                crate::LiquidityPool {
+                    pool_id: String::new(),
+                    token0: String::new(),
+                    token1: String::new(),
+                    reserve0: 0,
+                    reserve1: 0,
+                    provider: [0u8; 32],
+                    created_at: chrono::Utc::now(),
+                },
+                false,
+                0,
+                0,
+                0,
+            )
         };
 
-        (id, p, reversed, res_in, res_out, amt_out)
-    } else {
-        // Dummy values for oracle-based swaps (won't be used)
-        (String::new(), crate::LiquidityPool {
-            pool_id: String::new(),
-            token0: String::new(),
-            token1: String::new(),
-            reserve0: 0,
-            reserve1: 0,
-            provider: [0u8; 32],
-            created_at: chrono::Utc::now(),
-        }, false, 0, 0, 0)
-    };
-
     // Use oracle amount if oracle-based, otherwise use pool amount
-    let final_amount_out = if use_oracle { final_amount_out } else { pool_final_amount_out };
+    let final_amount_out = if use_oracle {
+        final_amount_out
+    } else {
+        pool_final_amount_out
+    };
 
     // ✅ Additional safety check: prevent zero output
     if final_amount_out == 0 {
         return Ok(Json(ApiResponse::error(
-            "Swap would result in zero output. Amount too small or pool reserves too low.".to_string()
+            "Swap would result in zero output. Amount too small or pool reserves too low."
+                .to_string(),
         )));
     }
 
@@ -5291,8 +5775,10 @@ pub async fn execute_swap(
                 request.min_amount_out, lenient_minimum, final_amount_out
             ))));
         }
-        info!("✅ Oracle swap slippage check passed (lenient mode): {} >= {} (requested: {})",
-            final_amount_out, lenient_minimum, request.min_amount_out);
+        info!(
+            "✅ Oracle swap slippage check passed (lenient mode): {} >= {} (requested: {})",
+            final_amount_out, lenient_minimum, request.min_amount_out
+        );
     }
 
     // Check if pool has enough reserves (skip for oracle-based swaps)
@@ -5323,14 +5809,21 @@ pub async fn execute_swap(
             drop(token_balances);
             let mut vault = state.collateral_vault.write().await;
             if let Err(e) = vault.burn(&wallet_addr, request.amount_in) {
-                return Ok(Json(ApiResponse::error(format!("Failed to burn QUGUSD: {}", e))));
+                return Ok(Json(ApiResponse::error(format!(
+                    "Failed to burn QUGUSD: {}",
+                    e
+                ))));
             }
             // 🔒 PRIVACY: No logging of exact amounts
             debug!("💸 Burned QUGUSD from wallet via CollateralVault");
 
             // Persist CollateralVault to storage after burn
             if let Ok(vault_bytes) = bincode::serialize(&*vault) {
-                if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+                if let Err(e) = state
+                    .storage_engine
+                    .save_collateral_vault_data(&vault_bytes)
+                    .await
+                {
                     warn!("Failed to persist CollateralVault after burn: {}", e);
                 }
             }
@@ -5369,14 +5862,21 @@ pub async fn execute_swap(
             drop(token_balances);
             let mut vault = state.collateral_vault.write().await;
             if let Err(e) = vault.mint(&wallet_addr, final_amount_out) {
-                return Ok(Json(ApiResponse::error(format!("Failed to mint QUGUSD: {}", e))));
+                return Ok(Json(ApiResponse::error(format!(
+                    "Failed to mint QUGUSD: {}",
+                    e
+                ))));
             }
             // 🔒 PRIVACY: No logging of exact amounts
             debug!("💰 Minted QUGUSD to wallet via CollateralVault");
 
             // Persist CollateralVault to storage after mint
             if let Ok(vault_bytes) = bincode::serialize(&*vault) {
-                if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+                if let Err(e) = state
+                    .storage_engine
+                    .save_collateral_vault_data(&vault_bytes)
+                    .await
+                {
                     warn!("Failed to persist CollateralVault after mint: {}", e);
                 }
             }
@@ -5389,13 +5889,21 @@ pub async fn execute_swap(
 
             let balance_key = (wallet_addr, to_token_addr);
             *token_balances.entry(balance_key).or_insert(0) += final_amount_out;
-            token_balance_changes.push((wallet_addr, to_token_addr, token_balances.get(&balance_key).copied().unwrap()));
+            token_balance_changes.push((
+                wallet_addr,
+                to_token_addr,
+                token_balances.get(&balance_key).copied().unwrap(),
+            ));
             // 🔒 PRIVACY: No logging of exact amounts
             debug!("💰 Added QUGUSD to token_balances map for API visibility");
         } else {
             let balance_key = (wallet_addr, to_token_addr);
             *token_balances.entry(balance_key).or_insert(0) += final_amount_out;
-            token_balance_changes.push((wallet_addr, to_token_addr, token_balances.get(&balance_key).copied().unwrap()));
+            token_balance_changes.push((
+                wallet_addr,
+                to_token_addr,
+                token_balances.get(&balance_key).copied().unwrap(),
+            ));
             // 🔒 PRIVACY: No logging of exact amounts
             debug!("💰 Added {} tokens to wallet", request.to_token);
         }
@@ -5416,7 +5924,10 @@ pub async fn execute_swap(
                 pool_mut.reserve1 += request.amount_in;
                 pool_mut.reserve0 -= final_amount_out;
             }
-            info!("🔄 Updated pool reserves: {} / {}", pool_mut.reserve0, pool_mut.reserve1);
+            info!(
+                "🔄 Updated pool reserves: {} / {}",
+                pool_mut.reserve0, pool_mut.reserve1
+            );
 
             // ✅ Persist updated liquidity pool to storage
             let pool_data = match serde_json::to_vec(&*pool_mut) {
@@ -5427,14 +5938,22 @@ pub async fn execute_swap(
                 }
             };
             if !pool_data.is_empty() {
-                if let Err(e) = state.storage_engine.save_liquidity_pool(&pool_id_str, &pool_data).await {
+                if let Err(e) = state
+                    .storage_engine
+                    .save_liquidity_pool(&pool_id_str, &pool_data)
+                    .await
+                {
                     warn!("Failed to persist updated liquidity pool after swap: {}", e);
                 } else {
                     info!("💾 Persisted updated liquidity pool: {}", pool_id_str);
                 }
             }
 
-            (pool_mut.reserve0, pool_mut.reserve1, pool_mut.reserve0 + pool_mut.reserve1)
+            (
+                pool_mut.reserve0,
+                pool_mut.reserve1,
+                pool_mut.reserve0 + pool_mut.reserve1,
+            )
         } else {
             (0, 0, 0)
         }
@@ -5444,7 +5963,11 @@ pub async fn execute_swap(
     {
         let wallet_balances_read = state.wallet_balances.read().await;
         if let Some(&final_balance) = wallet_balances_read.get(&wallet_addr) {
-            if let Err(e) = state.storage_engine.save_wallet_balance(&wallet_addr, final_balance).await {
+            if let Err(e) = state
+                .storage_engine
+                .save_wallet_balance(&wallet_addr, final_balance)
+                .await
+            {
                 warn!("Failed to persist wallet balance after swap: {}", e);
             } else {
                 debug!("💾 Persisted wallet balance: {}", final_balance);
@@ -5454,7 +5977,11 @@ pub async fn execute_swap(
 
     // Persist token balance changes
     for (wallet, token, new_balance) in token_balance_changes {
-        if let Err(e) = state.storage_engine.save_token_balance(&wallet, &token, new_balance).await {
+        if let Err(e) = state
+            .storage_engine
+            .save_token_balance(&wallet, &token, new_balance)
+            .await
+        {
             warn!("Failed to persist token balance after swap: {}", e);
         }
     }
@@ -5526,7 +6053,10 @@ pub async fn execute_swap(
     };
 
     if let Err(e) = state.event_broadcaster.broadcast(from_price_event).await {
-        warn!("Failed to broadcast from-token price update SSE event: {}", e);
+        warn!(
+            "Failed to broadcast from-token price update SSE event: {}",
+            e
+        );
     }
 
     // Broadcast balance-updated event for real-time wallet balance refresh
@@ -5538,13 +6068,23 @@ pub async fn execute_swap(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Err(e) = state.event_broadcaster.broadcast(balance_updated_event).await {
+    if let Err(e) = state
+        .event_broadcaster
+        .broadcast(balance_updated_event)
+        .await
+    {
         warn!("Failed to broadcast balance-updated SSE event: {}", e);
     } else {
-        info!("📡 [SSE] Balance update event broadcasted for wallet: {}", hex::encode(wallet_addr));
+        info!(
+            "📡 [SSE] Balance update event broadcasted for wallet: {}",
+            hex::encode(wallet_addr)
+        );
     }
 
-    info!("✅ Swap completed: {} {} -> {} {}", request.amount_in, request.from_token, final_amount_out, request.to_token);
+    info!(
+        "✅ Swap completed: {} {} -> {} {}",
+        request.amount_in, request.from_token, final_amount_out, request.to_token
+    );
 
     // ============================================================================
     // 📡 GOSSIPSUB DEX SWAP BROADCAST
@@ -5573,7 +6113,11 @@ pub async fn execute_swap(
                     if let Err(e) = nm.publish_topic("/qnk/dex/swaps", swap_bytes) {
                         tracing::warn!("Failed to broadcast DEX swap to network: {}", e);
                     } else {
-                        tracing::info!("📤 DEX swap {}->{} broadcast to network", from_token, to_token);
+                        tracing::info!(
+                            "📤 DEX swap {}->{} broadcast to network",
+                            from_token,
+                            to_token
+                        );
                     }
                 });
             }
@@ -5621,7 +6165,10 @@ pub fn parse_wallet_address(address_str: &str) -> Result<[u8; 32], String> {
                 padded[12..].copy_from_slice(&bytes);
                 Ok(padded)
             } else {
-                Err(format!("Address must be 20 or 32 bytes, got {}", bytes.len()))
+                Err(format!(
+                    "Address must be 20 or 32 bytes, got {}",
+                    bytes.len()
+                ))
             }
         }
         Err(_) => Err("Invalid hex in address".to_string()),
@@ -5703,7 +6250,9 @@ pub async fn shadow_mode_metrics(
 
         Ok(Json(ApiResponse::success(response)))
     } else {
-        Ok(Json(ApiResponse::error("Shadow mode not initialized".to_string())))
+        Ok(Json(ApiResponse::error(
+            "Shadow mode not initialized".to_string(),
+        )))
     }
 }
 
@@ -5753,7 +6302,9 @@ pub async fn shadow_mode_migration_report(
 
         Ok(Json(ApiResponse::success(response)))
     } else {
-        Ok(Json(ApiResponse::error("Shadow mode not initialized".to_string())))
+        Ok(Json(ApiResponse::error(
+            "Shadow mode not initialized".to_string(),
+        )))
     }
 }
 
@@ -5764,21 +6315,23 @@ pub async fn migrate_to_resonance(
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
     if let Some(ref shadow_coordinator) = state.shadow_coordinator {
         // Extract wallet address and signature from payload
-        let wallet_address = payload.get("wallet_address")
+        let wallet_address = payload
+            .get("wallet_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| StatusCode::BAD_REQUEST)?;
 
-        let signature_hex = payload.get("signature")
+        let signature_hex = payload
+            .get("signature")
             .and_then(|v| v.as_str())
             .ok_or_else(|| StatusCode::BAD_REQUEST)?;
 
-        let message = payload.get("message")
+        let message = payload
+            .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| StatusCode::BAD_REQUEST)?;
 
         // Parse wallet address
-        let address = parse_wallet_address(wallet_address)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let address = parse_wallet_address(wallet_address).map_err(|_| StatusCode::BAD_REQUEST)?;
 
         // Verify this is the founder wallet (TODO: add founder address check)
         // For now, any wallet with valid AEGIS-QL signature can migrate (should be restricted in production)
@@ -5796,10 +6349,7 @@ pub async fn migrate_to_resonance(
 
         // Perform migration to Q-Resonance consensus
         if let Err(e) = coordinator_guard.migrate_to_resonance().await {
-            return Ok(Json(ApiResponse::error(format!(
-                "Migration failed: {}",
-                e
-            ))));
+            return Ok(Json(ApiResponse::error(format!("Migration failed: {}", e))));
         }
 
         let response = serde_json::json!({
@@ -5812,7 +6362,9 @@ pub async fn migrate_to_resonance(
 
         Ok(Json(ApiResponse::success(response)))
     } else {
-        Ok(Json(ApiResponse::error("Shadow mode not initialized".to_string())))
+        Ok(Json(ApiResponse::error(
+            "Shadow mode not initialized".to_string(),
+        )))
     }
 }
 
@@ -5835,18 +6387,28 @@ pub async fn run_blockchain_benchmark(
 ) -> Result<Json<ApiResponse<BenchmarkResult>>, StatusCode> {
     // Get client IP (simplified - in production you'd extract from headers/ConnectInfo)
     let client_ip = "127.0.0.1"; // Placeholder - would extract from request headers in production
-    
+
     info!("🏁 Benchmark requested from IP: {}", client_ip);
-    
+
     // Check rate limit
-    match state.storage_engine.check_benchmark_rate_limit(client_ip).await {
+    match state
+        .storage_engine
+        .check_benchmark_rate_limit(client_ip)
+        .await
+    {
         Ok((is_limited, minutes_remaining)) => {
             if is_limited {
-                warn!("🚫 Benchmark rate limited for IP {}: {} minutes remaining", client_ip, minutes_remaining);
+                warn!(
+                    "🚫 Benchmark rate limited for IP {}: {} minutes remaining",
+                    client_ip, minutes_remaining
+                );
                 return Ok(Json(ApiResponse {
                     success: false,
                     data: None,
-                    error: Some(format!("Rate limit exceeded. Please try again in {} minutes.", minutes_remaining)),
+                    error: Some(format!(
+                        "Rate limit exceeded. Please try again in {} minutes.",
+                        minutes_remaining
+                    )),
                     timestamp: chrono::Utc::now().timestamp() as u64,
                 }));
             }
@@ -5856,19 +6418,21 @@ pub async fn run_blockchain_benchmark(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
-    
+
     info!("✅ Rate limit check passed, running benchmark...");
-    
+
     // Run actual benchmark
     let start_time = std::time::Instant::now();
-    
+
     // Simulate benchmark by measuring real system performance
     let node_status = state.node_status.read().await;
     let tx_count = state.tx_pool.len();
-    let confirmed_txs = state.tx_status.iter()
+    let confirmed_txs = state
+        .tx_status
+        .iter()
         .filter(|entry| matches!(entry.value(), crate::TxStatus::Confirmed { .. }))
         .count();
-    
+
     // Calculate TPS based on confirmed transactions and uptime
     let elapsed = start_time.elapsed();
     let benchmark_tps = if elapsed.as_secs() > 0 {
@@ -5876,26 +6440,33 @@ pub async fn run_blockchain_benchmark(
     } else {
         50000 // Default high TPS for demo
     };
-    
+
     let result = BenchmarkResult {
         tps: benchmark_tps.max(48000), // Show at least 48K TPS
-        latency: 45, // Sub-50ms latency
-        block_time: 2300, // 2.3s finality
-        consensus_time: 1200, // 1.2s consensus
+        latency: 45,                   // Sub-50ms latency
+        block_time: 2300,              // 2.3s finality
+        consensus_time: 1200,          // 1.2s consensus
     };
-    
-    info!("📊 Benchmark results: TPS={}, Latency={}ms", result.tps, result.latency);
-    
+
+    info!(
+        "📊 Benchmark results: TPS={}, Latency={}ms",
+        result.tps, result.latency
+    );
+
     // Save timestamp to enforce rate limit
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    
-    if let Err(e) = state.storage_engine.save_benchmark_timestamp(client_ip, now).await {
+
+    if let Err(e) = state
+        .storage_engine
+        .save_benchmark_timestamp(client_ip, now)
+        .await
+    {
         error!("Failed to save benchmark timestamp: {}", e);
     }
-    
+
     Ok(Json(ApiResponse {
         success: true,
         data: Some(result),
@@ -5917,7 +6488,10 @@ pub async fn list_blocks(
     let current_height = status.current_height;
     drop(status); // Release the lock immediately
 
-    info!("🔍 Explorer: Fetching recent blocks from current height {}", current_height);
+    info!(
+        "🔍 Explorer: Fetching recent blocks from current height {}",
+        current_height
+    );
 
     // Calculate how many recent blocks to fetch (up to 5)
     let limit = 5u64;
@@ -5927,7 +6501,10 @@ pub async fn list_blocks(
         1
     };
 
-    info!("🔍 Explorer: Will fetch blocks from height {} to {}", start_height, current_height);
+    info!(
+        "🔍 Explorer: Will fetch blocks from height {} to {}",
+        start_height, current_height
+    );
 
     // Fetch real QBlocks from storage
     let mut recent_blocks = Vec::new();
@@ -5951,13 +6528,19 @@ pub async fn list_blocks(
                 continue;
             }
             Err(e) => {
-                error!("❌ Explorer: Failed to fetch QBlock at height {}: {}", height, e);
+                error!(
+                    "❌ Explorer: Failed to fetch QBlock at height {}: {}",
+                    height, e
+                );
                 continue;
             }
         }
     }
 
-    info!("✅ Explorer: Returning {} recent blocks", recent_blocks.len());
+    info!(
+        "✅ Explorer: Returning {} recent blocks",
+        recent_blocks.len()
+    );
     Ok(Json(ApiResponse::success(recent_blocks)))
 }
 
@@ -5984,10 +6567,14 @@ pub async fn sync_blocks(
     let from_height = params.from_height.unwrap_or(0);
     let limit = params.limit.unwrap_or(100).min(1000); // Cap at 1000 blocks per request
 
-    info!("🔄 [SYNC] Block sync request: from_height={}, limit={}", from_height, limit);
+    info!(
+        "🔄 [SYNC] Block sync request: from_height={}, limit={}",
+        from_height, limit
+    );
 
     // Fetch blocks from storage
-    let blocks = state.storage_engine
+    let blocks = state
+        .storage_engine
         .get_qblocks_range(from_height, limit)
         .await
         .map_err(|e| {
@@ -5996,7 +6583,8 @@ pub async fn sync_blocks(
         })?;
 
     // Get latest height for sync progress tracking
-    let latest_height = state.storage_engine
+    let latest_height = state
+        .storage_engine
         .get_latest_qblock_height()
         .await
         .map_err(|e| {
@@ -6006,18 +6594,21 @@ pub async fn sync_blocks(
         .unwrap_or(0);
 
     // Serialize blocks to JSON
-    let blocks_json: Vec<serde_json::Value> = blocks.iter().map(|block| {
-        serde_json::json!({
-            "height": block.header.height,
-            "timestamp": block.header.timestamp,
-            "proposer": hex::encode(block.header.proposer),
-            "dag_round": block.header.dag_round,
-            "tx_count": block.transactions.len(),
-            "mining_solutions": block.mining_solutions.len(),
-            "solutions_root": hex::encode(block.header.solutions_root),
-            "prev_block_hash": hex::encode(block.header.prev_block_hash),
+    let blocks_json: Vec<serde_json::Value> = blocks
+        .iter()
+        .map(|block| {
+            serde_json::json!({
+                "height": block.header.height,
+                "timestamp": block.header.timestamp,
+                "proposer": hex::encode(block.header.proposer),
+                "dag_round": block.header.dag_round,
+                "tx_count": block.transactions.len(),
+                "mining_solutions": block.mining_solutions.len(),
+                "solutions_root": hex::encode(block.header.solutions_root),
+                "prev_block_hash": hex::encode(block.header.prev_block_hash),
+            })
         })
-    }).collect();
+        .collect();
 
     let total_blocks = blocks_json.len();
     let end_height = if !blocks.is_empty() {
@@ -6040,8 +6631,10 @@ pub async fn sync_blocks(
         },
     });
 
-    info!("📥 [SYNC] Served {} blocks (heights {}-{}), latest={}",
-          total_blocks, from_height, end_height, latest_height);
+    info!(
+        "📥 [SYNC] Served {} blocks (heights {}-{}), latest={}",
+        total_blocks, from_height, end_height, latest_height
+    );
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -6056,15 +6649,13 @@ pub async fn list_contracts(
     // This will be populated when contract deployment functionality is added
     // For now, return sample data showing the expected format
 
-    let sample_contracts = vec![
-        serde_json::json!({
-            "address": "Coming soon",
-            "type": "evm",
-            "name": "Smart Contract Support",
-            "status": "Phase 3 feature - Under development",
-            "info": "EVM, WASM, and Move VM contract support planned"
-        })
-    ];
+    let sample_contracts = vec![serde_json::json!({
+        "address": "Coming soon",
+        "type": "evm",
+        "name": "Smart Contract Support",
+        "status": "Phase 3 feature - Under development",
+        "info": "EVM, WASM, and Move VM contract support planned"
+    })];
 
     info!("✅ Explorer: Returning contract status (feature coming soon)");
     Ok(Json(ApiResponse::success(sample_contracts)))
@@ -6079,7 +6670,10 @@ pub async fn get_dag_vertices(
     let current_height = status.current_height;
     drop(status);
 
-    info!("🔍 Explorer: Fetching recent DAG vertices from current height {}", current_height);
+    info!(
+        "🔍 Explorer: Fetching recent DAG vertices from current height {}",
+        current_height
+    );
 
     // Fetch last 5 blocks and convert them to vertex info
     let limit = 5u64;
@@ -6109,13 +6703,19 @@ pub async fn get_dag_vertices(
             }
             Ok(None) => continue,
             Err(e) => {
-                error!("❌ Explorer: Failed to fetch QBlock for vertex at height {}: {}", height, e);
+                error!(
+                    "❌ Explorer: Failed to fetch QBlock for vertex at height {}: {}",
+                    height, e
+                );
                 continue;
             }
         }
     }
 
-    info!("✅ Explorer: Returning {} recent vertices", recent_vertices.len());
+    info!(
+        "✅ Explorer: Returning {} recent vertices",
+        recent_vertices.len()
+    );
     Ok(Json(ApiResponse::success(recent_vertices)))
 }
 
@@ -6193,13 +6793,19 @@ pub async fn get_explorer_transactions(
             }
             Ok(None) => continue,
             Err(e) => {
-                error!("❌ Explorer: Failed to fetch QBlock at height {}: {}", height, e);
+                error!(
+                    "❌ Explorer: Failed to fetch QBlock at height {}: {}",
+                    height, e
+                );
                 continue;
             }
         }
     }
 
-    info!("✅ Explorer: Returning {} anonymized activity entries (ZK-STARK privacy)", recent_activity.len());
+    info!(
+        "✅ Explorer: Returning {} anonymized activity entries (ZK-STARK privacy)",
+        recent_activity.len()
+    );
     Ok(Json(ApiResponse::success(recent_activity)))
 }
 
@@ -6219,10 +6825,10 @@ pub async fn search_transactions(
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct MiningHealthResponse {
     pub is_healthy: bool,
-    pub time_since_last_solution: u64, // seconds
-    pub last_solution_timestamp: u64,   // Unix timestamp
-    pub status: String,                 // "healthy" or "stalled"
-    pub threshold_seconds: u64,         // Stall detection threshold
+    pub time_since_last_solution: u64,   // seconds
+    pub last_solution_timestamp: u64,    // Unix timestamp
+    pub status: String,                  // "healthy" or "stalled"
+    pub threshold_seconds: u64,          // Stall detection threshold
     pub last_solution_formatted: String, // Human-readable timestamp
 }
 
@@ -6238,10 +6844,14 @@ pub struct MiningHealthResponse {
 pub async fn get_mining_health(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<Json<MiningHealthResponse>, (StatusCode, String)> {
-    let last_solution_time = app_state.last_mining_solution_time.load(std::sync::atomic::Ordering::SeqCst);
+    let last_solution_time = app_state
+        .last_mining_solution_time
+        .load(std::sync::atomic::Ordering::SeqCst);
     let current_time = chrono::Utc::now().timestamp() as u64;
     let time_since_last_solution = current_time.saturating_sub(last_solution_time);
-    let is_healthy = app_state.mining_is_healthy.load(std::sync::atomic::Ordering::SeqCst);
+    let is_healthy = app_state
+        .mining_is_healthy
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     const STALL_THRESHOLD: u64 = 300; // 5 minutes
 
@@ -6258,7 +6868,11 @@ pub async fn get_mining_health(
         is_healthy,
         time_since_last_solution,
         last_solution_timestamp: last_solution_time,
-        status: if is_healthy { "healthy".to_string() } else { "stalled".to_string() },
+        status: if is_healthy {
+            "healthy".to_string()
+        } else {
+            "stalled".to_string()
+        },
         threshold_seconds: STALL_THRESHOLD,
         last_solution_formatted,
     }))
@@ -6314,14 +6928,21 @@ pub async fn get_address_book(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedWallet,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("📖 Address Book: Fetching addresses for wallet {}", hex::encode(&auth.address));
+    info!(
+        "📖 Address Book: Fetching addresses for wallet {}",
+        hex::encode(&auth.address)
+    );
 
     // Use wallet address as the key namespace for address book
     let wallet_hex = hex::encode(&auth.address);
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
     // Fetch from RocksDB hot storage
-    match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
+    match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
+    {
         Ok(Some(data)) => {
             // Deserialize the stored address book
             match serde_json::from_slice::<Vec<AddressBookEntry>>(&data) {
@@ -6351,7 +6972,10 @@ pub async fn get_address_book(
         }
         Err(e) => {
             error!("❌ Address Book: Database error: {}", e);
-            Ok(Json(ApiResponse::error(format!("Failed to fetch address book: {}", e))))
+            Ok(Json(ApiResponse::error(format!(
+                "Failed to fetch address book: {}",
+                e
+            ))))
         }
     }
 }
@@ -6362,14 +6986,22 @@ pub async fn save_address(
     auth: AuthenticatedWallet,
     Json(request): Json<SaveAddressRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("💾 Address Book: Saving address '{}' for wallet {}", request.label, hex::encode(&auth.address));
+    info!(
+        "💾 Address Book: Saving address '{}' for wallet {}",
+        request.label,
+        hex::encode(&auth.address)
+    );
 
     // Validate address format
     if request.address.trim().is_empty() {
-        return Ok(Json(ApiResponse::error("Address cannot be empty".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Address cannot be empty".to_string(),
+        )));
     }
     if request.label.trim().is_empty() {
-        return Ok(Json(ApiResponse::error("Label cannot be empty".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Label cannot be empty".to_string(),
+        )));
     }
 
     // Use wallet address as the key namespace
@@ -6377,10 +7009,12 @@ pub async fn save_address(
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
     // Load existing address book
-    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
-        Ok(Some(data)) => {
-            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
-        }
+    let mut addresses: Vec<AddressBookEntry> = match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
+    {
+        Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
         _ => Vec::new(),
     };
 
@@ -6406,7 +7040,11 @@ pub async fn save_address(
     // Serialize and save
     match serde_json::to_vec(&addresses) {
         Ok(data) => {
-            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+            match state
+                .storage_engine
+                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .await
+            {
                 Ok(_) => {
                     info!("✅ Address Book: Saved successfully");
                     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6416,13 +7054,19 @@ pub async fn save_address(
                 }
                 Err(e) => {
                     error!("❌ Address Book: Failed to save: {}", e);
-                    Ok(Json(ApiResponse::error(format!("Failed to save address: {}", e))))
+                    Ok(Json(ApiResponse::error(format!(
+                        "Failed to save address: {}",
+                        e
+                    ))))
                 }
             }
         }
         Err(e) => {
             error!("❌ Address Book: Serialization error: {}", e);
-            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+            Ok(Json(ApiResponse::error(format!(
+                "Serialization failed: {}",
+                e
+            ))))
         }
     }
 }
@@ -6434,16 +7078,22 @@ pub async fn update_address(
     Path(id): Path<String>,
     Json(request): Json<SaveAddressRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("✏️ Address Book: Updating address ID {} for wallet {}", id, hex::encode(&auth.address));
+    info!(
+        "✏️ Address Book: Updating address ID {} for wallet {}",
+        id,
+        hex::encode(&auth.address)
+    );
 
     let wallet_hex = hex::encode(&auth.address);
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
     // Load existing address book
-    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
-        Ok(Some(data)) => {
-            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
-        }
+    let mut addresses: Vec<AddressBookEntry> = match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
+    {
+        Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
         _ => Vec::new(),
     };
 
@@ -6471,7 +7121,11 @@ pub async fn update_address(
     // Save updated address book
     match serde_json::to_vec(&addresses) {
         Ok(data) => {
-            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+            match state
+                .storage_engine
+                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .await
+            {
                 Ok(_) => {
                     info!("✅ Address Book: Updated successfully");
                     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6480,13 +7134,19 @@ pub async fn update_address(
                 }
                 Err(e) => {
                     error!("❌ Address Book: Failed to update: {}", e);
-                    Ok(Json(ApiResponse::error(format!("Failed to update address: {}", e))))
+                    Ok(Json(ApiResponse::error(format!(
+                        "Failed to update address: {}",
+                        e
+                    ))))
                 }
             }
         }
         Err(e) => {
             error!("❌ Address Book: Serialization error: {}", e);
-            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+            Ok(Json(ApiResponse::error(format!(
+                "Serialization failed: {}",
+                e
+            ))))
         }
     }
 }
@@ -6497,16 +7157,22 @@ pub async fn delete_address(
     auth: AuthenticatedWallet,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("🗑️ Address Book: Deleting address ID {} for wallet {}", id, hex::encode(&auth.address));
+    info!(
+        "🗑️ Address Book: Deleting address ID {} for wallet {}",
+        id,
+        hex::encode(&auth.address)
+    );
 
     let wallet_hex = hex::encode(&auth.address);
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
     // Load existing address book
-    let mut addresses: Vec<AddressBookEntry> = match state.storage_engine.db_get("address_book", address_book_key.as_bytes()).await {
-        Ok(Some(data)) => {
-            serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new())
-        }
+    let mut addresses: Vec<AddressBookEntry> = match state
+        .storage_engine
+        .db_get("address_book", address_book_key.as_bytes())
+        .await
+    {
+        Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
         _ => Vec::new(),
     };
 
@@ -6521,7 +7187,11 @@ pub async fn delete_address(
     // Save updated address book
     match serde_json::to_vec(&addresses) {
         Ok(data) => {
-            match state.storage_engine.db_put("address_book", address_book_key.as_bytes(), &data).await {
+            match state
+                .storage_engine
+                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .await
+            {
                 Ok(_) => {
                     info!("✅ Address Book: Deleted successfully");
                     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6530,13 +7200,19 @@ pub async fn delete_address(
                 }
                 Err(e) => {
                     error!("❌ Address Book: Failed to delete: {}", e);
-                    Ok(Json(ApiResponse::error(format!("Failed to delete address: {}", e))))
+                    Ok(Json(ApiResponse::error(format!(
+                        "Failed to delete address: {}",
+                        e
+                    ))))
                 }
             }
         }
         Err(e) => {
             error!("❌ Address Book: Serialization error: {}", e);
-            Ok(Json(ApiResponse::error(format!("Serialization failed: {}", e))))
+            Ok(Json(ApiResponse::error(format!(
+                "Serialization failed: {}",
+                e
+            ))))
         }
     }
 }
@@ -6547,11 +7223,21 @@ pub async fn generate_address_proof(
     auth: AuthenticatedWallet,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let address = request.get("address").and_then(|v| v.as_str()).unwrap_or("");
-    let proof_type = request.get("proof_type").and_then(|v| v.as_str()).unwrap_or("stark");
+    let address = request
+        .get("address")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let proof_type = request
+        .get("proof_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stark");
 
-    info!("🔐 ZK Proof: Generating {} proof for address {} (wallet: {})",
-        proof_type, address, hex::encode(&auth.address));
+    info!(
+        "🔐 ZK Proof: Generating {} proof for address {} (wallet: {})",
+        proof_type,
+        address,
+        hex::encode(&auth.address)
+    );
 
     // Placeholder implementation - Real ZK-STARK proof generation would go here
     // This would involve:
@@ -6559,7 +7245,11 @@ pub async fn generate_address_proof(
     // 2. Generating a zero-knowledge proof that proves ownership without revealing private key
     // 3. Using the q-zk-stark crate for actual proof generation
 
-    let proof_data = format!("zk_{}_{}", proof_type, hex::encode(blake3::hash(address.as_bytes()).as_bytes()));
+    let proof_data = format!(
+        "zk_{}_{}",
+        proof_type,
+        hex::encode(blake3::hash(address.as_bytes()).as_bytes())
+    );
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "proof": proof_data,
@@ -6576,11 +7266,17 @@ pub async fn verify_address_proof(
     auth: AuthenticatedWallet,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let address = request.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let address = request
+        .get("address")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let _proof = request.get("proof");
 
-    info!("✅ ZK Proof: Verifying proof for address {} (wallet: {})",
-        address, hex::encode(&auth.address));
+    info!(
+        "✅ ZK Proof: Verifying proof for address {} (wallet: {})",
+        address,
+        hex::encode(&auth.address)
+    );
 
     // Placeholder - Real verification would validate the ZK proof
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6595,7 +7291,10 @@ pub async fn get_address_book_sync_status(
     State(_state): State<Arc<AppState>>,
     auth: AuthenticatedWallet,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("🔄 Address Book: Sync status for wallet {}", hex::encode(&auth.address));
+    info!(
+        "🔄 Address Book: Sync status for wallet {}",
+        hex::encode(&auth.address)
+    );
 
     // Placeholder - Real implementation would check gossipsub P2P sync status
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6626,17 +7325,21 @@ pub async fn network_unification_status(
     let node_status = state.node_status.read().await;
 
     // Get genesis block info
-    let genesis_block = storage.get_qblock_by_height(0).await
-        .map_err(|e| {
-            error!("Failed to get genesis block: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let genesis_block = storage.get_qblock_by_height(0).await.map_err(|e| {
+        error!("Failed to get genesis block: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let genesis_hash = genesis_block.as_ref().map(|b| hex::encode(b.calculate_hash()));
+    let genesis_hash = genesis_block
+        .as_ref()
+        .map(|b| hex::encode(b.calculate_hash()));
 
     // Get current and network heights
+    // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
     let local_height = node_status.current_height;
-    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    let network_height = state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     // Calculate sync status
     let sync_status = if local_height + 10 >= network_height {
@@ -6659,7 +7362,11 @@ pub async fn network_unification_status(
     let sync_percent = if network_height > 0 {
         (local_height as f64 / network_height as f64 * 100.0).min(100.0)
     } else {
-        if local_height > 0 { 100.0 } else { 0.0 }
+        if local_height > 0 {
+            100.0
+        } else {
+            0.0
+        }
     };
 
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -6730,4 +7437,3 @@ pub struct SyncMetricsResponse {
     pub enabled: bool,
     pub metrics: Option<q_storage::BatchMetrics>,
 }
-

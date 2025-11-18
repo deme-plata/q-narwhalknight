@@ -2,12 +2,12 @@
 //!
 //! Provides Axum HTTP handlers for the DEX API endpoints
 
+use crate::AppState;
 use axum::{
     routing::{get, post},
     Router,
 };
 use std::sync::Arc;
-use crate::AppState;
 
 /// Create the DEX router with all API endpoints
 pub fn create_dex_router() -> Router<Arc<AppState>> {

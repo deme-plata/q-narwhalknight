@@ -41,6 +41,9 @@ dashmap = "5.5"
 # Rayon for parallel processing (v0.9.41-beta: parallel decompression)
 rayon = "1.8"
 
+# System information for memory management (v1.0.15.1-beta)
+sysinfo = "0.30"
+
 # Q-NarwhalKnight types
 q-types = { path = "../q-types" }
 q-narwhal-core = { path = "../q-narwhal-core" }
@@ -76,6 +79,10 @@ path = "src/bin/reset_balances.rs"
 [[bin]]
 name = "recover-database"
 path = "src/bin/recover_database.rs"
+
+[[bin]]
+name = "fix-corrupted-pointer"
+path = "src/bin/fix_corrupted_pointer.rs"
 
 [dev-dependencies]
 tempfile = "3.8"

@@ -11,7 +11,6 @@
 ///
 /// Note: HTTP/2 support is enabled automatically by Axum when the client
 /// requests it via ALPN negotiation.
-
 use axum::Router;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -32,9 +31,9 @@ impl HighPerformanceServer {
         Self {
             app,
             addr,
-            tcp_recv_buffer_size: 4 * 1024 * 1024,  // 4MB receive buffer
-            tcp_send_buffer_size: 4 * 1024 * 1024,  // 4MB send buffer
-            tcp_backlog: 1024,  // 1024 pending connections (up from default 128)
+            tcp_recv_buffer_size: 4 * 1024 * 1024, // 4MB receive buffer
+            tcp_send_buffer_size: 4 * 1024 * 1024, // 4MB send buffer
+            tcp_backlog: 1024,                     // 1024 pending connections (up from default 128)
         }
     }
 
@@ -55,9 +54,11 @@ impl HighPerformanceServer {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         info!("🚀 Starting High-Performance HTTP Server");
         info!("   Address: {}", self.addr);
-        info!("   TCP buffer size: {} MB recv, {} MB send",
-              self.tcp_recv_buffer_size / (1024 * 1024),
-              self.tcp_send_buffer_size / (1024 * 1024));
+        info!(
+            "   TCP buffer size: {} MB recv, {} MB send",
+            self.tcp_recv_buffer_size / (1024 * 1024),
+            self.tcp_send_buffer_size / (1024 * 1024)
+        );
         info!("   TCP backlog: {} pending connections", self.tcp_backlog);
         info!("   Target throughput: 1,000,000+ TPS");
 
@@ -96,7 +97,10 @@ impl HighPerformanceServer {
 
         // Listen with custom backlog
         socket.listen(self.tcp_backlog as i32)?;
-        info!("   ✓ Listening with {} connection backlog", self.tcp_backlog);
+        info!(
+            "   ✓ Listening with {} connection backlog",
+            self.tcp_backlog
+        );
 
         // Convert to non-blocking
         socket.set_nonblocking(true)?;

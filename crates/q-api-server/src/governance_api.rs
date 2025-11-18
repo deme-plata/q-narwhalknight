@@ -194,9 +194,7 @@ async fn list_proposals(
     debug!("📋 Listing governance proposals");
 
     let governance = get_governance_coordinator(&state)?;
-    let mut proposals = governance
-        .get_all_proposals()
-        .await;
+    let mut proposals = governance.get_all_proposals().await;
 
     // Filter by status
     if let Some(status) = query.status {
@@ -211,7 +209,8 @@ async fn list_proposals(
 
     // Filter by type
     if let Some(ptype) = query.proposal_type {
-        proposals.retain(|p| format!("{:?}", p.proposal_type).to_lowercase() == ptype.to_lowercase());
+        proposals
+            .retain(|p| format!("{:?}", p.proposal_type).to_lowercase() == ptype.to_lowercase());
     }
 
     // Apply pagination
@@ -267,12 +266,8 @@ async fn submit_vote(
     voter_address.copy_from_slice(&voter_bytes);
 
     // Parse signature
-    let signature = hex::decode(&req.signature).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid signature: {}", e),
-        )
-    })?;
+    let signature = hex::decode(&req.signature)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid signature: {}", e)))?;
 
     // Convert mining contribution DTO if provided
     let mining_contribution = req.mining_contribution.map(|dto| MiningContribution {
@@ -375,12 +370,8 @@ async fn get_contribution_stats(
 ) -> Result<Json<ContributionStatsResponse>, (StatusCode, String)> {
     debug!("📈 Getting contribution stats for: {}", address);
 
-    let addr_bytes = hex::decode(&address).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid address: {}", e),
-        )
-    })?;
+    let addr_bytes = hex::decode(&address)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid address: {}", e)))?;
 
     if addr_bytes.len() != 32 {
         return Err((
@@ -415,12 +406,8 @@ async fn get_reputation(
 ) -> Result<Json<q_governance::MinerReputation>, (StatusCode, String)> {
     debug!("🏆 Getting reputation for: {}", address);
 
-    let addr_bytes = hex::decode(&address).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid address: {}", e),
-        )
-    })?;
+    let addr_bytes = hex::decode(&address)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid address: {}", e)))?;
 
     if addr_bytes.len() != 32 {
         return Err((
@@ -434,10 +421,12 @@ async fn get_reputation(
 
     let governance = get_governance_coordinator(&state)?;
 
-    let reputation = governance
-        .get_reputation(&addr)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "No reputation data found".to_string()))?;
+    let reputation = governance.get_reputation(&addr).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "No reputation data found".to_string(),
+        )
+    })?;
 
     Ok(Json(reputation))
 }

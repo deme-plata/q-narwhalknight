@@ -20,8 +20,8 @@ use tokio::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::privacy_service_api::PaaSService;
+use crate::AppState;
 
 /// Reservation status state machine
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,8 +49,8 @@ pub struct BalanceReservation {
     pub error_message: Option<String>,
 
     // v2 additions
-    pub nonce: u64,  // Replay protection
-    pub request_hash: String,  // SHA256 of original request
+    pub nonce: u64,           // Replay protection
+    pub request_hash: String, // SHA256 of original request
 }
 
 impl BalanceReservation {
@@ -91,22 +91,26 @@ pub struct BillingMetrics {
 impl BillingMetrics {
     pub fn record_reservation(&self, amount: u64) {
         self.total_reservations.fetch_add(1, Ordering::SeqCst);
-        self.total_amount_reserved.fetch_add(amount, Ordering::SeqCst);
+        self.total_amount_reserved
+            .fetch_add(amount, Ordering::SeqCst);
     }
 
     pub fn record_finalized(&self, amount: u64) {
         self.total_finalized.fetch_add(1, Ordering::SeqCst);
-        self.total_amount_charged.fetch_add(amount, Ordering::SeqCst);
+        self.total_amount_charged
+            .fetch_add(amount, Ordering::SeqCst);
     }
 
     pub fn record_released(&self, amount: u64) {
         self.total_released.fetch_add(1, Ordering::SeqCst);
-        self.total_amount_refunded.fetch_add(amount, Ordering::SeqCst);
+        self.total_amount_refunded
+            .fetch_add(amount, Ordering::SeqCst);
     }
 
     pub fn record_expired(&self, amount: u64) {
         self.total_expired.fetch_add(1, Ordering::SeqCst);
-        self.total_amount_refunded.fetch_add(amount, Ordering::SeqCst);
+        self.total_amount_refunded
+            .fetch_add(amount, Ordering::SeqCst);
     }
 
     pub fn get_stats(&self) -> BillingStats {
@@ -371,8 +375,10 @@ impl PaaSBillingManagerV2 {
         drop(reservations);
 
         // Debit wallet & credit bank (atomic operations)
-        self.debit_wallet(state, &wallet_address, amount_qug).await?;
-        self.credit_quillon_bank(state, amount_qug, service, wallet_address).await?;
+        self.debit_wallet(state, &wallet_address, amount_qug)
+            .await?;
+        self.credit_quillon_bank(state, amount_qug, service, wallet_address)
+            .await?;
 
         // Atomically decrease reserved balance
         let mut wallet_reserved = self.wallet_reserved_balances.write().await;
@@ -526,7 +532,7 @@ impl PaaSBillingManagerV2 {
 
         let master_account = accounts.entry(master_address.clone()).or_insert_with(|| {
             use q_quillon_bank::{
-                BankAccount, CreditScore, RiskTier, QuantumCreditData, QuantumAccountFeatures,
+                BankAccount, CreditScore, QuantumAccountFeatures, QuantumCreditData, RiskTier,
             };
             BankAccount {
                 address: master_address.clone(),
@@ -616,10 +622,7 @@ mod tests {
 
         // Check reserved balance (should be exactly 100M atomic units)
         let wallet_reserved = manager.wallet_reserved_balances.read().await;
-        let reserved = wallet_reserved
-            .get(&wallet)
-            .unwrap()
-            .load(Ordering::SeqCst);
+        let reserved = wallet_reserved.get(&wallet).unwrap().load(Ordering::SeqCst);
         assert_eq!(reserved, 100_000_000); // 10 * 10M
     }
 

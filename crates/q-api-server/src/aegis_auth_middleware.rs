@@ -5,14 +5,14 @@
 
 use axum::{
     extract::{Request, State},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    http::{StatusCode, HeaderMap},
 };
+use q_aegis_ql::{AegisError, AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use q_aegis_ql::{AegisQL, Signature as AegisSignature, PublicKey as AegisPublicKey, AegisError};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Founder wallet address (hardcoded for security)
 pub const FOUNDER_WALLET: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
@@ -97,8 +97,7 @@ impl AuthHeaders {
             .to_str()
             .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        let wallet_bytes = hex::decode(wallet_hex)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let wallet_bytes = hex::decode(wallet_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
 
         if wallet_bytes.len() != 32 {
             error!("Invalid wallet address length: {}", wallet_bytes.len());
@@ -115,14 +114,12 @@ impl AuthHeaders {
             .to_str()
             .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        let signature_bytes = hex::decode(signature_hex)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let signature_bytes = hex::decode(signature_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        let signature = AegisSignature::from_bytes(&signature_bytes)
-            .map_err(|_| {
-                error!("Failed to deserialize AEGIS-QL signature");
-                StatusCode::BAD_REQUEST
-            })?;
+        let signature = AegisSignature::from_bytes(&signature_bytes).map_err(|_| {
+            error!("Failed to deserialize AEGIS-QL signature");
+            StatusCode::BAD_REQUEST
+        })?;
 
         // Extract timestamp
         let timestamp_str = headers
@@ -238,27 +235,39 @@ pub async fn verify_founder_signature(
 
 /// Create protected router with AEGIS-QL authentication
 pub fn create_protected_routes() -> axum::Router<Arc<crate::AppState>> {
-    use axum::routing::{get, post};
     use crate::quillon_bank_api;
+    use axum::routing::{get, post};
 
     axum::Router::new()
         // Stablecoin operations (founder-only)
         .route("/stablecoin/mint", post(quillon_bank_api::mint_qnkusd))
         .route("/stablecoin/burn", post(quillon_bank_api::burn_qnkusd))
-        .route("/stablecoin/collateral/add", post(quillon_bank_api::add_collateral))
-        .route("/stablecoin/collateral/rebalance", post(quillon_bank_api::rebalance_collateral))
+        .route(
+            "/stablecoin/collateral/add",
+            post(quillon_bank_api::add_collateral),
+        )
+        .route(
+            "/stablecoin/collateral/rebalance",
+            post(quillon_bank_api::rebalance_collateral),
+        )
         .route("/stablecoin/peg/adjust", post(quillon_bank_api::adjust_peg))
-
         // Lending operations (founder-only)
         .route("/lending/approve", post(quillon_bank_api::approve_loan))
         .route("/lending/liquidate", post(quillon_bank_api::liquidate_loan))
-
         // Treasury operations (founder-only)
-        .route("/treasury/reserves/allocate", post(quillon_bank_api::allocate_reserves))
-        .route("/treasury/profits/distribute", post(quillon_bank_api::distribute_profits))
-
+        .route(
+            "/treasury/reserves/allocate",
+            post(quillon_bank_api::allocate_reserves),
+        )
+        .route(
+            "/treasury/profits/distribute",
+            post(quillon_bank_api::distribute_profits),
+        )
         // Risk management (founder-only)
-        .route("/risk/liquidations/execute", post(quillon_bank_api::execute_liquidations))
+        .route(
+            "/risk/liquidations/execute",
+            post(quillon_bank_api::execute_liquidations),
+        )
 }
 
 #[cfg(test)]

@@ -537,14 +537,25 @@ export default function AIChatScreen() {
         })
       });
 
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Failed to create chat - HTTP', response.status, errorText);
+        alert(`Failed to create new chat: ${response.status} - ${errorText}`);
+        return;
+      }
+
       const data = await response.json();
       if (data.success && data.data) {
         setCurrentChatId(data.data.chat_id);
         setMessages([]);
         loadChats(false); // Don't auto-select, we already set the current chat
+      } else {
+        console.error('Failed to create chat - API returned error:', data);
+        alert(`Failed to create new chat: ${data.error || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Failed to create chat:', error);
+      alert(`Failed to create new chat: ${error}`);
     }
   };
 

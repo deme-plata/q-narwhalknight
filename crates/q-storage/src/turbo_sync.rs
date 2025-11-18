@@ -684,6 +684,9 @@ pub struct TurboSyncManager {
 
     /// 📊 v0.9.15-beta: Peer trust registry for reputation tracking
     peer_trust: Arc<crate::aegis_sync::PeerTrustRegistry>,
+
+    /// 🧠 v1.0.15.1-beta: Memory limiter for adaptive sync batch sizing
+    memory_limiter: Arc<crate::memory_limiter::MemoryLimiter>,
 }
 
 impl TurboSyncManager {
@@ -697,6 +700,10 @@ impl TurboSyncManager {
         info!("🔐 [AEGIS-QL] Generated post-quantum keypair for signed P2P sync");
         info!("   Public key (first 16 bytes): {}", hex::encode(&bincode::serialize(&public_key).unwrap()[..16]));
 
+        // 🧠 v1.0.15.1-beta: Initialize memory limiter with adaptive batch sizing
+        let memory_limiter = Arc::new(crate::memory_limiter::MemoryLimiter::new());
+        info!("🧠 [MEMORY] Memory limiter initialized for adaptive sync batch sizing");
+
         Self {
             config,
             storage,
@@ -708,6 +715,7 @@ impl TurboSyncManager {
             aegis_secret_key: Arc::new(RwLock::new(secret_key)),
             aegis_public_key: public_key,
             peer_trust: Arc::new(crate::aegis_sync::PeerTrustRegistry::new()),
+            memory_limiter,
         }
     }
 
@@ -1366,6 +1374,7 @@ impl TurboSyncManager {
             aegis_secret_key: Arc::clone(&self.aegis_secret_key),
             aegis_public_key: self.aegis_public_key.clone(),
             peer_trust: Arc::clone(&self.peer_trust),
+            memory_limiter: Arc::clone(&self.memory_limiter),
         }
     }
 
@@ -1415,11 +1424,25 @@ impl TurboSyncManager {
             ));
         }
 
+        // 🧠 v1.0.15.1-beta: Check memory pressure before starting sync
+        if self.memory_limiter.should_pause_sync().await {
+            warn!("⏸️  [MEMORY CRITICAL] Pausing sync until memory relief");
+            self.memory_limiter.wait_for_memory_relief().await;
+        }
+
+        // 🧠 v1.0.15.1-beta: Get adaptive batch size based on current memory pressure
+        let adaptive_chunk_size = self.memory_limiter.get_recommended_batch_size().await as u64;
+        let chunk_size = min(self.config.chunk_size, adaptive_chunk_size);
+
+        let memory_stats = self.memory_limiter.get_memory_stats().await;
+        info!("🧠 [MEMORY] Adaptive batch sizing: {} blocks (pressure: {:?}, usage: {:.1}%)",
+              chunk_size, memory_stats.pressure, memory_stats.usage_percent());
+
         let missing_range = target_height - local_height;
 
         info!("🚀 TURBO SYNC STARTING: {} blocks ({} → {})",
               missing_range, local_height, target_height);
-        info!("⚙️  Config: {} parallel streams, {} blocks/chunk, compression level {}",
+        info!("⚙️  Config: {} parallel streams, {} blocks/chunk (adaptive), compression level {}",
               self.config.parallel_streams, self.config.chunk_size, self.config.compression_level);
 
         // Record start time

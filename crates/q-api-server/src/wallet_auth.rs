@@ -13,17 +13,17 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use ed25519_dalek::{Verifier, VerifyingKey, Signature as DalekSignature};
-use q_types::{Address, ApiResponse};
-use sha3::{Digest, Sha3_256};
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
+use q_aegis_ql::{AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
+use q_types::{Address, ApiResponse};
 use q_wallet::{
     dilithium_wallet::Dilithium5KeyPair,
-    sphincs_wallet::{SphincsPlusKeyPair, OperationType},
+    sphincs_wallet::{OperationType, SphincsPlusKeyPair},
 };
-use q_aegis_ql::{AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+use std::sync::Arc;
 
 /// Cryptographic scheme used for authentication
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,7 +133,10 @@ where
                 message: "Invalid X-Wallet-Auth header format".to_string(),
             })?;
 
-        eprintln!("🔍 [AUTH DEBUG] Received X-Wallet-Auth header: {}", auth_header);
+        eprintln!(
+            "🔍 [AUTH DEBUG] Received X-Wallet-Auth header: {}",
+            auth_header
+        );
         eprintln!("🔍 [AUTH DEBUG] Request path: {}", parts.uri.path());
 
         // Parse JSON authentication header
@@ -142,8 +145,10 @@ where
             message: format!("Invalid authentication JSON: {}", e),
         })?;
 
-        eprintln!("🔍 [AUTH DEBUG] Parsed auth - address: {}, timestamp: {}, scheme: {:?}",
-                  auth.address, auth.timestamp, auth.scheme);
+        eprintln!(
+            "🔍 [AUTH DEBUG] Parsed auth - address: {}, timestamp: {}, scheme: {:?}",
+            auth.address, auth.timestamp, auth.scheme
+        );
 
         // Check timestamp to prevent replay attacks (max 5 minutes old)
         let now = Utc::now().timestamp();
@@ -152,7 +157,9 @@ where
             // 5 minutes
             return Err(AuthError {
                 error: "expired_auth".to_string(),
-                message: "Authentication expired. Timestamp must be within 5 minutes of current time.".to_string(),
+                message:
+                    "Authentication expired. Timestamp must be within 5 minutes of current time."
+                        .to_string(),
             });
         }
 
@@ -186,7 +193,10 @@ where
         hasher.update(parts.uri.path().as_bytes());
         let message = hasher.finalize();
 
-        eprintln!("🔍 [AUTH DEBUG] Challenge message hash: {}", hex::encode(&message));
+        eprintln!(
+            "🔍 [AUTH DEBUG] Challenge message hash: {}",
+            hex::encode(&message)
+        );
 
         // Verify signature(s) based on scheme
         match auth.scheme {
@@ -232,9 +242,18 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
         message: "Ed25519 signature required for this scheme".to_string(),
     })?;
 
-    eprintln!("🔍 [AUTH DEBUG] Verifying Ed25519 signature: {}", signature_hex);
-    eprintln!("🔍 [AUTH DEBUG] Message to verify: {}", hex::encode(message));
-    eprintln!("🔍 [AUTH DEBUG] Public key (address): {}", hex::encode(address));
+    eprintln!(
+        "🔍 [AUTH DEBUG] Verifying Ed25519 signature: {}",
+        signature_hex
+    );
+    eprintln!(
+        "🔍 [AUTH DEBUG] Message to verify: {}",
+        hex::encode(message)
+    );
+    eprintln!(
+        "🔍 [AUTH DEBUG] Public key (address): {}",
+        hex::encode(address)
+    );
 
     let sig_bytes = hex::decode(signature_hex).map_err(|_| AuthError {
         error: "invalid_signature".to_string(),
@@ -253,34 +272,43 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
         message: "Invalid Ed25519 public key in address".to_string(),
     })?;
 
-    let signature = DalekSignature::from_bytes(
-        &sig_bytes[..64]
-            .try_into()
-            .map_err(|_| AuthError {
-                error: "signature_conversion_failed".to_string(),
-                message: "Failed to convert Ed25519 signature bytes".to_string(),
-            })?,
-    );
+    let signature =
+        DalekSignature::from_bytes(&sig_bytes[..64].try_into().map_err(|_| AuthError {
+            error: "signature_conversion_failed".to_string(),
+            message: "Failed to convert Ed25519 signature bytes".to_string(),
+        })?);
 
-    public_key.verify(message, &signature).map_err(|_| AuthError {
-        error: "invalid_signature".to_string(),
-        message: "Ed25519 signature verification failed".to_string(),
-    })?;
+    public_key
+        .verify(message, &signature)
+        .map_err(|_| AuthError {
+            error: "invalid_signature".to_string(),
+            message: "Ed25519 signature verification failed".to_string(),
+        })?;
 
     Ok(())
 }
 
 /// Verify Dilithium5 post-quantum signature
-fn verify_dilithium5(auth: &AuthHeader, address: &Address, message: &[u8]) -> Result<(), AuthError> {
-    let signature_hex = auth.dilithium5_signature.as_ref().ok_or_else(|| AuthError {
-        error: "missing_dilithium5_signature".to_string(),
-        message: "Dilithium5 signature required for this scheme".to_string(),
-    })?;
+fn verify_dilithium5(
+    auth: &AuthHeader,
+    address: &Address,
+    message: &[u8],
+) -> Result<(), AuthError> {
+    let signature_hex = auth
+        .dilithium5_signature
+        .as_ref()
+        .ok_or_else(|| AuthError {
+            error: "missing_dilithium5_signature".to_string(),
+            message: "Dilithium5 signature required for this scheme".to_string(),
+        })?;
 
-    let public_key_hex = auth.dilithium5_public_key.as_ref().ok_or_else(|| AuthError {
-        error: "missing_dilithium5_public_key".to_string(),
-        message: "Dilithium5 public key required for verification".to_string(),
-    })?;
+    let public_key_hex = auth
+        .dilithium5_public_key
+        .as_ref()
+        .ok_or_else(|| AuthError {
+            error: "missing_dilithium5_public_key".to_string(),
+            message: "Dilithium5 public key required for verification".to_string(),
+        })?;
 
     let sig_bytes = hex::decode(signature_hex).map_err(|_| AuthError {
         error: "invalid_dilithium5_signature".to_string(),
@@ -302,10 +330,12 @@ fn verify_dilithium5(auth: &AuthHeader, address: &Address, message: &[u8]) -> Re
     }
 
     // Verify the Dilithium5 signature
-    let is_valid = Dilithium5KeyPair::verify(message, &sig_bytes, &public_key_bytes)
-        .map_err(|e| AuthError {
-            error: "dilithium5_verification_failed".to_string(),
-            message: format!("Dilithium5 verification error: {}", e),
+    let is_valid =
+        Dilithium5KeyPair::verify(message, &sig_bytes, &public_key_bytes).map_err(|e| {
+            AuthError {
+                error: "dilithium5_verification_failed".to_string(),
+                message: format!("Dilithium5 verification error: {}", e),
+            }
         })?;
 
     if !is_valid {
@@ -319,7 +349,11 @@ fn verify_dilithium5(auth: &AuthHeader, address: &Address, message: &[u8]) -> Re
 }
 
 /// Verify SPHINCS+ ultra-conservative signature (for critical operations)
-fn verify_sphincs_plus(auth: &AuthHeader, address: &Address, message: &[u8]) -> Result<(), AuthError> {
+fn verify_sphincs_plus(
+    auth: &AuthHeader,
+    address: &Address,
+    message: &[u8],
+) -> Result<(), AuthError> {
     let signature_hex = auth.sphincs_signature.as_ref().ok_or_else(|| AuthError {
         error: "missing_sphincs_signature".to_string(),
         message: "SPHINCS+ signature required for ultra-secure scheme".to_string(),
@@ -350,10 +384,12 @@ fn verify_sphincs_plus(auth: &AuthHeader, address: &Address, message: &[u8]) -> 
     }
 
     // Verify the SPHINCS+ signature
-    let is_valid = SphincsPlusKeyPair::verify(message, &sig_bytes, &public_key_bytes)
-        .map_err(|e| AuthError {
-            error: "sphincs_verification_failed".to_string(),
-            message: format!("SPHINCS+ verification error: {}", e),
+    let is_valid =
+        SphincsPlusKeyPair::verify(message, &sig_bytes, &public_key_bytes).map_err(|e| {
+            AuthError {
+                error: "sphincs_verification_failed".to_string(),
+                message: format!("SPHINCS+ verification error: {}", e),
+            }
         })?;
 
     if !is_valid {
@@ -379,23 +415,27 @@ fn verify_aegis_ql(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resu
     })?;
 
     // Deserialize AEGIS-QL signature from JSON
-    let signature: AegisSignature = serde_json::from_str(signature_json).map_err(|e| AuthError {
-        error: "invalid_aegis_signature".to_string(),
-        message: format!("Invalid AEGIS-QL signature format: {}", e),
-    })?;
+    let signature: AegisSignature =
+        serde_json::from_str(signature_json).map_err(|e| AuthError {
+            error: "invalid_aegis_signature".to_string(),
+            message: format!("Invalid AEGIS-QL signature format: {}", e),
+        })?;
 
     // Deserialize AEGIS-QL public key from JSON
-    let public_key: AegisPublicKey = serde_json::from_str(public_key_json).map_err(|e| AuthError {
-        error: "invalid_aegis_public_key".to_string(),
-        message: format!("Invalid AEGIS-QL public key format: {}", e),
-    })?;
+    let public_key: AegisPublicKey =
+        serde_json::from_str(public_key_json).map_err(|e| AuthError {
+            error: "invalid_aegis_public_key".to_string(),
+            message: format!("Invalid AEGIS-QL public key format: {}", e),
+        })?;
 
     // Verify the AEGIS-QL signature
     let aegis = AegisQL::new();
-    let is_valid = aegis.verify(message, &signature, &public_key).map_err(|e| AuthError {
-        error: "aegis_verification_failed".to_string(),
-        message: format!("AEGIS-QL verification error: {:?}", e),
-    })?;
+    let is_valid = aegis
+        .verify(message, &signature, &public_key)
+        .map_err(|e| AuthError {
+            error: "aegis_verification_failed".to_string(),
+            message: format!("AEGIS-QL verification error: {:?}", e),
+        })?;
 
     if !is_valid {
         return Err(AuthError {

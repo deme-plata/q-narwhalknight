@@ -251,10 +251,7 @@ impl PaaSApiKeyManager {
 
         // Get key record
         let keys = self.keys.read().await;
-        let mut key_record = keys
-            .get(&key_id)
-            .ok_or("API key not found")?
-            .clone();
+        let mut key_record = keys.get(&key_id).ok_or("API key not found")?.clone();
         drop(keys);
 
         // Check if key is active
@@ -297,9 +294,7 @@ impl PaaSApiKeyManager {
     /// Check rate limit for an API key
     pub async fn check_rate_limit(&self, key_id: &str) -> Result<(), String> {
         let mut keys = self.keys.write().await;
-        let key_record = keys
-            .get_mut(key_id)
-            .ok_or("API key not found")?;
+        let key_record = keys.get_mut(key_id).ok_or("API key not found")?;
 
         let now = chrono::Utc::now().timestamp() as u64;
         let current_minute = now / 60;
@@ -360,9 +355,7 @@ impl PaaSApiKeyManager {
 
         // Update key record
         let mut keys = self.keys.write().await;
-        let key_record = keys
-            .get_mut(key_id)
-            .ok_or("API key not found")?;
+        let key_record = keys.get_mut(key_id).ok_or("API key not found")?;
 
         let old_hash_prefix = self.compute_hash_prefix_from_hash(&key_record.key_hash);
         key_record.key_hash = new_key_hash;
@@ -386,9 +379,7 @@ impl PaaSApiKeyManager {
     /// Revoke an API key
     pub async fn revoke_key(&self, key_id: &str, reason: String) -> Result<(), String> {
         let mut keys = self.keys.write().await;
-        let key_record = keys
-            .get_mut(key_id)
-            .ok_or("API key not found")?;
+        let key_record = keys.get_mut(key_id).ok_or("API key not found")?;
 
         key_record.is_active = false;
         key_record.revocation_reason = Some(reason.clone());
@@ -397,19 +388,13 @@ impl PaaSApiKeyManager {
         let mut blacklist = self.blacklist.write().await;
         blacklist.insert(key_id.to_string(), reason.clone());
 
-        warn!(
-            "🚫 Revoked API key {} (reason: {})",
-            key_id, reason
-        );
+        warn!("🚫 Revoked API key {} (reason: {})", key_id, reason);
 
         Ok(())
     }
 
     /// List all API keys for a wallet
-    pub async fn list_keys_for_wallet(
-        &self,
-        wallet_address: &[u8; 32],
-    ) -> Vec<ApiKeyRecord> {
+    pub async fn list_keys_for_wallet(&self, wallet_address: &[u8; 32]) -> Vec<ApiKeyRecord> {
         let keys = self.keys.read().await;
         keys.values()
             .filter(|k| k.wallet_address == *wallet_address)

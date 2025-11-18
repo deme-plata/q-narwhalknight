@@ -2,7 +2,6 @@
 ///
 /// Provides production-ready RESTful API endpoints for the Quillon Bank CLI
 /// to execute real banking operations on the quantum blockchain.
-
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -14,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-use crate::AppState;
 use crate::handlers::parse_wallet_address;
-use q_quillon_bank::{QuillonBankSystem, AssetType};
-use q_types::{ApiResponse, Transaction};
+use crate::AppState;
 use chrono::Utc;
+use q_quillon_bank::{AssetType, QuillonBankSystem};
+use q_types::{ApiResponse, Transaction};
 
 /// Create Quillon Bank API router with AEGIS-QL protection for sensitive operations
 pub fn create_quillon_bank_router() -> Router<Arc<AppState>> {
@@ -30,9 +29,7 @@ pub fn create_quillon_bank_router() -> Router<Arc<AppState>> {
     let protected_routes = create_protected_routes();
 
     // Merge public and protected routes
-    Router::new()
-        .merge(public_routes)
-        .merge(protected_routes)
+    Router::new().merge(public_routes).merge(protected_routes)
 }
 
 /// Create public Quillon Bank routes (read-only, no authentication)
@@ -69,7 +66,10 @@ pub fn create_protected_routes() -> Router<Arc<AppState>> {
         .route("/stablecoin/mint", post(mint_qnkusd))
         .route("/stablecoin/burn", post(burn_qnkusd))
         .route("/stablecoin/collateral/add", post(add_collateral))
-        .route("/stablecoin/collateral/rebalance", post(rebalance_collateral))
+        .route(
+            "/stablecoin/collateral/rebalance",
+            post(rebalance_collateral),
+        )
         .route("/stablecoin/peg/adjust", post(adjust_peg))
         // Lending Operations (FOUNDER-ONLY)
         .route("/lending/approve", post(approve_loan))
@@ -142,8 +142,10 @@ async fn get_banking_metrics(
     })?;
 
     // Calculate aggregated values
-    let total_deposits: u64 = (bank_metrics.total_deposits.values().sum::<u128>() / 1_000_000_000_000) as u64;
-    let total_loans: u64 = (bank_metrics.total_loans.values().sum::<u128>() / 1_000_000_000_000) as u64;
+    let total_deposits: u64 =
+        (bank_metrics.total_deposits.values().sum::<u128>() / 1_000_000_000_000) as u64;
+    let total_loans: u64 =
+        (bank_metrics.total_loans.values().sum::<u128>() / 1_000_000_000_000) as u64;
 
     let metrics = BankingMetrics {
         active_accounts: bank_metrics.total_accounts,
@@ -249,8 +251,12 @@ pub async fn mint_qnkusd(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MintRequest>,
 ) -> Result<Json<ApiResponse<MintResponse>>, StatusCode> {
-    info!("💰 Minting {} QUGUSD with {} {} collateral",
-        request.amount as f64 / 1e8, request.collateral_amount, request.collateral_type);
+    info!(
+        "💰 Minting {} QUGUSD with {} {} collateral",
+        request.amount as f64 / 1e8,
+        request.collateral_amount,
+        request.collateral_type
+    );
 
     // Parse collateral type
     let collateral_type = match request.collateral_type.to_uppercase().as_str() {
@@ -321,15 +327,18 @@ pub async fn mint_qnkusd(
     let tx_id = {
         let mut bank_system = state.quillon_bank.write().await;
         let borrower = q_quillon_bank::Address(borrower_bytes);
-        bank_system.mint_qnkusd(
-            &borrower,
-            (request.collateral_amount * 1_000_000_000_000.0) as u128, // Convert to base units
-            collateral_type,
-            amount_backend_units, // Already converted from frontend base units
-        ).await.map_err(|e| {
-            error!("Failed to mint QNKUSD: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
+        bank_system
+            .mint_qnkusd(
+                &borrower,
+                (request.collateral_amount * 1_000_000_000_000.0) as u128, // Convert to base units
+                collateral_type,
+                amount_backend_units, // Already converted from frontend base units
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to mint QNKUSD: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
     }; // Drop the lock here
 
     let finalized_in_seconds = start.elapsed().as_secs_f64();
@@ -337,15 +346,19 @@ pub async fn mint_qnkusd(
     // Create a blockchain Transaction object for Recent Activity
     let zero_address = [0u8; 32]; // System address for minting
     let transaction = Transaction {
-        id: tx_id.0,  // Use the transaction ID from Quillon Bank
-        from: zero_address,  // System/CDP mint (from zero address)
-        to: borrower_bytes,  // User receiving QUGUSD
-        amount: request.amount,  // QUGUSD amount already in frontend base units
-        fee: 0,  // No fee for CDP minting
-        nonce: 0,  // CDP operations don't use nonces
-        signature: vec![],  // System operation, no signature needed
+        id: tx_id.0,            // Use the transaction ID from Quillon Bank
+        from: zero_address,     // System/CDP mint (from zero address)
+        to: borrower_bytes,     // User receiving QUGUSD
+        amount: request.amount, // QUGUSD amount already in frontend base units
+        fee: 0,                 // No fee for CDP minting
+        nonce: 0,               // CDP operations don't use nonces
+        signature: vec![],      // System operation, no signature needed
         timestamp: Utc::now(),
-        data: format!("CDP_MINT:{}:{}", request.collateral_type, request.collateral_amount).into_bytes(),
+        data: format!(
+            "CDP_MINT:{}:{}",
+            request.collateral_type, request.collateral_amount
+        )
+        .into_bytes(),
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
     };
@@ -354,7 +367,10 @@ pub async fn mint_qnkusd(
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
         error!("Failed to save CDP mint transaction to storage: {}", e);
     } else {
-        info!("💳 CDP mint transaction saved to Recent Activity: {}", hex::encode(&tx_id.0));
+        info!(
+            "💳 CDP mint transaction saved to Recent Activity: {}",
+            hex::encode(&tx_id.0)
+        );
     }
 
     // ✅ CRITICAL FIX: Update user's QUGUSD balance in token_balances map
@@ -365,7 +381,8 @@ pub async fn mint_qnkusd(
         let new_balance = current_balance + request.amount;
         token_balances.insert(balance_key, new_balance);
 
-        info!("💰 Updated QUGUSD balance for {}: {} → {} (minted: {})",
+        info!(
+            "💰 Updated QUGUSD balance for {}: {} → {} (minted: {})",
             hex::encode(&borrower_bytes[..8]),
             current_balance as f64 / 1e8,
             new_balance as f64 / 1e8,
@@ -373,7 +390,11 @@ pub async fn mint_qnkusd(
         );
 
         // Persist the balance update to storage
-        if let Err(e) = state.storage_engine.save_token_balance(&borrower_bytes, &q_types::QUGUSD_TOKEN_ADDRESS, new_balance).await {
+        if let Err(e) = state
+            .storage_engine
+            .save_token_balance(&borrower_bytes, &q_types::QUGUSD_TOKEN_ADDRESS, new_balance)
+            .await
+        {
             error!("Failed to persist QUGUSD balance after minting: {}", e);
         }
     }
@@ -388,18 +409,27 @@ pub async fn mint_qnkusd(
             let new_qug_balance = current_qug - collateral_base_units;
             wallet_balances.insert(borrower_bytes, new_qug_balance);
 
-            info!("🔒 Locked {} QUG as collateral: {} → {}",
+            info!(
+                "🔒 Locked {} QUG as collateral: {} → {}",
                 request.collateral_amount,
                 current_qug as f64 / 1e8,
                 new_qug_balance as f64 / 1e8
             );
 
             // Persist the QUG balance update
-            if let Err(e) = state.storage_engine.save_wallet_balance(&borrower_bytes, new_qug_balance).await {
-                error!("Failed to persist QUG balance after locking collateral: {}", e);
+            if let Err(e) = state
+                .storage_engine
+                .save_wallet_balance(&borrower_bytes, new_qug_balance)
+                .await
+            {
+                error!(
+                    "Failed to persist QUG balance after locking collateral: {}",
+                    e
+                );
             }
         } else {
-            error!("⚠️  Insufficient QUG balance for collateral lock: {} QUG required, {} available",
+            error!(
+                "⚠️  Insufficient QUG balance for collateral lock: {} QUG required, {} available",
                 request.collateral_amount,
                 current_qug as f64 / 1e8
             );
@@ -414,7 +444,10 @@ pub async fn mint_qnkusd(
         finalized_in_seconds,
     };
 
-    info!("✅ Minted {} QUGUSD in {:.2}s", request.amount, finalized_in_seconds);
+    info!(
+        "✅ Minted {} QUGUSD in {:.2}s",
+        request.amount, finalized_in_seconds
+    );
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -449,13 +482,16 @@ pub async fn burn_qnkusd(
     // Execute burn operation
     let holder = q_quillon_bank::Address(recipient_bytes);
 
-    let _tx_id = bank_system.burn_qnkusd(
-        &holder,
-        (request.amount * 1_000_000_000_000) as u128, // Convert QNKUSD to base units
-    ).await.map_err(|e| {
-        error!("Failed to burn QNKUSD: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let _tx_id = bank_system
+        .burn_qnkusd(
+            &holder,
+            (request.amount * 1_000_000_000_000) as u128, // Convert QNKUSD to base units
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to burn QNKUSD: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Calculate collateral returned based on current ratio
     let collateral_returned = (request.amount as f64) / 70_000.0; // Estimate based on BTC price
@@ -503,14 +539,20 @@ async fn get_collateral_status(
     let total_value: u128 = metrics.total_deposits.values().sum();
 
     // Build composition array from deposits
-    let composition: Vec<CollateralAsset> = metrics.total_deposits.iter().map(|(asset_type, amount)| {
-        CollateralAsset {
+    let composition: Vec<CollateralAsset> = metrics
+        .total_deposits
+        .iter()
+        .map(|(asset_type, amount)| CollateralAsset {
             asset_type: format!("{:?}", asset_type),
             amount: (*amount as f64) / 1_000_000_000_000.0,
             value_usd: (*amount / 1_000_000_000_000) as u64,
-            percentage: if total_value > 0 { (*amount as f64 / total_value as f64) * 100.0 } else { 0.0 },
-        }
-    }).collect();
+            percentage: if total_value > 0 {
+                (*amount as f64 / total_value as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
 
     let status = CollateralStatus {
         total_value: (total_value / 1_000_000_000_000) as u64,
@@ -532,7 +574,10 @@ pub async fn add_collateral(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddCollateralRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("➕ Adding {} {} collateral", request.amount, request.collateral_type);
+    info!(
+        "➕ Adding {} {} collateral",
+        request.amount, request.collateral_type
+    );
 
     let mut bank_system = state.quillon_bank.write().await;
 
@@ -545,11 +590,17 @@ pub async fn add_collateral(
     };
 
     // Add collateral to system (for now, just acknowledge)
-    info!("Adding collateral: {} {} (value estimation)", request.amount, request.collateral_type);
+    info!(
+        "Adding collateral: {} {} (value estimation)",
+        request.amount, request.collateral_type
+    );
 
     // TODO: Implement actual collateral addition through treasury system
 
-    info!("✅ Added {} {} collateral", request.amount, request.collateral_type);
+    info!(
+        "✅ Added {} {} collateral",
+        request.amount, request.collateral_type
+    );
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "success": true,
@@ -615,9 +666,8 @@ fn parse_address(address_str: &str) -> Result<[u8; 32], StatusCode> {
 
     let mut address = [0u8; 32];
     for i in 0..32 {
-        let byte_str = &hex_str[i*2..i*2+2];
-        address[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let byte_str = &hex_str[i * 2..i * 2 + 2];
+        address[i] = u8::from_str_radix(byte_str, 16).map_err(|_| StatusCode::BAD_REQUEST)?;
     }
 
     Ok(address)
@@ -631,7 +681,7 @@ fn parse_address(address_str: &str) -> Result<[u8; 32], StatusCode> {
 pub struct LoanApplication {
     pub loan_id: String,
     pub borrower_address: String,
-    pub loan_amount: u128, // QUGUSD in base units
+    pub loan_amount: u128,      // QUGUSD in base units
     pub collateral_amount: f64, // QUG amount
     pub collateral_type: String,
     pub term_months: u32,
@@ -650,36 +700,53 @@ pub struct ApplyLoanRequest {
     pub term_months: u32,
 }
 
-async fn get_loan_applications(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+async fn get_loan_applications(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let pending_loans = state.pending_loan_applications.read().await;
-    let applications: Vec<serde_json::Value> = pending_loans.values().map(|loan| {
-        serde_json::json!({
-            "loan_id": loan.loan_id,
-            "borrower_address": loan.borrower_address,
-            "loan_amount": loan.loan_amount,
-            "collateral_amount": loan.collateral_amount,
-            "collateral_type": loan.collateral_type,
-            "term_months": loan.term_months,
-            "interest_rate": loan.interest_rate,
-            "monthly_payment": loan.monthly_payment,
-            "status": loan.status,
-            "created_at": loan.created_at,
+    let applications: Vec<serde_json::Value> = pending_loans
+        .values()
+        .map(|loan| {
+            serde_json::json!({
+                "loan_id": loan.loan_id,
+                "borrower_address": loan.borrower_address,
+                "loan_amount": loan.loan_amount,
+                "collateral_amount": loan.collateral_amount,
+                "collateral_type": loan.collateral_type,
+                "term_months": loan.term_months,
+                "interest_rate": loan.interest_rate,
+                "monthly_payment": loan.monthly_payment,
+                "status": loan.status,
+                "created_at": loan.created_at,
+            })
         })
-    }).collect();
+        .collect();
 
-    Ok(Json(ApiResponse::success(serde_json::json!({"applications": applications}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"applications": applications}),
+    )))
 }
 
-pub async fn approve_loan(State(state): State<Arc<AppState>>, Json(request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let loan_id = request.get("loan_id")
+pub async fn approve_loan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let loan_id = request
+        .get("loan_id")
         .and_then(|v| v.as_str())
         .ok_or(StatusCode::BAD_REQUEST)?;
 
     // Get loan from pending applications
     let mut pending_loans = state.pending_loan_applications.write().await;
-    let loan = pending_loans.get_mut(loan_id).ok_or(StatusCode::NOT_FOUND)?;
+    let loan = pending_loans
+        .get_mut(loan_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
-    info!("🏦 Approving loan {} for {} QUGUSD", loan_id, loan.loan_amount as f64 / 1e8);
+    info!(
+        "🏦 Approving loan {} for {} QUGUSD",
+        loan_id,
+        loan.loan_amount as f64 / 1e8
+    );
 
     // Update status to approved
     loan.status = "approved".to_string();
@@ -688,22 +755,34 @@ pub async fn approve_loan(State(state): State<Arc<AppState>>, Json(request): Jso
 
     info!("✅ Loan {} approved", loan_id);
 
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true, "loan": approved_loan}))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true, "loan": approved_loan}),
+    )))
 }
 
-async fn get_loans_at_risk(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+async fn get_loans_at_risk(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"loans": []}))))
 }
 
-pub async fn liquidate_loan(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
+pub async fn liquidate_loan(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true}),
+    )))
 }
 
 pub async fn apply_loan(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApplyLoanRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    info!("🏦 Loan application received for {} QUGUSD", request.loan_amount as f64 / 1e8);
+    info!(
+        "🏦 Loan application received for {} QUGUSD",
+        request.loan_amount as f64 / 1e8
+    );
 
     // 1. Parse and validate wallet address
     let borrower_address = match parse_wallet_address(&request.wallet_address) {
@@ -716,7 +795,8 @@ pub async fn apply_loan(
 
     // 2. Validate collateral availability
     let wallet_balances = state.wallet_balances.read().await;
-    let current_qug_balance = wallet_balances.get(&borrower_address).copied().unwrap_or(0) as f64 / 1e8;
+    let current_qug_balance =
+        wallet_balances.get(&borrower_address).copied().unwrap_or(0) as f64 / 1e8;
     drop(wallet_balances);
 
     if current_qug_balance < request.collateral_amount {
@@ -779,7 +859,11 @@ pub async fn apply_loan(
     };
 
     // 7. Persist to RocksDB for durability
-    if let Err(e) = state.storage_engine.save_loan_application(&loan_id, &loan_bytes).await {
+    if let Err(e) = state
+        .storage_engine
+        .save_loan_application(&loan_id, &loan_bytes)
+        .await
+    {
         error!("Failed to persist loan application to RocksDB: {}", e);
         // Continue anyway - we'll store it in memory
     } else {
@@ -793,7 +877,10 @@ pub async fn apply_loan(
             block_bytes: loan_bytes.clone(),
             block_height: 0, // Loan applications don't have block heights
         });
-        info!("📡 Broadcasted loan application {} to network for consensus", loan_id);
+        info!(
+            "📡 Broadcasted loan application {} to network for consensus",
+            loan_id
+        );
     }
 
     // 9. Skip storing in pending_loan_applications - will be loaded from RocksDB on next GET request
@@ -801,7 +888,10 @@ pub async fn apply_loan(
 
     info!(
         "✅ Loan application {} created: {} QUGUSD @ {:.2}% APR for {} months",
-        loan_id, loan_amount_f64, interest_rate * 100.0, request.term_months
+        loan_id,
+        loan_amount_f64,
+        interest_rate * 100.0,
+        request.term_months
     );
 
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -814,52 +904,102 @@ pub async fn apply_loan(
     }))))
 }
 
-async fn list_accounts(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"accounts": []}))))
+async fn list_accounts(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"accounts": []}),
+    )))
 }
 
-async fn get_pending_accounts(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"pending": []}))))
+async fn get_pending_accounts(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"pending": []}),
+    )))
 }
 
-pub async fn approve_account(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
+pub async fn approve_account(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true}),
+    )))
 }
 
-async fn get_reserves_status(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"reserves": {}}))))
+async fn get_reserves_status(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"reserves": {}}),
+    )))
 }
 
-pub async fn allocate_reserves(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
+pub async fn allocate_reserves(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true}),
+    )))
 }
 
-async fn calculate_profits(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"profits": {}}))))
+async fn calculate_profits(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"profits": {}}),
+    )))
 }
 
-pub async fn distribute_profits(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
+pub async fn distribute_profits(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true}),
+    )))
 }
 
-async fn risk_assessment(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"assessment": {}}))))
+async fn risk_assessment(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"assessment": {}}),
+    )))
 }
 
-async fn liquidation_queue(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+async fn liquidation_queue(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     Ok(Json(ApiResponse::success(serde_json::json!({"queue": []}))))
 }
 
-pub async fn execute_liquidations(State(_state): State<Arc<AppState>>, Json(_request): Json<serde_json::Value>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"success": true}))))
+pub async fn execute_liquidations(
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success": true}),
+    )))
 }
 
-async fn daily_summary(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"summary": {}}))))
+async fn daily_summary(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"summary": {}}),
+    )))
 }
 
-async fn customer_analytics(State(_state): State<Arc<AppState>>) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"analytics": {}}))))
+async fn customer_analytics(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"analytics": {}}),
+    )))
 }
 
 // ============================================================================
@@ -882,7 +1022,8 @@ async fn get_dev_fee_status(
     info!("📊 Fetching development fee status");
 
     const DEV_FEE_PERCENT: f64 = 0.01; // 1%
-    const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const FOUNDER_WALLET_HEX: &str =
+        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
     let status = DevFeeStatus {
         enabled: true,
@@ -910,7 +1051,8 @@ async fn get_dev_fee_stats(
 ) -> Result<Json<ApiResponse<DevFeeStats>>, StatusCode> {
     info!("📊 Fetching development fee statistics");
 
-    const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const FOUNDER_WALLET_HEX: &str =
+        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
     // Decode founder wallet
     let founder_wallet_bytes = match hex::decode(FOUNDER_WALLET_HEX) {
@@ -926,7 +1068,10 @@ async fn get_dev_fee_stats(
     };
 
     // Get founder wallet balance (this is the total dev fees collected)
-    let founder_balance = state.wallet_balances.read().await
+    let founder_balance = state
+        .wallet_balances
+        .read()
+        .await
         .get(&founder_wallet_bytes)
         .copied()
         .unwrap_or(0);
@@ -971,7 +1116,8 @@ async fn get_founder_wallet_info(
 ) -> Result<Json<ApiResponse<FounderWalletInfo>>, StatusCode> {
     info!("📊 Fetching founder wallet information");
 
-    const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const FOUNDER_WALLET_HEX: &str =
+        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
     // Decode founder wallet
     let founder_wallet_bytes = match hex::decode(FOUNDER_WALLET_HEX) {
@@ -987,7 +1133,10 @@ async fn get_founder_wallet_info(
     };
 
     // Get founder wallet balance
-    let balance = state.wallet_balances.read().await
+    let balance = state
+        .wallet_balances
+        .read()
+        .await
         .get(&founder_wallet_bytes)
         .copied()
         .unwrap_or(0);

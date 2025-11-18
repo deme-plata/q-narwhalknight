@@ -8,37 +8,36 @@
 /// - Cross-chain atomic swaps
 ///
 /// Revenue Model: All PaaS fees flow to Quillon Bank master account
-
 use axum::{
-    extract::{Path, State, Json, Request},
+    extract::{Json, Path, Request, State},
     http::StatusCode,
     response::IntoResponse,
     Extension,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::paas_auth::AuthContext;
+use crate::AppState;
 use q_types::{ApiResponse, PrivacyLevel};
 
 /// PaaS pricing in QUG tokens (atomic units: 1 QUG = 100,000,000 atomic units)
 pub mod pricing {
     // Pay-per-use pricing
-    pub const TOR_RELAY_PER_MB: u64 = 100_000;           // 0.001 QUG/MB
-    pub const MIXING_FEE_BASIS_POINTS: u64 = 10;         // 0.1% of transaction value
-    pub const MIXING_FEE_MINIMUM: u64 = 1_000_000;       // 0.01 QUG minimum
-    pub const RING_SIGNATURE_FEE: u64 = 100_000;         // 0.001 QUG
-    pub const STEALTH_ADDRESS_FEE: u64 = 10_000;         // 0.0001 QUG
-    pub const ZK_STARK_PROOF_FEE: u64 = 1_000_000;       // 0.01 QUG
-    pub const ATOMIC_SWAP_FEE: u64 = 5_000_000;          // 0.05 QUG
+    pub const TOR_RELAY_PER_MB: u64 = 100_000; // 0.001 QUG/MB
+    pub const MIXING_FEE_BASIS_POINTS: u64 = 10; // 0.1% of transaction value
+    pub const MIXING_FEE_MINIMUM: u64 = 1_000_000; // 0.01 QUG minimum
+    pub const RING_SIGNATURE_FEE: u64 = 100_000; // 0.001 QUG
+    pub const STEALTH_ADDRESS_FEE: u64 = 10_000; // 0.0001 QUG
+    pub const ZK_STARK_PROOF_FEE: u64 = 1_000_000; // 0.01 QUG
+    pub const ATOMIC_SWAP_FEE: u64 = 5_000_000; // 0.05 QUG
 
     // Enterprise tier monthly subscriptions (in USD equivalent QUG)
     pub const PROFESSIONAL_TIER_MONTHLY: u64 = 499_00000000; // $499
-    pub const ENTERPRISE_TIER_MONTHLY: u64 = 1999_00000000;  // $1,999
+    pub const ENTERPRISE_TIER_MONTHLY: u64 = 1999_00000000; // $1,999
     pub const WHITE_LABEL_TIER_MONTHLY: u64 = 9999_00000000; // $9,999
 }
 
@@ -137,9 +136,15 @@ pub struct CircuitRequirements {
     pub circuit_lifetime_minutes: u32,
 }
 
-fn default_min_hops() -> u8 { 3 }
-fn default_true() -> bool { true }
-fn default_circuit_lifetime() -> u32 { 10 }
+fn default_min_hops() -> u8 {
+    3
+}
+fn default_true() -> bool {
+    true
+}
+fn default_circuit_lifetime() -> u32 {
+    10
+}
 
 #[derive(Debug, Serialize)]
 pub struct TorRelayResponse {
@@ -171,7 +176,9 @@ pub async fn tor_relay_service(
         Some(client) => client,
         None => {
             error!("❌ Tor client not initialized");
-            return Ok(Json(ApiResponse::error("Tor service not available".to_string())));
+            return Ok(Json(ApiResponse::error(
+                "Tor service not available".to_string(),
+            )));
         }
     };
 
@@ -184,7 +191,8 @@ pub async fn tor_relay_service(
     let data_size_mb = tx_data.len() as f64 / 1_048_576.0;
 
     // Calculate cost: 0.001 QUG per MB, minimum 0.001 QUG
-    let cost_qug = ((data_size_mb * pricing::TOR_RELAY_PER_MB as f64) as u64).max(pricing::TOR_RELAY_PER_MB);
+    let cost_qug =
+        ((data_size_mb * pricing::TOR_RELAY_PER_MB as f64) as u64).max(pricing::TOR_RELAY_PER_MB);
 
     // Generate billing transaction
     let billing_tx_id = Uuid::new_v4().to_string();
@@ -195,11 +203,15 @@ pub async fn tor_relay_service(
         cost_qug,
         PaaSService::TorRelay,
         auth_context.wallet_address, // Extract from authenticated context
-    ).await;
+    )
+    .await;
 
     match credit_result {
         Ok(_) => {
-            info!("💰 PaaS Revenue: {} QUG to Quillon Bank (Tor relay)", cost_qug as f64 / 100_000_000.0);
+            info!(
+                "💰 PaaS Revenue: {} QUG to Quillon Bank (Tor relay)",
+                cost_qug as f64 / 100_000_000.0
+            );
         }
         Err(e) => {
             warn!("⚠️ Failed to credit Quillon Bank: {}", e);
@@ -224,7 +236,7 @@ pub async fn tor_relay_service(
             (
                 format!("qnk-tor-{:016x}", circuit_id),
                 ("DE".to_string(), "Controlled-Egress-Relay".to_string()), // TODO: Extract from tor_stats
-                latency
+                latency,
             )
         }
         Err(e) => {
@@ -274,8 +286,12 @@ pub struct MixingParameters {
     pub compliance_mode: bool,
 }
 
-fn default_decoy_count() -> u32 { 20 }
-fn default_ring_size() -> u32 { 16 }
+fn default_decoy_count() -> u32 {
+    20
+}
+fn default_ring_size() -> u32 {
+    16
+}
 
 #[derive(Debug, Serialize)]
 pub struct MixingResponse {
@@ -324,7 +340,9 @@ pub async fn mixing_service(
         Some(mixer) => mixer,
         None => {
             error!("❌ Quantum mixing engine not initialized");
-            return Ok(Json(ApiResponse::error("Mixing service not available".to_string())));
+            return Ok(Json(ApiResponse::error(
+                "Mixing service not available".to_string(),
+            )));
         }
     };
 
@@ -340,8 +358,8 @@ pub async fn mixing_service(
     let tx_value = extract_transaction_value(&request.chain, &request.transaction_data);
 
     // Calculate mixing fee: 0.1% of transaction value, minimum 0.01 QUG
-    let mixing_fee = ((tx_value * pricing::MIXING_FEE_BASIS_POINTS) / 10_000)
-        .max(pricing::MIXING_FEE_MINIMUM);
+    let mixing_fee =
+        ((tx_value * pricing::MIXING_FEE_BASIS_POINTS) / 10_000).max(pricing::MIXING_FEE_MINIMUM);
 
     // Generate billing transaction
     let billing_tx_id = Uuid::new_v4().to_string();
@@ -352,11 +370,15 @@ pub async fn mixing_service(
         mixing_fee,
         PaaSService::TransactionMixing,
         auth_context.wallet_address, // Extract from authenticated context
-    ).await;
+    )
+    .await;
 
     match credit_result {
         Ok(_) => {
-            info!("💰 PaaS Revenue: {} QUG to Quillon Bank (mixing)", mixing_fee as f64 / 100_000_000.0);
+            info!(
+                "💰 PaaS Revenue: {} QUG to Quillon Bank (mixing)",
+                mixing_fee as f64 / 100_000_000.0
+            );
         }
         Err(e) => {
             warn!("⚠️ Failed to credit Quillon Bank: {}", e);
@@ -368,7 +390,9 @@ pub async fn mixing_service(
     let mixing_input = q_quantum_mixing::MixingInput {
         amount: tx_value,
         sender_key: [0u8; 32], // TODO: Extract from request
-        recipient_address: request.output_addresses.first()
+        recipient_address: request
+            .output_addresses
+            .first()
             .and_then(|addr| hex::decode(addr.trim_start_matches("0x")).ok())
             .and_then(|bytes| {
                 let mut arr = [0u8; 32];
@@ -452,7 +476,9 @@ pub struct RingSignatureRequest {
     pub signature_scheme: String,
 }
 
-fn default_signature_scheme() -> String { "dilithium5".to_string() }
+fn default_signature_scheme() -> String {
+    "dilithium5".to_string()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RingMember {
@@ -499,12 +525,16 @@ pub async fn ring_signature_service(
 
     // Validate ring size
     if request.ring_members.len() < 8 || request.ring_members.len() > 64 {
-        return Ok(Json(ApiResponse::error("Ring size must be between 8 and 64".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Ring size must be between 8 and 64".to_string(),
+        )));
     }
 
     // Validate signing key index
     if request.signing_key_index >= request.ring_members.len() {
-        return Ok(Json(ApiResponse::error("Invalid signing key index".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Invalid signing key index".to_string(),
+        )));
     }
 
     let signature_fee = pricing::RING_SIGNATURE_FEE;
@@ -515,7 +545,10 @@ pub async fn ring_signature_service(
     // TODO: Charge customer wallet
     // TODO: Credit Quillon Bank master account
 
-    info!("💰 PaaS Revenue: {} QUG to Quillon Bank (ring signature)", signature_fee as f64 / 100_000_000.0);
+    info!(
+        "💰 PaaS Revenue: {} QUG to Quillon Bank (ring signature)",
+        signature_fee as f64 / 100_000_000.0
+    );
 
     // TODO: Implement actual Dilithium5 ring signature generation
     // For now, return simulated response
@@ -528,7 +561,11 @@ pub async fn ring_signature_service(
     };
 
     let verification_data = VerificationData {
-        ring_public_keys: request.ring_members.iter().map(|m| m.public_key.clone()).collect(),
+        ring_public_keys: request
+            .ring_members
+            .iter()
+            .map(|m| m.public_key.clone())
+            .collect(),
         message_hash: request.message_hash.clone(),
     };
 
@@ -554,7 +591,9 @@ pub struct StealthAddressRequest {
     pub count: u32,
 }
 
-fn default_address_count() -> u32 { 1 }
+fn default_address_count() -> u32 {
+    1
+}
 
 #[derive(Debug, Serialize)]
 pub struct StealthAddressResponse {
@@ -581,7 +620,9 @@ pub async fn stealth_address_service(
 
     // Validate count
     if request.count == 0 || request.count > 100 {
-        return Ok(Json(ApiResponse::error("Count must be between 1 and 100".to_string())));
+        return Ok(Json(ApiResponse::error(
+            "Count must be between 1 and 100".to_string(),
+        )));
     }
 
     let generation_fee = pricing::STEALTH_ADDRESS_FEE * request.count as u64;
@@ -592,7 +633,10 @@ pub async fn stealth_address_service(
     // TODO: Charge customer wallet
     // TODO: Credit Quillon Bank master account
 
-    info!("💰 PaaS Revenue: {} QUG to Quillon Bank (stealth addresses)", generation_fee as f64 / 100_000_000.0);
+    info!(
+        "💰 PaaS Revenue: {} QUG to Quillon Bank (stealth addresses)",
+        generation_fee as f64 / 100_000_000.0
+    );
 
     // TODO: Implement actual stealth address generation
     // For now, return simulated response
@@ -628,7 +672,9 @@ pub struct ZkStarkProofRequest {
     pub proof_type: String,
 }
 
-fn default_proof_type() -> String { "stark".to_string() }
+fn default_proof_type() -> String {
+    "stark".to_string()
+}
 
 #[derive(Debug, Serialize)]
 pub struct ZkStarkProofResponse {
@@ -664,7 +710,10 @@ pub async fn zk_stark_proof_service(
     // TODO: Charge customer wallet
     // TODO: Credit Quillon Bank master account
 
-    info!("💰 PaaS Revenue: {} QUG to Quillon Bank (ZK-STARK proof)", proof_fee as f64 / 100_000_000.0);
+    info!(
+        "💰 PaaS Revenue: {} QUG to Quillon Bank (ZK-STARK proof)",
+        proof_fee as f64 / 100_000_000.0
+    );
 
     // TODO: Implement actual ZK-STARK proof generation using q-zk-stark
     // For now, return simulated response
@@ -716,8 +765,8 @@ pub async fn paas_statistics(
     let stats = PaaSStatistics {
         total_revenue_qug: "1250.50000000".to_string(), // Simulated
         services_used,
-        active_api_keys: 42, // Simulated
-        total_requests_today: 5159, // Simulated
+        active_api_keys: 42,                               // Simulated
+        total_requests_today: 5159,                        // Simulated
         quillon_bank_balance: "1250.50000000".to_string(), // Should match total revenue
     };
 
@@ -779,8 +828,8 @@ pub async fn credit_quillon_bank(
     let master_address = Address::from_public_key(&{
         let mut key = [0u8; 33];
         key[0] = 0x02; // Compressed public key prefix
-        // Use deterministic derivation for QUILLON_BANK_MASTER_ACCOUNT
-        use sha2::{Sha256, Digest};
+                       // Use deterministic derivation for QUILLON_BANK_MASTER_ACCOUNT
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(QUILLON_BANK_MASTER_ACCOUNT.as_bytes());
         let hash = hasher.finalize();
@@ -790,7 +839,10 @@ pub async fn credit_quillon_bank(
 
     // Credit Quillon Bank master account
     let master_account = accounts.entry(master_address.clone()).or_insert_with(|| {
-        use q_quillon_bank::{BankAccount, CreditScore, RiskTier, QuantumCreditData, QuantumPrivacyLevel, QuantumAccountFeatures};
+        use q_quillon_bank::{
+            BankAccount, CreditScore, QuantumAccountFeatures, QuantumCreditData,
+            QuantumPrivacyLevel, RiskTier,
+        };
         BankAccount {
             address: master_address.clone(),
             balances: std::collections::HashMap::new(),
@@ -821,15 +873,19 @@ pub async fn credit_quillon_bank(
     });
 
     // Credit ORB (QUG) balance
-    let orb_balance = master_account.balances.entry(AssetType::ORB).or_insert(q_quillon_bank::Balance {
-        available: 0,
-        locked: 0,
-        staked: 0,
-        borrowed: 0,
-        lending: 0,
-        quantum_secured: 0,
-        last_updated: chrono::Utc::now().timestamp() as u64,
-    });
+    let orb_balance =
+        master_account
+            .balances
+            .entry(AssetType::ORB)
+            .or_insert(q_quillon_bank::Balance {
+                available: 0,
+                locked: 0,
+                staked: 0,
+                borrowed: 0,
+                lending: 0,
+                quantum_secured: 0,
+                last_updated: chrono::Utc::now().timestamp() as u64,
+            });
 
     // Add PaaS revenue to available balance
     orb_balance.available += amount_qug as u128;

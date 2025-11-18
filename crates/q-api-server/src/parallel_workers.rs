@@ -12,14 +12,13 @@
 /// Expected Performance:
 /// - Current: 21,817 TPS (single worker)
 /// - With 16 workers: 349,072 TPS (16x improvement)
-
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
-use crate::AppState;
 use crate::handlers;
+use crate::AppState;
 
 /// Worker pool configuration
 #[derive(Debug, Clone)]
@@ -39,10 +38,10 @@ pub struct WorkerPoolConfig {
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
         Self {
-            num_workers: 16,           // 16 parallel workers for 16x improvement
-            batch_interval_ms: 100,    // Process every 100ms
-            min_batch_size: 1,         // Process even single transactions for immediate finality
-            max_batch_size: 5000,      // Up to 5000 tx per worker per batch
+            num_workers: 16,            // 16 parallel workers for 16x improvement
+            batch_interval_ms: 100,     // Process every 100ms
+            min_batch_size: 1,          // Process even single transactions for immediate finality
+            max_batch_size: 5000,       // Up to 5000 tx per worker per batch
             enable_numa_pinning: false, // Requires elevated privileges
         }
     }
@@ -83,9 +82,18 @@ impl ParallelWorkerPool {
 
     /// Start all worker threads
     pub fn start(&mut self) {
-        info!("🚀 Starting {} parallel batch processors", self.config.num_workers);
-        info!("   Expected improvement: {}x over single worker", self.config.num_workers);
-        info!("   Projected TPS: {} (with 21,817 baseline)", 21_817 * self.config.num_workers);
+        info!(
+            "🚀 Starting {} parallel batch processors",
+            self.config.num_workers
+        );
+        info!(
+            "   Expected improvement: {}x over single worker",
+            self.config.num_workers
+        );
+        info!(
+            "   Projected TPS: {} (with 21,817 baseline)",
+            21_817 * self.config.num_workers
+        );
 
         for worker_id in 0..self.config.num_workers {
             let config = self.config.clone();
@@ -98,7 +106,10 @@ impl ParallelWorkerPool {
             self.worker_handles.push(handle);
         }
 
-        info!("✅ All {} workers started successfully", self.config.num_workers);
+        info!(
+            "✅ All {} workers started successfully",
+            self.config.num_workers
+        );
     }
 
     /// Main worker loop
@@ -142,10 +153,10 @@ impl ParallelWorkerPool {
                     stats.batches_processed += 1;
                     stats.transactions_processed += batch_size as u64;
                     stats.total_processing_time_ms += elapsed;
-                    stats.average_batch_size = stats.transactions_processed as f64
-                        / stats.batches_processed as f64;
-                    stats.average_latency_ms = stats.total_processing_time_ms as f64
-                        / stats.batches_processed as f64;
+                    stats.average_batch_size =
+                        stats.transactions_processed as f64 / stats.batches_processed as f64;
+                    stats.average_latency_ms =
+                        stats.total_processing_time_ms as f64 / stats.batches_processed as f64;
 
                     // Log statistics every 100 batches
                     if stats.batches_processed % 100 == 0 {
@@ -193,13 +204,7 @@ impl ParallelWorkerPool {
     fn hash_to_shard(tx_hash: &q_types::TxHash, num_workers: usize) -> usize {
         // Use first 8 bytes of hash for deterministic sharding
         let hash_u64 = u64::from_le_bytes([
-            tx_hash[0],
-            tx_hash[1],
-            tx_hash[2],
-            tx_hash[3],
-            tx_hash[4],
-            tx_hash[5],
-            tx_hash[6],
+            tx_hash[0], tx_hash[1], tx_hash[2], tx_hash[3], tx_hash[4], tx_hash[5], tx_hash[6],
             tx_hash[7],
         ]);
         (hash_u64 % num_workers as u64) as usize

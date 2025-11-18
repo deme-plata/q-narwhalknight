@@ -163,13 +163,17 @@ impl QTransaction {
         let block_bytes = postcard::to_allocvec(block)
             .context("Failed to serialize block")?;
 
-        // Store in blocks column family by height
-        let height_key = block.header.height.to_be_bytes();
-        self.put("blocks", &height_key, &block_bytes).await?;
+        // 🚨 v1.0.17-beta CRITICAL FIX: Use string keys not raw binary!
+        // BUG: Was using height.to_be_bytes() as key (e.g. 0x0000000000000001)
+        // CORRECT: Use "qblock:height:1" string format (matches all other code)
+        // This bug created 842 orphaned blocks with binary keys that weren't readable
+        let height_key = format!("qblock:height:{}", block.header.height);
+        self.put("blocks", height_key.as_bytes(), &block_bytes).await?;
 
         // Store block hash -> height mapping for lookups
         let block_hash = self.calculate_block_hash_for_storage(block);
-        self.put("block_hash_to_height", &block_hash, &height_key).await?;
+        let height_bytes = block.header.height.to_be_bytes();
+        self.put("block_hash_to_height", &block_hash, &height_bytes).await?;
 
         // ✅ v0.9.29-beta CRITICAL FIX: Only update pointer if block extends contiguous chain
         // PREVENTS: Pointer racing ahead when receiving out-of-order blocks from gossipsub/TurboSync
@@ -180,7 +184,7 @@ impl QTransaction {
         // 1. This is genesis block (height 0), OR
         // 2. This block is exactly 1 higher than current pointer (extends contiguous chain)
         if block.header.height == 0 || block.header.height == current_pointer + 1 {
-            self.put("blocks", b"qblock:latest", &height_key).await?;
+            self.put("blocks", b"qblock:latest", &height_bytes).await?;
             debug!("✅ Transaction {}: Saved block at height {} and updated qblock:latest pointer (contiguous extension from {})",
                    self.tx_id, block.header.height, current_pointer);
         } else {

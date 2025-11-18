@@ -14,6 +14,13 @@ pub mod network_manager;
 pub mod peer_registry;
 pub mod persistent_channels;
 pub mod protocol_handshake;
+pub mod handshake_validator;  // ✅ v1.0.15.1-beta - Protocol version validation
+
+// Export handshake components
+pub use handshake_validator::{
+    HandshakeValidator, HandshakeMessage, HandshakeResult, ProtocolVersion,
+    HANDSHAKE_PROTOCOL, HandshakeCodec,
+};
 
 // Real network implementations (production-ready)
 pub mod real_dht;

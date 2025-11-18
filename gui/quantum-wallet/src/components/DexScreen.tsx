@@ -619,6 +619,7 @@ export default function DexScreen() {
           const apiTokens = await Promise.all(apiTokensPromises);
 
           // ✅ FILTER: Only show tokens that have liquidity pools (liquidity > 0)
+          // This ensures token pairs are tradeable before appearing in the DEX
           const tokensWithLiquidity = apiTokens.filter(token => {
             const hasLiquidity = token.liquidity > 0;
             if (!hasLiquidity) {

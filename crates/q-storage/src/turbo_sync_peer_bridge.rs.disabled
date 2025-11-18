@@ -1,0 +1,545 @@
+/// Turbo Sync Peer Registry Bridge
+///
+/// **CRITICAL FIX v0.9.5-beta**: Bridge libp2p discovered peers to TurboSync peer registry
+///
+/// **ROOT CAUSE**: TurboSync maintained its own empty `peer_registry` separate from libp2p's
+/// `discovered_peers`, causing "No peers available with target height" failures even when
+/// peers were connected via libp2p.
+///
+/// **SOLUTION**: Automatically synchronize libp2p peer discoveries with TurboSync registry
+/// using periodic sync + event-driven updates.
+
+use anyhow::Result;
+use libp2p::PeerId;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+
+use crate::turbo_sync::TurboSyncManager;
+
+/// Peer height cache entry
+#[derive(Clone, Debug)]
+pub struct PeerHeightEntry {
+    /// Peer ID
+    pub peer_id: PeerId,
+    /// Last announced height
+    pub height: u64,
+    /// Last update timestamp
+    pub last_updated: Instant,
+    /// Number of successful sync operations from this peer
+    pub successful_syncs: u64,
+    /// Number of failed sync operations from this peer
+    pub failed_syncs: u64,
+}
+
+/// Network height tracker with monotonicity guarantees (v1.0.13-beta)
+///
+/// **CRITICAL FIX**: Prevents height regression and outlier attacks
+/// - Uses median instead of max for outlier resistance
+/// - Enforces monotonicity (height never decreases)
+/// - Expires stale peer heights (60s timeout)
+/// - Bootstraps from local blockchain height
+#[derive(Clone)]
+pub struct NetworkHeightTracker {
+    /// Last confirmed network height (monotonically increasing)
+    last_height: Arc<RwLock<u64>>,
+    /// Timestamp of last height update
+    last_update: Arc<RwLock<Instant>>,
+    /// Peer expiry timeout (60 seconds)
+    peer_timeout: Duration,
+}
+
+impl NetworkHeightTracker {
+    /// Create new network height tracker
+    pub fn new(initial_height: u64) -> Self {
+        Self {
+            last_height: Arc::new(RwLock::new(initial_height)),
+            last_update: Arc::new(RwLock::new(Instant::now())),
+            peer_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Calculate network height from peer registry with outlier resistance
+    ///
+    /// **CRITICAL**: Uses median instead of max to resist malicious peers
+    /// **CRITICAL**: Enforces monotonicity - height never decreases
+    pub async fn calculate_network_height(
+        &self,
+        peer_heights: &HashMap<PeerId, PeerHeightEntry>,
+        local_height: u64,
+    ) -> u64 {
+        let now = Instant::now();
+
+        // Filter out stale peers (older than 60s)
+        let mut fresh_heights: Vec<u64> = peer_heights
+            .values()
+            .filter(|entry| now.duration_since(entry.last_updated) < self.peer_timeout)
+            .map(|entry| entry.height)
+            .collect();
+
+        // Always include local height as floor
+        fresh_heights.push(local_height);
+
+        if fresh_heights.is_empty() {
+            // No peers - return last known height
+            return *self.last_height.read().await;
+        }
+
+        // Calculate median for outlier resistance
+        fresh_heights.sort_unstable();
+        let median = if fresh_heights.len() % 2 == 0 {
+            let mid = fresh_heights.len() / 2;
+            (fresh_heights[mid - 1] + fresh_heights[mid]) / 2
+        } else {
+            fresh_heights[fresh_heights.len() / 2]
+        };
+
+        // Enforce monotonicity - network height never decreases
+        let last = *self.last_height.read().await;
+        let new_height = median.max(last);
+
+        if new_height > last {
+            *self.last_height.write().await = new_height;
+            *self.last_update.write().await = now;
+            debug!("📈 [NETWORK HEIGHT] Updated: {} → {} (median of {} peers)",
+                   last, new_height, fresh_heights.len());
+        }
+
+        new_height
+    }
+
+    /// Get last confirmed network height
+    pub async fn get_height(&self) -> u64 {
+        *self.last_height.read().await
+    }
+}
+
+/// Peer registry bridge - synchronizes libp2p peers with TurboSync
+pub struct TurboSyncPeerBridge {
+    /// Cached peer heights
+    peer_heights: Arc<RwLock<HashMap<PeerId, PeerHeightEntry>>>,
+
+    /// Last sync timestamp
+    last_sync: Arc<RwLock<Instant>>,
+
+    /// Sync interval (how often to update TurboSync registry from cache)
+    sync_interval: Duration,
+
+    /// Network height tracker with monotonicity (v1.0.13-beta)
+    network_height_tracker: NetworkHeightTracker,
+}
+
+impl TurboSyncPeerBridge {
+    /// Create new peer registry bridge
+    pub fn new() -> Self {
+        Self {
+            peer_heights: Arc::new(RwLock::new(HashMap::new())),
+            last_sync: Arc::new(RwLock::new(Instant::now())),
+            sync_interval: Duration::from_secs(5), // Update TurboSync registry every 5 seconds
+            network_height_tracker: NetworkHeightTracker::new(0), // Bootstrap from genesis
+        }
+    }
+
+    /// Update peer height from gossipsub peer-height announcement
+    ///
+    /// **Call this from gossipsub `/qnk/testnet-phase5/peer-heights` topic handler**
+    pub async fn update_peer_height(&self, peer_id: PeerId, height: u64) {
+        let mut peers = self.peer_heights.write().await;
+
+        if let Some(entry) = peers.get_mut(&peer_id) {
+            // Update existing peer
+            if height > entry.height {
+                debug!("🔄 [PEER BRIDGE] Updated peer {} height: {} → {}",
+                       peer_id, entry.height, height);
+                entry.height = height;
+                entry.last_updated = Instant::now();
+            }
+        } else {
+            // Register new peer
+            info!("✅ [PEER BRIDGE] Registered new peer {} with height {}", peer_id, height);
+            peers.insert(peer_id, PeerHeightEntry {
+                peer_id,
+                height,
+                last_updated: Instant::now(),
+                successful_syncs: 0,
+                failed_syncs: 0,
+            });
+        }
+    }
+
+    /// Remove peer when disconnected from libp2p
+    ///
+    /// **Call this from libp2p ConnectionClosed event**
+    pub async fn remove_peer(&self, peer_id: &PeerId) {
+        let mut peers = self.peer_heights.write().await;
+        if peers.remove(peer_id).is_some() {
+            info!("👋 [PEER BRIDGE] Removed disconnected peer {}", peer_id);
+        }
+    }
+
+    /// Record successful sync from peer (for reputation tracking)
+    pub async fn record_sync_success(&self, peer_id: &PeerId) {
+        let mut peers = self.peer_heights.write().await;
+        if let Some(entry) = peers.get_mut(peer_id) {
+            entry.successful_syncs += 1;
+            debug!("✅ [PEER BRIDGE] Peer {} successful syncs: {}",
+                   peer_id, entry.successful_syncs);
+        }
+    }
+
+    /// Record failed sync from peer (for reputation tracking)
+    pub async fn record_sync_failure(&self, peer_id: &PeerId) {
+        let mut peers = self.peer_heights.write().await;
+        if let Some(entry) = peers.get_mut(peer_id) {
+            entry.failed_syncs += 1;
+            warn!("❌ [PEER BRIDGE] Peer {} failed syncs: {}",
+                  peer_id, entry.failed_syncs);
+
+            // TODO: Ban peers with excessive failures (>10 consecutive failures)
+        }
+    }
+
+    /// Synchronize cached peer heights to TurboSync registry
+    ///
+    /// **Call this periodically** (every 5 seconds) OR after receiving peer height announcement
+    pub async fn sync_to_turbo_sync(&self, turbo_sync: &TurboSyncManager) -> Result<()> {
+        let mut last_sync = self.last_sync.write().await;
+
+        // Check if enough time has elapsed since last sync
+        if last_sync.elapsed() < self.sync_interval {
+            return Ok(());
+        }
+
+        let peers = self.peer_heights.read().await;
+        let peer_count = peers.len();
+
+        if peer_count == 0 {
+            debug!("🔄 [PEER BRIDGE] No peers to sync to TurboSync registry");
+            return Ok(());
+        }
+
+        info!("🔄 [PEER BRIDGE] Syncing {} peers to TurboSync registry", peer_count);
+
+        // Register all cached peers with TurboSync
+        for (peer_id, entry) in peers.iter() {
+            turbo_sync.register_peer(*peer_id, entry.height).await;
+        }
+
+        // Update last sync timestamp
+        *last_sync = Instant::now();
+
+        info!("✅ [PEER BRIDGE] TurboSync registry updated with {} peers", peer_count);
+
+        // Log peer registry info for debugging
+        let registry_info = turbo_sync.get_peer_registry_info().await;
+        if registry_info.is_empty() {
+            error!("🚨 [PEER BRIDGE] WARNING: TurboSync registry is EMPTY after sync!");
+            error!("   This indicates a critical bug in register_peer()");
+        } else {
+            debug!("📊 [PEER BRIDGE] TurboSync registry now has {} peers", registry_info.len());
+            for (pid, height) in registry_info.iter().take(5) {
+                debug!("   - Peer {}: height {}", pid, height);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get current peer count
+    pub async fn peer_count(&self) -> usize {
+        self.peer_heights.read().await.len()
+    }
+
+    /// Get all cached peers
+    pub async fn get_all_peers(&self) -> Vec<PeerHeightEntry> {
+        self.peer_heights.read().await.values().cloned().collect()
+    }
+
+    /// Get peers with height >= target (for Turbo Sync discovery)
+    pub async fn get_peers_with_height(&self, target_height: u64) -> Vec<(PeerId, u64)> {
+        let peers = self.peer_heights.read().await;
+
+        peers.iter()
+            .filter(|(_, entry)| entry.height >= target_height)
+            .map(|(peer_id, entry)| (*peer_id, entry.height))
+            .collect()
+    }
+}
+
+impl Default for TurboSyncPeerBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Background task to periodically sync peers to TurboSync
+///
+/// **Usage**:
+/// ```rust
+/// let bridge = Arc::new(TurboSyncPeerBridge::new());
+/// let turbo_sync = Arc::new(turbo_sync_manager);
+///
+/// tokio::spawn(run_periodic_sync(bridge.clone(), turbo_sync.clone()));
+/// ```
+pub async fn run_periodic_sync(
+    bridge: Arc<TurboSyncPeerBridge>,
+    turbo_sync: Arc<TurboSyncManager>,
+) {
+    info!("🔄 [PEER BRIDGE] Starting periodic sync task (every 5 seconds)");
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        if let Err(e) = bridge.sync_to_turbo_sync(&turbo_sync).await {
+            error!("❌ [PEER BRIDGE] Failed to sync peers to TurboSync: {}", e);
+        }
+    }
+}
+
+/// ✅ v1.0.4-beta: Enhanced periodic sync with timeout-based activation
+///
+/// This is the CRITICAL FIX for the sync activation deadlock.
+///
+/// Integrates:
+/// 1. Peer registry synchronization (existing behavior)
+/// 2. Timeout-based sync activation (NEW - fixes deadlock)
+/// 3. Active peer height probing (NEW - reduces passive dependency)
+///
+/// # Arguments
+/// * `bridge` - Peer registry bridge
+/// * `turbo_sync` - TurboSync manager
+/// * `storage` - Storage engine (to check current height)
+/// * `cold_start_timeout_secs` - How long to wait before forcing sync at genesis (default: 30)
+/// * `retry_interval_secs` - How long between forced retries (default: 60)
+/// * `min_peers` - Minimum peers required to force sync (default: 1)
+///
+/// # Behavior
+/// - Runs every 5 seconds
+/// - Updates peer registry from libp2p discoveries
+/// - Checks if sync should be activated (normal OR timeout-based)
+/// - Triggers TurboSync when activation conditions are met
+pub async fn run_enhanced_periodic_sync(
+    bridge: Arc<TurboSyncPeerBridge>,
+    turbo_sync: Arc<TurboSyncManager>,
+    storage: Arc<crate::QStorage>,
+    cold_start_timeout_secs: u64,
+    retry_interval_secs: u64,
+    min_peers: usize,
+) {
+    info!("🔄 [ENHANCED SYNC] Starting enhanced periodic sync with timeout activation");
+    info!("🔧 [ENHANCED SYNC] This FIXES the genesis deadlock (v1.0.4-beta)");
+    info!("   Cold start timeout: {}s", cold_start_timeout_secs);
+    info!("   Retry interval: {}s", retry_interval_secs);
+    info!("   Min peers: {}", min_peers);
+
+    let startup_time = Instant::now();
+    let mut last_sync_attempt: Option<Instant> = None;
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+
+    // ✅ v1.0.13-beta: Crash-fast mechanism for stuck nodes
+    let mut consecutive_failures = 0u32;
+    const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+    let mut last_known_height = 0u64;
+
+    loop {
+        interval.tick().await;
+
+        // Step 1: Sync peer registry (existing behavior)
+        if let Err(e) = bridge.sync_to_turbo_sync(&turbo_sync).await {
+            error!("❌ [ENHANCED SYNC] Failed to sync peers to TurboSync: {}", e);
+            continue;
+        }
+
+        // Step 2: Get current blockchain state
+        let current_height = match storage.get_latest_qblock_height().await {
+            Ok(Some(h)) => h,
+            Ok(None) => 0, // Genesis
+            Err(e) => {
+                error!("❌ [ENHANCED SYNC] Failed to get current height: {}", e);
+                continue;
+            }
+        };
+
+        // Step 3: Get network state with monotonicity guarantees (v1.0.13-beta)
+        let peer_count = bridge.peer_count().await;
+        let registry_info = turbo_sync.get_peer_registry_info().await;
+
+        // ✅ CRITICAL: Use NetworkHeightTracker instead of simple max()
+        // This provides: median for outlier resistance, monotonicity, peer expiry
+        let peer_heights_map = bridge.peer_heights.read().await;
+        let network_height = bridge.network_height_tracker
+            .calculate_network_height(&peer_heights_map, current_height)
+            .await;
+
+        // Step 4: Decide if we should sync (inline timeout logic to avoid circular dependency)
+        let mut should_sync = false;
+        let mut activation_reason = "";
+
+        // Condition 1: Normal activation - network height is known and ahead
+        if network_height > current_height + 5 {
+            should_sync = true;
+            activation_reason = "NORMAL (network ahead)";
+        }
+        // Condition 2: Cold start timeout - node stuck at genesis
+        else if current_height <= 1 && startup_time.elapsed().as_secs() > cold_start_timeout_secs {
+            if peer_count >= min_peers {
+                should_sync = true;
+                activation_reason = "COLD START TIMEOUT";
+                warn!("⏰ [ENHANCED SYNC] Cold start timeout reached ({:?})", startup_time.elapsed());
+                warn!("   Current height: {}, Peers: {}, Network height: {}",
+                      current_height, peer_count, network_height);
+            }
+        }
+        // Condition 3: Stalled sync retry
+        else if let Some(last_attempt) = last_sync_attempt {
+            if last_attempt.elapsed().as_secs() > retry_interval_secs && peer_count > 0 {
+                should_sync = true;
+                activation_reason = "RETRY TIMEOUT";
+                warn!("🔄 [ENHANCED SYNC] Retry timeout reached ({:?})", last_attempt.elapsed());
+            }
+        }
+
+        if !should_sync {
+            debug!("💤 [ENHANCED SYNC] No sync needed: current={}, network={}, peers={}",
+                   current_height, network_height, peer_count);
+            continue;
+        }
+
+        // Step 5: Calculate target height with sync-down protection (v1.0.13-beta)
+        let target_height = if network_height > 0 {
+            // ✅ CRITICAL: Application-level sync-down protection
+            // Even though database layer has protection, fail fast here
+            if network_height < current_height {
+                warn!("⚠️  [ENHANCED SYNC] Network height ({}) < current height ({}) - ignoring malicious/stale peer announcement",
+                      network_height, current_height);
+                warn!("   This protects against sync-down data loss");
+                continue; // Skip this sync attempt, wait for next interval
+            }
+            network_height
+        } else {
+            // Conservative estimate when network height is unknown
+            current_height + 100
+        };
+
+        info!("🎯 [ENHANCED SYNC] Sync activation triggered: {}", activation_reason);
+        info!("   Current height: {}", current_height);
+        info!("   Target height:  {}", target_height);
+        info!("   Network height: {} {}", network_height,
+              if network_height == 0 { "(UNKNOWN)" } else { "(known)" });
+        info!("   Peer count:     {}", peer_count);
+        info!("   Gap:            {} blocks", target_height.saturating_sub(current_height));
+
+        // Step 6: Record sync attempt
+        last_sync_attempt = Some(Instant::now());
+
+        // Step 7: Execute sync
+        info!("🚀 [ENHANCED SYNC] Triggering TurboSync to height {}", target_height);
+
+        match turbo_sync.sync_to_height(target_height).await {
+            Ok(()) => {
+                info!("✅ [ENHANCED SYNC] Sync successful!");
+
+                // Verify height advancement
+                match storage.get_latest_qblock_height().await {
+                    Ok(Some(new_height)) => {
+                        let synced_blocks = new_height.saturating_sub(current_height);
+                        info!("📈 [ENHANCED SYNC] Height advanced: {} → {} (+{} blocks)",
+                              current_height, new_height, synced_blocks);
+
+                        // ✅ v1.0.13-beta: Crash-fast height regression check
+                        if new_height < last_known_height {
+                            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            error!("🚨 CRITICAL: HEIGHT REGRESSION DETECTED!");
+                            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            error!("   Last height: {}", last_known_height);
+                            error!("   New height:  {}", new_height);
+                            error!("   Regression:  {} blocks", last_known_height - new_height);
+                            error!("   ");
+                            error!("   This indicates CATASTROPHIC DATA CORRUPTION!");
+                            error!("   Crashing immediately to prevent further damage.");
+                            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            std::process::exit(1);
+                        }
+
+                        // Reset failure counter on successful height advancement
+                        if new_height > last_known_height {
+                            consecutive_failures = 0;
+                            last_known_height = new_height;
+                        }
+                    }
+                    _ => {
+                        warn!("⚠️  [ENHANCED SYNC] Could not verify new height");
+                    }
+                }
+            }
+            Err(e) => {
+                error!("❌ [ENHANCED SYNC] Sync failed: {}", e);
+                error!("   Will retry in next interval ({}s)", retry_interval_secs);
+
+                // ✅ v1.0.13-beta: Crash-fast on consecutive failures
+                consecutive_failures += 1;
+                warn!("⚠️  [CRASH-FAST] Consecutive failures: {}/{}",
+                      consecutive_failures, MAX_CONSECUTIVE_FAILURES);
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    error!("🚨 CRITICAL: SYNC FAILURE THRESHOLD EXCEEDED!");
+                    error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    error!("   Consecutive failures: {}", consecutive_failures);
+                    error!("   Last known height:    {}", last_known_height);
+                    error!("   Current height:       {}", current_height);
+                    error!("   ");
+                    error!("   Node is stuck and unable to sync!");
+                    error!("   Crashing to trigger systemd restart.");
+                    error!("   ");
+                    error!("   Possible causes:");
+                    error!("   1. No peers with higher blocks available");
+                    error!("   2. Network partition");
+                    error!("   3. Database corruption");
+                    error!("   4. P2P networking infrastructure failure");
+                    error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_peer_bridge_updates() {
+        let bridge = TurboSyncPeerBridge::new();
+
+        // Generate test peer IDs
+        let peer1 = PeerId::random();
+        let peer2 = PeerId::random();
+
+        // Update peer heights
+        bridge.update_peer_height(peer1, 100).await;
+        bridge.update_peer_height(peer2, 200).await;
+
+        // Verify peer count
+        assert_eq!(bridge.peer_count().await, 2);
+
+        // Verify height queries
+        let peers_100 = bridge.get_peers_with_height(100).await;
+        assert_eq!(peers_100.len(), 2); // Both have height >= 100
+
+        let peers_150 = bridge.get_peers_with_height(150).await;
+        assert_eq!(peers_150.len(), 1); // Only peer2 has height >= 150
+
+        // Update peer1 to higher height
+        bridge.update_peer_height(peer1, 250).await;
+        let peers_200 = bridge.get_peers_with_height(200).await;
+        assert_eq!(peers_200.len(), 2); // Both now have height >= 200
+
+        // Remove peer
+        bridge.remove_peer(&peer1).await;
+        assert_eq!(bridge.peer_count().await, 1);
+    }
+}

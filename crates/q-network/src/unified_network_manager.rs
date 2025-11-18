@@ -674,6 +674,26 @@ impl UnifiedNetworkManager {
         info!("  • Ping (connection keepalive)");
         info!("  • Gossipsub (consensus messaging, {} topics)", topics.len());
 
+        // 🔥 v1.0.17-beta: CRITICAL FIX - Trigger Kademlia bootstrap process
+        // The bootstrap peers were added to Kademlia's routing table during swarm creation,
+        // but we MUST call bootstrap() to actually initiate the dial attempts!
+        if bootstrap_count > 0 {
+            info!("🚀 [BOOTSTRAP] Initiating Kademlia bootstrap process for {} peers", bootstrap_count);
+            match swarm.behaviour_mut().kademlia.bootstrap() {
+                Ok(query_id) => {
+                    info!("✅ [BOOTSTRAP] Kademlia bootstrap initiated successfully (query_id: {:?})", query_id);
+                    info!("   → Bootstrap peers will be dialed automatically by Kademlia");
+                }
+                Err(e) => {
+                    warn!("⚠️  [BOOTSTRAP] Kademlia bootstrap failed: {}", e);
+                    warn!("   → This may happen if no bootstrap peers were added to routing table");
+                    warn!("   → Node will still attempt discovery via mDNS and identify protocol");
+                }
+            }
+        } else {
+            info!("ℹ️  [BOOTSTRAP] No bootstrap peers to dial - relying on mDNS/identify discovery");
+        }
+
         // 🚀 v0.9.38-beta: PHASE 1.2 - Bootstrap Peer Discovery with Retry Logic
         // Explicitly dial bootstrap peer if Q_BOOTSTRAP_PEER environment variable is set
         // This ensures Server Alpha connects to Server Beta for network unification

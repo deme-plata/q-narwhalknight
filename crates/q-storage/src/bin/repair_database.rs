@@ -11,7 +11,8 @@ use std::sync::Arc;
 const CF_BLOCKS: &str = "blocks";
 
 fn main() -> Result<()> {
-    println!("🔧 Q-NarwhalKnight Database Repair Utility v0.5.22");
+    println!("🔧 Q-NarwhalKnight Database Repair Utility v0.5.23-FIXED");
+    println!("   Fixed: Now scans all blocks even if early blocks are missing");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Get database path from args or use default
@@ -56,8 +57,10 @@ fn main() -> Result<()> {
     let mut highest_found = 0u64;
     let mut total_blocks = 0u64;
     let mut missing_blocks = Vec::new();
+    let mut consecutive_missing = 0u64;
 
     // Check blocks from 0 to 200,000
+    // Fixed bug: Continue scanning even if early blocks are missing
     for height in 0..=200_000 {
         if height % 10_000 == 0 {
             println!("   Scanning height {}...", height);
@@ -67,15 +70,21 @@ fn main() -> Result<()> {
 
         if let Ok(Some(_)) = db.get_cf(&cf_blocks, key.as_bytes()) {
             total_blocks += 1;
-            if height > highest_found {
-                highest_found = height;
-            }
-        } else if height < highest_found {
-            // Found a gap
-            missing_blocks.push(height);
+            highest_found = height;
+            consecutive_missing = 0; // Reset counter when we find a block
         } else {
-            // Reached the end of contiguous blocks
-            break;
+            // Block is missing
+            if total_blocks > 0 {
+                // Only record as gap if we've found at least one block
+                missing_blocks.push(height);
+            }
+            consecutive_missing += 1;
+
+            // Only break if we've seen 1000 consecutive missing blocks after finding at least one
+            if consecutive_missing >= 1000 && total_blocks > 0 {
+                println!("   Stopping scan: 1000 consecutive missing blocks after height {}", height - 1000);
+                break;
+            }
         }
     }
 
@@ -106,6 +115,13 @@ fn main() -> Result<()> {
             // Found first gap
             break;
         }
+    }
+
+    // ✅ EMERGENCY FIX: If genesis (block 0) is missing but we have blocks, use highest_found
+    if highest_contiguous == 0 && total_blocks > 100 {
+        println!("   ⚠️  Genesis block 0 missing, but {} blocks found", total_blocks);
+        println!("   Using highest_found ({}) as recovery height", highest_found);
+        highest_contiguous = highest_found;
     }
 
     println!("   Highest contiguous: {}", highest_contiguous);

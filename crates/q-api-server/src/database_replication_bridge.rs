@@ -23,7 +23,6 @@
 /// │  - /qnk/database-updates/1.0.0  │
 /// └─────────────────────────────────┘
 /// ```
-
 use q_ipfs_storage::{DatabaseReplicationManager, DatabaseUpdate, DATABASE_UPDATES_TOPIC};
 use q_storage::QStorage; // ✅ v0.9.98-beta: Add QStorage for durability
 use std::sync::Arc;
@@ -72,8 +71,7 @@ impl DatabaseReplicationBridge {
         let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         // Task 1: Forward outgoing updates from replication manager to gossipsub
-        let update_rx = self.update_rx.take()
-            .ok_or("update_rx already taken")?;
+        let update_rx = self.update_rx.take().ok_or("update_rx already taken")?;
 
         tokio::spawn(async move {
             Self::forward_outgoing_updates(update_rx, gossipsub_tx).await;
@@ -115,7 +113,10 @@ impl DatabaseReplicationBridge {
                     if let Err(e) = gossipsub_tx.send((DATABASE_UPDATES_TOPIC.to_string(), data)) {
                         error!("❌ Failed to send update to gossipsub: {}", e);
                     } else {
-                        debug!("✅ Database update published to gossipsub topic: {}", DATABASE_UPDATES_TOPIC);
+                        debug!(
+                            "✅ Database update published to gossipsub topic: {}",
+                            DATABASE_UPDATES_TOPIC
+                        );
                     }
                 }
                 Err(e) => {
@@ -146,7 +147,8 @@ impl DatabaseReplicationBridge {
                     );
 
                     // ✅ v0.9.98-beta: Generate update ID for idempotency
-                    let update_id = format!("db_update_{:?}_{}",
+                    let update_id = format!(
+                        "db_update_{:?}_{}",
                         update.update_type,
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -177,7 +179,10 @@ impl DatabaseReplicationBridge {
                     for attempt in 1..=3 {
                         match replication_manager.handle_update(update.clone()).await {
                             Ok(_) => {
-                                debug!("✅ Database update processed successfully (attempt {})", attempt);
+                                debug!(
+                                    "✅ Database update processed successfully (attempt {})",
+                                    attempt
+                                );
 
                                 // ✅ v0.9.98-beta: Wait for durability BEFORE marking as processed
                                 if let Some(ref storage) = storage {
@@ -193,7 +198,8 @@ impl DatabaseReplicationBridge {
                                     }
 
                                     // ✅ v0.9.98-beta: Mark as processed ONLY after durable
-                                    if let Err(e) = storage.mark_update_processed(&update_id).await {
+                                    if let Err(e) = storage.mark_update_processed(&update_id).await
+                                    {
                                         warn!("⚠️  Failed to mark update as processed: {}", e);
                                         // Non-critical - update was durable, just tracking failed
                                     }
@@ -210,7 +216,10 @@ impl DatabaseReplicationBridge {
                                         "⚠️  Database update failed (attempt {}/3): {:?}, retrying in {}ms",
                                         attempt, e, delay_ms
                                     );
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                                        delay_ms,
+                                    ))
+                                    .await;
                                 } else {
                                     error!("❌ Database update failed after 3 attempts: {:?}", e);
                                 }
@@ -240,7 +249,10 @@ impl DatabaseReplicationBridge {
 pub fn subscribe_to_database_updates(
     manager: &mut q_network::UnifiedNetworkManager,
 ) -> Result<(), String> {
-    info!("📢 Subscribing to database updates topic: {}", DATABASE_UPDATES_TOPIC);
+    info!(
+        "📢 Subscribing to database updates topic: {}",
+        DATABASE_UPDATES_TOPIC
+    );
 
     // The subscription happens via UnifiedNetworkManager's gossipsub behavior
     // We'll need to add a method to UnifiedNetworkManager to support this

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+pub mod conservative_adaptive_vdf;
 pub mod parameters;
 pub mod pietrzak;
 pub mod proof_generation;
@@ -21,6 +22,10 @@ pub mod quantum_vdf;
 pub mod verification;
 pub mod wesolowski;
 
+pub use conservative_adaptive_vdf::{
+    AdaptiveVDFProof, ConservativeAdaptiveVDF, ConservativeVDFParams, HashrateSnapshot,
+    HashrateTracker, SecurityTier, WesolowskiProof,
+};
 pub use parameters::{SecurityLevel, VDFParameters};
 pub use pietrzak::PietrzakVDF;
 pub use proof_generation::{ProofGenerator, ProofStrategy};

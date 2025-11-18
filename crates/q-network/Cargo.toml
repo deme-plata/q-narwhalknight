@@ -17,7 +17,17 @@ q-ai-inference = { path = "../q-ai-inference" }
 
 # Networking - gossipsub included from workspace
 # NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here
-libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response"] }
+# 🔥 v1.0.17-beta: Added NAT traversal features (autonat, relay, dcutr) for true decentralization
+libp2p = { version = "0.53", features = [
+    "noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp",
+    "macros", "tokio", "request-response",
+    "autonat",           # 🔥 Detect if node is dialable
+    "relay",             # 🔥 Be reachable via relay nodes
+    "dcutr",             # 🔥 Hole-punching for direct connections
+    "quic",              # 🔥 QUIC transport for better NAT traversal
+    "dns",               # 🔥 DNS resolution for bootstrap nodes
+    # NOTE: connection-limits is built-in to libp2p 0.53, no feature flag needed
+] }
 # libp2p-quic = { workspace = true }  # Disabled to avoid conflicts
 
 # Async runtime
@@ -78,6 +88,13 @@ num_cpus = "1.16"
 # Compression for tensor forwarding
 zstd = "0.13"
 bincode = "1.3"
+
+# libp2p codec support (v1.0.15.1-beta: handshake protocol)
+unsigned-varint = { version = "0.7", features = ["futures", "codec"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# void crate for libp2p 0.53 connection_limits (v1.0.17-beta)
+void = "1.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

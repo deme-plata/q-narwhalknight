@@ -13,12 +13,31 @@ pub mod block;
 // ✅ v0.9.68-beta: libp2p request-response protocol for block sync
 pub mod block_pack;
 
+// ✨ v1.0.15-beta: Post-quantum signature verification
+pub mod signature_verification;
+
+// ✨ v1.0.16-beta: PQC key management
+pub mod pqc_keys;
+
+// ✨ v1.0.16-beta: ZK proof integration for untrusted setup
+pub mod zk_proof_integration;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
     QuantumMetadata, HypergraphCoordinates, EnergyComponents,
-    SpectralSignature, VDFProof, FinalityStatus, FinalizedBlock,
+    SpectralSignature, SignaturePhase, VDFProof, FinalityStatus, FinalizedBlock,
     FinalityCertificate,
+};
+
+// Re-export signature verification functions
+pub use signature_verification::{
+    verify_spectral_signature, verify_block_signature,
+};
+
+// Re-export PQC key management types
+pub use pqc_keys::{
+    ValidatorKeypair, ValidatorPublicKeys, ValidatorKeyRegistry,
 };
 
 // Re-export block pack types
@@ -712,7 +731,19 @@ pub enum NetworkId {
     #[serde(rename = "testnet-phase11")]
     TestnetPhase11,
 
-    /// Mainnet (Launch: TBD - After Phase 11 testing complete)
+    /// Phase 12: Post-Quantum Security & ZK Proofs - v1.0.12-beta (2025-11-15)
+    /// - Block reward: 0.05 QUG (proven sustainable scarcity model)
+    /// - Daily emission: ~672 QUG
+    /// - Time to 21M: ~85 years
+    /// - Fresh database (data-mine12)
+    /// - ✅ NEW: Active PQC integration (Dilithium5 signatures verified)
+    /// - ✅ NEW: Encrypted key storage (AES-256-GCM + Argon2)
+    /// - ✅ NEW: ZK untrusted setup (STARK + SNARK proofs)
+    /// - ✅ Security milestone: Post-quantum ready consensus
+    #[serde(rename = "testnet-phase12")]
+    TestnetPhase12,
+
+    /// Mainnet (Launch: TBD - After Phase 12 testing complete)
     Mainnet,
 }
 
@@ -726,7 +757,8 @@ impl NetworkId {
             NetworkId::TestnetPhase8 => "testnet-phase8",
             NetworkId::TestnetPhase9 => "testnet-phase9",
             NetworkId::TestnetPhase10 => "testnet-phase10",
-            NetworkId::TestnetPhase11 => "testnet-phase11", // ✅ Phase 11 added
+            NetworkId::TestnetPhase11 => "testnet-phase11",
+            NetworkId::TestnetPhase12 => "testnet-phase12", // ✅ Phase 12 added
             NetworkId::Mainnet => "mainnet",
         }
     }
@@ -740,7 +772,8 @@ impl NetworkId {
             NetworkId::TestnetPhase8 => "Q-NarwhalKnight Testnet Phase 8 (Deprecated - Four Bug Discovery)",
             NetworkId::TestnetPhase9 => "Q-NarwhalKnight Testnet Phase 9 (Deprecated - Pre-Durability Fixes)",
             NetworkId::TestnetPhase10 => "Q-NarwhalKnight Testnet Phase 10 (Deprecated - Pre-Data-Loss-Fix)",
-            NetworkId::TestnetPhase11 => "Q-NarwhalKnight Testnet Phase 11 - Data Loss FIX (v1.0.1-beta)", // ✅ Phase 11 added
+            NetworkId::TestnetPhase11 => "Q-NarwhalKnight Testnet Phase 11 (Deprecated - Pre-PQC)",
+            NetworkId::TestnetPhase12 => "Q-NarwhalKnight Testnet Phase 12 - Post-Quantum Security (v1.0.12-beta)", // ✅ Phase 12 added
             NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
         }
     }
@@ -754,7 +787,8 @@ impl NetworkId {
             NetworkId::TestnetPhase8 => 8080,
             NetworkId::TestnetPhase9 => 8080,
             NetworkId::TestnetPhase10 => 8080,
-            NetworkId::TestnetPhase11 => 8080, // ✅ Phase 11 added
+            NetworkId::TestnetPhase11 => 8080,
+            NetworkId::TestnetPhase12 => 8080, // ✅ Phase 12 added
             NetworkId::Mainnet => 8081,
         }
     }
@@ -768,7 +802,8 @@ impl NetworkId {
             NetworkId::TestnetPhase8 => 9001,
             NetworkId::TestnetPhase9 => 9001,
             NetworkId::TestnetPhase10 => 9001,
-            NetworkId::TestnetPhase11 => 9001, // ✅ Phase 11 added
+            NetworkId::TestnetPhase11 => 9001,
+            NetworkId::TestnetPhase12 => 9001, // ✅ Phase 12 added
             NetworkId::Mainnet => 9002,
         }
     }
@@ -843,7 +878,8 @@ impl std::str::FromStr for NetworkId {
             "testnet-phase8" => Ok(NetworkId::TestnetPhase8),
             "testnet-phase9" => Ok(NetworkId::TestnetPhase9),
             "testnet-phase10" => Ok(NetworkId::TestnetPhase10),
-            "testnet-phase11" => Ok(NetworkId::TestnetPhase11), // ✅ CRITICAL: Bug #1 fix - Phase 11 parser added
+            "testnet-phase11" => Ok(NetworkId::TestnetPhase11),
+            "testnet-phase12" => Ok(NetworkId::TestnetPhase12), // ✅ CRITICAL: Bug #1 fix - Phase 12 parser added
             "mainnet" => Ok(NetworkId::Mainnet),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
@@ -852,8 +888,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        // ✅ v1.0.1-beta: Default to Phase 11 (Data Loss FIX - 0.05 QUG/block)
-        NetworkId::TestnetPhase11
+        // ✅ v1.0.12-beta: Default to Phase 12 (Post-Quantum Security - 0.05 QUG/block)
+        NetworkId::TestnetPhase12
     }
 }
 
@@ -889,9 +925,9 @@ impl NetworkConfig {
     /// Create testnet configuration
     pub fn testnet() -> Self {
         Self {
-            // ✅ v1.0.1-beta: Phase 11 - Data Loss FIX (0.05 QUG/block)
-            // ✅ CRITICAL: Bug #3 fix - NetworkConfig updated to Phase 11
-            network_id: NetworkId::TestnetPhase11,
+            // ✅ v1.0.12-beta: Phase 12 - Post-Quantum Security (0.05 QUG/block)
+            // ✅ CRITICAL: Bug #3 fix - NetworkConfig updated to Phase 12
+            network_id: NetworkId::TestnetPhase12,
             genesis_hash: [
                 // Testnet genesis hash (October 2025)
                 0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
@@ -956,7 +992,8 @@ impl NetworkConfig {
             NetworkId::TestnetPhase8 => Self::testnet(),  // Phase 8 (TRUE scarcity)
             NetworkId::TestnetPhase9 => Self::testnet(),  // Phase 9 (Deprecated - Pre-Durability Fixes)
             NetworkId::TestnetPhase10 => Self::testnet(), // Phase 10 (Deprecated - Pre-Data-Loss-Fix)
-            NetworkId::TestnetPhase11 => Self::testnet(), // ✅ Phase 11 (Data Loss FIX - v1.0.1-beta)
+            NetworkId::TestnetPhase11 => Self::testnet(), // Phase 11 (Deprecated - Pre-PQC)
+            NetworkId::TestnetPhase12 => Self::testnet(), // ✅ Phase 12 (Post-Quantum Security - v1.0.12-beta)
             NetworkId::Mainnet => Self::mainnet(),
         }
     }

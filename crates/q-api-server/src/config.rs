@@ -47,10 +47,18 @@ pub struct Config {
     pub total_validators: u64,
 }
 
-fn default_block_interval() -> u64 { 2 } // Phase 2: Fast block production for exciting visualization
-fn default_min_solutions() -> usize { 1 }
-fn default_max_solutions() -> usize { 100 }
-fn default_total_validators() -> u64 { 1 }
+fn default_block_interval() -> u64 {
+    2
+} // Phase 2: Fast block production for exciting visualization
+fn default_min_solutions() -> usize {
+    1
+}
+fn default_max_solutions() -> usize {
+    100
+}
+fn default_total_validators() -> u64 {
+    1
+}
 
 /// Tor-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +104,7 @@ impl Default for Config {
         Self {
             port: 8080,
             host: "0.0.0.0".to_string(),
-            is_validator: true,  // ✅ Default TRUE so localhost mining works out-of-the-box
+            is_validator: true, // ✅ Default TRUE so localhost mining works out-of-the-box
             p2p_port: 8081,
             bootstrap_peers: vec![],
             database_url: None,
@@ -106,12 +114,12 @@ impl Default for Config {
             enable_metrics: true,
             node_id: None,
             tor: TorConfig::default(),
-            allow_manual_trigger: false, // v0.0.22-beta: default secure
+            allow_manual_trigger: false,  // v0.0.22-beta: default secure
             block_interval_secs: 2, // Phase 2: Fast block production for exciting visualization
             min_solutions_per_block: 1, // v0.0.22-beta: default 1
             max_solutions_per_block: 100, // v0.0.22-beta: default 100
-            validator_index: 0, // v0.0.22-beta: default primary
-            total_validators: 1, // v0.0.22-beta: default single validator
+            validator_index: 0,     // v0.0.22-beta: default primary
+            total_validators: 1,    // v0.0.22-beta: default single validator
         }
     }
 }
@@ -181,10 +189,15 @@ impl Config {
 
             // Warn if multi-validator without coordination
             if self.total_validators > 1 {
-                warn!("⚠️  Multi-validator mode enabled ({} validators)", self.total_validators);
+                warn!(
+                    "⚠️  Multi-validator mode enabled ({} validators)",
+                    self.total_validators
+                );
                 warn!("⚠️  Ensure all validators have identical total_validators setting");
-                warn!("⚠️  Ensure each validator has unique validator_index (0 to {})",
-                      self.total_validators - 1);
+                warn!(
+                    "⚠️  Ensure each validator has unique validator_index (0 to {})",
+                    self.total_validators - 1
+                );
                 warn!("⚠️  Simple coordination: Only validator 0 produces empty blocks");
             } else {
                 info!("✅ Single validator mode (default)");
@@ -239,12 +252,18 @@ impl Config {
             let bootstrap_url = env::var("Q_BOOTSTRAP_URL")
                 .unwrap_or_else(|_| "http://185.182.185.227:8080".to_string());
 
-            info!("🔍 Attempting automatic bootstrap discovery from {}", bootstrap_url);
+            info!(
+                "🔍 Attempting automatic bootstrap discovery from {}",
+                bootstrap_url
+            );
 
             match Self::fetch_bootstrap_peers(&bootstrap_url) {
                 Ok(peers) => {
                     if !peers.is_empty() {
-                        info!("✅ Discovered {} bootstrap peer(s) automatically", peers.len());
+                        info!(
+                            "✅ Discovered {} bootstrap peer(s) automatically",
+                            peers.len()
+                        );
                         for peer in &peers {
                             info!("   📡 {}", peer);
                         }
@@ -255,7 +274,10 @@ impl Config {
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️  Failed to fetch bootstrap peers from {}: {}", bootstrap_url, e);
+                    warn!(
+                        "⚠️  Failed to fetch bootstrap peers from {}: {}",
+                        bootstrap_url, e
+                    );
                     warn!("⚠️  Falling back to mDNS local discovery only");
                 }
             }

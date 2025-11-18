@@ -3,20 +3,20 @@
 // Uses post-quantum encryption (Kyber1024) for all sensitive data
 
 use axum::{
-    extract::{State, Query, Json},
+    extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use chrono::{DateTime, Utc, Duration};
-use sha2::{Sha256, Digest};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
-use crate::{AppState, ApiResponse};
+use crate::{ApiResponse, AppState};
 
 // ============================================================================
 // OAuth2 Configuration
@@ -160,7 +160,9 @@ impl OAuth2Storage {
 
     pub async fn get_consent(&self, wallet_address: &str, client_id: &str) -> Option<UserConsent> {
         let consents = self.user_consents.read().await;
-        consents.get(&(wallet_address.to_string(), client_id.to_string())).cloned()
+        consents
+            .get(&(wallet_address.to_string(), client_id.to_string()))
+            .cloned()
     }
 }
 
@@ -281,7 +283,9 @@ pub async fn register_client(
             Ok(key) => Some(key),
             Err(e) => {
                 error!("Invalid Kyber public key: {}", e);
-                return Ok(Json(ApiResponse::error("Invalid Kyber public key format".to_string())));
+                return Ok(Json(ApiResponse::error(
+                    "Invalid Kyber public key format".to_string(),
+                )));
             }
         }
     } else {
@@ -301,13 +305,21 @@ pub async fn register_client(
         kyber_public_key,
     };
 
-    state.oauth2_storage.write().await.register_client(client).await
+    state
+        .oauth2_storage
+        .write()
+        .await
+        .register_client(client)
+        .await
         .map_err(|e| {
             error!("Failed to register client: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    info!("✅ Registered OAuth2 client: {} ({})", request.name, client_id);
+    info!(
+        "✅ Registered OAuth2 client: {} ({})",
+        request.name, client_id
+    );
 
     Ok(Json(ApiResponse::success(RegisterClientResponse {
         client_id,
@@ -322,14 +334,26 @@ pub async fn authorize(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuthorizeRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    info!("🔐 OAuth2 authorization request from client: {}", params.client_id);
+    info!(
+        "🔐 OAuth2 authorization request from client: {}",
+        params.client_id
+    );
 
     // Validate client
-    let client = match state.oauth2_storage.read().await.get_client(&params.client_id).await {
+    let client = match state
+        .oauth2_storage
+        .read()
+        .await
+        .get_client(&params.client_id)
+        .await
+    {
         Some(c) => c,
         None => {
             warn!("Unknown client ID: {}", params.client_id);
-            return Ok(Redirect::to(&format!("{}?error=invalid_client", params.redirect_uri)));
+            return Ok(Redirect::to(&format!(
+                "{}?error=invalid_client",
+                params.redirect_uri
+            )));
         }
     };
 
@@ -341,8 +365,11 @@ pub async fn authorize(
 
     // Validate response type
     if params.response_type != "code" {
-        let error_uri = format!("{}?error=unsupported_response_type&state={}",
-            params.redirect_uri, params.state.as_deref().unwrap_or(""));
+        let error_uri = format!(
+            "{}?error=unsupported_response_type&state={}",
+            params.redirect_uri,
+            params.state.as_deref().unwrap_or("")
+        );
         return Ok(Redirect::to(&error_uri));
     }
 
@@ -365,8 +392,10 @@ pub async fn handle_consent(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConsentRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-    info!("🔐 Processing consent from wallet: {} for client: {}",
-        request.wallet_address, request.client_id);
+    info!(
+        "🔐 Processing consent from wallet: {} for client: {}",
+        request.wallet_address, request.client_id
+    );
 
     if !request.approved {
         info!("❌ User denied consent");
@@ -382,7 +411,12 @@ pub async fn handle_consent(
         expires_at: Some(Utc::now() + Duration::days(365)), // 1 year
     };
 
-    state.oauth2_storage.write().await.store_consent(consent).await;
+    state
+        .oauth2_storage
+        .write()
+        .await
+        .store_consent(consent)
+        .await;
 
     // Generate authorization code
     let auth_code = generate_random_token(32);
@@ -397,7 +431,12 @@ pub async fn handle_consent(
         code_challenge_method: None,
     };
 
-    state.oauth2_storage.write().await.store_auth_code(code_record).await;
+    state
+        .oauth2_storage
+        .write()
+        .await
+        .store_auth_code(code_record)
+        .await;
 
     info!("✅ Consent granted, authorization code generated");
     Ok(Json(ApiResponse::success(auth_code)))
@@ -412,24 +451,36 @@ pub async fn token(
     info!("🔐 OAuth2 token request from client: {}", request.client_id);
 
     // Validate client credentials
-    let client = match state.oauth2_storage.read().await.get_client(&request.client_id).await {
+    let client = match state
+        .oauth2_storage
+        .read()
+        .await
+        .get_client(&request.client_id)
+        .await
+    {
         Some(c) if c.client_secret == request.client_secret => c,
         _ => {
             error!("Invalid client credentials");
-            return Ok(Json(ApiResponse::error("Invalid client credentials".to_string())));
+            return Ok(Json(ApiResponse::error(
+                "Invalid client credentials".to_string(),
+            )));
         }
     };
 
     match request.grant_type.as_str() {
         "authorization_code" => {
             // Exchange authorization code for access token
-            let code = request.code.as_ref()
-                .ok_or_else(|| {
-                    error!("Missing authorization code");
-                    StatusCode::BAD_REQUEST
-                })?;
+            let code = request.code.as_ref().ok_or_else(|| {
+                error!("Missing authorization code");
+                StatusCode::BAD_REQUEST
+            })?;
 
-            let auth_code = state.oauth2_storage.write().await.consume_auth_code(code).await
+            let auth_code = state
+                .oauth2_storage
+                .write()
+                .await
+                .consume_auth_code(code)
+                .await
                 .ok_or_else(|| {
                     error!("Invalid or expired authorization code");
                     StatusCode::BAD_REQUEST
@@ -438,19 +489,28 @@ pub async fn token(
             // Verify not expired
             if auth_code.expires_at < Utc::now() {
                 error!("Authorization code expired");
-                return Ok(Json(ApiResponse::error("Authorization code expired".to_string())));
+                return Ok(Json(ApiResponse::error(
+                    "Authorization code expired".to_string(),
+                )));
             }
 
             // Verify PKCE if present
-            if let (Some(challenge), Some(method)) = (auth_code.code_challenge.as_ref(), auth_code.code_challenge_method.as_ref()) {
+            if let (Some(challenge), Some(method)) = (
+                auth_code.code_challenge.as_ref(),
+                auth_code.code_challenge_method.as_ref(),
+            ) {
                 if let Some(verifier) = request.code_verifier.as_ref() {
                     if !verify_pkce_challenge(verifier, challenge, method) {
                         error!("PKCE verification failed");
-                        return Ok(Json(ApiResponse::error("PKCE verification failed".to_string())));
+                        return Ok(Json(ApiResponse::error(
+                            "PKCE verification failed".to_string(),
+                        )));
                     }
                 } else {
                     error!("Missing code verifier for PKCE");
-                    return Ok(Json(ApiResponse::error("Missing code verifier".to_string())));
+                    return Ok(Json(ApiResponse::error(
+                        "Missing code verifier".to_string(),
+                    )));
                 }
             }
 
@@ -467,7 +527,12 @@ pub async fn token(
                 refresh_token: Some(refresh_token.clone()),
             };
 
-            state.oauth2_storage.write().await.store_access_token(token_record).await;
+            state
+                .oauth2_storage
+                .write()
+                .await
+                .store_access_token(token_record)
+                .await;
 
             info!("✅ Access token generated");
             Ok(Json(ApiResponse::success(TokenResponse {
@@ -480,19 +545,22 @@ pub async fn token(
         }
         "refresh_token" => {
             // Refresh access token
-            let refresh_token = request.refresh_token.as_ref()
-                .ok_or_else(|| {
-                    error!("Missing refresh token");
-                    StatusCode::BAD_REQUEST
-                })?;
+            let refresh_token = request.refresh_token.as_ref().ok_or_else(|| {
+                error!("Missing refresh token");
+                StatusCode::BAD_REQUEST
+            })?;
 
             // TODO: Implement refresh token logic
             error!("Refresh token not yet implemented");
-            Ok(Json(ApiResponse::error("Refresh token not implemented".to_string())))
+            Ok(Json(ApiResponse::error(
+                "Refresh token not implemented".to_string(),
+            )))
         }
         _ => {
             error!("Unsupported grant type: {}", request.grant_type);
-            Ok(Json(ApiResponse::error("Unsupported grant type".to_string())))
+            Ok(Json(ApiResponse::error(
+                "Unsupported grant type".to_string(),
+            )))
         }
     }
 }
@@ -504,15 +572,22 @@ pub async fn userinfo(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     // Extract Bearer token from Authorization header
-    let auth_header = headers.get("Authorization")
+    let auth_header = headers
+        .get("Authorization")
         .and_then(|h| h.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let token = auth_header.strip_prefix("Bearer ")
+    let token = auth_header
+        .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate access token
-    let access_token = state.oauth2_storage.read().await.get_access_token(token).await
+    let access_token = state
+        .oauth2_storage
+        .read()
+        .await
+        .get_access_token(token)
+        .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Check if expired
@@ -520,7 +595,10 @@ pub async fn userinfo(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    info!("✅ Userinfo request for wallet: {}", access_token.wallet_address);
+    info!(
+        "✅ Userinfo request for wallet: {}",
+        access_token.wallet_address
+    );
 
     // Return user info based on granted scopes
     let mut user_info = serde_json::json!({
@@ -558,7 +636,12 @@ pub async fn revoke(
     Json(request): Json<RevokeRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("🔐 Revoking token");
-    state.oauth2_storage.write().await.revoke_token(&request.token).await;
+    state
+        .oauth2_storage
+        .write()
+        .await
+        .revoke_token(&request.token)
+        .await;
     Ok(Json(ApiResponse::success("Token revoked".to_string())))
 }
 
@@ -570,7 +653,13 @@ pub async fn get_client_info(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!("🔍 Client info request for: {}", client_id);
 
-    match state.oauth2_storage.read().await.get_client(&client_id).await {
+    match state
+        .oauth2_storage
+        .read()
+        .await
+        .get_client(&client_id)
+        .await
+    {
         Some(client) => {
             let client_info = serde_json::json!({
                 "client_id": client.client_id,

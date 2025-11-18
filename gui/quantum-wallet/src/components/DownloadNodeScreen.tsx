@@ -16,9 +16,9 @@ export default function DownloadNodeScreen() {
         <p className="text-xl text-gray-300 max-w-3xl mx-auto">
           Join the quantum consensus network. Run your own validator node with Phase 1 post-quantum cryptography.
         </p>
-        <div className="inline-flex items-center gap-2 px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-full">
-          <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-red-400">v0.9.1-beta CRITICAL - Pruning Bug Fixed + Phase 5</span>
+        <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
+          <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
+          <span className="text-sm font-bold text-quantum-cyan">v1.0.3.5-beta • Safe Batched Sync</span>
         </div>
       </motion.div>
 
@@ -72,40 +72,39 @@ export default function DownloadNodeScreen() {
               </div>
             </div>
             <div className="flex items-start gap-3">
-              <CheckCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+              <CheckCircle className="w-5 h-5 text-quantum-cyan flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">CRITICAL: Pruning Bug Fixed - Blocks Never Deleted</p>
-                <p className="text-sm text-gray-400">v0.9.1-beta fixes Adaptive Pruning bug that deleted blocks every hour + Height monotonicity protection</p>
+                <p className="text-white font-medium">Safe Batched Sync</p>
+                <p className="text-sm text-gray-400">v1.0.3.5-beta implements safe blockchain sync without data loss risk</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
-              <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
+              <CheckCircle className="w-5 h-5 text-quantum-purple flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Phase 5 Network - Clean Start for Everyone</p>
-                <p className="text-sm text-gray-400">Network reset with pruning disabled by default + enhanced security guarantees</p>
+                <p className="text-white font-medium">PQC Block Signing with zk-STARK</p>
+                <p className="text-sm text-gray-400">Post-quantum Dilithium5 signatures with untrusted setup fallback</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v0.9.1-beta"
+              href="/downloads/q-api-server-v1.0.3.5-beta"
               download="q-api-server"
-              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-red-500 to-orange-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-red-500/50 transition-all"
+              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v0.9.1-beta) - PRUNING BUG FIXED
+              Download Linux Binary (v1.0.3.5-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 112 MB | CRITICAL - Fixes Adaptive Pruning Block Deletion
+              Size: 124 MB | Safe Batched Sync + PQC + zk-STARK
             </p>
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-              <p className="text-red-400 text-xs font-bold mb-1">🚨 CRITICAL UPDATE - PRUNING BUG FIXED</p>
+            <div className="p-3 bg-quantum-cyan/10 border border-quantum-cyan/30 rounded-lg">
+              <p className="text-quantum-cyan text-xs font-bold mb-1">✨ NEW FEATURES - v1.0.3.5-beta</p>
               <p className="text-gray-300 text-xs">
-                v0.9.1-beta fixes the catastrophic Adaptive Pruning bug that was deleting all blocks every hour.
-                Blocks are now NEVER deleted (pruning disabled by default). Height monotonicity protection prevents
-                height regression. Network reset to Phase 5 for clean start. All testnet nodes must upgrade immediately.
-                Your old blocks were being intentionally deleted by pruning - this is now fixed permanently.
+                Safe batched blockchain synchronization prevents data loss • Multi-layer sync-down protection
+                • Atomically updates blockchain and balances together • Enhanced database consistency checks
+                • Improved error handling and recovery procedures • Network height verification before sync.
               </p>
             </div>
           </div>

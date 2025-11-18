@@ -13,7 +13,10 @@ fn main() {
 
     // Also set a human-readable timestamp
     let now = chrono::Utc::now();
-    println!("cargo:rustc-env=BUILD_DATE={}", now.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "cargo:rustc-env=BUILD_DATE={}",
+        now.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
     // Rerun if this file changes
     println!("cargo:rerun-if-changed=build.rs");

@@ -1,7 +1,6 @@
 /// Liquidity Provision API for DEX
 ///
 /// This module handles adding and managing liquidity pools
-
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -47,11 +46,11 @@ impl<T> ApiResponse<T> {
 /// Add liquidity request
 #[derive(Debug, Deserialize)]
 pub struct AddLiquidityRequest {
-    pub token0: String,  // "QUG" for native or token contract address
-    pub token1: String,  // Token contract address
+    pub token0: String, // "QUG" for native or token contract address
+    pub token1: String, // Token contract address
     pub amount0: u64,
     pub amount1: u64,
-    pub provider: String,  // Wallet address
+    pub provider: String, // Wallet address
 }
 
 /// Add liquidity response
@@ -70,7 +69,7 @@ pub struct AddLiquidityResponse {
 pub struct RemoveLiquidityRequest {
     pub pool_id: String,
     pub percentage: u64,  // Percentage to remove (0-100)
-    pub provider: String,  // Wallet address
+    pub provider: String, // Wallet address
 }
 
 /// Remove liquidity response
@@ -110,12 +109,12 @@ pub async fn add_liquidity(
     }
 
     // Check if token0 is native QUG or a token contract
-    let is_native_token0 = request.token0.to_uppercase() == "QUG"
-        || request.token0.to_lowercase() == "native-qug";
+    let is_native_token0 =
+        request.token0.to_uppercase() == "QUG" || request.token0.to_lowercase() == "native-qug";
 
     // Check if token1 is native QUG or a token contract
-    let is_native_token1 = request.token1.to_uppercase() == "QUG"
-        || request.token1.to_lowercase() == "native-qug";
+    let is_native_token1 =
+        request.token1.to_uppercase() == "QUG" || request.token1.to_lowercase() == "native-qug";
 
     // Resolve token1 symbol to contract address if needed (unless it's native QUG)
     let token1_addr = if is_native_token1 {
@@ -131,7 +130,12 @@ pub async fn add_liquidity(
         // It's a token symbol, look it up in deployed contracts
         match resolve_token_symbol(&state, &request.token1).await {
             Ok(addr) => addr,
-            Err(e) => return Ok(Json(ApiResponse::error(format!("Token symbol '{}' not found: {}", request.token1, e)))),
+            Err(e) => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Token symbol '{}' not found: {}",
+                    request.token1, e
+                ))))
+            }
         }
     };
 
@@ -162,19 +166,25 @@ pub async fn add_liquidity(
             );
         } else {
             // Deduct token0 (token contract) - resolve symbol if needed
-            let token0_addr = if request.token0.starts_with("0x") || request.token0.starts_with("qnk") {
-                // Already an address
-                match parse_address(&request.token0) {
-                    Ok(addr) => addr,
-                    Err(e) => return Ok(Json(ApiResponse::error(e))),
-                }
-            } else {
-                // It's a token symbol, look it up in deployed contracts
-                match resolve_token_symbol(&state, &request.token0).await {
-                    Ok(addr) => addr,
-                    Err(e) => return Ok(Json(ApiResponse::error(format!("Token symbol '{}' not found: {}", request.token0, e)))),
-                }
-            };
+            let token0_addr =
+                if request.token0.starts_with("0x") || request.token0.starts_with("qnk") {
+                    // Already an address
+                    match parse_address(&request.token0) {
+                        Ok(addr) => addr,
+                        Err(e) => return Ok(Json(ApiResponse::error(e))),
+                    }
+                } else {
+                    // It's a token symbol, look it up in deployed contracts
+                    match resolve_token_symbol(&state, &request.token0).await {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            return Ok(Json(ApiResponse::error(format!(
+                                "Token symbol '{}' not found: {}",
+                                request.token0, e
+                            ))))
+                        }
+                    }
+                };
 
             let balance_key = (provider, token0_addr);
 
@@ -184,11 +194,14 @@ pub async fn add_liquidity(
                 let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
                 for contract in deployed_contracts.values() {
                     if contract.deployer == provider && contract.address.0 == token0_addr {
-                        if let Some(supply_value) = contract.deployment_params.get("initialSupply")
+                        if let Some(supply_value) = contract
+                            .deployment_params
+                            .get("initialSupply")
                             .or_else(|| contract.deployment_params.get("initial_supply"))
                         {
-                            let initial_supply = supply_value.as_u64()
-                                .or_else(|| supply_value.as_str().and_then(|s| s.parse::<u64>().ok()));
+                            let initial_supply = supply_value.as_u64().or_else(|| {
+                                supply_value.as_str().and_then(|s| s.parse::<u64>().ok())
+                            });
 
                             if let Some(supply) = initial_supply {
                                 token_balances.insert(balance_key, supply);
@@ -254,11 +267,14 @@ pub async fn add_liquidity(
                 let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
                 for contract in deployed_contracts.values() {
                     if contract.deployer == provider && contract.address.0 == token1_addr {
-                        if let Some(supply_value) = contract.deployment_params.get("initialSupply")
+                        if let Some(supply_value) = contract
+                            .deployment_params
+                            .get("initialSupply")
                             .or_else(|| contract.deployment_params.get("initial_supply"))
                         {
-                            let initial_supply = supply_value.as_u64()
-                                .or_else(|| supply_value.as_str().and_then(|s| s.parse::<u64>().ok()));
+                            let initial_supply = supply_value.as_u64().or_else(|| {
+                                supply_value.as_str().and_then(|s| s.parse::<u64>().ok())
+                            });
 
                             if let Some(supply) = initial_supply {
                                 token_balances.insert(balance_key, supply);
@@ -300,7 +316,11 @@ pub async fn add_liquidity(
 
     // Persist all token balance changes to storage
     for (wallet_addr, token_addr, new_balance) in token_balance_changes {
-        if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &token_addr, new_balance).await {
+        if let Err(e) = state
+            .storage_engine
+            .save_token_balance(&wallet_addr, &token_addr, new_balance)
+            .await
+        {
             tracing::warn!("Failed to persist token balance after liquidity: {}", e);
         }
     }
@@ -310,10 +330,13 @@ pub async fn add_liquidity(
         let pools = state.liquidity_pools.read().await;
 
         // Look for existing pool with matching token pair and provider
-        pools.values()
+        pools
+            .values()
             .find(|p| {
-                (p.token0 == request.token0 && p.token1 == request.token1 && p.provider == provider) ||
-                (p.token0 == request.token1 && p.token1 == request.token0 && p.provider == provider)
+                (p.token0 == request.token0 && p.token1 == request.token1 && p.provider == provider)
+                    || (p.token0 == request.token1
+                        && p.token1 == request.token0
+                        && p.provider == provider)
             })
             .map(|p| p.pool_id.clone())
     };
@@ -343,7 +366,11 @@ pub async fn add_liquidity(
             drop(pools); // Release write lock before async I/O
 
             if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
-                if let Err(e) = state.storage_engine.save_liquidity_pool(&existing_pool_id, &pool_data).await {
+                if let Err(e) = state
+                    .storage_engine
+                    .save_liquidity_pool(&existing_pool_id, &pool_data)
+                    .await
+                {
                     tracing::warn!("Failed to persist updated liquidity pool: {}", e);
                 } else {
                     tracing::info!("💾 Persisted updated liquidity pool: {}", existing_pool_id);
@@ -379,7 +406,11 @@ pub async fn add_liquidity(
 
             // ✅ Persist new liquidity pool to storage
             if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
-                if let Err(e) = state.storage_engine.save_liquidity_pool(&new_pool_id, &pool_data).await {
+                if let Err(e) = state
+                    .storage_engine
+                    .save_liquidity_pool(&new_pool_id, &pool_data)
+                    .await
+                {
                     tracing::warn!("Failed to persist new liquidity pool: {}", e);
                 } else {
                     tracing::info!("💾 Persisted new liquidity pool: {}", new_pool_id);
@@ -418,7 +449,11 @@ pub async fn add_liquidity(
 
         // ✅ Persist new liquidity pool to storage
         if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
-            if let Err(e) = state.storage_engine.save_liquidity_pool(&new_pool_id, &pool_data).await {
+            if let Err(e) = state
+                .storage_engine
+                .save_liquidity_pool(&new_pool_id, &pool_data)
+                .await
+            {
                 tracing::warn!("Failed to persist new liquidity pool: {}", e);
             } else {
                 tracing::info!("💾 Persisted new liquidity pool: {}", new_pool_id);
@@ -455,9 +490,13 @@ pub async fn add_liquidity(
     // Store transaction
     let tx_id = transaction.id;
     state.tx_pool.insert(tx_id, transaction);
-    state
-        .tx_status
-        .insert(tx_id, TxStatus::Confirmed { block_height: 0, round: 0 });
+    state.tx_status.insert(
+        tx_id,
+        TxStatus::Confirmed {
+            block_height: 0,
+            round: 0,
+        },
+    );
 
     Ok(Json(ApiResponse::success(AddLiquidityResponse {
         pool_id: final_pool_id.clone(),
@@ -551,8 +590,10 @@ pub async fn remove_liquidity(
     let amount1_to_return = (pool.reserve1 * request.percentage) / 100;
 
     // Check if tokens are native QUG or custom tokens
-    let is_native_token0 = pool.token0.to_uppercase() == "QUG" || pool.token0.to_lowercase() == "native-qug";
-    let is_native_token1 = pool.token1.to_uppercase() == "QUG" || pool.token1.to_lowercase() == "native-qug";
+    let is_native_token0 =
+        pool.token0.to_uppercase() == "QUG" || pool.token0.to_lowercase() == "native-qug";
+    let is_native_token1 =
+        pool.token1.to_uppercase() == "QUG" || pool.token1.to_lowercase() == "native-qug";
 
     // Resolve token addresses for custom tokens
     let token0_addr = if !is_native_token0 {
@@ -605,7 +646,11 @@ pub async fn remove_liquidity(
         } else {
             let balance_key = (provider, token0_addr);
             *token_balances.entry(balance_key).or_insert(0) += amount0_to_return;
-            token_balance_changes.push((provider, token0_addr, *token_balances.get(&balance_key).unwrap()));
+            token_balance_changes.push((
+                provider,
+                token0_addr,
+                *token_balances.get(&balance_key).unwrap(),
+            ));
             tracing::info!(
                 "💰 Returned {} token0 to {} from liquidity removal",
                 amount0_to_return,
@@ -624,7 +669,11 @@ pub async fn remove_liquidity(
         } else {
             let balance_key = (provider, token1_addr);
             *token_balances.entry(balance_key).or_insert(0) += amount1_to_return;
-            token_balance_changes.push((provider, token1_addr, *token_balances.get(&balance_key).unwrap()));
+            token_balance_changes.push((
+                provider,
+                token1_addr,
+                *token_balances.get(&balance_key).unwrap(),
+            ));
             tracing::info!(
                 "💰 Returned {} token1 to {} from liquidity removal",
                 amount1_to_return,
@@ -635,8 +684,15 @@ pub async fn remove_liquidity(
 
     // Persist token balance changes
     for (wallet_addr, token_addr, new_balance) in token_balance_changes {
-        if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &token_addr, new_balance).await {
-            tracing::warn!("Failed to persist token balance after liquidity removal: {}", e);
+        if let Err(e) = state
+            .storage_engine
+            .save_token_balance(&wallet_addr, &token_addr, new_balance)
+            .await
+        {
+            tracing::warn!(
+                "Failed to persist token balance after liquidity removal: {}",
+                e
+            );
         }
     }
 
@@ -646,14 +702,24 @@ pub async fn remove_liquidity(
         if request.percentage == 100 {
             // Remove pool entirely
             pools.remove(&request.pool_id);
-            tracing::info!("🗑️ Removed liquidity pool {} (100% withdrawn)", request.pool_id);
+            tracing::info!(
+                "🗑️ Removed liquidity pool {} (100% withdrawn)",
+                request.pool_id
+            );
 
             // ✅ Delete pool from storage
             drop(pools); // Release write lock before async I/O
-            if let Err(e) = state.storage_engine.delete_liquidity_pool(&request.pool_id).await {
+            if let Err(e) = state
+                .storage_engine
+                .delete_liquidity_pool(&request.pool_id)
+                .await
+            {
                 tracing::warn!("Failed to delete liquidity pool from storage: {}", e);
             } else {
-                tracing::info!("💾 Deleted liquidity pool from storage: {}", request.pool_id);
+                tracing::info!(
+                    "💾 Deleted liquidity pool from storage: {}",
+                    request.pool_id
+                );
             }
         } else {
             // Update pool reserves
@@ -672,8 +738,15 @@ pub async fn remove_liquidity(
                 drop(pools); // Release write lock before async I/O
 
                 if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
-                    if let Err(e) = state.storage_engine.save_liquidity_pool(&request.pool_id, &pool_data).await {
-                        tracing::warn!("Failed to persist updated liquidity pool after removal: {}", e);
+                    if let Err(e) = state
+                        .storage_engine
+                        .save_liquidity_pool(&request.pool_id, &pool_data)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to persist updated liquidity pool after removal: {}",
+                            e
+                        );
                     } else {
                         tracing::info!("💾 Persisted updated liquidity pool: {}", request.pool_id);
                     }
@@ -748,7 +821,10 @@ fn parse_address(address_str: &str) -> Result<[u8; 32], String> {
                 padded[12..].copy_from_slice(&bytes);
                 Ok(padded)
             } else {
-                Err(format!("Address must be 20 or 32 bytes, got {}", bytes.len()))
+                Err(format!(
+                    "Address must be 20 or 32 bytes, got {}",
+                    bytes.len()
+                ))
             }
         }
         Err(_) => Err("Invalid hex in address".to_string()),
