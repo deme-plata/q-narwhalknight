@@ -7287,6 +7287,20 @@ async fn main() -> anyhow::Result<()> {
                             info!("   Threshold = 100");
                             info!("   Condition (gap>100): {}", blocks_behind > 100);
 
+                            // ✅ v1.0.17-beta-batch-sync-disabled: BATCH SYNC DISABLED DUE TO DEADLOCK
+                            // 🚨 CRITICAL DEADLOCK FIX: Batch sync holds libp2p lock for MINUTES
+                            // This causes complete system freeze after 5-10 minutes of operation
+                            // See: CRITICAL_BATCH_SYNC_DEADLOCK_FOUND.md for full analysis
+                            //
+                            // The batch sync code below is DISABLED until it can be refactored to:
+                            // 1. Not hold libp2p.lock() across long-running operations
+                            // 2. Pass Arc<Mutex<NetworkManager>> instead of &mut NetworkManager
+                            // 3. Acquire lock only when needed, drop immediately
+                            //
+                            // For now, gap-fill sync (which we fixed) will handle ALL syncing.
+                            // This is slower but DEADLOCK-FREE.
+
+                            /* DISABLED - DEADLOCK RISK
                             // ✅ v1.0.12-beta: BATCH SYNC for large gaps (>100 blocks)
                             // Use high-performance batch sync engine for 50-200x improvement
                             if blocks_behind > 100 {
@@ -7354,6 +7368,13 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             } else {
                                 info!("⚠️  [BATCH SYNC DEBUG] Gap {} < 100 - using sequential TurboSync", blocks_behind);
+                            }
+                            */ // END DISABLED BATCH SYNC
+
+                            // ✅ v1.0.17-beta: Log that we're using gap-fill only
+                            if blocks_behind > 100 {
+                                info!("⚠️  [SYNC] Large gap detected ({} blocks) - batch sync DISABLED due to deadlock", blocks_behind);
+                                info!("   Using gap-fill sync (slower but deadlock-free)");
                             }
 
                             // ✅ v0.9.75-beta: OPTIMISTIC PEER TESTING - Assume compatible unless proven otherwise

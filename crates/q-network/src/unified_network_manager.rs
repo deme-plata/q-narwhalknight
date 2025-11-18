@@ -36,7 +36,7 @@ use q_types::QBlock;
 /// Now: Multiple diverse bootstrap nodes (different operators, geos)
 /// ✅ v1.0.17-beta: Fixed bootstrap configuration (correct P2P port 9001 and PeerID)
 const BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWC688bzHi7djbkensGQMABzX9tY41LNasgd3g3FdwqQn7",  // Server Beta (EU) - P2P port, actual PeerID
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg",  // Server Beta (EU) - P2P port, actual PeerID (updated 2025-11-18)
     // TODO: Add Server Alpha (US) bootstrap node
     // TODO: Add community bootstrap nodes
 ];
