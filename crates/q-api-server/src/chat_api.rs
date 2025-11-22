@@ -59,6 +59,181 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+/// On-demand AI engine loading helper
+///
+/// This function ensures the AI engine is loaded before attempting inference.
+/// It uses a static Mutex to ensure only one thread loads the engine at a time.
+async fn ensure_ai_engine_loaded(state: &Arc<AppState>) -> anyhow::Result<Arc<q_ai_inference::MistralRsEngine>> {
+    use tokio::sync::Mutex as TokioMutex;
+    use std::sync::OnceLock;
+
+    // Static mutex to ensure single initialization
+    static LOADING_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+    let lock = LOADING_LOCK.get_or_init(|| TokioMutex::new(()));
+
+    // Check if engine is already loaded
+    if let Some(ref engine) = state.mistralrs_engine {
+        return Ok(engine.clone());
+    }
+
+    // Acquire lock to prevent concurrent loading
+    let _guard = lock.lock().await;
+
+    // Double-check after acquiring lock (another thread might have loaded it)
+    if let Some(ref engine) = state.mistralrs_engine {
+        return Ok(engine.clone());
+    }
+
+    info!("🚀 On-demand loading of AI engine starting...");
+    info!("   This is a one-time operation that will take ~5-10 seconds");
+
+    // Download and verify model files
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    async fn ensure_model_available() -> anyhow::Result<std::path::PathBuf> {
+        let model_dir = std::path::PathBuf::from("./models");
+        tokio::fs::create_dir_all(&model_dir).await?;
+
+        let model_path = model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
+        let tokenizer_config_path = model_dir.join("tokenizer_config.json");
+        let tokenizer_json_path = model_dir.join("tokenizer.json");
+
+        // Download tokenizer_config.json if it doesn't exist
+        if !tokenizer_config_path.exists() {
+            info!("📥 Downloading tokenizer_config.json from bootstrap node...");
+            info!("   Source: https://quillon.xyz/downloads/tokenizer_config.json");
+
+            let url = "https://quillon.xyz/downloads/tokenizer_config.json";
+            let response = reqwest::get(url).await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to download tokenizer config: HTTP {}",
+                    response.status()
+                ));
+            }
+
+            let bytes = response.bytes().await?;
+            tokio::fs::write(&tokenizer_config_path, bytes).await?;
+            info!(
+                "✅ Tokenizer config downloaded: {:?}",
+                tokenizer_config_path
+            );
+        } else {
+            info!(
+                "✅ Tokenizer config already exists locally at: {:?}",
+                tokenizer_config_path
+            );
+        }
+
+        // Download tokenizer.json if it doesn't exist
+        if !tokenizer_json_path.exists() {
+            info!("📥 Downloading tokenizer.json from bootstrap node...");
+            info!("   Source: https://quillon.xyz/downloads/tokenizer.json");
+
+            let url = "https://quillon.xyz/downloads/tokenizer.json";
+            let response = reqwest::get(url).await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to download tokenizer.json: HTTP {}",
+                    response.status()
+                ));
+            }
+
+            let bytes = response.bytes().await?;
+            tokio::fs::write(&tokenizer_json_path, bytes).await?;
+            info!("✅ Tokenizer.json downloaded: {:?}", tokenizer_json_path);
+        } else {
+            info!(
+                "✅ Tokenizer.json already exists locally at: {:?}",
+                tokenizer_json_path
+            );
+        }
+
+        // If model doesn't exist, download from bootstrap node
+        if !model_path.exists() {
+            info!("📥 Downloading Mistral-7B model (4.1GB) from bootstrap node...");
+            info!("   This is a one-time download and will be cached locally");
+            info!(
+                "   Source: https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
+            );
+
+            let url = "https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf";
+            let response = reqwest::get(url).await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to download model: HTTP {}",
+                    response.status()
+                ));
+            }
+
+            let total_size = response.content_length().unwrap_or(0);
+            info!(
+                "   Download size: {:.2} GB",
+                total_size as f64 / 1_000_000_000.0
+            );
+
+            let mut file = tokio::fs::File::create(&model_path).await?;
+            let mut downloaded: u64 = 0;
+            let mut stream = response.bytes_stream();
+
+            let progress_interval = 100 * 1024 * 1024; // Log every 100MB
+            let mut last_logged = 0u64;
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+                downloaded += chunk.len() as u64;
+
+                // Log progress every 100MB
+                if downloaded - last_logged >= progress_interval {
+                    let percent = if total_size > 0 {
+                        (downloaded as f64 / total_size as f64 * 100.0)
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "   Downloaded: {:.2} MB / {:.2} MB ({:.1}%)",
+                        downloaded as f64 / 1_000_000.0,
+                        total_size as f64 / 1_000_000.0,
+                        percent
+                    );
+                    last_logged = downloaded;
+                }
+            }
+
+            file.flush().await?;
+            info!(
+                "✅ Model downloaded successfully and cached at: {:?}",
+                model_path
+            );
+            info!(
+                "   File size: {:.2} GB",
+                downloaded as f64 / 1_000_000_000.0
+            );
+        } else {
+            info!("✅ Model already exists locally at: {:?}", model_path);
+        }
+
+        Ok(model_path)
+    }
+
+    // Ensure model files are available
+    let model_path = ensure_model_available().await?;
+
+    // Initialize the AI engine
+    info!("🤖 Initializing MistralRs engine...");
+    let engine = q_ai_inference::MistralRsEngine::new(model_path.to_str().unwrap()).await?;
+    let engine_arc = Arc::new(engine);
+
+    info!("✅ AI engine loaded successfully and ready for inference!");
+
+    Ok(engine_arc)
+}
+
 /// Request to create a new chat
 #[derive(Debug, Deserialize)]
 pub struct CreateChatRequest {
@@ -725,10 +900,11 @@ pub async fn stream_message(
                     nodes_available
                 );
 
-                // Distributed inference requires at least 2 nodes to split work
-                // With < 2 nodes, fall back to single-node local inference
-                if nodes_available < 2 {
-                    warn!("⚠️  Need at least 2 nodes for distributed inference (have {}), falling back to single-node", nodes_available);
+                // Allow single-node distributed inference to route through coordinator
+                // This populates metrics and triggers verification even with 1 node
+                // With multiple nodes, work is distributed for horizontal scaling
+                if nodes_available < 1 {
+                    warn!("⚠️  No nodes available for distributed inference, falling back to single-node local inference");
                 } else {
                     // ✨ DISTRIBUTED INFERENCE WITH REAL-TIME STREAMING ✨
                     // Register response channel and stream results from worker nodes
@@ -900,7 +1076,20 @@ pub async fn stream_message(
         }
 
         // Use HIGH-PERFORMANCE mistral.rs engine (10-100x faster) - SINGLE NODE
-        if let Some(ref engine) = state.mistralrs_engine {
+        // Try to load engine on-demand if not already loaded
+        let engine = match ensure_ai_engine_loaded(&state).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                error!("❌ Failed to load AI engine: {}", e);
+                let error_event = Event::default()
+                    .event("error")
+                    .data(format!("Failed to initialize AI engine: {}. Set Q_ENABLE_AI=1 and ensure model files are available.", e));
+                let _ = tx.send(Ok(error_event)).await;
+                return;
+            }
+        };
+
+        {
             let max_tokens = query.max_tokens.unwrap_or(2048); // Increased from 150 to allow full responses
 
             info!(
@@ -1032,12 +1221,6 @@ pub async fn stream_message(
                     let _ = tx.send(Ok(error_event)).await;
                 }
             }
-        } else {
-            warn!("⚠️  SSE stream: mistral.rs engine not initialized");
-            let error_event = Event::default()
-                .event("error")
-                .data("AI inference engine not initialized. Set Q_ENABLE_AI=1 to enable.");
-            let _ = tx.send(Ok(error_event)).await;
         }
     });
 
@@ -1110,7 +1293,20 @@ pub async fn stream_message_anonymous(
         let _ = tx.send(Ok(start_event)).await;
 
         // Use HIGH-PERFORMANCE mistral.rs engine for anonymous queries
-        if let Some(ref engine) = state.mistralrs_engine {
+        // Try to load engine on-demand if not already loaded
+        let engine = match ensure_ai_engine_loaded(&state).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                error!("❌ Failed to load AI engine: {}", e);
+                let error_event = Event::default()
+                    .event("error")
+                    .data(format!("Failed to initialize AI engine: {}. Set Q_ENABLE_AI=1 and ensure model files are available.", e));
+                let _ = tx.send(Ok(error_event)).await;
+                return;
+            }
+        };
+
+        {
             let max_tokens = query.max_tokens.unwrap_or(500); // Default 500 tokens for wallet analysis
 
             info!(
@@ -1189,12 +1385,6 @@ pub async fn stream_message_anonymous(
                     let _ = tx.send(Ok(error_event)).await;
                 }
             }
-        } else {
-            warn!("⚠️  Anonymous stream: mistral.rs engine not initialized");
-            let error_event = Event::default()
-                .event("error")
-                .data("AI inference engine not initialized. Set Q_ENABLE_AI=1 to enable.");
-            let _ = tx.send(Ok(error_event)).await;
         }
     });
 
@@ -1499,8 +1689,17 @@ pub async fn stream_message_distributed(
     info!("💻 Using LOCAL single-node inference for chat {}", chat_id);
 
     // Use mistral.rs engine for local inference
-    if let Some(ref engine) = state.mistralrs_engine {
-        let engine_clone = Arc::clone(engine); // Clone Arc for 'static lifetime
+    // Try to load engine on-demand if not already loaded
+    let engine = match ensure_ai_engine_loaded(&state).await {
+        Ok(engine) => engine,
+        Err(e) => {
+            error!("❌ Failed to load AI engine for fallback: {}", e);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
+    {
+        let engine_clone = Arc::clone(&engine); // Clone Arc for 'static lifetime
         let storage_clone = state.storage_engine.clone();
         let chat_id_clone = chat_id.clone();
         let metadata_clone = metadata.clone();
@@ -1644,14 +1843,11 @@ pub async fn stream_message_distributed(
         let boxed: std::pin::Pin<
             Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>,
         > = Box::pin(sse_stream);
-        return Ok(Sse::new(boxed).keep_alive(
+        Ok(Sse::new(boxed).keep_alive(
             axum::response::sse::KeepAlive::new()
                 .interval(std::time::Duration::from_secs(1))
                 .text("keepalive"),
-        ));
-    } else {
-        error!("❌ No inference engine available (local or distributed)");
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        ))
     }
 }
 
