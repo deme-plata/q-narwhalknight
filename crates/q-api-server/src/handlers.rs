@@ -407,8 +407,8 @@ pub async fn bootstrap_peers(
         } else {
             vec![]
         },
-        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string()),
-        "version": "v0.9.103-beta",
+        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase12".to_string()),
+        "version": "v1.0.32-beta",
         "bootstrap_node": true,
         "discovery_method": "dynamic",
         "status": if peer_id != "discovering..." { "ready" } else { "initializing" },
@@ -6937,10 +6937,10 @@ pub async fn get_address_book(
     let wallet_hex = hex::encode(&auth.address);
     let address_book_key = format!("addressbook:{}", wallet_hex);
 
-    // Fetch from RocksDB hot storage
+    // Fetch from RocksDB hot storage (using CF_MANIFEST for address book data)
     match state
         .storage_engine
-        .db_get("address_book", address_book_key.as_bytes())
+        .db_get("manifest", address_book_key.as_bytes())
         .await
     {
         Ok(Some(data)) => {
@@ -7011,7 +7011,7 @@ pub async fn save_address(
     // Load existing address book
     let mut addresses: Vec<AddressBookEntry> = match state
         .storage_engine
-        .db_get("address_book", address_book_key.as_bytes())
+        .db_get("manifest", address_book_key.as_bytes())
         .await
     {
         Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
@@ -7042,7 +7042,7 @@ pub async fn save_address(
         Ok(data) => {
             match state
                 .storage_engine
-                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .db_put("manifest", address_book_key.as_bytes(), &data)
                 .await
             {
                 Ok(_) => {
@@ -7090,7 +7090,7 @@ pub async fn update_address(
     // Load existing address book
     let mut addresses: Vec<AddressBookEntry> = match state
         .storage_engine
-        .db_get("address_book", address_book_key.as_bytes())
+        .db_get("manifest", address_book_key.as_bytes())
         .await
     {
         Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
@@ -7123,7 +7123,7 @@ pub async fn update_address(
         Ok(data) => {
             match state
                 .storage_engine
-                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .db_put("manifest", address_book_key.as_bytes(), &data)
                 .await
             {
                 Ok(_) => {
@@ -7169,7 +7169,7 @@ pub async fn delete_address(
     // Load existing address book
     let mut addresses: Vec<AddressBookEntry> = match state
         .storage_engine
-        .db_get("address_book", address_book_key.as_bytes())
+        .db_get("manifest", address_book_key.as_bytes())
         .await
     {
         Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_else(|_| Vec::new()),
@@ -7189,7 +7189,7 @@ pub async fn delete_address(
         Ok(data) => {
             match state
                 .storage_engine
-                .db_put("address_book", address_book_key.as_bytes(), &data)
+                .db_put("manifest", address_book_key.as_bytes(), &data)
                 .await
             {
                 Ok(_) => {
