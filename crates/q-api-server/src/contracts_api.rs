@@ -348,11 +348,18 @@ pub async fn deploy_contract(
 
     let ecosystem = &state.orobit_ecosystem;
 
+    // Ensure decimals parameter is set (default to 8 if not specified)
+    let mut deployment_params = request.parameters.clone();
+    if !deployment_params.contains_key("decimals") {
+        deployment_params.insert("decimals".to_string(), serde_json::json!(8));
+        tracing::info!("📊 Decimals not specified, defaulting to 8");
+    }
+
     match ecosystem
         .deploy_contract(
             contract_type,
             deployer,
-            request.parameters.clone(),
+            deployment_params,
             deployment_options,
         )
         .await
@@ -420,42 +427,61 @@ pub async fn deploy_contract(
                 .get("initialSupply")
                 .or_else(|| request.parameters.get("initial_supply"))
             {
-                // Get decimals from parameters (for display purposes only)
+                // Get decimals from parameters
+                // Default to 8 decimals (same as QUG/QUGUSD) for consistency
                 let decimals = request
                     .parameters
                     .get("decimals")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(18) as u32;
+                    .unwrap_or(8) as u32;
 
-                // ULTRA-SIMPLE APPROACH: Number you enter = Number you get (in base units)
-                // User enters 1 → Gets 1 base unit
-                // User enters 1000000000 → Gets 1 billion base units
-                // User enters 10000000000000000000000 → Gets 10 sextillion base units
-                //
-                // NO multiplication or division - just use the raw number!
+                // v1.0.49-beta: CRITICAL FIX - Convert human-readable to base units
+                // User enters "1000000" (1 million tokens)
+                // We store: 1000000 * 10^8 = 100,000,000,000,000 base units
+                // This matches how liquidity and swaps work (8 decimal standard)
+                let decimal_multiplier = 10u64.pow(decimals);
 
                 let initial_supply_result: Option<u64> = if let Some(supply_u64) =
                     initial_supply_val.as_u64()
                 {
-                    // Number fits in u64 - use it directly
-                    Some(supply_u64)
+                    // Convert to base units: multiply by 10^decimals
+                    let base_units = (supply_u64 as u128) * (decimal_multiplier as u128);
+                    if base_units <= u64::MAX as u128 {
+                        tracing::info!(
+                            "✅ Token supply: {} display tokens × 10^{} = {} base units",
+                            supply_u64,
+                            decimals,
+                            base_units
+                        );
+                        Some(base_units as u64)
+                    } else {
+                        tracing::error!(
+                            "❌ Initial supply {} × 10^{} = {} exceeds u64::MAX",
+                            supply_u64,
+                            decimals,
+                            base_units
+                        );
+                        None
+                    }
                 } else if let Some(supply_str) = initial_supply_val.as_str() {
-                    // Large number as string
+                    // Parse string and convert to base units
                     match supply_str.parse::<u128>() {
                         Ok(supply_u128) => {
-                            if supply_u128 <= u64::MAX as u128 {
-                                let result = supply_u128 as u64;
+                            let base_units = supply_u128 * (decimal_multiplier as u128);
+                            if base_units <= u64::MAX as u128 {
                                 tracing::info!(
-                                    "✅ User entered {} base units → stored as {} base units",
+                                    "✅ Token supply: {} display tokens × 10^{} = {} base units",
                                     supply_str,
-                                    result
+                                    decimals,
+                                    base_units
                                 );
-                                Some(result)
+                                Some(base_units as u64)
                             } else {
                                 tracing::error!(
-                                    "❌ Initial supply {} exceeds u64::MAX ({}). Maximum allowed: {}",
+                                    "❌ Initial supply {} × 10^{} = {} exceeds u64::MAX ({})",
                                     supply_str,
-                                    supply_u128,
+                                    decimals,
+                                    base_units,
                                     u64::MAX
                                 );
                                 None
@@ -475,14 +501,14 @@ pub async fn deploy_contract(
 
                 match initial_supply_result {
                     Some(initial_supply) if initial_supply > 0 => {
-                        // Mint tokens to deployer's wallet
+                        // Mint tokens to deployer's wallet (in base units)
                         let mut token_balances = state.token_balances.write().await;
                         token_balances.insert((deployer, contract_address.0), initial_supply);
 
                         // Calculate human-readable amount (for logging only)
-                        let token_amount = initial_supply as f64 / 10f64.powi(decimals as i32);
+                        let token_amount = initial_supply as f64 / decimal_multiplier as f64;
                         tracing::info!(
-                            "💰 Minted {} base units (displayed as {} tokens with {} decimals) to deployer {}",
+                            "💰 Minted {} base units ({} display tokens with {} decimals) to deployer {}",
                             initial_supply,
                             token_amount,
                             decimals,
@@ -584,12 +610,14 @@ pub async fn get_user_contracts(
                         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
                 });
 
+            // v1.0.49-beta: FIXED - Default to 8 decimals (like Bitcoin satoshis)
+            // This matches the standard throughout the system
             let decimals = contract
                 .deployment_params
                 .get("decimals")
                 .and_then(|v| v.as_u64())
                 .map(|d| d as u32)
-                .or(Some(18)); // Default to 18 decimals if not specified
+                .or(Some(8)); // Default to 8 decimals (Bitcoin standard)
 
             ContractInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)), // Add qnk prefix to match wallet format
@@ -610,6 +638,9 @@ pub async fn get_user_contracts(
 
     Ok(Json(ApiResponse::success(contract_infos)))
 }
+
+/// Get user contracts (identical function)
+/// v1.0.49-beta: CRITICAL - This function is called from DexScreen.tsx for symbol mapping
 
 /// Get all contracts with optional filtering
 pub async fn get_contracts(
@@ -648,12 +679,13 @@ pub async fn get_contract_details(
                         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
                 });
 
+            // v1.0.49-beta: FIXED - Default to 8 decimals (like Bitcoin satoshis)
             let decimals = contract
                 .deployment_params
                 .get("decimals")
                 .and_then(|v| v.as_u64())
                 .map(|d| d as u32)
-                .or(Some(18)); // Default to 18 decimals if not specified
+                .or(Some(8)); // Default to 8 decimals (Bitcoin standard)
 
             let contract_info = ContractInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)),
@@ -766,7 +798,17 @@ fn parse_contract_type(contract_type_str: &str) -> Result<ContractType, String> 
 /// Token balance response
 #[derive(Debug, Serialize)]
 pub struct TokenBalanceResponse {
+    /// Balance as string to preserve precision for large numbers (JavaScript loses precision above 2^53)
+    #[serde(serialize_with = "serialize_u64_as_string")]
     pub balance: u64,
+}
+
+/// Serialize u64 as string to preserve precision in JavaScript
+fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 /// Get token balance for a wallet

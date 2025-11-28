@@ -46,6 +46,13 @@ use q_network::{CryptoProvider, QuantumNetwork};
 // Plugin System
 use q_plugin_system::{PluginManager, PluginSystem, PluginSystemConfig};
 
+// ✨ v1.0.58-beta: FROST threshold signing for validator committees (IACR 2025/1024)
+#[cfg(feature = "advanced-crypto")]
+pub mod frost_committee;
+
+// ✨ v1.0.51-beta: Crypto-enhanced instant mining rewards (AEGIS-256 authenticated)
+pub mod instant_mining_rewards;
+
 // Sharding System
 use q_sharding::{ShardConfig, ShardMetrics, ShardingEngine, ShardingStrategy};
 
@@ -185,6 +192,7 @@ pub mod aegis_auth_middleware; // ✅ ENABLED - AEGIS-QL post-quantum authentica
 pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
 pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod verification_api; // ✅ NEW - Proof-of-inference verification monitoring (SSE)
 pub mod database_replication_bridge; // Bridge between IPFS replication and gossipsub
 pub mod dex_handlers; // ✅ ENABLED - DEX HTTP API handlers
 pub mod dex_initialization; // ✅ ENABLED - DEX component initialization
@@ -283,6 +291,11 @@ pub struct LiquidityPool {
     pub reserve1: u64,
     pub provider: [u8; 32], // Wallet address that provided liquidity
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Total LP token supply (calculated using Uniswap V2 formula: sqrt(reserve0 * reserve1))
+    /// For existing pools: proportional minting
+    /// v0.6.0-beta: DEX Decentralization
+    #[serde(default)]
+    pub lp_token_supply: u64,
 }
 
 /// Mining submission for async queue processing
@@ -677,6 +690,11 @@ pub struct AppState {
     // Atomic peer count for fast lock-free access
     pub libp2p_peer_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
 
+    // 💱 v0.6.1-beta: DEX DECENTRALIZATION PHASE 3 - Pool Announcement Signing
+    // Node signing key for signing pool announcements broadcast to P2P network
+    // Persisted to disk for consistency across restarts
+    pub node_signing_key: Arc<ed25519_dalek::SigningKey>,
+
     // SYNC MODE: Track highest block height seen from network to prevent mining during sync
     pub highest_network_height: Arc<std::sync::atomic::AtomicU64>,
 
@@ -833,8 +851,17 @@ pub struct AppState {
     // Distributed AI Coordinator - Horizontal scaling across network nodes
     pub distributed_ai_coordinator: Option<Arc<q_network::DistributedAICoordinator>>,
 
+    // 🔐 AI Verification System - Proof-of-inference and worker benchmarking
+    pub proof_verifier: Option<Arc<q_ai_inference::ProofOfInferenceVerifier>>,
+    pub benchmark_verifier: Option<Arc<q_ai_inference::WorkerBenchmarkVerifier>>,
+    pub failover_manager: Option<Arc<q_network::FailoverManager>>,
+    pub verification_events_tx: Option<tokio::sync::broadcast::Sender<crate::verification_api::VerificationEvent>>,
+
     // 🚀 TURBO SYNC - Git-Inspired 50-250x Faster Blockchain Synchronization
     pub turbo_sync: Option<Arc<q_storage::TurboSyncManager>>,
+
+    // 🚀 v1.0.4-beta: PHASE 2 DAG-AWARE SYNC - 20-40x Faster with Parallel DAG Layer Fetching
+    pub enable_dag_sync: bool, // Feature flag for Phase 2 (default: true)
 
     // 🌉 v0.9.6-beta: TURBO SYNC PEER BRIDGE - Synchronizes libp2p peers to TurboSync registry
     // Fixes: "No peers available with target height" even when peers connected via libp2p
@@ -1508,6 +1535,7 @@ impl AppState {
             libp2p_command_tx: None, // Disabled in test mode
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
+            node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
@@ -1588,11 +1616,11 @@ impl AppState {
                     node_id,
                     is_validator,
                     validator_index: 0, // Will be overridden by pool for each producer
-                    total_validators: 8, // Phase 2: 8 parallel producers
+                    total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
-                let num_producers = 8; // Phase 2: 8-way parallelism for exciting multi-lane visualization
+                let num_producers = 2; // 🔧 v1.0.17-beta-v5: Reduced to 2 to eliminate CPU saturation deadlock
 
                 // ✅ v0.9.92-beta DEADLOCK FIX: Use LOCK-FREE producer pool with channel-based architecture
                 // This completely eliminates the RwLock deadlock that caused 9+ hour stalls
@@ -1730,8 +1758,17 @@ impl AppState {
             // Distributed AI Coordinator - Initialized separately
             distributed_ai_coordinator: None,
 
+            // AI Verification System - Initialized in main.rs
+            proof_verifier: None,
+            benchmark_verifier: None,
+            failover_manager: None,
+            verification_events_tx: None,
+
             // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
             turbo_sync: None,
+
+            // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync - Feature flag (set in main.rs)
+            enable_dag_sync: false, // Will be set in main.rs based on Q_ENABLE_DAG_SYNC env var
 
             // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
             // TEMPORARILY DISABLED v1.0.15: Circular dependency
@@ -2227,6 +2264,7 @@ impl AppState {
 
             // Atomic peer count (will be populated from network manager)
             libp2p_peer_count: None, // Will be initialized in main.rs after network manager creation
+            node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key (will be replaced in main.rs)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
@@ -2342,11 +2380,11 @@ impl AppState {
                     node_id,
                     is_validator,
                     validator_index: 0, // Will be overridden by pool for each producer
-                    total_validators: 8, // Phase 2: 8 parallel producers
+                    total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
-                let num_producers = 8; // Phase 2: 8-way parallelism for exciting multi-lane visualization
+                let num_producers = 2; // 🔧 v1.0.17-beta-v5: Reduced to 2 to eliminate CPU saturation deadlock
 
                 // ✅ v0.9.92-beta DEADLOCK FIX: Use LOCK-FREE producer pool with channel-based architecture
                 // This completely eliminates the RwLock deadlock that caused 9+ hour stalls
@@ -2484,8 +2522,17 @@ impl AppState {
             // Distributed AI Coordinator - Initialized separately
             distributed_ai_coordinator: None,
 
+            // AI Verification System - Initialized in main.rs
+            proof_verifier: None,
+            benchmark_verifier: None,
+            failover_manager: None,
+            verification_events_tx: None,
+
             // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
             turbo_sync: None,
+
+            // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync - Feature flag (set in main.rs)
+            enable_dag_sync: false, // Will be set in main.rs based on Q_ENABLE_DAG_SYNC env var
 
             // v0.9.6-beta: Peer Registry Bridge (initialized in main.rs)
             // TEMPORARILY DISABLED v1.0.15: Circular dependency

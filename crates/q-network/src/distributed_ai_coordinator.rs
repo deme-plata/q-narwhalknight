@@ -49,6 +49,10 @@ pub struct DistributedAICoordinator {
     /// FLAW #2 FIX: Message deduplication cache (message_id -> timestamp)
     /// Prevents duplicate processing of gossipsub messages (5-minute TTL)
     pub processed_messages: Arc<RwLock<HashMap<String, i64>>>,
+    /// v1.0.3-beta: Security metrics for monitoring signature verification (Week 2 Day 1-2)
+    pub security_metrics: Arc<super::security_metrics::SecurityMetrics>,
+    /// v1.0.3-beta: Circuit breaker for attack protection (Week 2 Day 3-4)
+    pub circuit_breaker: Arc<super::circuit_breaker::CircuitBreaker>,
 }
 
 /// AI Node information
@@ -176,6 +180,11 @@ impl DistributedAICoordinator {
 
         info!("⚖️  Load balancing: max {} concurrent requests based on hardware", max_concurrent_requests);
 
+        // v1.0.3-beta: Initialize security components
+        let security_metrics = Arc::new(super::security_metrics::SecurityMetrics::new());
+        let circuit_breaker = Arc::new(super::circuit_breaker::CircuitBreaker::new(Arc::clone(&security_metrics)));
+        info!("🔐 Security: Circuit breaker initialized (threshold: 100 failures/5min)");
+
         Ok(Self {
             node_id,
             peer_id,
@@ -194,6 +203,8 @@ impl DistributedAICoordinator {
             max_concurrent_requests,
             pending_requests: Arc::new(RwLock::new(HashMap::new())), // NEW v1.0: Data parallelism pending requests
             processed_messages: Arc::new(RwLock::new(HashMap::new())), // FLAW #2 FIX: Message deduplication cache
+            security_metrics,
+            circuit_breaker,
         })
     }
 
@@ -478,7 +489,57 @@ impl DistributedAICoordinator {
 
     /// Handle incoming AI message from network
     pub async fn handle_ai_message(&self, message: AIGossipsubMessage) -> Result<()> {
-        // FLAW #2 FIX: Check for duplicate message
+        // v1.0.3-beta Week 2 Day 3-4: Check circuit breaker FIRST (emergency stop)
+        if !self.circuit_breaker.should_process().await {
+            error!("🚨 CIRCUIT BREAKER OPEN: Rejecting message during attack protection");
+            error!("   Message ID: {}", message.message_id);
+            error!("   Sender: {} ({})", message.sender_node_id, message.sender_peer_id);
+            return Err(anyhow::anyhow!("Circuit breaker open - system under attack protection"));
+        }
+
+        // CRITICAL SECURITY FIX v1.0.3: Verify signature BEFORE processing
+        // This closes the complete security bypass identified in external audit
+
+        // Step 1: Verify timestamp (cheap check, prevents replay attacks)
+        if !message.verify_timestamp() {
+            error!("❌ REJECTED: Message timestamp outside acceptable window");
+            error!("   Message ID: {}", message.message_id);
+            error!("   Sender: {} ({})", message.sender_node_id, message.sender_peer_id);
+            return Err(anyhow::anyhow!("Invalid message timestamp"));
+        }
+
+        // Step 2: Verify signature (expensive check, prevents forgery)
+        // v1.0.3-beta Week 1 Day 5-7: Signature caching added for performance
+        let start_time = std::time::Instant::now();
+        let is_valid = message.verify_signature_async().await;
+        let verification_duration_micros = start_time.elapsed().as_micros() as u64;
+
+        // v1.0.3-beta Week 2 Day 1-2: Record metrics for monitoring
+        self.security_metrics.record_signature_verification(is_valid, verification_duration_micros).await;
+
+        // v1.0.3-beta Week 2 Day 3-4: Record verification result in circuit breaker
+        self.circuit_breaker.record_verification(is_valid).await;
+
+        if !is_valid {
+            // Protocol v0: Allow unsigned messages for backwards compatibility (TEMPORARY)
+            // Migration deadline: 2025-12-07
+            if message.protocol_version == 0 {
+                warn!("⚠️  SECURITY WARNING: Accepting unsigned v0 message (backwards compat)");
+                warn!("   Message ID: {}", message.message_id);
+                warn!("   Sender: {} ({})", message.sender_node_id, message.sender_peer_id);
+                warn!("   ⚠️  Unsigned messages will be REJECTED after 2025-12-07");
+            } else {
+                // Protocol v1+: REJECT invalid signatures
+                error!("❌ SECURITY VIOLATION: Invalid signature");
+                error!("   Message ID: {}", message.message_id);
+                error!("   Protocol version: {}", message.protocol_version);
+                error!("   Sender: {} ({})", message.sender_node_id, message.sender_peer_id);
+                error!("   🚨 POSSIBLE ATTACK: Message authentication failed");
+                return Err(anyhow::anyhow!("Invalid signature - message rejected"));
+            }
+        }
+
+        // FLAW #2 FIX: Check for duplicate message (after signature verification)
         {
             let mut cache = self.processed_messages.write().await;
             let now = chrono::Utc::now().timestamp();
@@ -1562,13 +1623,16 @@ impl DistributedAICoordinator {
 
     /// Get list of available nodes for distributed inference
     /// v1.0: Made public for API endpoint access
+    ///
+    /// EMERGENCY FIX v1.0.17-beta: Removed all logging - this is called on EVERY API request!
+    /// Was generating 270 logs/second causing livelock/deadlock.
     pub async fn get_available_nodes(&self) -> Result<Vec<AINode>> {
         let nodes = self.available_nodes.read().await;
         let now = chrono::Utc::now().timestamp();
 
-        info!("🔍 Checking available nodes for distributed inference...");
-        info!("   Total registered nodes: {}", nodes.len());
-        info!("   Current timestamp: {}", now);
+        // LOGGING REMOVED: Called too frequently (270 times/second!)
+        // This was causing a livelock that deadlocked the entire service
+        // See: DEADLOCK_ROOT_CAUSE_FOUND_DISTRIBUTED_AI_SPAM.md
 
         // Filter nodes that are active (heartbeat within last 20 seconds)
         // FLAW #1 FIX: Reduced from 60s to 20s (2× heartbeat interval of 10s)
@@ -1576,27 +1640,16 @@ impl DistributedAICoordinator {
             .values()
             .filter(|node| {
                 let time_since_heartbeat = now - node.last_heartbeat;
-                let is_active = time_since_heartbeat < 20;
-
-                debug!("   Node {}: last_heartbeat={}, time_since={}s, active={}",
-                      node.node_id, node.last_heartbeat, time_since_heartbeat, is_active);
-
-                is_active
+                time_since_heartbeat < 20
             })
             .cloned()
             .collect();
 
-        if active_nodes.is_empty() {
-            warn!("⚠️  No active peer nodes found (all nodes have heartbeat > 20s old)");
-            warn!("   This means no nodes are sending heartbeats or all have timed out");
-            warn!("   Registered nodes: {}", nodes.len());
-
-            for (node_id, node) in nodes.iter() {
-                warn!("      {} - last heartbeat: {}s ago",
-                     node_id, now - node.last_heartbeat);
-            }
-        } else {
-            info!("✅ Found {} active nodes (heartbeat within 20s)", active_nodes.len());
+        // Only log at debug level when there's a state change
+        if active_nodes.is_empty() && !nodes.is_empty() {
+            debug!("No active AI nodes ({} registered but all stale)", nodes.len());
+        } else if !active_nodes.is_empty() {
+            debug!("AI nodes available: {}/{}", active_nodes.len(), nodes.len());
         }
 
         Ok(active_nodes)

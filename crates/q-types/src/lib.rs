@@ -22,6 +22,19 @@ pub mod pqc_keys;
 // ✨ v1.0.16-beta: ZK proof integration for untrusted setup
 pub mod zk_proof_integration;
 
+// ✨ MessagePack versioned types for P2P messaging
+pub mod messagepack;
+
+// ✨ v1.0.3-beta: Block-Vertex mapping for DAG-aware sync (Phase 1)
+pub mod block_vertex_map;
+
+// ✨ v0.6.0-beta: Liquidity pool P2P broadcasting (DEX Decentralization Phase 2)
+pub mod liquidity_pool;
+
+// ✨ v1.0.58-beta: Advanced cryptographic primitives (FROST, AEGIS, SQIsign, Bulletproofs, etc.)
+#[cfg(feature = "advanced-crypto")]
+pub mod advanced_crypto;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
@@ -44,6 +57,21 @@ pub use pqc_keys::{
 pub use block_pack::{
     BlockPackRequest, BlockPackResponse, BlockPackProtocol,
     BlockPackCodec, MAX_BLOCKS_PER_REQUEST,
+};
+
+// Re-export MessagePack versioned types
+pub use messagepack::{
+    VersionedBlock, VersionedTransaction,
+    BLOCK_VERSION, TRANSACTION_VERSION,
+};
+
+// Re-export block-vertex mapping
+pub use block_vertex_map::BlockVertexMap;
+
+// Re-export liquidity pool P2P types
+pub use liquidity_pool::{
+    PoolAnnouncement, PoolSyncRequest, PoolSyncResponse,
+    PoolAnnouncementRateLimiter,
 };
 
 // P2P block synchronization types are defined at the end of this file (BlockRequest, BlockResponse)

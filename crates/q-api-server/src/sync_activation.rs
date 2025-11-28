@@ -4,7 +4,7 @@ use std::sync::Arc;
 /// Implements timeout-based sync activation to break the "stuck at genesis" deadlock.
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct SyncActivationConfig {
@@ -53,10 +53,22 @@ impl TimeoutBasedSyncActivation {
         peer_count: usize,
         network_height: u64,
     ) -> bool {
+        // 🔍🔍🔍 v1.0.19-rc1: LOUD DIAGNOSTIC LOGGING
+        // This function is CRITICAL - if it's not called or returns wrong value, sync won't work
+        error!("🔍🔍🔍 [SYNC ACTIVATION] should_force_sync() CALLED!");
+        error!("    current_height: {}", current_height);
+        error!("    network_height: {}", network_height);
+        error!("    peer_count: {}", peer_count);
+
         let now = Instant::now();
         let since_startup = now.duration_since(self.startup_time);
 
         let clearly_behind = network_height > current_height + 5;
+        let gap = network_height.saturating_sub(current_height);
+
+        // More diagnostic logging
+        error!("    gap: {}", gap);
+        error!("    clearly_behind: {}", clearly_behind);
 
         // ✅ KIMI AI FIX: Remove hardcoded 13000 threshold
         // Dynamic stagnation check: node is stagnant if significantly behind network OR at very low height

@@ -49,6 +49,27 @@ pub mod turbo_sync;
 // pub mod turbo_sync_peer_bridge;
 pub mod zk_block_request_auth;
 pub mod memory_limiter;  // ✅ v1.0.15.1-beta - Adaptive memory management for sync operations
+pub mod encryption;  // ✅ v1.0.39-beta - RocksDB encryption-at-rest with Argon2id + AES-GCM
+pub mod encryption_stream;  // ✅ v1.0.40-beta - AES-CTR stream cipher for SST/WAL files
+pub mod encryption_ffi;  // ✅ v1.0.40-beta - FFI bindings for C++ EncryptionProvider
+pub mod encryption_migration;  // ✅ v1.0.41-beta - Transitional provider for online migration
+pub mod encryption_zkstark;  // ✅ v1.0.43-beta - ZK-STARK proofs for untrusted automatic setup
+
+// ========== v1.0.4-beta: Phase 2 DAG-Aware Sync (20-40x Performance) ==========
+pub mod sync_state_manager;  // Checkpoint/resume for crash recovery
+pub mod dag_layer_detector;  // Topological DAG layer organization
+pub mod parallel_batch_fetcher;  // Concurrent block fetching with concurrency limits
+pub mod causal_validator;  // DAG parent dependency enforcement
+pub mod dag_sync_manager;  // Orchestration layer (wires all Phase 2 components)
+
+// ========== v1.0.5-beta: Request Pipelining (libp2p-rust Phase 2) ==========
+pub mod request_pipeline;  // Request pipelining with adaptive window sizing (+50% performance)
+
+// ========== v1.0.6-beta: Pack Caching (libp2p-rust Phase 3) ==========
+pub mod pack_cache;  // Server-side LRU cache for compressed block packs (+30% performance)
+
+// ========== v1.0.50-beta: Crypto-Enhanced Sync (IACR 2024-2025 Papers) ==========
+pub mod crypto_enhanced_sync;  // Incremental verification, adaptive timeout, checkpointing
 
 // Windows uses sled implementation
 #[cfg(target_os = "windows")]
@@ -97,6 +118,22 @@ pub use zk_block_request_auth::{
     BlockRequestAuthenticator, AuthenticatedBlockPackRequest, AuthenticatedBlockPackResponse,
     generate_block_request_proof,
 };
+pub use encryption::{
+    ProtectedKey, PassphraseKDF, KeysFileHeader, CpuCapabilities, EncryptionManager,
+};
+pub use encryption_stream::{
+    EncryptedFileHeader, AesCtrStream, WalEncryption, FileEncryptionManager,
+};
+pub use encryption_migration::{
+    TransitionalEncryptionProvider, FileEncryptionStatus, MigrationProgress, FileFormatDetector,
+};
+
+// ========== v1.0.4-beta: Phase 2 DAG-Aware Sync Exports ==========
+pub use sync_state_manager::{SyncStateManager, SyncCheckpoint, SyncProgress};
+pub use dag_layer_detector::{DagLayerDetector, BlockHeader as DagBlockHeader};
+pub use parallel_batch_fetcher::{ParallelBatchFetcher, BatchFetchConfig, NetworkFetcher};
+pub use causal_validator::CausalValidator;
+pub use dag_sync_manager::{DagSyncManager, DagSyncConfig, SyncStats};
 
 /// Column family names for optimized storage
 pub const CF_BLOCKS: &str = "blocks";
@@ -271,6 +308,20 @@ impl QStorage {
 
         info!("✅ Q-Storage initialized successfully");
         Ok(storage)
+    }
+
+    /// Get reference to the underlying KV store (hot_db)
+    ///
+    /// # Usage
+    /// Used by DAG sync manager to access raw KV operations for block storage.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let kv = storage_engine.get_kv();
+    /// let dag_sync = DagSyncManager::new(kv, block_vertex_map, config);
+    /// ```
+    pub fn get_kv(&self) -> Arc<dyn KVStore> {
+        self.hot_db.clone()
     }
 
     /// Begin atomic transaction
@@ -556,6 +607,9 @@ impl QStorage {
         };
 
         // Commit entire batch atomically
+        // NOTE: Using regular write_batch (with fsync) because bulk mode breaks P2P
+        // Testing showed bulk mode causes P2P mesh collapse without improving sync speed
+        // Real bottleneck is network delivery (~260ms/block), not database writes (~3ms/block)
         self.hot_db.write_batch(batch).await
             .context("Failed to write batch QBlocks to database")?;
 
@@ -752,6 +806,13 @@ impl QStorage {
         }
 
         Ok(cached_height)
+    }
+
+    /// 🚨 v1.0.41-beta: Public method to update height cache from external callers
+    /// Used by libp2p sync to update cache after Transaction.save_qblock() commits
+    /// (Transaction doesn't have access to Storage's height_cache)
+    pub async fn update_height_cache(&self, height: u64) {
+        self.height_cache.update(height).await;
     }
 
     /// INTERNAL: Scan database for highest height (called ONLY on cache initialization)

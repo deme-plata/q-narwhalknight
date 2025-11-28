@@ -29,6 +29,7 @@ pub mod real_peer_discovery;
 // libp2p-based peer discovery (zero-config mDNS + gossipsub)
 pub mod unified_network_manager;
 pub mod libp2p_bridge;
+pub mod dag_sync_adapter; // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync network adapter
 
 // Resonance consensus protocol (Phase 3: String-theoretic consensus)
 pub mod resonance_protocol;
@@ -38,6 +39,10 @@ pub mod transaction_tunneling;
 
 // ZK Peer Height Proofs - Trustless P2P Sync (v0.9.6-beta)
 pub mod zk_peer_height_proof;
+
+// ✨ v1.0.58-beta: Lattice Aggregate Signatures for 98% bandwidth reduction (IACR 2025/1056)
+#[cfg(feature = "advanced-crypto")]
+pub mod lattice_gossip;
 
 pub use crypto_agile::{AgileHandshake, CryptoProvider, CryptoScheme, Kyber1024KeyExchange};
 pub use network_manager::{NetworkManager, NetworkManagerConfig};
@@ -57,12 +62,19 @@ pub use resonance_protocol::{
 // Export transaction tunneling components
 pub use transaction_tunneling::{
     TunnelingEngine, TunnelingConfig, TunnelingProfile, TunnelingResult,
-    TunnelingStats, CircuitBreakerState, ConsensusMessageType,
+    TunnelingStats, ConsensusMessageType,
 };
 
 // Export ZK peer height proof components (v0.9.6-beta)
 pub use zk_peer_height_proof::{
     PeerHeightWithProof, PeerHeightVerifier, generate_height_proof,
+};
+
+// ✨ v1.0.58-beta: Lattice aggregate signature exports (98% bandwidth reduction)
+#[cfg(feature = "advanced-crypto")]
+pub use lattice_gossip::{
+    GossipAggregator, GossipAggregatorConfig, AggregatedGossipMessage,
+    GossipSigningKey, GossipBatchVerifier, LatticeSecurityLevel, AggregationStats,
 };
 
 // Export protocol handshake components (v0.9.57-beta)
@@ -80,6 +92,11 @@ pub mod distributed_inference_bridge;
 pub mod kv_cache_manager;
 pub mod distributed_mistralrs_bridge;
 pub mod encrypted_tensor_forwarding; // PRIVACY: ZK + Aegis-QL encrypted tensors
+pub mod failover_manager; // Automatic failover & retry logic
+pub mod public_key_dht; // v1.0.3-beta: DHT-based public key distribution (Showstopper #2 fix)
+pub mod signature_cache; // v1.0.3-beta: Signature verification cache with TOCTOU fix (Showstopper #3 fix)
+pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verification (Week 2, Day 1-2)
+pub mod circuit_breaker; // v1.0.3-beta: Circuit breaker for attack protection (Week 2, Day 3-4)
 
 // Export distributed components
 pub use distributed_vm::{
@@ -116,7 +133,22 @@ pub use kv_cache_manager::{
 };
 pub use distributed_mistralrs_bridge::{
     DistributedMistralRsBridge, DistributedMistralRsConfig,
-    DistributedRequest, DistributedResponse,
+};
+pub use public_key_dht::{
+    PublicKeyDhtManager, NodePublicKeyAnnouncement, CachedPublicKey,
+};
+pub use signature_cache::{
+    SignatureCache, CacheStats,
+};
+pub use security_metrics::{
+    SecurityMetrics, SignatureVerificationStats, CachePerformanceStats, DhtOperationStats,
+};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitBreakerState,
+};
+pub use failover_manager::{
+    FailoverManager, FailoverConfig, FailoverDecision, WorkerHealth,
+    FailureRecord, FailureType,
 };
 
 // Simplified network structure for compilation

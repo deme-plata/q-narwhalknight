@@ -23,6 +23,7 @@ rand = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 libp2p = { workspace = true }
+tokio = { workspace = true }
 serde_cbor = "0.11"
 # ✨ v1.0.15-beta: Post-quantum cryptography
 pqcrypto-dilithium = "0.5"
@@ -34,6 +35,8 @@ argon2 = "0.5"
 zeroize = "1.7"
 hex = "0.4"
 tracing = { workspace = true }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives from IACR papers
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 
 [dev-dependencies]
 rpassword = "7.3"
@@ -41,3 +44,4 @@ rpassword = "7.3"
 [features]
 default = []
 signing = []
+advanced-crypto = ["q-crypto-advanced"]

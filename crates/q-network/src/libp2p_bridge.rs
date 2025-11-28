@@ -6,6 +6,7 @@ use libp2p::{
     swarm::{Swarm, SwarmEvent, NetworkBehaviour},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
+use libp2p_websocket as websocket;
 use libp2p::identity::Keypair as Libp2pKeypair;
 use libp2p::mdns::Event as MdnsEvent;
 use futures::StreamExt;
@@ -35,6 +36,11 @@ pub enum BridgeEvent {
     ValidatorDiscovered { peer_id: String, capabilities: Vec<String> },
     /// Network health update
     NetworkHealth { connected_peers: usize, topics: Vec<String> },
+    /// Pool announcement received (DEX Decentralization Phase 3)
+    PoolAnnouncement {
+        announcement: q_types::PoolAnnouncement,
+        peer: String,
+    },
 }
 
 /// Custom libp2p behaviour combining gossip, mDNS, and identification
@@ -87,11 +93,28 @@ impl Libp2pBridge {
     ) -> Result<(Self, mpsc::Sender<DhtEvent>)> {
         let peer_id = PeerId::from(local_key.public());
 
-        // Transport: TCP + Noise encryption + Yamux multiplexing
-        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+        // Transport: TCP + WebSocket + Noise encryption + Yamux multiplexing
+        // TCP transport for node-to-node connections
+        let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default())
             .upgrade(libp2p::core::upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key)?)
-            .multiplex(yamux::Config::default())
+            .multiplex(yamux::Config::default());
+
+        // WebSocket transport for browser-to-node connections
+        // WebSocket is layered on top of TCP transport
+        let ws_tcp_transport = tcp::tokio::Transport::new(tcp::Config::default());
+        let ws_transport = websocket::Config::new(ws_tcp_transport)
+            .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+            .authenticate(noise::Config::new(&local_key)?)
+            .multiplex(yamux::Config::default());
+
+        // Combine both transports with OrTransport
+        let transport = tcp_transport
+            .or_transport(ws_transport)
+            .map(|either, _| match either {
+                futures::future::Either::Left((peer_id, muxer)) => (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)),
+                futures::future::Either::Right((peer_id, muxer)) => (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)),
+            })
             .boxed();
 
         // Gossipsub configuration optimized for consensus
@@ -119,7 +142,7 @@ impl Libp2pBridge {
                 peer_id,
             )?,
             identify: identify::Behaviour::new(identify::Config::new(
-                "/qnk/1.0.0".to_string(),
+                "/qnarwhal/1.0.0".to_string(),  // v1.0.2-beta: Standardized protocol ID for P2P compatibility
                 local_key.public(),
             )),
         };
@@ -127,7 +150,9 @@ impl Libp2pBridge {
         let mut swarm = Swarm::new(transport, behaviour, peer_id, libp2p::swarm::Config::with_tokio_executor());
 
         // Listen on all interfaces for P2P connections
-        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+        // Port 9001 for both TCP (node-to-node) and WebSocket (browser-to-node)
+        swarm.listen_on("/ip4/0.0.0.0/tcp/9001".parse()?)?;
+        swarm.listen_on("/ip4/0.0.0.0/tcp/9001/ws".parse()?)?;
 
         let (dht_tx, dht_rx) = mpsc::channel(1000);
 
@@ -154,6 +179,7 @@ impl Libp2pBridge {
             "/qnk/consensus/votes",       // Consensus votes
             "/qnk/peers/discovery",       // Peer announcements from DHT
             "/qnk/network/health",        // Network health monitoring
+            "/qnk/liquidity-pools",       // DEX liquidity pool announcements (v0.6.0-beta)
         ];
 
         for topic_str in topics {
@@ -285,34 +311,48 @@ impl Libp2pBridge {
                 message_id: _,
                 message,
             })) => {
+                let topic_str = message.topic.to_string();
+
                 debug!(
                     peer = %propagation_source,
-                    topic = %message.topic,
+                    topic = %topic_str,
                     data_len = message.data.len(),
                     "Gossip message received"
                 );
 
-                // Forward to consensus layer
-                let bridge_event = BridgeEvent::ConsensusMessage {
-                    topic: message.topic.to_string(),
-                    data: message.data,
-                    peer: propagation_source.to_string(),
-                };
+                // DEX Decentralization Phase 3: Handle liquidity pool announcements
+                if topic_str == "/qnk/liquidity-pools" {
+                    if let Err(e) = self.handle_pool_announcement(&message.data, &propagation_source).await {
+                        warn!(
+                            peer = %propagation_source,
+                            error = %e,
+                            "Failed to handle pool announcement"
+                        );
+                    }
+                    // Don't forward to consensus layer - handled separately
+                } else {
+                    // Forward other topics to consensus layer
+                    let bridge_event = BridgeEvent::ConsensusMessage {
+                        topic: topic_str,
+                        data: message.data,
+                        peer: propagation_source.to_string(),
+                    };
 
-                if let Err(e) = self.bridge_tx.send(bridge_event).await {
-                    warn!(error = %e, "Failed to forward gossip message");
+                    if let Err(e) = self.bridge_tx.send(bridge_event).await {
+                        warn!(error = %e, "Failed to forward gossip message");
+                    }
                 }
             }
 
             SwarmEvent::Behaviour(QnkBehaviourEvent::Identify(identify_event)) => {
                 match identify_event {
-                    identify::Event::Received { peer_id, info } => {
+                    identify::Event::Received { peer_id, info, connection_id: _ } => {
                         debug!(peer = %peer_id, protocol = %info.protocol_version, "Identified peer");
                     }
                     identify::Event::Sent { .. } => {
                         debug!("Sent identify info");
                     }
-                    identify::Event::Error { peer_id, error } => {
+                    identify::Event::Error { peer_id, error, connection_id: _ } => {
                         warn!(peer = ?peer_id, error = %error, "Identify error");
                     }
                     identify::Event::Pushed { .. } => {
@@ -387,6 +427,149 @@ impl Libp2pBridge {
     pub fn publish_to_topic(&mut self, topic: &str, data: Vec<u8>) -> Result<()> {
         let topic = IdentTopic::new(topic);
         self.swarm.behaviour_mut().gossipsub.publish(topic, data)?;
+        Ok(())
+    }
+
+    /// Broadcast liquidity pool announcement to P2P network
+    /// v0.6.0-beta: DEX Decentralization Phase 3
+    ///
+    /// Publishes a signed PoolAnnouncement to the `/qnk/liquidity-pools` gossipsub topic.
+    /// The announcement must be signed before broadcasting (call announcement.sign() first).
+    ///
+    /// # Arguments
+    /// * `announcement` - Signed pool announcement with cryptographic verification
+    ///
+    /// # Returns
+    /// * `Ok(())` if broadcast successful
+    /// * `Err` if serialization or gossipsub publish fails
+    pub fn broadcast_pool_announcement(
+        &mut self,
+        announcement: q_types::PoolAnnouncement,
+    ) -> Result<()> {
+        // Verify announcement signature before broadcasting
+        announcement.verify_signature()
+            .map_err(|e| AnyhowError::msg(format!("Pool announcement signature invalid: {}", e)))?;
+
+        // Verify announcement structure
+        announcement.verify_structure()
+            .map_err(|e| AnyhowError::msg(format!("Pool announcement structure invalid: {}", e)))?;
+
+        // Serialize to JSON for P2P transmission
+        let announcement_json = serde_json::to_vec(&announcement)
+            .map_err(|e| AnyhowError::msg(format!("Failed to serialize pool announcement: {}", e)))?;
+
+        // Publish to liquidity pools topic
+        let topic = IdentTopic::new("/qnk/liquidity-pools");
+        self.swarm.behaviour_mut().gossipsub.publish(topic, announcement_json)?;
+
+        info!(
+            pool_id = ?announcement.pool_id,
+            creator = ?announcement.creator,
+            reserve0 = announcement.reserve0,
+            reserve1 = announcement.reserve1,
+            lp_supply = announcement.lp_token_supply,
+            "📢 Broadcast pool announcement to P2P network"
+        );
+
+        Ok(())
+    }
+
+    /// Handle incoming pool announcement from P2P network
+    /// v0.6.0-beta: DEX Decentralization Phase 3
+    async fn handle_pool_announcement(
+        &mut self,
+        data: &[u8],
+        peer_id: &PeerId,
+    ) -> Result<()> {
+        // Security Fix #3: Validate message size (prevent memory exhaustion)
+        const MAX_POOL_ANNOUNCEMENT_SIZE: usize = 2048;  // 2 KB max
+        if data.len() > MAX_POOL_ANNOUNCEMENT_SIZE {
+            warn!(
+                peer = %peer_id,
+                size = data.len(),
+                max_size = MAX_POOL_ANNOUNCEMENT_SIZE,
+                "Pool announcement too large"
+            );
+            return Err(AnyhowError::msg("Message size exceeds limit"));
+        }
+
+        // Deserialize announcement
+        let announcement: q_types::PoolAnnouncement = serde_json::from_slice(data)
+            .map_err(|e| AnyhowError::msg(format!("Failed to deserialize pool announcement: {}", e)))?;
+
+        // Verify signature
+        if let Err(e) = announcement.verify_signature() {
+            warn!(
+                peer = %peer_id,
+                error = %e,
+                "Rejected pool announcement: invalid signature"
+            );
+            return Err(AnyhowError::msg("Invalid signature"));
+        }
+
+        // Verify structure
+        if let Err(e) = announcement.verify_structure() {
+            warn!(
+                peer = %peer_id,
+                error = %e,
+                "Rejected pool announcement: invalid structure"
+            );
+            return Err(AnyhowError::msg("Invalid structure"));
+        }
+
+        // Security Fix #2: Validate timestamp (prevent replay attacks)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| AnyhowError::msg(format!("System time error: {}", e)))?
+            .as_secs();
+
+        const MAX_AGE_SECONDS: u64 = 3600;  // 1 hour old max
+        const MAX_FUTURE_SECONDS: u64 = 300;  // 5 minutes in future max
+
+        if announcement.timestamp < now.saturating_sub(MAX_AGE_SECONDS) {
+            warn!(
+                peer = %peer_id,
+                timestamp = announcement.timestamp,
+                now = now,
+                age = now - announcement.timestamp,
+                "Pool announcement too old (rejected)"
+            );
+            return Err(AnyhowError::msg("Pool announcement expired"));
+        }
+
+        if announcement.timestamp > now + MAX_FUTURE_SECONDS {
+            warn!(
+                peer = %peer_id,
+                timestamp = announcement.timestamp,
+                now = now,
+                future_offset = announcement.timestamp - now,
+                "Pool announcement from future (rejected)"
+            );
+            return Err(AnyhowError::msg("Pool announcement timestamp invalid"));
+        }
+
+        info!(
+            peer = %peer_id,
+            pool_id = ?announcement.pool_id,
+            token0 = ?announcement.token0,
+            token1 = ?announcement.token1,
+            reserve0 = announcement.reserve0,
+            reserve1 = announcement.reserve1,
+            lp_supply = announcement.lp_token_supply,
+            "📥 Received valid pool announcement from P2P network"
+        );
+
+        // Forward to bridge consumer for storage
+        let bridge_event = BridgeEvent::PoolAnnouncement {
+            announcement: announcement.clone(),
+            peer: peer_id.to_string(),
+        };
+
+        if let Err(e) = self.bridge_tx.send(bridge_event).await {
+            warn!(error = %e, "Failed to forward pool announcement to bridge consumer");
+            return Err(AnyhowError::msg("Failed to forward event"));
+        }
+
         Ok(())
     }
 

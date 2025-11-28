@@ -24,10 +24,22 @@ pub mod kyber_wallet;
 pub mod sphincs_wallet;
 pub mod hybrid_wallet;
 
+// ✨ v1.0.58-beta: SQIsign compact signatures (IACR 2025/847)
+// Smallest post-quantum signatures: 204 bytes vs 49KB SPHINCS+
+#[cfg(feature = "advanced-crypto")]
+pub mod sqisign_wallet;
+
 // Re-export key types for convenience
 pub use dilithium_wallet::{Dilithium5KeyPair, Dilithium5StoredWallet};
 pub use kyber_wallet::{Kyber1024KeyPair, Kyber1024Ciphertext, KyberHybridEncryption};
 pub use hybrid_wallet::{HybridWallet, HybridStoredWallet, HybridSignature, CryptoPhase};
+
+// ✨ v1.0.58-beta: SQIsign compact signatures (99.6% smaller than SPHINCS+)
+#[cfg(feature = "advanced-crypto")]
+pub use sqisign_wallet::{
+    SqiSignWallet, SqiWalletLevel, SqiWalletSignature, SqiStoredWallet,
+    SqiBatchVerifier, SqiSignatureAggregator,
+};
 
 /// Main wallet interface for the Q-NarwhalKnight system
 pub struct QWallet {

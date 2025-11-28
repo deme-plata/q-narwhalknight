@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::io;
 
 /// Maximum blocks per request to prevent DoS
-pub const MAX_BLOCKS_PER_REQUEST: usize = 1000;
+/// v1.0.46-beta: Increased from 1000 to 5000 for faster sync
+/// Q-NarwhalKnight blocks are small (~2-5KB), so 5000 blocks = ~10-25MB per response
+pub const MAX_BLOCKS_PER_REQUEST: usize = 5000;
 
 /// Block pack request for efficient blockchain sync
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,17 +64,24 @@ pub struct BlockPackResponse {
 
     /// Whether more blocks are available beyond this response
     pub has_more: bool,
+
+    /// v1.0.45-beta: Peer's highest block height for progress tracking
+    /// This allows the requesting node to show accurate sync progress
+    #[serde(default)]
+    pub peer_height: u64,
 }
 
 impl BlockPackResponse {
-    /// Create response from blocks
-    pub fn from_blocks(blocks: Vec<QBlock>, requested_end: u64) -> Self {
+    /// Create response from blocks with peer's current height for progress tracking
+    /// v1.0.45-beta: Added peer_height parameter for sync progress display
+    pub fn from_blocks(blocks: Vec<QBlock>, requested_end: u64, peer_height: u64) -> Self {
         if blocks.is_empty() {
             return Self {
                 blocks: vec![],
                 start_height: 0,
                 end_height: 0,
                 has_more: false,
+                peer_height,
             };
         }
 
@@ -85,7 +94,13 @@ impl BlockPackResponse {
             start_height,
             end_height,
             has_more,
+            peer_height,
         }
+    }
+
+    /// Legacy constructor without peer_height (for backward compatibility)
+    pub fn from_blocks_legacy(blocks: Vec<QBlock>, requested_end: u64) -> Self {
+        Self::from_blocks(blocks, requested_end, 0)
     }
 }
 

@@ -46,6 +46,9 @@ pub mod mistralrs_engine;
 pub mod model_manager;
 pub mod chat_templates;
 pub mod distributed_engine;
+pub mod proof_of_inference;
+pub mod worker_benchmark;
+pub mod qwen3_vl;
 
 // Re-export commonly used types
 pub use types::{
@@ -86,6 +89,17 @@ pub use mistralrs_engine::{MistralRsEngine, MistralRsConfig, StreamEvent};
 pub use model_manager::{ModelManager, ModelMetadata};
 pub use chat_templates::{format_chat_prompt, format_conversation, parse_kimi_k2_reasoning};
 pub use distributed_engine::DistributedMistralEngine;
+pub use proof_of_inference::{
+    ProofOfInferenceVerifier, InferenceProof, TokenProof, Challenge, ChallengeResponse,
+    VerificationResult, SlashingRecord, ProofConfig,
+};
+pub use worker_benchmark::{
+    WorkerBenchmarkVerifier, BenchmarkChallenge, BenchmarkResult, BenchmarkVerification,
+    PerformanceThresholds, BenchmarkConfig,
+};
+pub use qwen3_vl::{
+    Qwen3VLProcessor, Qwen3VLConfig, ImageAttachment,
+};
 
 #[cfg(test)]
 mod tests {

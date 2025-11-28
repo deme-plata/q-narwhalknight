@@ -65,14 +65,18 @@ regex = "1.11"
 # Compression for tensor data
 flate2 = "1.0"
 
+# Image processing for vision models
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
 # Q-NarwhalKnight internal crates
 q-types = { path = "../q-types" }
 # q-network = { path = "../q-network" }  # Removed to break cyclic dependency
 q-aegis-ql = { path = "../q-aegis-ql" }
 q-zk-stark = { path = "../q-zk-stark" }
 
-# Cryptography for privacy layer
+# Cryptography for privacy layer and proof-of-inference
 aes-gcm = "0.10"
+sha2 = "0.10"  # SHA-256 for Merkle trees
 sha3 = "0.10"
 rand = "0.8"
 getrandom = "0.2"
@@ -94,6 +98,10 @@ path = "examples/test_forward_pass.rs"
 [[example]]
 name = "test_full_generation"
 path = "examples/test_full_generation.rs"
+
+[[example]]
+name = "test_qwen3vl_inference"
+path = "examples/test_qwen3vl_inference.rs"
 
 [features]
 default = []

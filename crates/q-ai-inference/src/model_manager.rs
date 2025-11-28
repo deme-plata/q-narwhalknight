@@ -128,8 +128,15 @@ impl ModelMetadata {
                     70.0,
                     38000,
                 )
+            } else if name.contains("Qwen3-VL-8B") || name.contains("qwen3-vl-8b") {
+                (
+                    "Qwen3-VL-8B-Instruct-Q4_K_M.gguf".to_string(),
+                    32, // 32 layers for 8B model
+                    8.0,
+                    5120, // ~5.1 GB with Q4_K_M quantization
+                )
             } else {
-                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Llama-7B, Llama-13B, Llama-70B", name));
+                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Llama-7B, Llama-13B, Llama-70B, Qwen3-VL-8B", name));
             };
 
         let download_url = format!("{}/downloads/{}", base_url, gguf_filename);

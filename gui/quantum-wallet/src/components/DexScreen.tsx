@@ -15,7 +15,9 @@ interface Token {
   name: string;
   balance: number;
   price: number;
+  change1h: number;   // 1-hour price change percentage
   change24h: number;
+  change7d: number;   // 7-day price change percentage
   volume24h: number;
   liquidity: number;
   icon: string;
@@ -346,53 +348,125 @@ export default function DexScreen() {
         }
 
         // Fetch all liquidity pools to calculate real liquidity per token
+        // v1.0.49-beta: ENHANCED - Better address/symbol mapping from pools
         let poolsByToken: Map<string, number> = new Map();
+        let addressToSymbol: Map<string, string> = new Map(); // Reverse map for display
         try {
           const poolsResponse = await qnkAPI.getLiquidityPools();
           if (poolsResponse.success && poolsResponse.data) {
-            // Aggregate liquidity by token
-            poolsResponse.data.forEach((pool: any) => {
-              // Add liquidity for token0
-              const token0 = pool.token0 === 'QUG' ? 'native-qug' : pool.token0 === 'QUGUSD' ? 'qugusd-stable' : pool.token0;
-              poolsByToken.set(token0, (poolsByToken.get(token0) || 0) + (pool.reserve0 || 0));
+            // Build a symbol-to-address map for resolving custom tokens
+            let symbolToAddress: Map<string, string> = new Map();
 
-              // Add liquidity for token1
-              const token1 = pool.token1 === 'QUG' ? 'native-qug' : pool.token1 === 'QUGUSD' ? 'qugusd-stable' : pool.token1;
-              poolsByToken.set(token1, (poolsByToken.get(token1) || 0) + (pool.reserve1 || 0));
+            // Fetch user contracts to map symbols to addresses
+            if (walletAddress) {
+              try {
+                const userContractsResponse = await qnkAPI.getUserContracts(walletAddress);
+                if (userContractsResponse.success && userContractsResponse.data) {
+                  userContractsResponse.data.forEach((contract: any) => {
+                    symbolToAddress.set(contract.symbol.toUpperCase(), contract.address);
+                    addressToSymbol.set(contract.address, contract.symbol);
+                    console.log(`📍 Mapped symbol ${contract.symbol} => ${contract.address}`);
+                  });
+                }
+              } catch (error) {
+                console.log('ℹ️ Could not fetch user contracts for symbol mapping:', error);
+              }
+            }
+
+            // Also fetch supported tokens and add to map
+            try {
+              const supportedTokensResponse = await qnkAPI.getSupportedTokens();
+              if (supportedTokensResponse.success && supportedTokensResponse.data) {
+                supportedTokensResponse.data.forEach((token: any) => {
+                  symbolToAddress.set(token.symbol.toUpperCase(), token.address);
+                  addressToSymbol.set(token.address, token.symbol);
+                });
+              }
+            } catch (error) {
+              console.log('ℹ️ Could not fetch supported tokens for symbol mapping:', error);
+            }
+
+            // v1.0.49-beta: Aggregate liquidity by token ADDRESS (not symbol)
+            // Backend now stores pools with canonical addresses (qnk...) which fixes duplicate pool bug
+            poolsResponse.data.forEach((pool: any) => {
+              // Resolve token0 to address key
+              let token0Key: string;
+              if (pool.token0 === 'QUG' || pool.token0.toUpperCase() === 'QUG') {
+                token0Key = 'native-qug';
+              } else if (pool.token0 === 'QUGUSD' || pool.token0.toUpperCase() === 'QUGUSD') {
+                token0Key = 'qugusd-stable';
+              } else if (pool.token0.startsWith('qnk') || pool.token0.startsWith('0x')) {
+                // Already an address - use directly (v1.0.49-beta: pools now use canonical addresses)
+                token0Key = pool.token0;
+              } else {
+                // It's a symbol, resolve to address
+                token0Key = symbolToAddress.get(pool.token0.toUpperCase()) || pool.token0;
+                if (token0Key !== pool.token0) {
+                  console.log(`🔍 Resolved pool.token0 "${pool.token0}" => "${token0Key}"`);
+                }
+              }
+              poolsByToken.set(token0Key, (poolsByToken.get(token0Key) || 0) + (pool.reserve0 || 0));
+
+              // Resolve token1 to address key
+              let token1Key: string;
+              if (pool.token1 === 'QUG' || pool.token1.toUpperCase() === 'QUG') {
+                token1Key = 'native-qug';
+              } else if (pool.token1 === 'QUGUSD' || pool.token1.toUpperCase() === 'QUGUSD') {
+                token1Key = 'qugusd-stable';
+              } else if (pool.token1.startsWith('qnk') || pool.token1.startsWith('0x')) {
+                // Already an address - use directly (v1.0.49-beta: pools now use canonical addresses)
+                token1Key = pool.token1;
+              } else {
+                // It's a symbol, resolve to address
+                token1Key = symbolToAddress.get(pool.token1.toUpperCase()) || pool.token1;
+                if (token1Key !== pool.token1) {
+                  console.log(`🔍 Resolved pool.token1 "${pool.token1}" => "${token1Key}"`);
+                }
+              }
+              poolsByToken.set(token1Key, (poolsByToken.get(token1Key) || 0) + (pool.reserve1 || 0));
             });
-            console.log('✅ Calculated liquidity from pools:', Object.fromEntries(poolsByToken));
+
+            console.log('✅ Calculated liquidity from pools (by address):', Object.fromEntries(poolsByToken));
           }
         } catch (error) {
           console.error('Failed to fetch liquidity pools:', error);
         }
 
-        // Fetch real price from oracle API
+        // Fetch real price from oracle API with all time periods
         let qugPrice = 42.50;
-        let qugChange = 0;
+        let qugChange1h = 0;
+        let qugChange24h = 0;
+        let qugChange7d = 0;
         let qugVolume = 0;
         try {
           const oracleResponse = await qnkAPI.getOraclePrice('QUG/USD');
           if (oracleResponse.success && oracleResponse.data) {
             qugPrice = oracleResponse.data.price;
-            qugChange = oracleResponse.data.change_24h || 0;
+            qugChange1h = oracleResponse.data.change_1h || 0;
+            qugChange24h = oracleResponse.data.change_24h || 0;
+            qugChange7d = oracleResponse.data.change_7d || 0;
             qugVolume = oracleResponse.data.volume_24h || 0;
-            console.log('✅ Fetched QUG price from oracle:', qugPrice, 'volume:', qugVolume);
+            console.log('✅ Fetched QUG metrics from oracle:', { price: qugPrice, change1h: qugChange1h, change24h: qugChange24h, change7d: qugChange7d, volume: qugVolume });
           }
         } catch (error) {
           console.error('Failed to fetch QUG price from oracle:', error);
         }
 
-        // Fetch QUGUSD price from oracle
+        // Fetch QUGUSD price from oracle with all time periods
         let qugusdPrice = 1.00;
-        let qugusdChange = 0;
+        let qugusdChange1h = 0;
+        let qugusdChange24h = 0;
+        let qugusdChange7d = 0;
         let qugusdVolume = 0;
         try {
           const oracleResponse = await qnkAPI.getOraclePrice('QUGUSD/USD');
           if (oracleResponse.success && oracleResponse.data) {
             qugusdPrice = oracleResponse.data.price;
-            qugusdChange = oracleResponse.data.change_24h || 0;
+            qugusdChange1h = oracleResponse.data.change_1h || 0;
+            qugusdChange24h = oracleResponse.data.change_24h || 0;
+            qugusdChange7d = oracleResponse.data.change_7d || 0;
             qugusdVolume = oracleResponse.data.volume_24h || 0;
-            console.log('✅ Fetched QUGUSD price from oracle:', qugusdPrice, 'volume:', qugusdVolume);
+            console.log('✅ Fetched QUGUSD metrics from oracle:', { price: qugusdPrice, change1h: qugusdChange1h, change24h: qugusdChange24h, change7d: qugusdChange7d, volume: qugusdVolume });
           }
         } catch (error) {
           console.error('Failed to fetch QUGUSD price from oracle:', error);
@@ -428,7 +502,9 @@ export default function DexScreen() {
             name: 'Quillon',
             balance: nativeQugBalance,
             price: qugPrice,
-            change24h: qugChange,
+            change1h: qugChange1h,
+            change24h: qugChange24h,
+            change7d: qugChange7d,
             volume24h: qugVolume,
             liquidity: poolsByToken.get('native-qug') || 0,
             marketCap: 625000000,
@@ -458,7 +534,9 @@ export default function DexScreen() {
             name: 'Quillon USD',
             balance: qugusdBalance,
             price: qugusdPrice,
-            change24h: qugusdChange,
+            change1h: qugusdChange1h,
+            change24h: qugusdChange24h,
+            change7d: qugusdChange7d,
             volume24h: qugusdVolume,
             liquidity: poolsByToken.get('qugusd-stable') || 0,
             marketCap: 125000000,
@@ -488,7 +566,9 @@ export default function DexScreen() {
             name: 'US Dollar',
             balance: usdBalance,
             price: 1.00,
+            change1h: 0,
             change24h: 0,
+            change7d: 0,
             volume24h: 0,
             liquidity: poolsByToken.get('fiat-usd') || 0,
             marketCap: 0,
@@ -564,38 +644,59 @@ export default function DexScreen() {
                 }
               }
 
-              // Fetch custom token price from oracle (if available)
-              let customPrice = 1.0; // Default price
-              let customChange = 0;
+              // Fetch custom token metrics from oracle (if available)
+              let customPrice = 1.0;
+              let customChange1h = 0;
+              let customChange24h = 0;
+              let customChange7d = 0;
               let customVolume = 0;
+              let customMarketCap = 0;
+              let customHolders = 0;
               try {
                 const oracleResponse = await qnkAPI.getOraclePrice(apiToken.address);
                 if (oracleResponse.success && oracleResponse.data) {
-                  customPrice = oracleResponse.data.price;
-                  customChange = oracleResponse.data.change_24h || 0;
+                  customPrice = oracleResponse.data.price || 1.0;
+                  customChange1h = oracleResponse.data.change_1h || 0;
+                  customChange24h = oracleResponse.data.change_24h || 0;
+                  customChange7d = oracleResponse.data.change_7d || 0;
                   customVolume = oracleResponse.data.volume_24h || 0;
-                  console.log(`✅ Fetched ${apiToken.symbol} price from oracle:`, customPrice, 'volume:', customVolume);
+                  customMarketCap = oracleResponse.data.market_cap || 0;
+                  customHolders = oracleResponse.data.holders || 0;
+                  console.log(`✅ Fetched ${apiToken.symbol} metrics from oracle:`, {
+                    price: customPrice,
+                    change1h: customChange1h,
+                    change24h: customChange24h,
+                    change7d: customChange7d,
+                    volume: customVolume,
+                    marketCap: customMarketCap,
+                    holders: customHolders
+                  });
                 }
               } catch (error) {
-                console.log(`ℹ️ No oracle price for ${apiToken.symbol}, using defaults`);
+                console.log(`ℹ️ No oracle data for ${apiToken.symbol}, using defaults`);
               }
 
               // Get real liquidity from pools for this token
               const tokenLiquidity = poolsByToken.get(apiToken.address) || 0;
 
+              // Calculate market cap if not provided by oracle
+              const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
+
               return {
                 id: apiToken.address,
                 symbol: apiToken.symbol,
                 name: apiToken.name,
-                balance: tokenBalance, // Balance converted to human-readable form (base units / 10^decimals)
+                balance: tokenBalance,
                 price: customPrice,
-                change24h: customChange,
+                change1h: customChange1h,
+                change24h: customChange24h,
+                change7d: customChange7d,
                 volume24h: customVolume,
                 liquidity: tokenLiquidity,
-                marketCap: 225000000,
+                marketCap: calculatedMarketCap,
                 totalSupply: actualSupply || 10000000,
                 circulatingSupply: actualSupply || 10000000,
-                holders: 8250,
+                holders: customHolders,
                 icon: '🪙',
                 features: {
                   reflection: false,
@@ -666,24 +767,43 @@ export default function DexScreen() {
               }
             }
 
-            // Fetch custom token price from oracle (if available)
-            let customPrice = 1.0; // Default price
-            let customChange = 0;
+            // Fetch custom token metrics from oracle (if available)
+            let customPrice = 1.0;
+            let customChange1h = 0;
+            let customChange24h = 0;
+            let customChange7d = 0;
             let customVolume = 0;
+            let customMarketCap = 0;
+            let customHolders = 0;
             try {
               const oracleResponse = await qnkAPI.getOraclePrice(contract.address);
               if (oracleResponse.success && oracleResponse.data) {
-                customPrice = oracleResponse.data.price;
-                customChange = oracleResponse.data.change_24h || 0;
+                customPrice = oracleResponse.data.price || 1.0;
+                customChange1h = oracleResponse.data.change_1h || 0;
+                customChange24h = oracleResponse.data.change_24h || 0;
+                customChange7d = oracleResponse.data.change_7d || 0;
                 customVolume = oracleResponse.data.volume_24h || 0;
-                console.log(`✅ Fetched ${contract.symbol} price from oracle:`, customPrice);
+                customMarketCap = oracleResponse.data.market_cap || 0;
+                customHolders = oracleResponse.data.holders || 0;
+                console.log(`✅ Fetched ${contract.symbol} metrics from oracle:`, {
+                  price: customPrice,
+                  change1h: customChange1h,
+                  change24h: customChange24h,
+                  change7d: customChange7d,
+                  volume: customVolume,
+                  marketCap: customMarketCap,
+                  holders: customHolders
+                });
               }
             } catch (error) {
-              console.log(`ℹ️ No oracle price for ${contract.symbol}, using defaults`);
+              console.log(`ℹ️ No oracle data for ${contract.symbol}, using defaults`);
             }
 
             // Get real liquidity from pools for this token
             const tokenLiquidity = poolsByToken.get(contract.address) || 0;
+
+            // Calculate market cap if not provided by oracle
+            const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
 
             return {
               id: contract.address,
@@ -691,13 +811,15 @@ export default function DexScreen() {
               name: contract.name || contract.symbol,
               balance: tokenBalance,
               price: customPrice,
-              change24h: customChange,
+              change1h: customChange1h,
+              change24h: customChange24h,
+              change7d: customChange7d,
               volume24h: customVolume,
               liquidity: tokenLiquidity,
-              marketCap: 0,
+              marketCap: calculatedMarketCap,
               totalSupply: actualSupply || 0,
               circulatingSupply: actualSupply || 0,
-              holders: 0,
+              holders: customHolders,
               icon: '🪙',
               features: {
                 reflection: false,
@@ -903,7 +1025,8 @@ export default function DexScreen() {
   const filteredTokens = tokens
     .filter(token => {
       const matchesSearch = token.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                           token.name.toLowerCase().includes(searchQuery.toLowerCase());
+                           token.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                           token.id.toLowerCase().includes(searchQuery.toLowerCase());
 
       if (filterBy === 'gainers') return matchesSearch && token.change24h > 0;
       if (filterBy === 'losers') return matchesSearch && token.change24h < 0;
@@ -1042,7 +1165,9 @@ export default function DexScreen() {
         name: contract.token_name || contract.name || 'Custom Token',
         balance: tokenBalance, // Balance is already in human-readable form from backend
         price: 1.0, // Default price, can be calculated from liquidity pools later
+        change1h: 0,
         change24h: 0,
+        change7d: 0,
         volume24h: 0,
         liquidity: actualSupply, // Use calculated supply
         marketCap: 0,
@@ -1285,8 +1410,8 @@ export default function DexScreen() {
                     <div className="flex items-center justify-between">
                       <span className="text-gray-400">Your Reserves:</span>
                       <div className="text-right">
-                        <div className="text-white text-sm">{removingPool.reserve0.toLocaleString()} {removingPool.token0}</div>
-                        <div className="text-white text-sm">{removingPool.reserve1.toLocaleString()} {removingPool.token1}</div>
+                        <div className="text-white text-sm">{(removingPool.reserve0 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token0}</div>
+                        <div className="text-white text-sm">{(removingPool.reserve1 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token1}</div>
                       </div>
                     </div>
                   </div>
@@ -1318,11 +1443,11 @@ export default function DexScreen() {
                     <div className="space-y-1">
                       <div className="flex justify-between">
                         <span className="text-gray-400">{removingPool.token0}:</span>
-                        <span className="text-white font-bold">{Math.floor((removingPool.reserve0 * removePercentage) / 100).toLocaleString()}</span>
+                        <span className="text-white font-bold">{((removingPool.reserve0 / 100_000_000) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-400">{removingPool.token1}:</span>
-                        <span className="text-white font-bold">{Math.floor((removingPool.reserve1 * removePercentage) / 100).toLocaleString()}</span>
+                        <span className="text-white font-bold">{((removingPool.reserve1 / 100_000_000) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
                       </div>
                     </div>
                   </div>
@@ -2214,13 +2339,13 @@ export default function DexScreen() {
                         <div className="bg-quantum-cyan/10 border border-quantum-cyan/20 rounded-lg p-3">
                           <div className="text-xs text-gray-400 mb-1">Reserve {pool.token0}</div>
                           <div className="text-sm font-bold text-white">
-                            {pool.reserve0.toLocaleString()}
+                            {(pool.reserve0 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
                           </div>
                         </div>
                         <div className="bg-quantum-purple/10 border border-quantum-purple/20 rounded-lg p-3">
                           <div className="text-xs text-gray-400 mb-1">Reserve {pool.token1}</div>
                           <div className="text-sm font-bold text-white">
-                            {pool.reserve1.toLocaleString()}
+                            {(pool.reserve1 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
                           </div>
                         </div>
                         <div className="bg-quantum-green/10 border border-quantum-green/20 rounded-lg p-3">
@@ -2277,7 +2402,9 @@ export default function DexScreen() {
                                       name: contract.token_name || contract.name || 'Custom Token',
                                       balance: tokenBalance,
                                       price: 1.0,
+                                      change1h: 0,
                                       change24h: 0,
+                                      change7d: 0,
                                       volume24h: 0,
                                       liquidity: actualSupply,
                                       marketCap: 0,
@@ -2348,7 +2475,9 @@ export default function DexScreen() {
                                           name: contract.token_name || contract.name || pool.token0,
                                           balance: tokenBalance,
                                           price: 1.0,
+                                          change1h: 0,
                                           change24h: 0,
+                                          change7d: 0,
                                           volume24h: 0,
                                           liquidity: actualSupply,
                                           marketCap: 0,
@@ -2441,7 +2570,7 @@ export default function DexScreen() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search tokens..."
+                    placeholder="Search by name, symbol, or address (qnk...)..."
                     className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-quantum-cyan/50 transition-colors"
                   />
                 </div>
@@ -2593,13 +2722,13 @@ export default function DexScreen() {
                           ${token.price.toLocaleString()}
                         </td>
 
-                        {/* 1h Change */}
+                        {/* 1h Change - REAL DATA */}
                         <td className="py-4 px-4 text-right">
                           <div className={`flex items-center justify-end gap-1 ${
-                            (token.change24h * 0.3) > 0 ? 'text-quantum-green' : 'text-red-500'
+                            token.change1h > 0 ? 'text-quantum-green' : 'text-red-500'
                           }`}>
                             <span className="font-medium">
-                              {(token.change24h * 0.3) > 0 ? '+' : ''}{(token.change24h * 0.3).toFixed(2)}%
+                              {token.change1h > 0 ? '+' : ''}{token.change1h.toFixed(2)}%
                             </span>
                           </div>
                         </td>
@@ -2620,13 +2749,13 @@ export default function DexScreen() {
                           </div>
                         </td>
 
-                        {/* 7d Change */}
+                        {/* 7d Change - REAL DATA */}
                         <td className="py-4 px-4 text-right">
                           <div className={`flex items-center justify-end gap-1 ${
-                            (token.change24h * 4.2) > 0 ? 'text-quantum-green' : 'text-red-500'
+                            token.change7d > 0 ? 'text-quantum-green' : 'text-red-500'
                           }`}>
                             <span className="font-medium">
-                              {(token.change24h * 4.2) > 0 ? '+' : ''}{(token.change24h * 4.2).toFixed(2)}%
+                              {token.change7d > 0 ? '+' : ''}{token.change7d.toFixed(2)}%
                             </span>
                           </div>
                         </td>

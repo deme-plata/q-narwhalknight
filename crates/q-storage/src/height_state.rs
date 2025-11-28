@@ -65,10 +65,17 @@ impl HeightState {
     }
 
     /// Update the cached height and broadcast to subscribers
+    /// 🚨 v1.0.41-beta: CRITICAL FIX - Only update if new height is HIGHER
+    /// This prevents height regression when out-of-order batch responses arrive
+    /// (e.g., batch 1-200 arriving after batch 800-1000 shouldn't set cache to 200)
     pub async fn update(&self, h: u64) {
-        self.cached.store(h, Ordering::Relaxed);
-        *self.last_refresh.write().await = Instant::now();
-        let _ = self.tx.send(h);
+        let current = self.cached.load(Ordering::Relaxed);
+        if h > current {
+            self.cached.store(h, Ordering::Relaxed);
+            *self.last_refresh.write().await = Instant::now();
+            let _ = self.tx.send(h);
+        }
+        // If h <= current, silently ignore (not an error, just out-of-order)
     }
 
     /// Check if the cache is fresh (within max_age)

@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 q-types = { path = "../q-types" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,6 +38,11 @@ pqcrypto-traits = "0.3"
 
 # Encryption
 aes-gcm = "0.10"
+
+[features]
+default = []
+# ✨ v1.0.58-beta: Enable SQIsign compact signatures (204 bytes vs 49KB SPHINCS+)
+advanced-crypto = ["q-crypto-advanced"]
 
 [dev-dependencies]
 proptest = { workspace = true }

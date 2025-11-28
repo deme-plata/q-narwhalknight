@@ -1,9 +1,38 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send } from 'lucide-react';
+import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send, History, BarChart3, TrendingUp, Activity, Clock, ArrowUpRight, ArrowDownRight, Gift, Percent, PieChart } from 'lucide-react';
 
 type ContractCategory = 'tokens' | 'defi' | 'rwa' | 'governance';
 type DeploymentStep = 'select' | 'basics' | 'features' | 'review' | 'deploying' | 'success';
+type ContractTab = 'control' | 'events' | 'stats';
+
+// Event types for contract history
+interface ContractEvent {
+  id: string;
+  type: 'mint' | 'burn' | 'transfer' | 'airdrop' | 'pause' | 'unpause' | 'stake' | 'unstake' | 'reflection';
+  amount?: string;
+  from?: string;
+  to?: string;
+  recipients?: number;
+  timestamp: Date;
+  txHash: string;
+}
+
+// Token stats interface
+interface TokenStats {
+  totalSupply: string;
+  circulatingSupply: string;
+  burnedTokens: string;
+  holders: number;
+  totalTransfers: number;
+  totalMinted: string;
+  totalBurned: string;
+  totalAirdropped: string;
+  stakingAPY?: string;
+  totalStaked?: string;
+  reflectionRate?: string;
+  totalReflections?: string;
+}
 
 interface DeployedContract {
   address: string;
@@ -24,6 +53,7 @@ interface DeployedContract {
   isPaused?: boolean;
   logoUrl?: string; // libp2p IPFS CID for logo
   logoDataUrl?: string; // Base64 data URL for display (temporary until uploaded)
+  abaBalance?: string; // Total ABA balance held by the token contract
 }
 
 interface ContractTemplate {
@@ -158,6 +188,75 @@ export default function VittuaVMScreen() {
   const [loadingContracts, setLoadingContracts] = useState(true);
   const [lastDeployedAddress, setLastDeployedAddress] = useState<string>('');
 
+  // Contract tab state - tracks which tab is active for each contract
+  const [activeContractTabs, setActiveContractTabs] = useState<Record<string, ContractTab>>({});
+
+  // Contract events - stores event history per contract
+  const [contractEvents, setContractEvents] = useState<Record<string, ContractEvent[]>>({});
+
+  // Contract stats - stores tokenomics per contract
+  const [contractStats, setContractStats] = useState<Record<string, TokenStats>>({});
+
+  // Helper to get active tab for a contract (defaults to 'control')
+  const getActiveTab = (contractAddress: string): ContractTab => {
+    return activeContractTabs[contractAddress] || 'control';
+  };
+
+  // Helper to set active tab for a contract
+  const setActiveTab = (contractAddress: string, tab: ContractTab) => {
+    setActiveContractTabs(prev => ({ ...prev, [contractAddress]: tab }));
+  };
+
+  // Generate mock events for a contract (in real implementation, fetch from API)
+  const getContractEvents = (contract: DeployedContract): ContractEvent[] => {
+    if (contractEvents[contract.address]) {
+      return contractEvents[contract.address];
+    }
+
+    // Generate mock events based on contract features
+    const events: ContractEvent[] = [
+      {
+        id: '1',
+        type: 'mint',
+        amount: contract.abaBalance || '1,000,000',
+        to: localStorage.getItem('walletAddress') || '',
+        timestamp: contract.deployedAt,
+        txHash: `0x${contract.address.slice(3, 11)}...initial`
+      }
+    ];
+
+    // Cache the events
+    setContractEvents(prev => ({ ...prev, [contract.address]: events }));
+    return events;
+  };
+
+  // Generate mock stats for a contract (in real implementation, fetch from API)
+  const getContractStats = (contract: DeployedContract): TokenStats => {
+    if (contractStats[contract.address]) {
+      return contractStats[contract.address];
+    }
+
+    const balance = parseFloat(contract.abaBalance?.replace(/,/g, '') || '1000000');
+    const stats: TokenStats = {
+      totalSupply: contract.abaBalance || '1,000,000',
+      circulatingSupply: contract.abaBalance || '1,000,000',
+      burnedTokens: '0',
+      holders: 1,
+      totalTransfers: 0,
+      totalMinted: contract.abaBalance || '1,000,000',
+      totalBurned: '0',
+      totalAirdropped: '0',
+      stakingAPY: contract.features.staking ? '12.5%' : undefined,
+      totalStaked: contract.features.staking ? '0' : undefined,
+      reflectionRate: contract.features.reflection ? '2%' : undefined,
+      totalReflections: contract.features.reflection ? '0' : undefined,
+    };
+
+    // Cache the stats
+    setContractStats(prev => ({ ...prev, [contract.address]: stats }));
+    return stats;
+  };
+
   // Load contracts from localStorage on mount for instant display
   React.useEffect(() => {
     const walletAddress = localStorage.getItem('walletAddress');
@@ -211,7 +310,7 @@ export default function VittuaVMScreen() {
 
         if (result.success && result.data) {
           // Map backend contract data to frontend format
-          const contracts: DeployedContract[] = result.data.map((c: any) => ({
+          const contractsWithoutBalances: DeployedContract[] = result.data.map((c: any) => ({
             address: c.address, // Already has qnk prefix from backend
             name: c.name,
             symbol: c.symbol || 'N/A',
@@ -221,12 +320,40 @@ export default function VittuaVMScreen() {
             isPaused: false,
           }));
 
-          console.log('✅ Loaded', contracts.length, 'deployed contracts from blockchain');
-          setDeployedContracts(contracts);
+          // Fetch token balance for each contract (user's balance OF each token)
+          const contractsWithBalances = await Promise.all(
+            contractsWithoutBalances.map(async (contract) => {
+              try {
+                // Fetch user's balance of this token from API
+                const balanceResponse = await fetch(`/api/v1/contracts/${contract.address}/balance/${walletAddress}`);
+                if (balanceResponse.ok) {
+                  const balanceResult = await balanceResponse.json();
+                  if (balanceResult.success && balanceResult.data) {
+                    // The balance is returned as a string to preserve precision for large numbers
+                    // Display as-is without decimal conversion since contracts store as whole numbers
+                    const rawBalance = balanceResult.data.balance || '0';
+                    // Handle both string and number formats for backwards compatibility
+                    const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+                    // Format with commas for display
+                    const formattedBalance = BigInt(balanceStr).toLocaleString();
+                    console.log(`✅ Fetched balance for ${contract.symbol}:`, formattedBalance);
+                    return { ...contract, abaBalance: formattedBalance };
+                  }
+                }
+                console.warn(`⚠️ Failed to fetch balance for contract ${contract.address} - response not ok or no data`);
+              } catch (error) {
+                console.warn(`❌ Failed to fetch balance for contract ${contract.address}:`, error);
+              }
+              return { ...contract, abaBalance: '0' };
+            })
+          );
+
+          console.log('✅ Loaded', contractsWithBalances.length, 'deployed contracts from blockchain with ABA balances');
+          setDeployedContracts(contractsWithBalances);
 
           // Cache contracts in localStorage for instant display on next mount
           const cacheKey = `deployedContracts_${walletAddress}`;
-          localStorage.setItem(cacheKey, JSON.stringify(contracts));
+          localStorage.setItem(cacheKey, JSON.stringify(contractsWithBalances));
           console.log('💾 Cached contracts to localStorage');
         }
       } catch (error) {
@@ -1294,8 +1421,70 @@ export default function VittuaVMScreen() {
                   <div className="font-mono text-sm text-quantum-green break-all">{contract.address}</div>
                 </div>
 
-                {/* Contract Controls */}
-                {Object.keys(contract.features).length > 0 && (
+                {/* Token Balance */}
+                {contract.abaBalance !== undefined && (
+                  <div className="bg-gradient-to-r from-quantum-cyan/10 to-quantum-purple/10 border border-quantum-cyan/30 rounded-lg p-3 mb-4">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs text-gray-400">Your Balance</div>
+                      <div className="text-lg font-bold text-quantum-cyan">{contract.abaBalance} {contract.symbol}</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tab Navigation */}
+                <div className="flex gap-2 mb-4 border-b border-quantum-purple/20 pb-3">
+                  <motion.button
+                    onClick={() => setActiveTab(contract.address, 'control')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      getActiveTab(contract.address) === 'control'
+                        ? 'bg-quantum-purple/30 text-white border border-quantum-purple/50'
+                        : 'bg-quantum-dark/30 text-gray-400 hover:text-white hover:bg-quantum-dark/50'
+                    }`}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <Settings className="w-4 h-4" />
+                    Control
+                  </motion.button>
+                  <motion.button
+                    onClick={() => setActiveTab(contract.address, 'events')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      getActiveTab(contract.address) === 'events'
+                        ? 'bg-quantum-cyan/30 text-white border border-quantum-cyan/50'
+                        : 'bg-quantum-dark/30 text-gray-400 hover:text-white hover:bg-quantum-dark/50'
+                    }`}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <History className="w-4 h-4" />
+                    Events
+                  </motion.button>
+                  <motion.button
+                    onClick={() => setActiveTab(contract.address, 'stats')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      getActiveTab(contract.address) === 'stats'
+                        ? 'bg-quantum-green/30 text-white border border-quantum-green/50'
+                        : 'bg-quantum-dark/30 text-gray-400 hover:text-white hover:bg-quantum-dark/50'
+                    }`}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <BarChart3 className="w-4 h-4" />
+                    Stats
+                  </motion.button>
+                </div>
+
+                {/* Tab Content */}
+                <AnimatePresence mode="wait">
+                  {/* Control Tab */}
+                  {getActiveTab(contract.address) === 'control' && Object.keys(contract.features).length > 0 && (
+                    <motion.div
+                      key="control"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                    >
                   <div className="space-y-4">
                     <div className="flex items-center gap-2 mb-3">
                       <Settings className="w-4 h-4 text-quantum-purple" />
@@ -1312,9 +1501,15 @@ export default function VittuaVMScreen() {
                           </div>
                           <div className="flex gap-2">
                             <input
-                              type="number"
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
                               value={mintAmount}
-                              onChange={(e) => setMintAmount(e.target.value)}
+                              onChange={(e) => {
+                                // Only allow digits
+                                const value = e.target.value.replace(/[^0-9]/g, '');
+                                setMintAmount(value);
+                              }}
                               placeholder="Amount"
                               className="flex-1 bg-quantum-dark/70 border border-quantum-green/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-green/50 focus:outline-none"
                             />
@@ -1340,9 +1535,14 @@ export default function VittuaVMScreen() {
                           </div>
                           <div className="flex gap-2">
                             <input
-                              type="number"
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
                               value={burnAmount}
-                              onChange={(e) => setBurnAmount(e.target.value)}
+                              onChange={(e) => {
+                                const value = e.target.value.replace(/[^0-9]/g, '');
+                                setBurnAmount(value);
+                              }}
                               placeholder="Amount"
                               className="flex-1 bg-quantum-dark/70 border border-quantum-orange/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-orange/50 focus:outline-none"
                             />
@@ -1376,9 +1576,14 @@ export default function VittuaVMScreen() {
                             />
                             <div className="flex gap-2">
                               <input
-                                type="number"
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
                                 value={airdropAmount}
-                                onChange={(e) => setAirdropAmount(e.target.value)}
+                                onChange={(e) => {
+                                  const value = e.target.value.replace(/[^0-9]/g, '');
+                                  setAirdropAmount(value);
+                                }}
                                 placeholder="Amount per address"
                                 className="flex-1 bg-quantum-dark/70 border border-quantum-blue/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-blue/50 focus:outline-none"
                               />
@@ -1551,7 +1756,216 @@ export default function VittuaVMScreen() {
                       View in Explorer
                     </motion.button>
                   </div>
-                )}
+                    </motion.div>
+                  )}
+
+                  {/* Events Tab */}
+                  {getActiveTab(contract.address) === 'events' && (
+                    <motion.div
+                      key="events"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      <div className="flex items-center gap-2 mb-3">
+                        <History className="w-4 h-4 text-quantum-cyan" />
+                        <h4 className="font-bold text-white">Event History</h4>
+                      </div>
+
+                      {/* Event List */}
+                      <div className="space-y-3 max-h-96 overflow-y-auto">
+                        {getContractEvents(contract).length === 0 ? (
+                          <div className="bg-quantum-dark/50 rounded-lg p-6 text-center">
+                            <Activity className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                            <p className="text-gray-400 text-sm">No events recorded yet</p>
+                          </div>
+                        ) : (
+                          getContractEvents(contract).map((event) => (
+                            <div
+                              key={event.id}
+                              className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-purple/10 hover:border-quantum-purple/30 transition-colors"
+                            >
+                              <div className="flex items-start justify-between mb-2">
+                                <div className="flex items-center gap-2">
+                                  {event.type === 'mint' && <ArrowUpRight className="w-4 h-4 text-quantum-green" />}
+                                  {event.type === 'burn' && <Flame className="w-4 h-4 text-quantum-orange" />}
+                                  {event.type === 'transfer' && <Send className="w-4 h-4 text-quantum-blue" />}
+                                  {event.type === 'airdrop' && <Gift className="w-4 h-4 text-quantum-purple" />}
+                                  {event.type === 'pause' && <PauseCircle className="w-4 h-4 text-quantum-yellow" />}
+                                  {event.type === 'unpause' && <PlayCircle className="w-4 h-4 text-quantum-green" />}
+                                  {event.type === 'stake' && <TrendingUp className="w-4 h-4 text-quantum-cyan" />}
+                                  {event.type === 'unstake' && <ArrowDownRight className="w-4 h-4 text-quantum-pink" />}
+                                  {event.type === 'reflection' && <Percent className="w-4 h-4 text-quantum-purple" />}
+                                  <span className="font-medium text-white capitalize">{event.type}</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs text-gray-500">
+                                  <Clock className="w-3 h-3" />
+                                  {event.timestamp.toLocaleDateString()} {event.timestamp.toLocaleTimeString()}
+                                </div>
+                              </div>
+
+                              {event.amount && (
+                                <div className="flex items-center gap-2 text-sm mb-2">
+                                  <span className="text-gray-400">Amount:</span>
+                                  <span className={`font-medium ${
+                                    event.type === 'mint' ? 'text-quantum-green' :
+                                    event.type === 'burn' ? 'text-quantum-orange' :
+                                    'text-white'
+                                  }`}>
+                                    {event.type === 'mint' ? '+' : event.type === 'burn' ? '-' : ''}{event.amount} {contract.symbol}
+                                  </span>
+                                </div>
+                              )}
+
+                              {event.to && (
+                                <div className="flex items-center gap-2 text-sm mb-2">
+                                  <span className="text-gray-400">To:</span>
+                                  <span className="font-mono text-xs text-quantum-cyan truncate max-w-xs">{event.to}</span>
+                                </div>
+                              )}
+
+                              {event.recipients && (
+                                <div className="flex items-center gap-2 text-sm mb-2">
+                                  <span className="text-gray-400">Recipients:</span>
+                                  <span className="text-white">{event.recipients} addresses</span>
+                                </div>
+                              )}
+
+                              <div className="flex items-center gap-2 text-xs">
+                                <span className="text-gray-500">TX:</span>
+                                <span className="font-mono text-quantum-green/70 truncate">{event.txHash}</span>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {/* Stats Tab */}
+                  {getActiveTab(contract.address) === 'stats' && (
+                    <motion.div
+                      key="stats"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      <div className="flex items-center gap-2 mb-3">
+                        <PieChart className="w-4 h-4 text-quantum-green" />
+                        <h4 className="font-bold text-white">Token Statistics</h4>
+                      </div>
+
+                      {/* Supply Stats */}
+                      <div className="bg-quantum-dark/50 rounded-lg p-4">
+                        <h5 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                          <Coins className="w-4 h-4" />
+                          Supply Information
+                        </h5>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Total Supply</div>
+                            <div className="text-lg font-bold text-white">{getContractStats(contract).totalSupply}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Circulating</div>
+                            <div className="text-lg font-bold text-quantum-cyan">{getContractStats(contract).circulatingSupply}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Burned</div>
+                            <div className="text-lg font-bold text-quantum-orange">{getContractStats(contract).burnedTokens}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Holders</div>
+                            <div className="text-lg font-bold text-quantum-purple">{getContractStats(contract).holders}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Activity Stats */}
+                      <div className="bg-quantum-dark/50 rounded-lg p-4">
+                        <h5 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                          <Activity className="w-4 h-4" />
+                          Activity
+                        </h5>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Total Minted</div>
+                            <div className="text-lg font-bold text-quantum-green">{getContractStats(contract).totalMinted}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Total Burned</div>
+                            <div className="text-lg font-bold text-quantum-orange">{getContractStats(contract).totalBurned}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Total Airdropped</div>
+                            <div className="text-lg font-bold text-quantum-blue">{getContractStats(contract).totalAirdropped}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Total Transfers</div>
+                            <div className="text-lg font-bold text-white">{getContractStats(contract).totalTransfers}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Staking Stats (if applicable) */}
+                      {contract.features.staking && (
+                        <div className="bg-gradient-to-r from-quantum-cyan/10 to-quantum-blue/10 border border-quantum-cyan/30 rounded-lg p-4">
+                          <h5 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                            <TrendingUp className="w-4 h-4 text-quantum-cyan" />
+                            Staking
+                          </h5>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <div className="text-xs text-gray-500 mb-1">APY</div>
+                              <div className="text-lg font-bold text-quantum-green">{getContractStats(contract).stakingAPY}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500 mb-1">Total Staked</div>
+                              <div className="text-lg font-bold text-quantum-cyan">{getContractStats(contract).totalStaked}</div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Reflection Stats (if applicable) */}
+                      {contract.features.reflection && (
+                        <div className="bg-gradient-to-r from-quantum-purple/10 to-quantum-pink/10 border border-quantum-purple/30 rounded-lg p-4">
+                          <h5 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                            <Percent className="w-4 h-4 text-quantum-purple" />
+                            Reflections
+                          </h5>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <div className="text-xs text-gray-500 mb-1">Reflection Rate</div>
+                              <div className="text-lg font-bold text-quantum-purple">{getContractStats(contract).reflectionRate}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500 mb-1">Total Distributed</div>
+                              <div className="text-lg font-bold text-quantum-pink">{getContractStats(contract).totalReflections}</div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* View in Explorer */}
+                      <motion.button
+                        onClick={() => {
+                          console.log('View in explorer:', contract.address);
+                        }}
+                        className="w-full bg-quantum-dark/50 hover:bg-quantum-dark/70 text-quantum-cyan px-4 py-3 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                        whileHover={{ scale: 1.01 }}
+                        whileTap={{ scale: 0.99 }}
+                      >
+                        <FileCode className="w-4 h-4" />
+                        View Full Analytics in Explorer
+                      </motion.button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             ))}
           </div>

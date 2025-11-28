@@ -28,6 +28,7 @@ import {
   ChevronDown
 } from 'lucide-react';
 import TransactionPreviewModal from './TransactionPreviewModal';
+import VerificationMonitor from './VerificationMonitor';
 
 interface Message {
   id: string;
@@ -71,6 +72,7 @@ export default function AIChatScreen() {
   // AI Metrics Data
   const [metricsData, setMetricsData] = useState<any>(null);
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+  const [isInitialMetricsLoad, setIsInitialMetricsLoad] = useState(true); // Track first load only
   const [workersData, setWorkersData] = useState<any>(null); // v1.0: Active workers for data parallelism
 
   // AI Settings
@@ -88,6 +90,7 @@ export default function AIChatScreen() {
   const backgroundGenerationRef = useRef<boolean>(false);
   const userHasScrolled = useRef(false);
   const lastScrollTop = useRef(0);
+  const currentChatIdRef = useRef<string | null>(null); // Track current chat ID for race condition prevention
 
   // ✅ v0.9.36-beta - AI Transaction Assistant State
   const [transactionPreview, setTransactionPreview] = useState<any>(null);
@@ -137,9 +140,10 @@ export default function AIChatScreen() {
     console.trace('Stack trace for messages change:');
   }, [messages]);
 
-  // Debug: Log whenever currentChatId changes
+  // Debug: Log whenever currentChatId changes AND update ref
   useEffect(() => {
     console.log(`🔍 [STATE] currentChatId changed to: ${currentChatId}`);
+    currentChatIdRef.current = currentChatId; // Keep ref in sync for async operations
   }, [currentChatId]);
 
   // Load wallet data when costs modal is opened
@@ -157,6 +161,7 @@ export default function AIChatScreen() {
       const json = await response.json();
       if (json.success) {
         setMetricsData(json.data);
+        setIsInitialMetricsLoad(false); // Mark initial load complete
       }
     } catch (error) {
       console.error('Failed to load AI metrics:', error);
@@ -178,36 +183,25 @@ export default function AIChatScreen() {
     }
   };
 
-  useEffect(() => {
-    if (showMetrics) {
-      loadMetrics();
-      loadWorkers(); // v1.0: Also load workers when modal opens
-      // Auto-refresh metrics and workers every 3 seconds while modal is open
-      const interval = setInterval(() => {
-        loadMetrics();
-        loadWorkers();
-      }, 3000);
-      return () => clearInterval(interval);
-    }
-  }, [showMetrics]);
-
-  // Load metrics and workers in background for the glowing icon indicator
+  // Unified metrics/workers loading effect - prevents flickering and duplicate fetches
   useEffect(() => {
     // Initial load
     loadMetrics();
-    loadWorkers(); // v1.0: Also load workers for icon glow
+    loadWorkers();
 
-    // Auto-refresh metrics and workers every 5 seconds to update the icon glow
+    // Set up interval based on modal state
+    const refreshInterval = showMetrics ? 3000 : 5000; // 3s when modal open, 5s when closed
+
     const interval = setInterval(() => {
-      // Only fetch in background if modal is closed (avoid duplicate fetches)
-      if (!showMetrics && !isLoadingMetrics) {
+      // Only fetch if not currently loading to prevent overlap
+      if (!isLoadingMetrics) {
         loadMetrics();
         loadWorkers();
       }
-    }, 5000);
+    }, refreshInterval);
 
     return () => clearInterval(interval);
-  }, [showMetrics, isLoadingMetrics]);
+  }, [showMetrics]); // Only depend on showMetrics, not isLoadingMetrics
 
   // Auto-scroll to bottom when new messages arrive (only if user hasn't manually scrolled up)
   useEffect(() => {
@@ -254,6 +248,7 @@ export default function AIChatScreen() {
 
           // CRITICAL: Set the chat ID FIRST so messages will display
           setCurrentChatId(genData.chatId);
+          currentChatIdRef.current = genData.chatId; // Also update ref immediately
 
           // Load the chat's messages immediately
           loadMessages(genData.chatId);
@@ -262,16 +257,33 @@ export default function AIChatScreen() {
           backgroundGenerationRef.current = true;
           setIsGenerating(true);
 
+          // Capture the chat ID for this poll session
+          const pollingChatId = genData.chatId;
+
           // Poll for new messages every 2 seconds
           const pollInterval = setInterval(async () => {
             try {
-              const response = await fetch(`/api/chat/${genData.chatId}/messages`);
+              // CRITICAL: Check if user switched to a different chat
+              if (currentChatIdRef.current !== pollingChatId) {
+                console.log(`🛑 [mount] Chat switched from ${pollingChatId} to ${currentChatIdRef.current}, stopping poll`);
+                clearInterval(pollInterval);
+                return;
+              }
+
+              const response = await fetch(`/api/chat/${pollingChatId}/messages`);
               if (response.ok) {
                 const backendMessages = await response.json();
 
                 // Ensure we have valid array data before setting state
                 if (backendMessages.success && Array.isArray(backendMessages.data)) {
-                  setMessages(backendMessages.data);
+                  // Double-check we're still on the same chat
+                  if (currentChatIdRef.current === pollingChatId) {
+                    setMessages(backendMessages.data);
+                  } else {
+                    console.log(`🛑 [mount] Chat changed during fetch, discarding`);
+                    clearInterval(pollInterval);
+                    return;
+                  }
 
                   // If we got a new assistant message, generation is complete
                   const lastMsg = backendMessages.data[backendMessages.data.length - 1];
@@ -316,6 +328,9 @@ export default function AIChatScreen() {
 
     // Check if there's an ongoing generation for this specific chat
     const activeGeneration = localStorage.getItem('activeAIGeneration');
+    let pollInterval: NodeJS.Timeout | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+
     if (activeGeneration) {
       try {
         const genData = JSON.parse(activeGeneration);
@@ -326,18 +341,35 @@ export default function AIChatScreen() {
 
           // If generation is less than 5 minutes old, start polling for completion
           if (age < 5 * 60 * 1000) {
-            console.log('🔄 Reconnecting to ongoing generation for current chat');
+            console.log('🔄 Reconnecting to ongoing generation for current chat:', currentChatId);
             setIsGenerating(true);
             backgroundGenerationRef.current = true;
 
+            // Capture chatId at the time polling starts to avoid stale closure
+            const pollingChatId = currentChatId;
+
             // Poll for new messages every 2 seconds
-            const pollInterval = setInterval(async () => {
+            pollInterval = setInterval(async () => {
               try {
-                const response = await fetch(`/api/chat/${currentChatId}/messages`);
+                // CRITICAL: Check if user switched to a different chat - if so, stop polling
+                if (currentChatIdRef.current !== pollingChatId) {
+                  console.log(`🛑 Chat switched from ${pollingChatId} to ${currentChatIdRef.current}, stopping poll`);
+                  if (pollInterval) clearInterval(pollInterval);
+                  return;
+                }
+
+                const response = await fetch(`/api/chat/${pollingChatId}/messages`);
                 if (response.ok) {
                   const backendMessages = await response.json();
                   if (backendMessages.success && Array.isArray(backendMessages.data) && backendMessages.data.length > 0) {
-                    setMessages(backendMessages.data);
+                    // CRITICAL: Double-check we're still on the same chat before updating UI
+                    if (currentChatIdRef.current === pollingChatId) {
+                      setMessages(backendMessages.data);
+                    } else {
+                      console.log(`🛑 Chat changed during fetch, discarding messages for ${pollingChatId}`);
+                      if (pollInterval) clearInterval(pollInterval);
+                      return;
+                    }
 
                     // Check if generation completed (new assistant message after startTime)
                     const lastMsg = backendMessages.data[backendMessages.data.length - 1];
@@ -346,14 +378,14 @@ export default function AIChatScreen() {
                       setIsGenerating(false);
                       backgroundGenerationRef.current = false;
                       localStorage.removeItem('activeAIGeneration');
-                      clearInterval(pollInterval);
+                      if (pollInterval) clearInterval(pollInterval);
                     }
                   } else if (!backendMessages.success) {
                     console.warn('Failed to fetch messages, stopping reconnection');
                     setIsGenerating(false);
                     backgroundGenerationRef.current = false;
                     localStorage.removeItem('activeAIGeneration');
-                    clearInterval(pollInterval);
+                    if (pollInterval) clearInterval(pollInterval);
                   }
                 }
               } catch (err) {
@@ -362,13 +394,13 @@ export default function AIChatScreen() {
                 setIsGenerating(false);
                 backgroundGenerationRef.current = false;
                 localStorage.removeItem('activeAIGeneration');
-                clearInterval(pollInterval);
+                if (pollInterval) clearInterval(pollInterval);
               }
             }, 2000);
 
             // Stop polling after 5 minutes
-            setTimeout(() => {
-              clearInterval(pollInterval);
+            timeoutId = setTimeout(() => {
+              if (pollInterval) clearInterval(pollInterval);
               setIsGenerating(false);
               backgroundGenerationRef.current = false;
               localStorage.removeItem('activeAIGeneration');
@@ -382,6 +414,18 @@ export default function AIChatScreen() {
         console.error('Failed to reconnect to generation:', e);
       }
     }
+
+    // CRITICAL: Cleanup when currentChatId changes or component unmounts
+    // This prevents messages from one chat overwriting another chat's messages
+    return () => {
+      if (pollInterval) {
+        console.log('🧹 Cleaning up poll interval for chat switch');
+        clearInterval(pollInterval);
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, [currentChatId]);
 
   // Monitor page visibility - check for ongoing generation when user returns
@@ -401,8 +445,11 @@ export default function AIChatScreen() {
               if (age < 5 * 60 * 1000) {
                 console.log('👁️ Page visible again, checking for ongoing generation...');
 
+                // Capture the chat ID for this poll session
+                const pollingChatId = currentChatId;
+
                 // Load latest messages to show any progress
-                loadMessages(currentChatId);
+                loadMessages(pollingChatId);
 
                 // Start polling to check if still generating
                 setIsGenerating(true);
@@ -410,11 +457,25 @@ export default function AIChatScreen() {
 
                 const pollInterval = setInterval(async () => {
                   try {
-                    const response = await fetch(`/api/chat/${currentChatId}/messages`);
+                    // CRITICAL: Check if user switched to a different chat
+                    if (currentChatIdRef.current !== pollingChatId) {
+                      console.log(`🛑 [visibility] Chat switched from ${pollingChatId} to ${currentChatIdRef.current}, stopping poll`);
+                      clearInterval(pollInterval);
+                      return;
+                    }
+
+                    const response = await fetch(`/api/chat/${pollingChatId}/messages`);
                     if (response.ok) {
                       const backendMessages = await response.json();
                       if (backendMessages.success && Array.isArray(backendMessages.data) && backendMessages.data.length > 0) {
-                        setMessages(backendMessages.data);
+                        // Double-check we're still on the same chat
+                        if (currentChatIdRef.current === pollingChatId) {
+                          setMessages(backendMessages.data);
+                        } else {
+                          console.log(`🛑 [visibility] Chat changed during fetch, discarding`);
+                          clearInterval(pollInterval);
+                          return;
+                        }
 
                         // Check if generation completed
                         const lastMsg = backendMessages.data[backendMessages.data.length - 1];
@@ -469,6 +530,8 @@ export default function AIChatScreen() {
 
         // If no current chat, select the most recent one (only if autoSelect is true)
         if (autoSelect && !currentChatId && data.data.length > 0) {
+          // CRITICAL: Update ref FIRST before async operations
+          currentChatIdRef.current = data.data[0].chat_id;
           setCurrentChatId(data.data[0].chat_id);
           loadMessages(data.data[0].chat_id);
         }
@@ -489,7 +552,14 @@ export default function AIChatScreen() {
       console.log(`📊 Received ${data.success ? 'success' : 'failure'}, data:`, data);
 
       if (data.success && data.data && Array.isArray(data.data)) {
-        console.log(`✅ Setting ${data.data.length} messages`);
+        // CRITICAL: Verify we're still on the same chat before setting messages
+        // This prevents race conditions when rapidly switching chats
+        if (currentChatIdRef.current !== chatId) {
+          console.log(`🛑 [loadMessages] Chat changed from ${chatId} to ${currentChatIdRef.current}, discarding fetched messages`);
+          return;
+        }
+
+        console.log(`✅ Setting ${data.data.length} messages for chat ${chatId}`);
         setMessages(data.data);
 
         // Check if there's an active generation that just completed
@@ -511,14 +581,18 @@ export default function AIChatScreen() {
           }
         }
       } else {
-        // Ensure messages is always an array
-        console.warn('⚠️ No valid messages data, setting empty array');
-        setMessages([]);
+        // CRITICAL: Only clear messages if we're still on the same chat
+        if (currentChatIdRef.current === chatId) {
+          console.warn('⚠️ No valid messages data, setting empty array');
+          setMessages([]);
+        }
       }
     } catch (error) {
       console.error('❌ Failed to load messages:', error);
-      // Ensure messages is always an array even on error
-      setMessages([]);
+      // CRITICAL: Only clear messages if we're still on the same chat
+      if (currentChatIdRef.current === chatId) {
+        setMessages([]);
+      }
     }
   };
 
@@ -546,6 +620,8 @@ export default function AIChatScreen() {
 
       const data = await response.json();
       if (data.success && data.data) {
+        // CRITICAL: Update ref FIRST before state
+        currentChatIdRef.current = data.data.chat_id;
         setCurrentChatId(data.data.chat_id);
         setMessages([]);
         loadChats(false); // Don't auto-select, we already set the current chat
@@ -568,6 +644,8 @@ export default function AIChatScreen() {
       });
 
       if (chatId === currentChatId) {
+        // CRITICAL: Update ref FIRST
+        currentChatIdRef.current = null;
         setCurrentChatId(null);
         setMessages([]);
       }
@@ -768,6 +846,8 @@ export default function AIChatScreen() {
         const data = await response.json();
         if (data.success && data.data) {
           chatId = data.data.chat_id;
+          // CRITICAL: Update ref FIRST before state
+          currentChatIdRef.current = chatId;
           setCurrentChatId(chatId);
           setMessages([]);
           loadChats(false); // Refresh chat list without auto-select
@@ -978,14 +1058,24 @@ export default function AIChatScreen() {
             <motion.button
               key={chat.chat_id}
               onClick={() => {
-                // Clean up any ongoing streaming before switching chats
+                // Clean up streaming UI state when switching chats
+                // BUT preserve the localStorage marker so we can reconnect when coming back
                 if (eventSourceRef.current) {
                   eventSourceRef.current.close();
                   eventSourceRef.current = null;
                 }
                 setStreamingMessage('');
+                setStreamingReasoning('');
+
+                // Always clear isGenerating when switching chats
+                // The localStorage marker (activeAIGeneration) is preserved
+                // so the reconnection logic will kick in when user returns
                 setIsGenerating(false);
                 backgroundGenerationRef.current = false;
+
+                // CRITICAL: Update ref FIRST before calling setCurrentChatId or loadMessages
+                // This ensures async operations know which chat is current
+                currentChatIdRef.current = chat.chat_id;
 
                 // Now switch to the new chat
                 setCurrentChatId(chat.chat_id);
@@ -1536,6 +1626,7 @@ export default function AIChatScreen() {
                       }}
                     >
                       <option value="Mistral-7B-Instruct-v0.3">Mistral 7B Instruct (4.3 GB) - Fast</option>
+                      <option value="Qwen3-VL-8B-Instruct">🖼️ Qwen3 VL 8B (5.1 GB) - Vision & Language</option>
                       <option value="Mistral-Small-3.2-24B-Instruct">Mistral Small 24B (14 GB) - Higher Quality</option>
                       <option value="Kimi-K2-Thinking">🧠 Kimi K2 Thinking (245 GB) - Advanced Reasoning</option>
                     </select>
@@ -2113,7 +2204,7 @@ export default function AIChatScreen() {
                   </button>
                 </div>
 
-                {isLoadingMetrics ? (
+                {isInitialMetricsLoad && isLoadingMetrics ? (
                   <div className="flex items-center justify-center py-12">
                     <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-400"></div>
                   </div>
@@ -2388,6 +2479,11 @@ export default function AIChatScreen() {
                       </div>
                     )}
 
+                    {/* ✨ NEW: Proof-of-Inference Verification Monitor */}
+                    <div className="mt-6" key="verification-monitor-container">
+                      <VerificationMonitor />
+                    </div>
+
                     {/* Info Note */}
                     <div
                       className="mt-6 p-4 rounded-xl"
@@ -2399,10 +2495,11 @@ export default function AIChatScreen() {
                       <div className="flex items-start gap-3">
                         <Shield className="w-5 h-5 text-blue-400 mt-0.5" />
                         <div className="flex-1">
-                          <p className="text-sm text-blue-200/90 font-medium mb-1">Performance Optimization</p>
+                          <p className="text-sm text-blue-200/90 font-medium mb-1">Performance Optimization & Verification</p>
                           <p className="text-xs text-blue-200/60 leading-relaxed">
                             Metrics are updated in real-time. KV cache sharing and distributed inference
-                            enable significantly faster response times across the network.
+                            enable significantly faster response times. All worker computations are verified
+                            using cryptographic proofs to ensure trustless distributed AI.
                           </p>
                         </div>
                       </div>

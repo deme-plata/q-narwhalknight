@@ -13,6 +13,7 @@ import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
+import AIWorkerDemo from './components/AIWorkerDemo';
 import './App.css';
 
 type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
@@ -411,6 +412,21 @@ function App() {
             console.error('❌ App.tsx: SSE stream read error:', error);
           } finally {
             reader.releaseLock();
+
+            // 🚨 v1.0.41-beta: CRITICAL FIX - Auto-reconnect SSE when stream ends
+            // BUG: SSE connection was one-shot - when it ended (network hiccup, server restart),
+            // balance updates would stop permanently until page refresh
+            // FIX: Automatically reconnect after 3 seconds with exponential backoff
+            if (mounted) {
+              const reconnectDelay = 3000; // 3 seconds
+              console.log(`🔄 App.tsx: SSE disconnected, reconnecting in ${reconnectDelay/1000}s...`);
+              setTimeout(() => {
+                if (mounted) {
+                  console.log('🔄 App.tsx: Attempting SSE reconnection...');
+                  setupAuthenticatedSSE();
+                }
+              }, reconnectDelay);
+            }
           }
         };
 
@@ -419,6 +435,18 @@ function App() {
 
       } catch (error) {
         console.error('❌ App.tsx: Failed to establish authenticated SSE connection:', error);
+
+        // 🚨 v1.0.41-beta: Also reconnect on connection failure (not just stream end)
+        if (mounted) {
+          const reconnectDelay = 5000; // 5 seconds on error
+          console.log(`🔄 App.tsx: SSE connection failed, retrying in ${reconnectDelay/1000}s...`);
+          setTimeout(() => {
+            if (mounted) {
+              console.log('🔄 App.tsx: Retrying SSE connection...');
+              setupAuthenticatedSSE();
+            }
+          }, reconnectDelay);
+        }
       }
     };
 
@@ -522,6 +550,11 @@ function App() {
             {currentScreen === 'download' && <DownloadNodeScreen />}
             {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
         </main>
+
+        {/* AI Worker Panel - Floating bottom-right */}
+        <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 1000 }}>
+          <AIWorkerDemo />
+        </div>
         </div>
       </div>
     </div>

@@ -12,6 +12,7 @@ import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
 import WalletCardWithGraph from './WalletCardWithGraph';
 import PhaseTransitionModal from './PhaseTransitionModal';
+import CustomTokensCard from './CustomTokensCard';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
 interface Transaction {
@@ -124,11 +125,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   const itemsPerPage = 20;
 
   // Phase transition modal state
-  const [showPhaseModal, setShowPhaseModal] = useState(() => {
-    // Check if user has already seen the Phase 11 Data Loss FIX announcement
-    const hasSeenPhase11 = localStorage.getItem('phase11DataLossFixModalSeen');
-    return !hasSeenPhase11; // Show if they haven't seen Phase 11 announcement yet
-  });
+  const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
 
   // Generate AI Report
   const generateAIReport = async () => {
@@ -1937,6 +1934,23 @@ Provide a brief analysis (under 250 tokens) covering:
         transition={{ delay: 0.35 }}
       >
         <ActiveLoansCard onPayback={handleLoanPayback} />
+      </motion.div>
+
+      {/* Custom Tokens Card */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.37 }}
+      >
+        <CustomTokensCard onSendToken={(symbol, contractAddress) => {
+          // When user clicks send on a custom token, navigate to send screen
+          // You can enhance this to pass the contract address as well
+          if (onNavigateToSend) {
+            // Store the contract address in localStorage for the send screen to use
+            localStorage.setItem('selectedTokenContract', contractAddress);
+            onNavigateToSend(symbol);
+          }
+        }} />
       </motion.div>
 
       {/* DAG-Knight Consensus Visualization */}

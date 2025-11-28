@@ -176,7 +176,7 @@ impl RealDht {
         let behaviour = DhtBehaviour {
             kademlia,
             identify: identify::Behaviour::new(identify::Config::new(
-                "/q-narwhal/1.0.0".to_string(),
+                "/qnarwhal/1.0.0".to_string(),  // v1.0.2-beta: Standardized protocol ID for P2P compatibility
                 local_key.public(),
             )),
             ping: ping::Behaviour::new(ping::Config::new()),
@@ -390,8 +390,9 @@ impl RealDht {
 
                     QueryResult::GetClosestPeers(Ok(peers)) => {
                         info!("Found {} closest peers", peers.peers.len());
+                        // 🔥 v2.0.0: PeerInfo doesn't impl Display, use Debug
                         for peer in peers.peers {
-                            debug!("Closest peer: {}", peer);
+                            debug!("Closest peer: {:?}", peer);
                         }
                     }
 
@@ -416,7 +417,7 @@ impl RealDht {
 
     async fn handle_identify_event(&mut self, event: identify::Event) -> Result<()> {
         match event {
-            identify::Event::Received { peer_id, info } => {
+            identify::Event::Received { peer_id, info, connection_id: _ } => {
                 info!("Identified peer: {} - {}", peer_id, info.protocol_version);
                 
                 // Update peer info with identification data
@@ -435,7 +436,7 @@ impl RealDht {
                 debug!("Sent identify info");
             }
 
-            identify::Event::Error { peer_id, error } => {
+            identify::Event::Error { peer_id, error, connection_id: _ } => {
                 warn!("Identify error with peer {:?}: {}", peer_id, error);
             }
 

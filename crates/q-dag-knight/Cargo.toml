@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 q-types = { path = "../q-types" }
 q-narwhal-core = { path = "../q-narwhal-core" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 q-lattice-vrf = { path = "../q-lattice-vrf" }
 q-quantum-rng = { path = "../q-quantum-rng" }
 
@@ -44,6 +46,11 @@ async-trait = { workspace = true }
 
 # Hex encoding for debug output
 hex = { workspace = true }
+
+[features]
+default = []
+# ✨ v1.0.58-beta: Enable Genus-2 VDF for quantum-resistant anchor election
+advanced-crypto = ["q-crypto-advanced"]
 
 [dev-dependencies]
 proptest = { workspace = true }

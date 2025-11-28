@@ -384,16 +384,52 @@ pub async fn get_supported_tokens(
         },
     ];
 
-    // TODO: Add custom tokens from deployed contracts
-    // The ContractRegistry needs to be enhanced to expose deployed contract metadata
-    // for token discovery. For now, return just the native QUG and QUGUSD tokens.
-    //
-    // Future enhancement: Implement contract metadata iteration in OrobitSmartContractEcosystem
-    // to enumerate all deployed token contracts with their symbol, name, decimals, and supply.
+    // ✅ Add custom tokens from deployed contracts
+    let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
+    for contract in deployed_contracts.values() {
+        // Check if this contract has token metadata (symbol indicates it's a token)
+        if let Some(symbol) = &contract.metadata.symbol {
+            // Get token details from deployment params
+            let total_supply = contract
+                .deployment_params
+                .get("initialSupply")
+                .or_else(|| contract.deployment_params.get("initial_supply"))
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                .unwrap_or(0);
+
+            let name = if contract.metadata.name.is_empty() {
+                symbol.clone()
+            } else {
+                contract.metadata.name.clone()
+            };
+            let decimals = 8; // All Q-NarwhalKnight tokens use 8 decimals (Bitcoin standard)
+
+            tokens.push(TokenInfo {
+                address: format!("qnk{}", hex::encode(contract.address.0)),
+                name,
+                symbol: symbol.clone(),
+                decimals,
+                total_supply: total_supply.to_string(),
+                contract_type: "Custom".to_string(),
+                verified: false, // Custom tokens are not verified by default
+                audit_report: None,
+            });
+
+            tracing::info!(
+                "✅ Added custom token to DEX listing: {} ({}) - Supply: {}",
+                symbol,
+                hex::encode(&contract.address.0[..8]),
+                total_supply
+            );
+        }
+    }
+    drop(deployed_contracts);
 
     tracing::info!(
-        "📋 Returning {} supported tokens (native only, custom tokens TBD)",
-        tokens.len()
+        "📋 Returning {} supported tokens ({} native + {} custom)",
+        tokens.len(),
+        2,
+        tokens.len() - 2
     );
 
     Ok(Json(DexApiResponse::success(tokens)))

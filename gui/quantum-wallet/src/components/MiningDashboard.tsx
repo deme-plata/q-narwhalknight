@@ -427,6 +427,71 @@ export default function MiningDashboard() {
         )}
       </motion.div>
 
+      {/* Download Miner */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+        className="bg-quantum-green/10 border border-quantum-green/30 rounded-xl p-6"
+      >
+        <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
+          <Zap className="w-5 h-5" />
+          Download Optimized Miner
+        </h4>
+        <p className="text-gray-300 text-sm mb-4">
+          New v1.0.0: 2.5x faster with BLAKE3 SIMD acceleration + CPU affinity pinning
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <a
+            href="/downloads/q-miner-v1.0.0-optimized-linux-x64"
+            download
+            className="flex items-center justify-center gap-2 bg-quantum-green/20 hover:bg-quantum-green/30 border border-quantum-green/50 text-quantum-green font-bold py-3 px-4 rounded-lg transition-all"
+          >
+            <Zap className="w-4 h-4" />
+            Linux x64 (Optimized)
+          </a>
+          <a
+            href="/downloads/q-miner-windows-x64.exe"
+            download
+            className="flex items-center justify-center gap-2 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 border border-quantum-cyan/50 text-quantum-cyan font-bold py-3 px-4 rounded-lg transition-all"
+          >
+            <Zap className="w-4 h-4" />
+            Windows x64
+          </a>
+          <a
+            href="/downloads/q-miner-macos-arm64"
+            download
+            className="flex items-center justify-center gap-2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/50 text-quantum-purple font-bold py-3 px-4 rounded-lg transition-all"
+          >
+            <Zap className="w-4 h-4" />
+            macOS ARM64
+          </a>
+          <a
+            href="/downloads/q-miner-macos-x64"
+            download
+            className="flex items-center justify-center gap-2 bg-quantum-yellow/20 hover:bg-quantum-yellow/30 border border-quantum-yellow/50 text-quantum-yellow font-bold py-3 px-4 rounded-lg transition-all"
+          >
+            <Zap className="w-4 h-4" />
+            macOS Intel x64
+          </a>
+        </div>
+        <div className="mt-4 p-4 bg-black/30 rounded-lg space-y-3">
+          <div>
+            <p className="text-xs text-gray-400 mb-1">Connect to Network:</p>
+            <code className="text-xs text-quantum-cyan block">
+              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://quillon.xyz:8080
+            </code>
+          </div>
+          <div>
+            <p className="text-xs text-gray-400 mb-1">Solo Mining (Local Node):</p>
+            <code className="text-xs text-quantum-yellow block">
+              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://localhost:8080
+            </code>
+            <p className="text-xs text-gray-500 mt-1">Start node with: Q_ALLOW_SOLO_MINING=true ./q-api-server</p>
+          </div>
+        </div>
+      </motion.div>
+
       {/* Mining Tips */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -451,6 +516,14 @@ export default function MiningDashboard() {
           <li className="flex items-start gap-2">
             <span className="text-quantum-cyan mt-0.5">•</span>
             <span>Hash rate is calculated from your actual mining performance</span>
+          </li>
+          <li className="flex items-start gap-2">
+            <span className="text-quantum-cyan mt-0.5">•</span>
+            <span>New optimized miner: 2.5x faster with AVX2 SIMD + CPU core pinning</span>
+          </li>
+          <li className="flex items-start gap-2">
+            <span className="text-quantum-yellow mt-0.5">⚡</span>
+            <span>Solo mining: Balance updates in &lt;100ms with AEGIS-256 authenticated rewards</span>
           </li>
         </ul>
       </motion.div>

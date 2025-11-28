@@ -54,6 +54,7 @@ vulkano-shaders = { version = "0.34", optional = true }
 # CPU optimizations
 target-lexicon = "0.12"
 raw-cpuid = "10.7"
+core_affinity = "0.8" # For CPU pinning on multi-socket systems
 
 # Memory management
 memmap2 = "0.9"

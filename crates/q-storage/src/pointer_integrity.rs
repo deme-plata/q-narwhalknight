@@ -172,13 +172,14 @@ impl PointerIntegrityChecker {
     /// 2. Binary search upward if pointer seems too low
     /// 3. Scan backward from a high estimate if binary search fails
     fn find_highest_block(&self, cf_blocks: &impl rocksdb::AsColumnFamilyRef) -> Result<u64> {
-        // 🚨 CRITICAL v1.0.17-beta FIX: Always return conservative estimate
-        // BUG: Old code was finding orphaned binary-key blocks and returning u64::MAX
-        // FIX: Simple linear scan from 0, capped at 100,000 blocks
-        // This is slower but SAFE - prevents u64::MAX corruption
+        // 🚨 CRITICAL v1.0.35-beta FIX: Remove 100k block limit
+        // BUG: v1.0.17-beta added safety limit of 100k blocks
+        // ISSUE: Nodes with >100k blocks lost data on restart!
+        // FIX: Scan up to 10M blocks (reasonable max for testnet), then use reverse scan
+        // This is slower but COMPLETE - no data loss
 
-        warn!("🔍 find_highest_block: Starting SAFE linear scan (max 100k blocks)");
-        let absolute_max = 100_000u64;  // Safety limit
+        warn!("🔍 find_highest_block: Starting SAFE linear scan (max 10M blocks)");
+        let absolute_max = 10_000_000u64;  // Increased from 100k to 10M
 
         let mut highest_found = 0u64;
 

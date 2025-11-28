@@ -1,9 +1,11 @@
 // Q-NarwhalKnight API Service
 // Handles all communication with the quantum consensus node
+// v1.0.53: Added automatic port discovery when default port is unavailable
 
 import { generateAuthHeader, walletSession, loadWallet } from './walletAuth';
+import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDiscovery';
 
-// Get API base URL from localStorage (set by network selector) or use default
+// Get API base URL from localStorage (set by network selector or auto-discovery) or use default
 const getApiBaseUrl = () => {
   const storedBaseURL = localStorage.getItem('apiBaseURL');
   if (storedBaseURL) {
@@ -12,7 +14,39 @@ const getApiBaseUrl = () => {
   return import.meta.env.VITE_API_URL || '/api';
 };
 
-const API_BASE_URL = getApiBaseUrl();
+let API_BASE_URL = getApiBaseUrl();
+
+// v1.0.53: Initialize node discovery on module load
+// This runs once when the API module is first imported
+(async () => {
+  console.log('🔍 [API] Initializing node auto-discovery...');
+  const result = await discoverNode({
+    startPort: 8080,
+    maxAttempts: 10,
+    timeout: 2000,
+  });
+
+  if (result.success && result.url) {
+    const newBaseUrl = result.url + '/api';
+    if (newBaseUrl !== API_BASE_URL) {
+      console.log(`✅ [API] Auto-discovered node at ${result.url}, updating API base URL`);
+      API_BASE_URL = newBaseUrl;
+    }
+  } else {
+    console.warn('⚠️ [API] Node auto-discovery failed, using default URL:', API_BASE_URL);
+  }
+})();
+
+// v1.0.53: Listen for node discovery events (in case discovery happens after initial load)
+if (typeof window !== 'undefined') {
+  onNodeDiscovered((result) => {
+    if (result.success && result.url) {
+      const newBaseUrl = result.url + '/api';
+      console.log(`🔄 [API] Node discovered event received, updating to: ${newBaseUrl}`);
+      API_BASE_URL = newBaseUrl;
+    }
+  });
+}
 
 // ============================================
 // REQUEST THROTTLING & DEBOUNCING UTILITIES
@@ -177,10 +211,31 @@ export interface WalletData {
 }
 
 class QNarwhalKnightAPI {
-  private baseURL: string;
+  private _baseURL: string;
 
   constructor(baseURL: string = API_BASE_URL) {
-    this.baseURL = baseURL;
+    this._baseURL = baseURL;
+  }
+
+  // v1.0.53: Getter that always returns the latest discovered URL
+  private get baseURL(): string {
+    // If we were initialized with a custom URL, use that
+    // Otherwise, always use the latest discovered URL
+    if (this._baseURL !== '/api' && !this._baseURL.includes(':8080')) {
+      return this._baseURL;
+    }
+    return API_BASE_URL;
+  }
+
+  // v1.0.53: Method to update base URL (called when node is discovered)
+  public setBaseURL(url: string): void {
+    this._baseURL = url;
+    console.log(`🔄 [API] Base URL updated to: ${url}`);
+  }
+
+  // v1.0.53: Get current base URL (for debugging)
+  public getBaseURL(): string {
+    return this.baseURL;
   }
 
   private async request<T>(endpoint: string, options?: RequestInit, retries = 3): Promise<ApiResponse<T>> {
@@ -1464,6 +1519,18 @@ export { QNarwhalKnightAPI };
 
 // Export throttling utilities for use in components
 export { throttle, debounce };
+
+// v1.0.53: Re-export node discovery functions for direct use
+export {
+  discoverNode,
+  clearDiscoveryCache,
+  getDiscoveredNodeUrl,
+  getDiscoveredPort,
+  initializeNodeConnection,
+  testConnection,
+  onNodeDiscovered,
+} from './nodeDiscovery';
+export type { NodeDiscoveryConfig, NodeDiscoveryResult } from './nodeDiscovery';
 
 // THROTTLED API METHODS FOR POLLING PROTECTION
 // ============================================

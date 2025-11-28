@@ -15,6 +15,7 @@ use axum::{
 use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS};
 use q_vm::contracts::{CollateralVault, MintResult, PositionHealth, RedeemResult, VaultStats};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -25,16 +26,8 @@ use q_api_server::wallet_auth::AuthenticatedWallet;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiTokenBalanceResponse {
     pub address: String,
-    pub tokens: TokenBalances,
+    pub tokens: HashMap<String, TokenBalance>,  // Changed to HashMap for dynamic tokens
     pub total_usd_value: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenBalances {
-    #[serde(rename = "QUG")]
-    pub qug: TokenBalance,
-    #[serde(rename = "QUGUSD")]
-    pub qugusd: TokenBalance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +35,12 @@ pub struct TokenBalance {
     pub balance: String,         // Human-readable (e.g., "1234.56789012")
     pub balance_base_units: u64, // Raw base units
     pub usd_value: f64,          // USD value
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,            // Token name (for custom tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_address: Option<String>,  // Contract address (for custom tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,            // Decimals (for custom tokens)
 }
 
 /// Mint QUGUSD request
@@ -139,6 +138,9 @@ pub async fn get_multi_token_balance(
     debug!("📊 [AUTHENTICATED] Getting multi-token balance for wallet");
     info!("✅ Wallet authenticated successfully via {:?}", auth.scheme);
 
+    let mut tokens = HashMap::new();
+    let mut total_usd_value = 0.0;
+
     // Get QUG balance from wallet_balances (native balance)
     let qug_balance = {
         let wallet_balances = state.wallet_balances.read().await;
@@ -154,31 +156,98 @@ pub async fn get_multi_token_balance(
     // Get current QUG price from vault
     let qug_price_usd = state.collateral_vault.read().await.qug_price_usd;
 
-    // Calculate USD values
+    // Calculate USD values for native tokens
     let qug_usd_value = (qug_balance as f64 / 1e8) * qug_price_usd;
     let qugusd_usd_value = qugusd_balance as f64 / 1e8; // QUGUSD is pegged to $1
 
-    let response = MultiTokenBalanceResponse {
-        address: address_hex,
-        tokens: TokenBalances {
-            qug: TokenBalance {
-                balance: format!("{:.8}", qug_balance as f64 / 1e8),
-                balance_base_units: qug_balance,
-                usd_value: qug_usd_value,
-            },
-            qugusd: TokenBalance {
-                balance: format!("{:.8}", qugusd_balance as f64 / 1e8),
-                balance_base_units: qugusd_balance,
-                usd_value: qugusd_usd_value,
-            },
+    // Add QUG token
+    tokens.insert(
+        "QUG".to_string(),
+        TokenBalance {
+            balance: format!("{:.8}", qug_balance as f64 / 1e8),
+            balance_base_units: qug_balance,
+            usd_value: qug_usd_value,
+            name: Some("Quillon".to_string()),
+            contract_address: Some(hex::encode(QUG_TOKEN_ADDRESS)),
+            decimals: Some(8),
         },
-        total_usd_value: qug_usd_value + qugusd_usd_value,
+    );
+    total_usd_value += qug_usd_value;
+
+    // Add QUGUSD token
+    tokens.insert(
+        "QUGUSD".to_string(),
+        TokenBalance {
+            balance: format!("{:.8}", qugusd_balance as f64 / 1e8),
+            balance_base_units: qugusd_balance,
+            usd_value: qugusd_usd_value,
+            name: Some("Quillon USD".to_string()),
+            contract_address: Some(hex::encode(QUGUSD_TOKEN_ADDRESS)),
+            decimals: Some(8),
+        },
+    );
+    total_usd_value += qugusd_usd_value;
+
+    // Get all custom token balances for this wallet
+    let token_balances = state.token_balances.read().await;
+    let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
+
+    for ((wallet_addr, token_addr), balance) in token_balances.iter() {
+        // Only include tokens for this wallet
+        if wallet_addr != &addr_bytes {
+            continue;
+        }
+
+        // Skip native tokens (already added above)
+        if token_addr == &QUG_TOKEN_ADDRESS || token_addr == &QUGUSD_TOKEN_ADDRESS {
+            continue;
+        }
+
+        // Look up contract metadata
+        // Convert [u8; 32] to ContractAddress for lookup
+        let contract_addr = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
+        if let Some(contract_info) = deployed_contracts.get(&contract_addr) {
+            let symbol = contract_info.metadata.symbol.clone().unwrap_or_else(|| "UNKNOWN".to_string());
+            // Get decimals from deployment_params if available
+            let decimals = contract_info.deployment_params
+                .get("decimals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(8) as u8;
+            let balance_display = *balance as f64 / 10f64.powi(decimals as i32);
+
+            tokens.insert(
+                symbol.clone(),
+                TokenBalance {
+                    balance: format!("{:.8}", balance_display),
+                    balance_base_units: *balance,
+                    usd_value: 0.0, // Custom tokens don't have USD pricing yet
+                    name: Some(contract_info.metadata.name.clone()),
+                    contract_address: Some(hex::encode(token_addr)),
+                    decimals: Some(decimals),
+                },
+            );
+
+            info!(
+                "📊 Added custom token balance: {} = {:.8} (contract: {})",
+                symbol,
+                balance_display,
+                hex::encode(&token_addr[..8])
+            );
+        }
+    }
+
+    let response = MultiTokenBalanceResponse {
+        address: address_hex.clone(),
+        tokens,
+        total_usd_value,
     };
 
     info!(
-        "✅ Retrieved balances: QUG={:.4}, QUGUSD={:.4}",
+        "✅ Retrieved balances for {}: QUG={:.4}, QUGUSD={:.4}, {} custom tokens",
+        &address_hex[..16],
         qug_balance as f64 / 1e8,
-        qugusd_balance as f64 / 1e8
+        qugusd_balance as f64 / 1e8,
+        response.tokens.len() - 2  // Subtract native tokens
     );
 
     Ok(Json(ApiResponse::success(response)))

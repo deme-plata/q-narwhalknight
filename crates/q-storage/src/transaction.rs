@@ -31,7 +31,10 @@ use crate::kv::RocksDBKV;
 
 // For block serialization and hashing
 use sha2::{Sha256, Digest};
-use postcard;
+// 🚨 v1.0.41-beta: CRITICAL FIX - Use bincode instead of postcard!
+// BUG: postcard was serializing blocks but bincode was deserializing them
+// This caused EVERY block to fail deserialization with "io error:"
+// and triggered continuous sync restarts from height 0
 
 /// Transaction state tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,9 +162,12 @@ impl QTransaction {
     /// **HEIGHT FIX (v0.8.4-beta)**: Added qblock:latest pointer update to fix
     /// height tracking bug where blocks saved but height counter stuck at 0
     pub async fn save_qblock(&self, block: &q_types::QBlock) -> Result<()> {
-        // Serialize block
-        let block_bytes = postcard::to_allocvec(block)
-            .context("Failed to serialize block")?;
+        // 🚨 v1.0.41-beta: CRITICAL FIX - Use bincode (not postcard!) to match deserialization
+        // BUG: Transaction.save_qblock used postcard but Storage.get_qblock_by_height used bincode
+        // This format mismatch caused ALL blocks to fail with "io error:" on deserialization
+        // which made the node think blocks didn't exist → announced height 0 → endless re-sync
+        let block_bytes = bincode::serialize(block)
+            .context("Failed to serialize block with bincode")?;
 
         // 🚨 v1.0.17-beta CRITICAL FIX: Use string keys not raw binary!
         // BUG: Was using height.to_be_bytes() as key (e.g. 0x0000000000000001)

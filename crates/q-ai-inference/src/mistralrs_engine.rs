@@ -62,9 +62,10 @@ use indexmap::IndexMap;
 use mistralrs::{
     GGUFLoaderBuilder, GGUFSpecificConfig, MistralRs, MistralRsBuilder, ModelDType,
     NormalRequest, Request, RequestMessage, Response, SamplingParams, SchedulerConfig,
-    DefaultSchedulerMethod, TokenSource, DeviceMapSetting, AutoDeviceMapParams,
-    Constraint,
+    DefaultSchedulerMethod, DeviceMapSetting, AutoDeviceMapParams,
+    Constraint, LocalModelPaths, Loader,
 };
+use mistralrs_core::{AdapterPaths, ModelPaths};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -285,9 +286,23 @@ impl MistralRsEngine {
         #[cfg(feature = "metal")]
         let device = mistralrs::Device::new_metal(0)?;
 
-        let pipeline = loader.load_model_from_hf(
-            None, // revision: Option<String>
-            TokenSource::CacheToken,
+        // Build LocalModelPaths to bypass HuggingFace API entirely
+        // This loads the model directly from local files without any network calls
+        let model_paths = Box::new(LocalModelPaths::new(
+            tokenizer_json.clone(), // tokenizer_filename
+            tokenizer_config.clone(), // config_filename
+            tokenizer_config.clone(), // template_filename - use tokenizer_config (will be wrapped in Some())
+            vec![local_gguf_path.clone()], // filenames - the GGUF model weights
+            AdapterPaths::None, // adapter_paths - no adapters
+            None, // gen_conf - no generation config
+            None, // preprocessor_config - not needed for text model
+            None, // processor_config - not needed for text model
+            None, // chat_template_json_filename - will use default
+        )) as Box<dyn ModelPaths>;
+
+        // Load model directly from local paths - NO HuggingFace API calls!
+        let pipeline = loader.load_model_from_path(
+            &model_paths,
             &ModelDType::Auto,
             &device,
             false, // silent: bool

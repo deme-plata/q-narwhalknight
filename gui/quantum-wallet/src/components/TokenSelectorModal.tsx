@@ -7,7 +7,9 @@ interface Token {
   name: string;
   balance: number;
   price: number;
+  change1h: number;
   change24h: number;
+  change7d: number;
   volume24h: number;
   liquidity: number;
   icon: string;

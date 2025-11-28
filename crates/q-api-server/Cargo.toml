@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 q-aegis-ql = { path = "../q-aegis-ql" }
 libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
@@ -43,6 +45,10 @@ tower_governor = "0.3"  # Governor integration for Axum/Tower
 # Async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
+
+# 🔍 v1.0.17-beta-v3: Tokio Console for deep deadlock debugging
+# DISABLED: Removed to allow normal compilation without tokio_unstable
+# console-subscriber = "0.2"
 
 # Lock-free data structures for Phase 2.2 optimization
 crossbeam = "0.8"  # Lock-free queues for 10x performance gain
@@ -175,6 +181,8 @@ q-benchmarks = { path = "../q-benchmarks" }
 [features]
 default = ["tui"]
 tui = ["q-tui"]
+# ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
+advanced-crypto = ["q-crypto-advanced"]
 
 [dev-dependencies]
 tokio-test = "0.4"

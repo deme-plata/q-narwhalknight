@@ -31,7 +31,7 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
 
   const loadActiveLoans = async () => {
     try {
-      const response = await fetch('/api/bank/lending/applications');
+      const response = await fetch('/api/v1/quillon-bank/lending/applications');
       const data = await response.json();
 
       if (data.success && data.data?.applications) {

@@ -3062,8 +3062,18 @@ pub async fn get_wallet_balance(
             // Only restore if this is the deployer
             if contract.deployer == address_bytes {
                 if let Some(symbol) = &contract.metadata.symbol {
-                    if let Some(supply_value) = contract.deployment_params.get("initial_supply") {
-                        let initial_supply = if let Some(num) = supply_value.as_u64() {
+                    if let Some(supply_value) = contract.deployment_params.get("initial_supply")
+                        .or_else(|| contract.deployment_params.get("initialSupply"))
+                    {
+                        // v1.0.49-beta: Get decimals and convert display tokens to base units
+                        let decimals = contract
+                            .deployment_params
+                            .get("decimals")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(8) as u32;
+                        let decimal_multiplier = 10u64.pow(decimals);
+
+                        let display_supply = if let Some(num) = supply_value.as_u64() {
                             Some(num)
                         } else if let Some(s) = supply_value.as_str() {
                             s.parse::<u64>().ok()
@@ -3071,21 +3081,28 @@ pub async fn get_wallet_balance(
                             None
                         };
 
-                        if let Some(initial_supply) = initial_supply {
-                            let token_address = contract.address.0;
-                            let balance_key = (address_bytes, token_address);
+                        if let Some(display_supply) = display_supply {
+                            // Convert display tokens to base units
+                            let base_units = (display_supply as u128) * (decimal_multiplier as u128);
+                            if base_units <= u64::MAX as u128 {
+                                let initial_supply = base_units as u64;
+                                let token_address = contract.address.0;
+                                let balance_key = (address_bytes, token_address);
 
-                            // Only restore if balance is missing or zero
-                            if !token_balances.contains_key(&balance_key)
-                                || token_balances.get(&balance_key) == Some(&0)
-                            {
-                                token_balances.insert(balance_key, initial_supply);
-                                tracing::info!(
-                                    "💰 Auto-restored {} token balance for deployer {}: {} tokens",
-                                    symbol,
-                                    hex::encode(&address_bytes[..8]),
-                                    initial_supply as f64 / 1_000_000.0
-                                );
+                                // Only restore if balance is missing or zero
+                                if !token_balances.contains_key(&balance_key)
+                                    || token_balances.get(&balance_key) == Some(&0)
+                                {
+                                    token_balances.insert(balance_key, initial_supply);
+                                    tracing::info!(
+                                        "💰 Auto-restored {} token balance for deployer {}: {} display × 10^{} = {} base units",
+                                        symbol,
+                                        hex::encode(&address_bytes[..8]),
+                                        display_supply,
+                                        decimals,
+                                        initial_supply
+                                    );
+                                }
                             }
                         }
                     }
@@ -4784,8 +4801,8 @@ pub async fn submit_mining_solution(
         )));
     }
 
-    // Return success immediately (non-blocking)
-    // Background processor will handle balance update, persistence, and broadcasting
+    // ✨ v1.0.51-beta: INSTANT BALANCE UPDATE with AEGIS-256 authentication
+    // Balance is updated IMMEDIATELY after solution acceptance (not waiting for block production)
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
     let block_reward_total =
         calculate_block_reward_time_based(GENESIS_TIMESTAMP, current_timestamp);
@@ -4795,24 +4812,90 @@ pub async fn submit_mining_solution(
     let dev_fee_amount = (block_reward_total as f64 * DEV_FEE_PERCENT) as u64;
     let miner_reward = block_reward_total - dev_fee_amount;
 
-    let current_balance = state
-        .wallet_balances
-        .read()
+    // ⚡ INSTANT BALANCE UPDATE: Update balance immediately in memory AND persist to RocksDB
+    let (current_balance, new_balance) = {
+        let mut balances = state.wallet_balances.write().await;
+        let current = balances.get(&miner_address).copied().unwrap_or(0);
+        let new = current.saturating_add(miner_reward);
+        balances.insert(miner_address, new);
+        (current, new)
+    };
+
+    // 💾 Persist to RocksDB immediately for crash recovery
+    // This ensures balance survives restarts even if block production is delayed
+    if let Err(e) = state
+        .storage_engine
+        .save_wallet_balance(&miner_address, new_balance)
         .await
-        .get(&miner_address)
-        .copied()
-        .unwrap_or(0);
-    let estimated_new_balance = current_balance + miner_reward;
+    {
+        warn!(
+            "⚠️ Failed to persist instant balance update (will retry in batch): {}",
+            e
+        );
+    } else {
+        debug!(
+            "💾 Instant balance persisted: {} = {} units",
+            &request.miner_address[..16],
+            new_balance
+        );
+    }
+
+    // 📡 INSTANT SSE PUSH: Broadcast balance update to frontend immediately
+    // Note: event_broadcaster is Arc<EventBroadcaster>, not Option
+    {
+        let broadcaster = &state.event_broadcaster;
+
+        // Emit BalanceUpdated event for general balance tracking
+        let balance_event = StreamEvent::BalanceUpdated {
+            wallet_address: request.miner_address.clone(),
+            old_balance: current_balance as f64 / 100_000_000.0,
+            new_balance: new_balance as f64 / 100_000_000.0,
+            change_reason: "mining_reward_instant".to_string(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        if let Err(e) = broadcaster.broadcast(balance_event).await {
+            warn!("⚠️ Failed to broadcast instant balance update: {}", e);
+        } else {
+            debug!(
+                "📡 SSE: Instant balance broadcast for {} (+{:.8} QNK)",
+                &request.miner_address[..16],
+                miner_reward as f64 / 100_000_000.0
+            );
+        }
+
+        // Emit MiningReward event for mining-specific UI updates
+        let mining_event = StreamEvent::MiningReward {
+            miner_address: request.miner_address.clone(),
+            reward_qnk: miner_reward as f64 / 100_000_000.0,
+            nonce,
+            block_height: state.node_status.read().await.current_height,
+            difficulty: hex::encode(&hash[..8]),
+            hash_rate: request.hash_rate.unwrap_or(0.0),
+            timestamp: chrono::Utc::now(),
+        };
+
+        if let Err(e) = broadcaster.broadcast(mining_event).await {
+            warn!("⚠️ Failed to broadcast mining reward event: {}", e);
+        }
+    }
+
+    info!(
+        "⚡ INSTANT REWARD: {} +{:.8} QNK (balance: {:.8} QNK)",
+        &request.miner_address[..16],
+        miner_reward as f64 / 100_000_000.0,
+        new_balance as f64 / 100_000_000.0
+    );
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
         reward: miner_reward,
         reward_qnk: miner_reward as f64 / 100_000_000.0,
-        new_balance: estimated_new_balance,
-        new_balance_qnk: estimated_new_balance as f64 / 100_000_000.0,
+        new_balance,
+        new_balance_qnk: new_balance as f64 / 100_000_000.0,
         block_height: state.node_status.read().await.current_height,
         message:
-            "Mining solution queued for processing (1% dev fee applied for sustainable development)"
+            "⚡ Mining reward applied INSTANTLY (1% dev fee for sustainable development)"
                 .to_string(),
     })))
 }
@@ -5582,29 +5665,78 @@ pub async fn execute_swap(
             let pool_token0_normalized = p.token0.to_uppercase();
             let pool_token1_normalized = p.token1.to_uppercase();
 
-            // Check if pool matches (either direction)
-            let forward_match = (from_is_native
-                && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG")
-                || from_is_qugusd && pool_token0_normalized == "QUGUSD"
-                || !from_is_native && !from_is_qugusd && p.token0 == request.from_token)
-                && (to_is_native
-                    && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG")
-                    || to_is_qugusd && pool_token1_normalized == "QUGUSD"
-                    || !to_is_native && !to_is_qugusd && p.token1 == request.to_token);
+            // ✅ RESOLVE POOL TOKENS TO ADDRESSES before comparison
+            // This fixes the bug where pool stores symbols ("MEME") but we're comparing with addresses ("qnk...")
+            let pool_token0_addr = if pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG" {
+                [0u8; 32] // Native QUG
+            } else if pool_token0_normalized == "QUGUSD" || pool_token0_normalized == "QUGUSD-STABLE" {
+                q_types::QUGUSD_TOKEN_ADDRESS
+            } else if p.token0.starts_with("qnk") || p.token0.starts_with("0x") {
+                // Already an address, parse it
+                match parse_wallet_address(&p.token0) {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        // Try to resolve as symbol
+                        match resolve_token_address(&state, &p.token0).await {
+                            Ok(addr) => addr,
+                            Err(_) => continue, // Skip this pool if we can't resolve
+                        }
+                    }
+                }
+            } else {
+                // It's a symbol, resolve to address
+                match resolve_token_address(&state, &p.token0).await {
+                    Ok(addr) => addr,
+                    Err(_) => continue, // Skip this pool if we can't resolve
+                }
+            };
 
-            let reverse_match = (to_is_native
-                && (pool_token0_normalized == "QUG" || pool_token0_normalized == "NATIVE-QUG")
-                || to_is_qugusd && pool_token0_normalized == "QUGUSD"
-                || !to_is_native && !to_is_qugusd && p.token0 == request.to_token)
-                && (from_is_native
-                    && (pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG")
-                    || from_is_qugusd && pool_token1_normalized == "QUGUSD"
-                    || !from_is_native && !from_is_qugusd && p.token1 == request.from_token);
+            let pool_token1_addr = if pool_token1_normalized == "QUG" || pool_token1_normalized == "NATIVE-QUG" {
+                [0u8; 32] // Native QUG
+            } else if pool_token1_normalized == "QUGUSD" || pool_token1_normalized == "QUGUSD-STABLE" {
+                q_types::QUGUSD_TOKEN_ADDRESS
+            } else if p.token1.starts_with("qnk") || p.token1.starts_with("0x") {
+                // Already an address, parse it
+                match parse_wallet_address(&p.token1) {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        // Try to resolve as symbol
+                        match resolve_token_address(&state, &p.token1).await {
+                            Ok(addr) => addr,
+                            Err(_) => continue, // Skip this pool if we can't resolve
+                        }
+                    }
+                }
+            } else {
+                // It's a symbol, resolve to address
+                match resolve_token_address(&state, &p.token1).await {
+                    Ok(addr) => addr,
+                    Err(_) => continue, // Skip this pool if we can't resolve
+                }
+            };
+
+            // ✅ NOW COMPARE ADDRESSES WITH ADDRESSES (not symbols with addresses!)
+            let forward_match = pool_token0_addr == from_token_addr && pool_token1_addr == to_token_addr;
+            let reverse_match = pool_token0_addr == to_token_addr && pool_token1_addr == from_token_addr;
 
             if forward_match {
+                info!(
+                    "✅ Found forward-matching pool: {} ({}) <-> {} ({})",
+                    p.token0,
+                    hex::encode(&pool_token0_addr[..8]),
+                    p.token1,
+                    hex::encode(&pool_token1_addr[..8])
+                );
                 matching_pool = Some((id.clone(), p.clone(), false));
                 break;
             } else if reverse_match {
+                info!(
+                    "✅ Found reverse-matching pool: {} ({}) <-> {} ({})",
+                    p.token0,
+                    hex::encode(&pool_token0_addr[..8]),
+                    p.token1,
+                    hex::encode(&pool_token1_addr[..8])
+                );
                 matching_pool = Some((id.clone(), p.clone(), true));
                 break;
             }
@@ -5692,34 +5824,49 @@ pub async fn execute_swap(
                     StatusCode::BAD_REQUEST
                 })?;
 
-            // Calculate swap output with overflow protection
+            // Calculate swap output with overflow protection using u128 for intermediate calculations
+            // AMM formula: amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
             let (res_in, res_out, amt_out) = if !reversed {
                 // Forward: from_token = token0, to_token = token1
-                let numerator = amount_in_with_fee.checked_mul(p.reserve1).ok_or_else(|| {
-                    warn!("Overflow in swap numerator calculation");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+                // Use u128 to prevent overflow with large amounts
+                let numerator = (amount_in_with_fee as u128) * (p.reserve1 as u128);
+                let denominator = (p.reserve0 as u128) + (amount_in_with_fee as u128);
 
-                let denominator = p.reserve0.checked_add(amount_in_with_fee).ok_or_else(|| {
-                    warn!("Overflow in swap denominator calculation");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+                if denominator == 0 {
+                    warn!("Denominator is zero in swap calculation");
+                    return Ok(Json(ApiResponse::error("Pool has no liquidity".to_string())));
+                }
 
-                let amt_out = numerator.checked_div(denominator).unwrap_or(0);
+                let amt_out_u128 = numerator / denominator;
+                // Safely convert back to u64, capping at u64::MAX if needed
+                let amt_out = if amt_out_u128 > u64::MAX as u128 {
+                    warn!("Swap output exceeds u64::MAX, capping");
+                    u64::MAX
+                } else {
+                    amt_out_u128 as u64
+                };
+
                 (p.reserve0, p.reserve1, amt_out)
             } else {
                 // Reversed: from_token = token1, to_token = token0
-                let numerator = amount_in_with_fee.checked_mul(p.reserve0).ok_or_else(|| {
-                    warn!("Overflow in swap numerator calculation (reversed)");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+                // Use u128 to prevent overflow with large amounts
+                let numerator = (amount_in_with_fee as u128) * (p.reserve0 as u128);
+                let denominator = (p.reserve1 as u128) + (amount_in_with_fee as u128);
 
-                let denominator = p.reserve1.checked_add(amount_in_with_fee).ok_or_else(|| {
-                    warn!("Overflow in swap denominator calculation (reversed)");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+                if denominator == 0 {
+                    warn!("Denominator is zero in swap calculation (reversed)");
+                    return Ok(Json(ApiResponse::error("Pool has no liquidity".to_string())));
+                }
 
-                let amt_out = numerator.checked_div(denominator).unwrap_or(0);
+                let amt_out_u128 = numerator / denominator;
+                // Safely convert back to u64, capping at u64::MAX if needed
+                let amt_out = if amt_out_u128 > u64::MAX as u128 {
+                    warn!("Swap output exceeds u64::MAX (reversed), capping");
+                    u64::MAX
+                } else {
+                    amt_out_u128 as u64
+                };
+
                 (p.reserve1, p.reserve0, amt_out)
             };
 
@@ -5736,6 +5883,7 @@ pub async fn execute_swap(
                     reserve1: 0,
                     provider: [0u8; 32],
                     created_at: chrono::Utc::now(),
+                    lp_token_supply: 0,
                 },
                 false,
                 0,
@@ -7436,4 +7584,96 @@ pub async fn get_sync_metrics(
 pub struct SyncMetricsResponse {
     pub enabled: bool,
     pub metrics: Option<q_storage::BatchMetrics>,
+}
+
+// ============================================================================
+// SECURITY METRICS ENDPOINT (v1.0.3-beta Week 2 Day 1-2)
+// ============================================================================
+
+/// GET /api/v1/security/metrics
+///
+/// Prometheus-compatible metrics endpoint for distributed AI security monitoring.
+///
+/// Returns metrics for:
+/// - Signature verification (total, failed, duration percentiles)
+/// - Signature cache performance (hits, misses, evictions)
+/// - DHT public key operations (announcements, fetches)
+/// - Circuit breaker state (failures, threshold, state)
+///
+/// Format: Prometheus text exposition format
+/// Content-Type: text/plain; version=0.0.4
+pub async fn get_security_metrics(State(state): State<Arc<AppState>>) -> Result<(StatusCode, String), (StatusCode, String)> {
+    // Check if distributed AI coordinator is available
+    if let Some(ref coordinator) = state.distributed_ai_coordinator {
+        // Get Prometheus-formatted metrics from coordinator
+        let metrics_text = coordinator.security_metrics.to_prometheus_format().await;
+
+        // Return with correct Content-Type for Prometheus scraping
+        Ok((StatusCode::OK, metrics_text))
+    } else {
+        // Distributed AI disabled or not initialized
+        let error_response = r#"# HELP security_metrics_unavailable Distributed AI security metrics unavailable
+# TYPE security_metrics_unavailable gauge
+security_metrics_unavailable 1
+
+# Reason: Distributed AI coordinator not initialized (Q_DISABLE_AI=1 or initialization failed)
+"#;
+        Ok((StatusCode::SERVICE_UNAVAILABLE, error_response.to_string()))
+    }
+}
+
+/// GET /api/v1/security/stats
+///
+/// Human-readable JSON endpoint for security statistics dashboard.
+///
+/// Returns detailed security metrics in JSON format for monitoring dashboards.
+pub async fn get_security_stats(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiResponse<()>>)> {
+    if let Some(ref coordinator) = state.distributed_ai_coordinator {
+        let sig_stats = coordinator.security_metrics.get_signature_stats().await;
+        let cache_stats = coordinator.security_metrics.get_cache_stats();
+        let dht_stats = coordinator.security_metrics.get_dht_stats();
+        let cb_stats = coordinator.circuit_breaker.get_stats().await;
+
+        let response = serde_json::json!({
+            "signature_verification": {
+                "total_verifications": sig_stats.total_verifications,
+                "failed_verifications": sig_stats.failed_verifications,
+                "success_rate_percent": sig_stats.success_rate,
+                "duration_p50_micros": sig_stats.duration_p50_micros,
+                "duration_p95_micros": sig_stats.duration_p95_micros,
+                "duration_p99_micros": sig_stats.duration_p99_micros,
+            },
+            "signature_cache": {
+                "cache_hits": cache_stats.cache_hits,
+                "cache_misses": cache_stats.cache_misses,
+                "cache_hit_rate_percent": cache_stats.cache_hit_rate,
+                "cache_evictions": cache_stats.cache_evictions,
+                "cache_size": cache_stats.cache_size,
+            },
+            "dht_operations": {
+                "announcements": dht_stats.announcements,
+                "fetches_success": dht_stats.fetches_success,
+                "fetches_failed": dht_stats.fetches_failed,
+                "fetch_success_rate_percent": dht_stats.fetch_success_rate,
+            },
+            "circuit_breaker": {
+                "state": format!("{:?}", cb_stats.state),
+                "failure_count": cb_stats.failure_count,
+                "failure_threshold": cb_stats.failure_threshold,
+                "failure_percentage": cb_stats.failure_percentage(),
+                "consecutive_successes": cb_stats.consecutive_successes,
+                "success_threshold": cb_stats.success_threshold,
+                "is_healthy": cb_stats.is_healthy(),
+                "time_in_open_state_secs": cb_stats.time_in_open_state.map(|d| d.as_secs()),
+            },
+            "timestamp": chrono::Utc::now().timestamp(),
+        });
+
+        Ok(Json(response))
+    } else {
+        Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error("Distributed AI coordinator not initialized (Q_DISABLE_AI=1 or initialization failed)".to_string()))
+        ))
+    }
 }

@@ -59,28 +59,28 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Static storage for the AI engine (persists across calls for metrics tracking)
+static AI_ENGINE: std::sync::OnceLock<Arc<q_ai_inference::MistralRsEngine>> = std::sync::OnceLock::new();
+static AI_ENGINE_LOADING: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 /// On-demand AI engine loading helper
 ///
 /// This function ensures the AI engine is loaded before attempting inference.
-/// It uses a static Mutex to ensure only one thread loads the engine at a time.
-async fn ensure_ai_engine_loaded(state: &Arc<AppState>) -> anyhow::Result<Arc<q_ai_inference::MistralRsEngine>> {
-    use tokio::sync::Mutex as TokioMutex;
-    use std::sync::OnceLock;
-
-    // Static mutex to ensure single initialization
-    static LOADING_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
-    let lock = LOADING_LOCK.get_or_init(|| TokioMutex::new(()));
-
-    // Check if engine is already loaded
-    if let Some(ref engine) = state.mistralrs_engine {
+/// Uses a static OnceLock to ensure the engine persists and accumulates stats.
+///
+/// Made public so it can be called from the gossip handler for distributed inference.
+pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<Arc<q_ai_inference::MistralRsEngine>> {
+    // Check if engine is already loaded in static storage
+    if let Some(engine) = AI_ENGINE.get() {
         return Ok(engine.clone());
     }
 
     // Acquire lock to prevent concurrent loading
+    let lock = AI_ENGINE_LOADING.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = lock.lock().await;
 
     // Double-check after acquiring lock (another thread might have loaded it)
-    if let Some(ref engine) = state.mistralrs_engine {
+    if let Some(engine) = AI_ENGINE.get() {
         return Ok(engine.clone());
     }
 
@@ -229,9 +229,17 @@ async fn ensure_ai_engine_loaded(state: &Arc<AppState>) -> anyhow::Result<Arc<q_
     let engine = q_ai_inference::MistralRsEngine::new(model_path.to_str().unwrap()).await?;
     let engine_arc = Arc::new(engine);
 
+    // Store in static for persistence (metrics tracking, etc.)
+    let _ = AI_ENGINE.set(engine_arc.clone());
+
     info!("✅ AI engine loaded successfully and ready for inference!");
 
     Ok(engine_arc)
+}
+
+/// Get the static AI engine reference (for metrics)
+pub fn get_static_ai_engine() -> Option<Arc<q_ai_inference::MistralRsEngine>> {
+    AI_ENGINE.get().cloned()
 }
 
 /// Request to create a new chat
@@ -1401,8 +1409,9 @@ async fn get_ai_metrics(
         "distributed": {}
     });
 
-    // Get single-node mistralrs engine stats
-    if let Some(ref engine) = state.mistralrs_engine {
+    // Get single-node mistralrs engine stats from STATIC storage (not state)
+    // This ensures we get accumulated stats from the actual engine instance
+    if let Some(engine) = get_static_ai_engine() {
         let stats = engine.get_stats().await;
         let average_latency_ms = if stats.tokens_generated > 0 {
             (stats.total_time_ms / stats.tokens_generated as f64)

@@ -1,0 +1,69 @@
+[package]
+name = "q-crypto-advanced"
+version.workspace = true
+edition.workspace = true
+description = "Advanced cryptographic primitives: FROST threshold signatures, Circle STARKs, AEGIS-256"
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["frost", "aegis"]
+frost = []
+aegis = []
+circle-stark = []
+lattice-aggregate = []
+genus2-vdf = []
+sqisign = []
+bulletproofs-v2 = []
+full = ["frost", "aegis", "circle-stark", "lattice-aggregate", "genus2-vdf", "sqisign", "bulletproofs-v2"]
+
+[dependencies]
+# FROST Threshold Signatures (IACR 2025/1024 - Memory-Optimal Two-Round Threshold Schnorr)
+frost-ed25519 = "2.2"
+frost-core = "2.2"
+frost-ristretto255 = "2.2"
+
+# AEGIS-256 (IACR 2024/268 - Fast Authenticated Encryption, 2-5x faster than AES-GCM)
+aegis = "0.9"
+
+# Circle STARKs foundation (for future Circle STARK implementation)
+# Uses winterfell as base, with circle-specific optimizations
+winterfell = "0.9"
+
+# Core dependencies
+sha3.workspace = true
+sha2.workspace = true
+# Use rand 0.8 for FROST compatibility (uses rand_core 0.6)
+rand = "0.8"
+rand_core = "0.6"
+getrandom = "0.2"
+zeroize.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+# Constant-time operations for lattice crypto (IACR 2025/1056)
+subtle = "2.5"
+
+# For key derivation
+hkdf.workspace = true
+argon2 = "0.5"
+
+# Serialization
+bincode.workspace = true
+
+# Async support
+tokio.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[bench]]
+name = "crypto_benchmarks"
+harness = false

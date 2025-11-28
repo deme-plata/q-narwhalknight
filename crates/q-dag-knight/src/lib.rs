@@ -24,6 +24,10 @@ pub mod quantum_beacon;
 pub mod quantum_vdf;
 pub mod vertex_creator;
 
+// ✨ v1.0.58-beta: Genus-2 VDF for quantum-resistant anchor election (IACR 2025/1050)
+#[cfg(feature = "advanced-crypto")]
+pub mod genus2_vdf_integration;
+
 pub use anchor_election::{AnchorElectionResult, QuantumAnchorElection};
 pub use commit_logic::CommitProtocol;
 pub use mempool_integration::{
@@ -33,6 +37,12 @@ pub use ordering_rules::OrderingEngine;
 pub use quantum_beacon::{BeaconState, QuantumBeacon};
 pub use quantum_vdf::{QuantumVDF, QuantumVDFConfig, QuantumVDFProof, VDFComputationResult, VDFSecurityLevel};
 pub use vertex_creator::{Vertex, VertexCreator, VertexCreatorConfig};
+
+// ✨ v1.0.58-beta: Genus-2 VDF exports (quantum-resistant time-locking)
+#[cfg(feature = "advanced-crypto")]
+pub use genus2_vdf_integration::{
+    Genus2VDFEngine, Genus2VDFConfig, Genus2VDFResult, Genus2SecurityLevel, Genus2BatchVerifier,
+};
 
 // Re-export types from q-types for easier access
 pub use q_types::{Block, BullsharkCert, NarwhalPayload};
@@ -362,6 +372,55 @@ impl DAGKnightConsensus {
     pub async fn get_committed_vertices(&self, round: Round) -> Vec<VertexId> {
         let committed = self.committed_vertices.read().await;
         committed.get(&round).cloned().unwrap_or_else(Vec::new)
+    }
+
+    /// Get N most recent committed vertices for use as DAG parents
+    ///
+    /// This method is used during block production to populate the dag_parents field.
+    /// It returns vertices from the most recent committed rounds, prioritizing
+    /// newer rounds first.
+    ///
+    /// # Arguments
+    /// * `count` - Maximum number of vertices to return
+    ///
+    /// # Returns
+    /// Vector of VertexIds from recent committed rounds (most recent first)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get 3 most recent committed vertices to use as DAG parents
+    /// let parents = dag_knight.get_recent_committed_vertices(3).await?;
+    /// let block = QBlock {
+    ///     dag_parents: parents,
+    ///     // ... other fields
+    /// };
+    /// ```
+    pub async fn get_recent_committed_vertices(&self, count: usize) -> Result<Vec<VertexId>> {
+        let committed = self.committed_vertices.read().await;
+
+        // Get all rounds and sort descending (most recent first)
+        let mut rounds: Vec<Round> = committed.keys().copied().collect();
+        rounds.sort_by(|a, b| b.cmp(a)); // Descending order
+
+        let mut vertices = Vec::new();
+
+        // Collect vertices from most recent rounds until we have enough
+        for round in rounds {
+            if vertices.len() >= count {
+                break;
+            }
+
+            if let Some(round_vertices) = committed.get(&round) {
+                for vertex_id in round_vertices {
+                    if vertices.len() >= count {
+                        break;
+                    }
+                    vertices.push(*vertex_id);
+                }
+            }
+        }
+
+        Ok(vertices)
     }
 
     /// Check if consensus has progressed beyond a round

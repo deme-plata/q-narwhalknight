@@ -16,6 +16,7 @@ import {
   Info
 } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import { InfiniteBlockList } from './InfiniteBlockList';
 
 interface NetworkStats {
   currentHeight: number;
@@ -917,19 +918,29 @@ export default function ExplorerScreen() {
         </div>
       </motion.section>
 
+      {/* ✨ Infinite Scroll Blockchain Explorer */}
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.8 }}
+        className="mt-8"
+      >
+        <InfiniteBlockList />
+      </motion.section>
+
       {/* Detail Modal */}
       <AnimatePresence>
         {selectedDetail && (
-          <DetailModal 
-            detail={selectedDetail} 
-            onClose={() => setSelectedDetail(null)} 
+          <DetailModal
+            detail={selectedDetail}
+            onClose={() => setSelectedDetail(null)}
           />
         )}
         {showStatsModal && (
-          <StatsModal 
+          <StatsModal
             networkStats={networkStats}
             liveMetrics={liveMetrics}
-            onClose={() => setShowStatsModal(false)} 
+            onClose={() => setShowStatsModal(false)}
           />
         )}
       </AnimatePresence>

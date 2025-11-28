@@ -154,6 +154,13 @@ pub enum ProducerCommand {
         emitter: Arc<crate::streaming::HighPerformanceEmitter>,
     },
 
+    /// ⚔️  v1.0.3-beta: Set DAG-Knight consensus for dag_parents population
+    /// When set, blocks will include references to recent DAG vertices
+    /// This enables Phase 2 DAG-aware layered sync (10-50x faster)
+    SetDagKnight {
+        dag_knight: Arc<q_dag_knight::DAGKnightConsensus>,
+    },
+
     /// Shutdown the producer task gracefully
     Shutdown,
 }
@@ -345,6 +352,14 @@ impl LockFreeProducer {
                     producer.set_event_emitter(emitter);
                     info!(
                         "🔔 Producer #{}: Event emitter set for SSE notifications",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetDagKnight { dag_knight } => {
+                    producer.set_dag_knight(dag_knight);
+                    info!(
+                        "⚔️  Producer #{}: DAG-Knight consensus set for dag_parents population",
                         producer_id
                     );
                 }
@@ -576,6 +591,14 @@ impl LockFreeProducer {
                     producer.set_event_emitter(emitter);
                     info!(
                         "🔔 Producer #{}: Event emitter set for SSE notifications (storage loop)",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetDagKnight { dag_knight } => {
+                    producer.set_dag_knight(dag_knight);
+                    info!(
+                        "⚔️  Producer #{}: DAG-Knight consensus set for dag_parents population (storage loop)",
                         producer_id
                     );
                 }
@@ -949,6 +972,28 @@ impl LockFreeProducer {
         } else {
             info!(
                 "🔐 Producer #{}: Sent SetValidatorKeypair command",
+                self.producer_id
+            );
+        }
+    }
+
+    /// Set DAG-Knight consensus for dag_parents population
+    /// ⚔️  v1.0.3-beta: Enable DAG-aware sync (Phase 1)
+    ///
+    /// When DAG-Knight consensus is set, all produced blocks will include
+    /// references to recent committed DAG vertices in the dag_parents field.
+    /// This enables Phase 2 DAG-aware layered sync (10-50x performance improvement).
+    pub fn set_dag_knight(&self, dag_knight: Arc<q_dag_knight::DAGKnightConsensus>) {
+        let cmd = ProducerCommand::SetDagKnight { dag_knight };
+
+        if let Err(e) = self.command_tx.try_send(cmd) {
+            error!(
+                "Producer #{}: Failed to send SetDagKnight command: {:?}",
+                self.producer_id, e
+            );
+        } else {
+            info!(
+                "⚔️  Producer #{}: Sent SetDagKnight command",
                 self.producer_id
             );
         }
@@ -1819,6 +1864,23 @@ impl LockFreeProducerPool {
             producer.set_validator_keypair(keypair.clone());
         }
         info!("✅ [PQC] Validator keypair sent to all producers");
+    }
+
+    /// Set DAG-Knight consensus for all producers
+    /// ⚔️  v1.0.3-beta: Enable DAG-aware sync (Phase 1)
+    ///
+    /// This sends the SetDagKnight command to all producer tasks,
+    /// enabling dag_parents population in all produced blocks.
+    /// This is the foundation for Phase 2 DAG-aware layered sync (10-50x faster).
+    pub fn set_dag_knight(&self, dag_knight: Arc<q_dag_knight::DAGKnightConsensus>) {
+        info!(
+            "⚔️  [DAG-Knight] Setting consensus for all {} producers...",
+            self.num_producers
+        );
+        for producer in &self.producers {
+            producer.set_dag_knight(dag_knight.clone());
+        }
+        info!("✅ [DAG-Knight] Consensus sent to all producers - dag_parents will be populated");
     }
 
     /// Set event emitter for all producers

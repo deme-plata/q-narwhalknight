@@ -31,6 +31,10 @@ pub mod hybrid_mining;
 #[cfg(feature = "gpu-mining")]
 pub mod gpu;
 
+// ✨ v1.0.58-beta: Bulletproofs v2 for confidential mining rewards (IACR 2024/313)
+#[cfg(feature = "advanced-crypto")]
+pub mod reward_proofs;
+
 // Re-exports for convenience
 pub use block::{QuantumPoWBlock, MiningTemplate, BlockHeader};
 pub use miner::{QuantumMiner, MiningConfig, MiningResult};
@@ -44,6 +48,14 @@ pub use hybrid_mining::{HybridMiningBlock, HybridMiningCoordinator, HybridReward
 
 #[cfg(feature = "gpu-mining")]
 pub use gpu::{GPUMiner, OpenCLContext, SHA3Kernel};
+
+// ✨ v1.0.58-beta: Bulletproofs v2 exports (confidential rewards)
+#[cfg(feature = "advanced-crypto")]
+pub use reward_proofs::{
+    RewardProver, RewardVerifier, RewardAggregator, ConfidentialReward,
+    AggregatedRewardProof, AggregatedRewardVerifier, RewardProofConfig,
+    RewardProofStats, VerificationResult,
+};
 
 use q_types::*;
 use q_precision::QAmount;

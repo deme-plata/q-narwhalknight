@@ -4,6 +4,7 @@ import App from './App.tsx'
 import ErrorBoundary from './components/ErrorBoundary.tsx'
 import { PasswordModalProvider } from './contexts/PasswordModalContext.tsx'
 import { SessionTimeoutProvider } from './contexts/SessionTimeoutContext.tsx'
+import { LibP2PProvider } from './contexts/LibP2PContext.tsx'
 import * as ed25519 from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha512'
 
@@ -31,7 +32,9 @@ createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
     <SessionTimeoutProvider>
       <PasswordModalProvider>
-        <App />
+        <LibP2PProvider>
+          <App />
+        </LibP2PProvider>
       </PasswordModalProvider>
     </SessionTimeoutProvider>
   </ErrorBoundary>
