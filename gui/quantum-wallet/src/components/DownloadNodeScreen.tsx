@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v1.0.49-beta • Gap Detection Sync Fix</span>
+          <span className="text-sm font-bold text-quantum-cyan">v1.1.22 Phase 15 • Safe Batched Sync + Genesis Checkpoint</span>
         </div>
       </motion.div>
 
@@ -67,37 +67,37 @@ export default function DownloadNodeScreen() {
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Gap Detection Sync v1.0.49</p>
-                <p className="text-sm text-gray-400">Fixes nodes falling behind - detects and fills sync gaps automatically</p>
+                <p className="text-white font-medium">Ring-LWE VRF Mining</p>
+                <p className="text-sm text-gray-400">Post-quantum secure mining leader election with lattice-based VRF</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-cyan flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">TurboSync + Bincode</p>
-                <p className="text-sm text-gray-400">16 parallel streams, 10k chunks, MessagePack serialization</p>
+                <p className="text-white font-medium">Genus-2 VDF Consensus</p>
+                <p className="text-sm text-gray-400">Hyperelliptic curve VDF for quantum-resistant time proofs</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-purple flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">HTTP→P2P Transition</p>
-                <p className="text-sm text-gray-400">Seamless switch from bootstrap sync to peer-to-peer network</p>
+                <p className="text-white font-medium">DAG-Knight + Slashing</p>
+                <p className="text-sm text-gray-400">Byzantine fault tolerant consensus with economic penalties</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v1.0.49-beta"
+              href="/downloads/q-api-server-v1.3.9-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v1.0.49-beta)
+              Download Linux Binary (v1.3.9-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 142 MB | Gap Detection + TurboSync + PQC
+              Size: 168 MB | Ring-LWE VRF Mining + Genus-2 VDF + PQC Security
             </p>
           </div>
 
@@ -105,9 +105,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v1.0.49-beta
-chmod +x q-api-server-v1.0.49-beta
-./q-api-server-v1.0.49-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v1.3.9-beta
+chmod +x q-api-server-v1.3.9-beta
+./q-api-server-v1.3.9-beta --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               Auto-discovers peers via bootstrap node (185.182.185.227:8080)

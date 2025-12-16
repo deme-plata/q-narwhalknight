@@ -115,7 +115,7 @@ impl DAGKnightConsensus {
             current_round: RwLock::new(0),
             last_commit_round: RwLock::new(0),
             f,
-            delta: 4, // Conservative default
+            delta: 1, // ⚡ v1.0.72-beta: Aggressive delta=1 for sub-50ms finality (was 4)
 
             // PHASE 4: Initialize anonymous mesh network state
             anonymous_validator_set: RwLock::new(HashMap::new()),
@@ -427,6 +427,66 @@ impl DAGKnightConsensus {
     pub async fn is_round_committed(&self, round: Round) -> bool {
         let last_commit = *self.last_commit_round.read().await;
         round <= last_commit
+    }
+
+    /// ⚔️ v1.0.69-beta: Get the latest committed/finalized round
+    ///
+    /// This is used by the block producer to enforce ancestor finality checks
+    /// and prevent tail forking vulnerabilities in pipelined BFT.
+    ///
+    /// # BFT Safety
+    /// Proposals should not be more than δ+1 rounds ahead of this value,
+    /// otherwise they risk creating tail forks that could be reorganized.
+    ///
+    /// # Returns
+    /// * `Ok(round)` - The highest round with committed vertices
+    /// * `Err` - If consensus state cannot be read (should never happen)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let committed = dag_knight.get_latest_committed_round().await?;
+    /// if proposed_height > committed + delta + 1 {
+    ///     return Err("Too far ahead of committed height");
+    /// }
+    /// ```
+    pub async fn get_latest_committed_round(&self) -> Result<Round> {
+        let last_commit = *self.last_commit_round.read().await;
+        Ok(last_commit)
+    }
+
+    /// 🚀 v1.0.73-beta: Initialize committed round from persisted blockchain height
+    /// This MUST be called on server restart to sync consensus state with storage
+    /// Without this, tail fork protection blocks all new blocks after restart!
+    pub async fn initialize_committed_round(&self, blockchain_height: u64) {
+        let mut last_commit = self.last_commit_round.write().await;
+        let mut current_round = self.current_round.write().await;
+
+        // Set committed round to current blockchain height
+        // This allows new blocks to be proposed immediately after restart
+        *last_commit = blockchain_height;
+        *current_round = blockchain_height;
+
+        info!(
+            "🔧 [CONSENSUS INIT] Initialized committed round to {} from blockchain height",
+            blockchain_height
+        );
+    }
+
+    /// 🚀 v1.0.76-beta: Advance committed round after successful block production
+    /// This MUST be called whenever a block is successfully added to the chain
+    /// Without this, tail fork protection will eventually stall block production
+    pub async fn advance_committed_round(&self, new_height: u64) {
+        let mut last_commit = self.last_commit_round.write().await;
+
+        // Only advance if new height is greater (prevents rollback attacks)
+        if new_height > *last_commit {
+            let old = *last_commit;
+            *last_commit = new_height;
+            debug!(
+                "📈 [COMMIT ADVANCE] Committed round advanced: {} → {}",
+                old, new_height
+            );
+        }
     }
 
     /// Get ordering of transactions from committed vertices

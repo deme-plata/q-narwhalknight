@@ -40,6 +40,8 @@ members = [
     "crates/q-quantum-mixing", # Quantum transaction mixing plugin
     "crates/q-zk-stark",      # ZK-STARK proofs with GPU acceleration
     "crates/q-zk-snark",      # ZK-SNARK toolkit (Groth16, PLONK, Marlin)
+    "crates/q-lattice-guard", # Post-quantum lattice-based zk-SNARK (RLWE)
+    "crates/q-rlwe-vrf",      # Post-quantum VRF based on Ring-LWE for mining
     "crates/q-zk-p2p",        # Zero-knowledge enhanced P2P networking
     "crates/q-dex",           # Decentralized exchange with ZK privacy
     "crates/q-oracle",        # Oracle network for price feeds
@@ -59,7 +61,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced"]  # v1.0.54: FROST threshold sigs, AEGIS-256, Circle STARKs
 
 [workspace.package]
-version = "1.0.3-beta"  # v1.0.3-beta: CRITICAL FIX - Enable timeout sync when network_height=0 (fixes stuck at height 1)
+version = "1.1.24-beta"  # v1.1.24-beta: Phase 16 - Mainnet Safety Infrastructure (Checkpoints, Integrity Monitor, Backup)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"

@@ -27,6 +27,8 @@ pub mod rewards;
 pub mod commitment;
 pub mod dev_fee;
 pub mod hybrid_mining;
+pub mod hashpower_security; // v1.3.0-beta: Hashpower-weighted cryptographic security enhancements
+pub mod optimized_miner; // v1.3.1-beta: Ultra-optimized multi-threaded mining engine
 
 #[cfg(feature = "gpu-mining")]
 pub mod gpu;
@@ -34,6 +36,10 @@ pub mod gpu;
 // ✨ v1.0.58-beta: Bulletproofs v2 for confidential mining rewards (IACR 2024/313)
 #[cfg(feature = "advanced-crypto")]
 pub mod reward_proofs;
+
+// ✨ v1.0.60-beta: Ring-LWE VRF for post-quantum mining leader election
+// Replaces broken X-VRF (IACR 2021/302) with secure Ring-LWE based VRF
+pub mod vrf_mining;
 
 // Re-exports for convenience
 pub use block::{QuantumPoWBlock, MiningTemplate, BlockHeader};
@@ -44,7 +50,29 @@ pub use pool::{MiningPool, PoolManager, PoolWorker};
 pub use rewards::{RewardCalculator, RewardResult, RewardConfig, RewardStats};
 pub use commitment::{DAGCommitter, CommitmentProtocol, MerkleCommitment};
 pub use dev_fee::{DevFeeConfig, MinerAuth, MinerCredentials, calculate_dev_fee_split, FOUNDER_WALLET, DEV_FEE_PERCENT};
-pub use hybrid_mining::{HybridMiningBlock, HybridMiningCoordinator, HybridRewards, CPUMiningPool, GPUMiningPool};
+pub use hybrid_mining::{
+    HybridMiningBlock, HybridMiningCoordinator, HybridRewards, CPUMiningPool, GPUMiningPool,
+    IntegratedHybridMiner, HybridMiningStats, HybridMiningStatsSnapshot,
+};
+
+// v1.3.0-beta: Hashpower-weighted security enhancements
+pub use hashpower_security::{
+    // Cumulative Work Security (Enhancement 1)
+    CumulativeWorkSecurity, CumulativeWorkProof, SecurityTier, WorkSnapshot,
+    // Adaptive VDF Complexity (Enhancement 2)
+    AdaptiveVdfComplexity, VdfDifficultyAdjustment, HashrateDataPoint,
+    // Mining Randomness Beacon (Enhancement 3)
+    MiningRandomnessBeacon, BlockEntropyContribution, BeaconOutput,
+    // Unified Manager
+    HashpowerSecurityManager, HashpowerSecurityStats,
+};
+
+// v1.3.1-beta: Ultra-optimized multi-threaded mining engine
+pub use optimized_miner::{
+    OptimizedMiner, OptimizedMinerConfig, MiningStatistics, MiningStatsSnapshot,
+    MiningSolution, MiningJob, OptimizedHasher,
+    benchmark_hashrate, get_optimal_thread_count,
+};
 
 #[cfg(feature = "gpu-mining")]
 pub use gpu::{GPUMiner, OpenCLContext, SHA3Kernel};
@@ -55,6 +83,12 @@ pub use reward_proofs::{
     RewardProver, RewardVerifier, RewardAggregator, ConfidentialReward,
     AggregatedRewardProof, AggregatedRewardVerifier, RewardProofConfig,
     RewardProofStats, VerificationResult,
+};
+
+// ✨ v1.0.60-beta: VRF mining exports (post-quantum leader election)
+pub use vrf_mining::{
+    VrfMiningEngine, VrfMiningConfig, VrfSecurityLevel, MiningVrfOutput,
+    calculate_lottery_threshold,
 };
 
 use q_types::*;

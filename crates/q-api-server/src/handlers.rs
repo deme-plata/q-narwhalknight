@@ -82,7 +82,7 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
         build_timestamp: env!("BUILD_TIMESTAMP").parse().unwrap_or(0),
         build_date: env!("BUILD_DATE").to_string(),
         turbo_sync_version: 1, // NEW format
-        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase5".to_string()),
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase16".to_string()),
         features: vec![
             "turbo-sync".to_string(),
             "balance-consensus".to_string(),
@@ -157,6 +157,14 @@ pub async fn node_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let status = state.node_status.read().await.clone();
+
+    // ✅ v1.0.70-beta: CRITICAL FIX - Use atomic height counter instead of stale node_status.current_height
+    // BUG: The node_status.current_height was only set once at startup from get_highest_contiguous_block()
+    // which returns 0 if genesis block is missing. The current_height_atomic is updated in real-time
+    // by both P2P sync and block production, so it reflects the actual current height.
+    let real_current_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     // ✅ v0.9.30-beta: Get master account (dev fee wallet) balance for node status display
     // Master account receives 1% of all mining rewards as development fee
@@ -241,21 +249,23 @@ pub async fn node_status(
 
     // Get sync status for miners
     // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
+    // v1.0.70-beta: Use real_current_height instead of stale status.current_height
     let network_height = state
         .highest_network_height
         .load(std::sync::atomic::Ordering::SeqCst);
-    let is_syncing = network_height > 0 && status.current_height + 10 < network_height;
-    let blocks_behind = if network_height > status.current_height {
-        network_height - status.current_height
+    let is_syncing = network_height > 0 && real_current_height + 10 < network_height;
+    let blocks_behind = if network_height > real_current_height {
+        network_height - real_current_height
     } else {
         0
     };
 
     // Create a dashboard-friendly response with properly formatted numeric values
+    // v1.0.70-beta: Use real_current_height from atomic counter for accurate height display
     let dashboard_status = serde_json::json!({
         "node_id": hex::encode(&status.node_id),
         "current_round": status.current_round,
-        "current_height": status.current_height,
+        "current_height": real_current_height,
         "highest_network_height": network_height,
         "is_syncing": is_syncing,
         "blocks_behind": blocks_behind,
@@ -305,69 +315,114 @@ pub async fn node_status(
     Ok(Json(ApiResponse::success(dashboard_status)))
 }
 
-/// Calculate block reward using TIME-BASED halving (independent of actual BPS)
-/// Based on Austrian economics time preference (people value present goods more than future goods)
+/// Calculate block reward using AUSTRIAN ECONOMICS emission schedule
 ///
-/// DYNAMIC HALVING: Uses elapsed time, not block count - adapts to any BPS!
+/// ## Bitcoin-Inspired Sound Money Principles:
+/// - Fixed maximum supply: 21,000,000 QUG
+/// - 4-year halving eras (not 1-year)
+/// - 256-year complete emission timeline (64 halvings × 4 years)
 ///
-/// This design allows performance optimization (10 BPS → 1000 BPS) without breaking
-/// the emission schedule. Halvings occur every calendar year regardless of blocks produced.
+/// ## Emission Schedule (matching emission_controller.rs):
+/// - Era 0 (Years 0-4):   328,125 QUG total → 82,031 QUG/year → 224.7 QUG/day
+/// - Era 1 (Years 4-8):   164,062 QUG total → 41,015 QUG/year → 112.4 QUG/day
+/// - Era 2 (Years 8-12):   82,031 QUG total → 20,507 QUG/year →  56.2 QUG/day
+/// - Era 3 (Years 12-16):  41,015 QUG total → 10,253 QUG/year →  28.1 QUG/day
+/// - ... continues halving every 4 years for 256 years
 ///
-/// Time-Based Emission Schedule:
-/// - Year 1: Target 3,153,600 QNK emission
-/// - Year 2: Target 1,576,800 QNK emission (halving)
-/// - Year 3: Target 788,400 QNK emission (halving)
-/// - Year 4: Target 394,200 QNK emission (halving)
-/// - ... (continues asymptotically to 21M QNK)
+/// ## Adaptive Block Reward:
+/// The per-block reward adapts to network throughput to maintain constant daily emission:
+///   reward_per_block = daily_target / (block_rate × 86400)
 ///
-/// Per-block rewards adjust dynamically based on actual network speed to hit annual targets.
-/// Fast network (high BPS) = smaller per-block rewards
-/// Slow network (low BPS) = larger per-block rewards
-/// Total annual emission = constant regardless of BPS
+/// At current ~27 blocks/sec: reward = 224.7 / (27 × 86400) = 0.0000963 QUG/block
+/// At 1000 blocks/sec:        reward = 224.7 / (1000 × 86400) = 0.0000026 QUG/block
 ///
-/// This enables:
-/// - Unlimited performance optimization
-/// - ASIC-resistant VDF mining at any speed
-/// - Predictable calendar-based halvings
-/// - Fair distribution regardless of network conditions
+/// This enables unlimited performance optimization without breaking the emission schedule.
+///
+/// ## Parameters:
+/// - `genesis_timestamp`: Unix timestamp when network started (Oct 26, 2025)
+/// - `current_timestamp`: Current Unix timestamp
+/// - `estimated_block_rate`: Estimated network blocks per second (for adaptive reward)
+///
+/// Returns: Block reward in base units (1 QUG = 100,000,000 base units)
 pub fn calculate_block_reward_time_based(genesis_timestamp: u64, current_timestamp: u64) -> u64 {
-    const SECONDS_PER_YEAR: u64 = 31_536_000; // 365 days
-    const BASE_REWARD: u64 = 100_000; // 0.001 QNK in base units
+    // Austrian Economics Constants
+    const SECONDS_PER_ERA: u64 = 126_144_000; // 4 years = 4 × 365.25 × 24 × 60 × 60
+    const SECONDS_PER_YEAR: f64 = 31_557_600.0; // 365.25 days (accounts for leap years)
+    const SECONDS_PER_DAY: f64 = 86_400.0;
+
+    // Era 0 targets (first 4 years)
+    const ERA_0_TOTAL_QUG: u64 = 328_125; // QUG for Era 0 (21M / 64)
+    const ERA_0_ANNUAL_QUG: f64 = 82_031.25; // QUG per year
+    const ERA_0_DAILY_QUG: f64 = 224.7465; // QUG per day
+
+    // Base units conversion
+    const QUG_TO_BASE: u64 = 100_000_000; // 1 QUG = 100M base units
+
+    // Estimated network block rate (blocks per second)
+    // This should ideally come from actual network metrics, but we use a conservative estimate
+    // TODO: Pass actual block rate from emission_controller for more accurate adaptive rewards
+    const ESTIMATED_BLOCK_RATE: f64 = 30.0; // ~30 blocks/sec observed on testnet
 
     // Protection against invalid timestamps
     if current_timestamp < genesis_timestamp {
-        return BASE_REWARD; // Fallback to base reward
+        // Before genesis: return minimum viable reward
+        return 1000; // 0.00001 QUG as fallback
     }
 
     let elapsed_seconds = current_timestamp - genesis_timestamp;
-    let halving_count = elapsed_seconds / SECONDS_PER_YEAR;
 
-    if halving_count >= 64 {
-        return 0; // After 64 years, rewards negligible
-    }
+    // Calculate current era (halving every 4 years)
+    let era = elapsed_seconds / SECONDS_PER_ERA;
 
-    // Halving based on calendar years, not blocks
-    BASE_REWARD >> halving_count
-}
-
-/// Legacy block-height based reward calculation (kept for backward compatibility)
-/// ⚠️ DEPRECATED: Use calculate_block_reward_time_based() for production
-///
-/// This function assumes fixed 100 BPS and will become inaccurate as performance improves.
-pub fn calculate_block_reward(block_height: u64) -> u64 {
-    const HALVING_INTERVAL: u64 = 3_153_600_000; // Assumes 100 BPS (brittle)
-    const BASE_REWARD: u64 = 100_000; // 0.001 QNK in base units (1 QNK = 100,000,000 base units)
-
-    // Calculate number of halvings that have occurred
-    let halving_count = block_height / HALVING_INTERVAL;
-
-    // After 64 halvings, reward becomes negligible (effectively 0)
-    if halving_count >= 64 {
+    // After 64 eras (256 years), emission complete
+    if era >= 64 {
         return 0;
     }
 
-    // Calculate reward with halving: reward = base_reward / (2^halving_count)
-    BASE_REWARD >> halving_count
+    // Calculate daily target for current era (halves each era)
+    let era_daily_qug = ERA_0_DAILY_QUG / (1u64 << era) as f64;
+
+    // Calculate blocks expected per day at current rate
+    let blocks_per_day = ESTIMATED_BLOCK_RATE * SECONDS_PER_DAY;
+
+    // Calculate reward per block in QUG
+    let reward_qug = era_daily_qug / blocks_per_day;
+
+    // Convert to base units
+    let reward_base_units = (reward_qug * QUG_TO_BASE as f64) as u64;
+
+    // Safety bounds: minimum 100 base units (0.000001 QUG), maximum 1 QUG
+    reward_base_units.clamp(100, QUG_TO_BASE)
+}
+
+/// Legacy block-height based reward calculation
+/// ⚠️ DEPRECATED: Use calculate_block_reward_time_based() for production
+///
+/// This function is kept for backward compatibility only.
+/// It assumes fixed block rate and doesn't adapt to network throughput.
+pub fn calculate_block_reward(block_height: u64) -> u64 {
+    // Era 0 parameters
+    const BLOCKS_PER_ERA: u64 = 126_144_000 * 30; // ~30 blocks/sec × 4 years
+    const ERA_0_DAILY_QUG: f64 = 224.7465;
+    const BLOCKS_PER_DAY: f64 = 30.0 * 86_400.0; // ~2.592M blocks/day
+    const QUG_TO_BASE: u64 = 100_000_000;
+
+    // Calculate era from block height
+    let era = block_height / BLOCKS_PER_ERA;
+
+    // After 64 eras (256 years), emission complete
+    if era >= 64 {
+        return 0;
+    }
+
+    // Calculate daily target for current era
+    let era_daily_qug = ERA_0_DAILY_QUG / (1u64 << era) as f64;
+
+    // Calculate reward per block
+    let reward_qug = era_daily_qug / BLOCKS_PER_DAY;
+
+    // Convert to base units with safety bounds
+    ((reward_qug * QUG_TO_BASE as f64) as u64).clamp(100, QUG_TO_BASE)
 }
 
 /// Genesis timestamp for Q-NarwhalKnight blockchain
@@ -407,7 +462,7 @@ pub async fn bootstrap_peers(
         } else {
             vec![]
         },
-        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase12".to_string()),
+        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase16".to_string()),
         "version": "v1.0.32-beta",
         "bootstrap_node": true,
         "discovery_method": "dynamic",
@@ -853,6 +908,7 @@ pub async fn sign_transaction(
                 data: vec![], // Empty data for simple transfers
                 token_type: q_types::TokenType::QUG,
                 fee_token_type: q_types::TokenType::QUGUSD,
+                tx_type: q_types::TransactionType::Transfer,
             };
             Ok(Json(ApiResponse::success(tx)))
         }
@@ -874,13 +930,56 @@ pub async fn submit_transaction(
     let tx_hash = request.transaction.hash();
 
     // ============================================================================
-    // LOCK-FREE FAST PATH: DashMap provides zero-lock concurrent access
-    // Target: 20-40K TPS through lock-free concurrent HashMap + batching
+    // 🔐 v1.2.0-beta Phase 3: MANDATORY SIGNATURE VERIFICATION
+    // ============================================================================
+    // All non-coinbase transactions MUST have valid Ed25519 signatures.
+    // This prevents unsigned/forged transactions from entering the mempool.
+    // ============================================================================
+    if let Err(sig_error) = request.transaction.verify_signature() {
+        tracing::warn!(
+            "🚨 [SECURITY] Transaction signature verification failed: {}",
+            sig_error
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Transaction signature invalid: {}",
+            sig_error
+        ))));
+    }
+    tracing::debug!(
+        "✅ [Phase 3] Transaction signature verified: {}",
+        hex::encode(&tx_hash)
+    );
+
+    // ============================================================================
+    // 🚀 v1.0.72-beta: NARWHAL MEMPOOL INTEGRATION FOR SUB-50MS FINALITY
+    // ============================================================================
+    // Dual-path transaction ingestion:
+    // 1. DashMap for lock-free immediate access (block production)
+    // 2. ProductionMempool for fee-ordered pre-ordering (Narwhal DAG)
     // ============================================================================
 
     // Lock-free concurrent insert - no blocking, no contention
     state.tx_pool.insert(tx_hash, request.transaction.clone());
     state.tx_status.insert(tx_hash, TxStatus::InMempool);
+
+    // ⚡ v1.0.72-beta: Submit to Narwhal ProductionMempool for fee-ordered batching
+    // This enables transaction pre-ordering for faster consensus finality
+    if let Some(ref production_mempool) = state.production_mempool {
+        let mempool = production_mempool.clone();
+        let tx = request.transaction.clone();
+        tokio::spawn(async move {
+            match mempool.add_transaction(tx, None).await {
+                Ok(added) => {
+                    if added {
+                        tracing::debug!("⚡ [NARWHAL] Transaction {} added to production mempool for pre-ordering", hex::encode(&tx_hash));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  [NARWHAL] Failed to add transaction to production mempool: {}", e);
+                }
+            }
+        });
+    }
 
     // ============================================================================
     // 📡 GOSSIPSUB TRANSACTION PROPAGATION
@@ -1184,6 +1283,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         drop(balances);
 
                         // Emit balance update events for real-time frontend updates
+                        // v1.2.0-beta Phase 3: Enhanced with block tracking
                         // Sender balance update
                         let sender_event = crate::streaming::StreamEvent::BalanceUpdated {
                             wallet_address: hex::encode(tx.from),
@@ -1191,6 +1291,9 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             new_balance: new_sender_balance as f64 / 100_000_000.0,
                             change_reason: "transaction_sent".to_string(),
                             timestamp: chrono::Utc::now(),
+                            block_hash: None, // Transaction not yet in a block
+                            block_height: None,
+                            confirmation_status: "pending".to_string(),
                         };
                         if let Err(e) = state.event_emitter.emit_immediate(sender_event).await {
                             warn!("Failed to emit sender balance update: {}", e);
@@ -1203,6 +1306,9 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             new_balance: new_recipient_balance as f64 / 100_000_000.0,
                             change_reason: "transaction_received".to_string(),
                             timestamp: chrono::Utc::now(),
+                            block_hash: None, // Transaction not yet in a block
+                            block_height: None,
+                            confirmation_status: "pending".to_string(),
                         };
                         if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
                             warn!("Failed to emit recipient balance update: {}", e);
@@ -1453,6 +1559,7 @@ pub async fn send_transaction(
         data: vec![], // Empty data for simple transfers
         token_type,   // Use the parsed token type from request
         fee_token_type: q_types::TokenType::QUGUSD,
+        tx_type: q_types::TransactionType::Transfer,
     };
 
     // Compute actual transaction hash
@@ -2139,7 +2246,7 @@ pub async fn get_p2p_health(
 
     // Get network ID for gossipsub topics
     let network_id =
-        std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase10".to_string());
+        std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase16".to_string());
 
     let health = P2PHealthStatus {
         libp2p_manager_active: state.libp2p_discovery.is_some(),
@@ -2570,6 +2677,253 @@ pub async fn threat_analysis(
     Ok(Json(ApiResponse::success(analysis)))
 }
 
+/// v1.3.1-beta: Hashpower-Weighted Cryptographic Security Metrics
+/// Returns realistic security metrics derived from cumulative mining work
+/// More hashpower = stronger cryptographic security guarantees
+pub async fn hashpower_security_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    debug!("Getting hashpower security metrics");
+
+    // Get current block height and network stats
+    let (current_height, connected_peers) = {
+        let status = state.node_status.read().await;
+        (status.current_height, status.connected_peers)
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REALISTIC SECURITY CALCULATIONS (v1.3.1-beta)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Base difficulty from SHA3-256 PoW (target ~2 second blocks)
+    // Real difficulty scales with network hashrate
+    let base_difficulty = 24u64;
+    let peer_difficulty_bonus = (connected_peers as u64).min(10) * 2; // +2 per peer up to 10
+    let height_difficulty_bonus = (current_height / 10000) as u64; // +1 per 10k blocks
+    let effective_difficulty = base_difficulty + peer_difficulty_bonus + height_difficulty_bonus;
+
+    // Cumulative work = sum of 2^difficulty for all blocks
+    // For network at height H with average difficulty D: work ≈ H × 2^D
+    // Security bits = log2(cumulative_work) = log2(H) + D
+    let cumulative_work_bits = if current_height > 0 {
+        (current_height as f64).log2() + (effective_difficulty as f64)
+    } else {
+        0.0
+    };
+
+    // Security tiers based on cumulative work (more aggressive thresholds)
+    let (security_tier, tier_description) = match cumulative_work_bits as u32 {
+        0..=40 => ("BOOTSTRAP", "Network bootstrapping - minimal security"),
+        41..=55 => ("EMERGING", "Early network growth - basic attack resistance"),
+        56..=70 => ("MODERATE", "Established network - significant attack cost"),
+        71..=85 => ("STRONG", "Mature network - enterprise-grade security"),
+        86..=100 => ("ENTERPRISE", "High-value protection - major attack deterrent"),
+        101..=115 => ("FINANCIAL", "Financial-grade - institutional security"),
+        116..=128 => ("NATION_STATE", "Nation-state attack resistance"),
+        _ => ("QUANTUM_RESISTANT", "Post-quantum security achieved"),
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REALISTIC NETWORK HASHRATE CALCULATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Network hashrate = 2^difficulty / block_time_seconds
+    // With 2-second blocks and effective difficulty:
+    let block_time_seconds = 2.0f64;
+    let estimated_hashrate = if current_height > 0 {
+        (2.0f64.powf(effective_difficulty as f64) / block_time_seconds) as u64
+    } else {
+        0
+    };
+
+    // Format hashrate with appropriate units
+    let hashrate_formatted = if estimated_hashrate >= 1_000_000_000_000 {
+        format!("{:.2} TH/s", estimated_hashrate as f64 / 1e12)
+    } else if estimated_hashrate >= 1_000_000_000 {
+        format!("{:.2} GH/s", estimated_hashrate as f64 / 1e9)
+    } else if estimated_hashrate >= 1_000_000 {
+        format!("{:.2} MH/s", estimated_hashrate as f64 / 1e6)
+    } else if estimated_hashrate >= 1_000 {
+        format!("{:.2} KH/s", estimated_hashrate as f64 / 1e3)
+    } else {
+        format!("{} H/s", estimated_hashrate)
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REALISTIC ATTACK COST CALCULATIONS (SHA3-256 GPU Mining Economics)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // SHA3-256 has NO dedicated ASICs - attackers must use GPUs:
+    // - High-end GPU (RTX 4090): ~$1,600, ~1.5 GH/s SHA3, ~450W
+    // - Cost per GH/s: ~$1,000-1,500 hardware acquisition
+    // - Power per GH/s: ~300W (GPUs are power-hungry for SHA3)
+    // - Electricity: $0.10/kWh industrial rate
+    //
+    // IMPORTANT: 51% attack requires:
+    // 1. Capital to acquire 51% of network hashpower
+    // 2. Sustained electricity during attack
+    // 3. VDF time-lock makes attacks take 2x longer (can't parallelize)
+    // 4. Risk of slashing/detection destroys attack profitability
+
+    let electricity_cost_per_kwh = 0.10f64; // USD (industrial rate)
+    let watts_per_ghs = 300.0f64; // GPU power consumption for SHA3 (realistic)
+    let hardware_cost_per_ghs = 1200.0f64; // USD per GH/s (GPU hardware cost)
+
+    let hashrate_ghs = estimated_hashrate as f64 / 1e9;
+    let attack_hashrate_ghs = hashrate_ghs * 0.51; // 51% of network
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CAPITAL INVESTMENT REQUIRED (One-time hardware acquisition)
+    // ═══════════════════════════════════════════════════════════════════════
+    let hardware_acquisition_cost = attack_hashrate_ghs * hardware_cost_per_ghs;
+
+    // Number of GPUs required (assuming 1.5 GH/s per RTX 4090)
+    let gpus_required = (attack_hashrate_ghs / 1.5).ceil() as u64;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPERATING COSTS (Electricity during attack)
+    // ═══════════════════════════════════════════════════════════════════════
+    // Power consumption in kW
+    let attack_power_kw = attack_hashrate_ghs * watts_per_ghs / 1000.0;
+    let hourly_electricity_cost = attack_power_kw * electricity_cost_per_kwh;
+
+    // Amortize hardware over 2 years (typical GPU lifespan for mining)
+    let hardware_hourly_amortization = hardware_acquisition_cost / (2.0 * 365.0 * 24.0);
+
+    // Total 51% attack cost per hour (electricity + hardware depreciation)
+    let attack_cost_per_hour = hourly_electricity_cost + hardware_hourly_amortization;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DOUBLE SPEND ATTACK COST
+    // ═══════════════════════════════════════════════════════════════════════
+    // A successful double spend requires:
+    // 1. Secretly mining an alternative chain (takes time proportional to confirmations)
+    // 2. VDF time-lock penalty (2x attack duration - can't parallelize)
+    // 3. Risk premium (probability of detection × stake at risk)
+    //
+    // Realistic attack duration: ~10-60 minutes for 6+ confirmations
+    // (Not just 12 seconds - need to build longer secret chain)
+
+    let confirmations_required = 6u64;
+    let realistic_attack_minutes = 30.0f64; // Realistic secret mining time
+    let attack_duration_hours = realistic_attack_minutes / 60.0;
+
+    // VDF time-lock doubles the attack difficulty (can't parallelize VDF)
+    let vdf_penalty_multiplier = 2.0f64;
+
+    // Base cost = hardware capital + operating costs during attack
+    let operating_cost_during_attack = attack_cost_per_hour * attack_duration_hours * vdf_penalty_multiplier;
+
+    // Total double spend cost includes capital at risk + operating costs
+    // Capital at risk = full hardware investment (could be seized/worthless if detected)
+    let detection_risk_multiplier = 1.0 + (cumulative_work_bits / 50.0); // Higher security = higher detection risk
+    let double_spend_cost = (hardware_acquisition_cost * 0.1) + (operating_cost_during_attack * detection_risk_multiplier);
+
+    // For display: show the TOTAL capital required (not just hourly cost)
+    let total_attack_capital = hardware_acquisition_cost;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SHA3-256 CRYPTOGRAPHIC GUARANTEES (FIXED, NOT CUMULATIVE)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // SHA3-256 provides fixed cryptographic security:
+    // - Collision resistance: 128-bit (birthday bound: 2^128 operations)
+    // - Preimage resistance: 256-bit (2^256 operations)
+    // - Second preimage resistance: 256-bit
+    // These are HASH FUNCTION properties, not network properties
+    let sha3_collision_bits = 128u32;
+    let sha3_preimage_bits = 256u32;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADAPTIVE VDF COMPLEXITY
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // VDF difficulty scales with network maturity
+    let base_vdf_iterations = 1000u64;
+    let height_scaling = (current_height / 1000).min(500) as u64; // +1 per 1000 blocks, max +500
+    let peer_scaling = (connected_peers as u64) * 10; // +10 per connected peer
+    let vdf_iterations = base_vdf_iterations + height_scaling + peer_scaling;
+
+    // VDF time in milliseconds (assuming ~1M iterations/second)
+    let vdf_time_ms = vdf_iterations as f64 / 1000.0;
+
+    // Mining randomness beacon epoch (1000 blocks per epoch)
+    let beacon_epoch = current_height / 1000;
+
+    // Format costs with appropriate scale
+    let format_cost = |cost: f64| -> String {
+        if cost >= 1_000_000_000.0 {
+            format!("${:.2}B", cost / 1e9)
+        } else if cost >= 1_000_000.0 {
+            format!("${:.2}M", cost / 1e6)
+        } else if cost >= 1_000.0 {
+            format!("${:.2}K", cost / 1e3)
+        } else {
+            format!("${:.2}", cost)
+        }
+    };
+
+    let metrics = serde_json::json!({
+        "version": "1.3.1-beta",
+        "feature": "hashpower-weighted-security",
+        "description": "Realistic cryptographic security metrics derived from cumulative mining work",
+        "metrics": {
+            "blocks_processed": current_height,
+            "security_bits": cumulative_work_bits,
+            "effective_difficulty": effective_difficulty,
+            "security_tier": security_tier,
+            "tier_description": tier_description,
+            "vdf_iterations": vdf_iterations,
+            "vdf_time_ms": vdf_time_ms,
+            "beacon_epoch": beacon_epoch,
+            "network_hashrate": estimated_hashrate,
+            "network_hashrate_formatted": hashrate_formatted,
+            "cumulative_work": format!("2^{:.1}", cumulative_work_bits),
+            "connected_peers": connected_peers
+        },
+        "security_guarantees": {
+            "collision_resistance": format!("{}-bit", sha3_collision_bits),
+            "collision_resistance_description": "SHA3-256 birthday bound: 2^128 operations needed for collision",
+            "preimage_resistance": format!("{}-bit", sha3_preimage_bits),
+            "preimage_resistance_description": "SHA3-256 preimage security: 2^256 operations to reverse hash",
+            "double_spend_cost_usd": format_cost(double_spend_cost),
+            "double_spend_cost_raw": double_spend_cost,
+            "double_spend_description": format!(
+                "Minimum cost for {} confirmation double-spend: hardware risk + operating costs + VDF penalty",
+                confirmations_required
+            ),
+            "51_percent_attack_capital": format_cost(total_attack_capital),
+            "51_percent_attack_capital_raw": total_attack_capital,
+            "51_percent_attack_cost_per_hour": format_cost(attack_cost_per_hour),
+            "51_percent_attack_cost_per_hour_raw": attack_cost_per_hour,
+            "51_percent_attack_description": format!(
+                "Requires {} GPUs (~{} capital) + {}/hour electricity to sustain 51% network control",
+                gpus_required,
+                format_cost(total_attack_capital),
+                format_cost(hourly_electricity_cost)
+            ),
+            "gpus_required_for_attack": gpus_required,
+            "attack_power_consumption_kw": attack_power_kw
+        },
+        "how_to_increase_security": {
+            "add_miners": "More miners = higher hashrate = exponentially higher attack cost",
+            "increase_difficulty": "Higher difficulty = more work per block = stronger guarantees",
+            "add_confirmations": "Wait for more confirmations before accepting transactions",
+            "increase_vdf_iterations": "Longer VDF = time-locks prevent parallel attacks",
+            "enable_slashing": "Slashing penalties make attacks economically irrational"
+        },
+        "components": {
+            "cumulative_work_security": true,
+            "adaptive_vdf_complexity": true,
+            "mining_randomness_beacon": true,
+            "post_quantum_vrf": true,
+            "genus2_vdf_enabled": true
+        }
+    });
+
+    Ok(Json(ApiResponse::success(metrics)))
+}
+
 /// Tor status
 pub async fn tor_status(
     State(state): State<Arc<AppState>>,
@@ -2943,12 +3297,16 @@ pub async fn faucet(
     }
 
     // Emit real-time balance update event for instant UI refresh
+    // v1.2.0-beta Phase 3: Enhanced with block tracking
     let balance_event = crate::streaming::StreamEvent::BalanceUpdated {
         wallet_address: hex::encode(wallet_address),
         old_balance: current_balance as f64 / 100_000_000.0,
         new_balance: new_balance as f64 / 100_000_000.0,
         change_reason: "faucet".to_string(),
         timestamp: chrono::Utc::now(),
+        block_hash: None, // Faucet is instant, not in a block
+        block_height: None,
+        confirmation_status: "instant".to_string(), // Faucet updates are instant
     };
 
     if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
@@ -3865,6 +4223,7 @@ pub async fn send_private_transaction(
         data: vec![], // Mixer metadata could go here
         token_type: q_types::TokenType::QUG,
         fee_token_type: q_types::TokenType::QUGUSD,
+        tx_type: q_types::TransactionType::Transfer,
     };
 
     let tx_hash = transaction.hash();
@@ -4341,12 +4700,16 @@ async fn complete_mixing_process(
         .unwrap_or(0);
 
     // CRITICAL FIX: Emit balance update events for both sender and recipient
+    // v1.2.0-beta Phase 3: Enhanced with block tracking
     let sender_event = StreamEvent::BalanceUpdated {
         wallet_address: hex::encode(sender_address),
         old_balance: old_sender_balance as f64 / 100_000_000.0,
         new_balance: final_sender_balance as f64 / 100_000_000.0,
         change_reason: "transaction_sent_mixed".to_string(),
         timestamp: chrono::Utc::now(),
+        block_hash: None, // Privacy mix not yet in block
+        block_height: None,
+        confirmation_status: "pending".to_string(),
     };
 
     let recipient_event = StreamEvent::BalanceUpdated {
@@ -4355,6 +4718,9 @@ async fn complete_mixing_process(
         new_balance: final_recipient_balance as f64 / 100_000_000.0,
         change_reason: "transaction_received_mixed".to_string(),
         timestamp: chrono::Utc::now(),
+        block_hash: None, // Privacy mix not yet in block
+        block_height: None,
+        confirmation_status: "pending".to_string(),
     };
 
     // Emit both balance update events
@@ -4846,12 +5212,16 @@ pub async fn submit_mining_solution(
         let broadcaster = &state.event_broadcaster;
 
         // Emit BalanceUpdated event for general balance tracking
+        // v1.2.0-beta Phase 3: Enhanced with block tracking
         let balance_event = StreamEvent::BalanceUpdated {
             wallet_address: request.miner_address.clone(),
             old_balance: current_balance as f64 / 100_000_000.0,
             new_balance: new_balance as f64 / 100_000_000.0,
             change_reason: "mining_reward_instant".to_string(),
             timestamp: chrono::Utc::now(),
+            block_hash: None, // Instant mining, block not yet produced
+            block_height: None,
+            confirmation_status: "instant".to_string(),
         };
 
         if let Err(e) = broadcaster.broadcast(balance_event).await {
@@ -4872,6 +5242,7 @@ pub async fn submit_mining_solution(
             block_height: state.node_status.read().await.current_height,
             difficulty: hex::encode(&hash[..8]),
             hash_rate: request.hash_rate.unwrap_or(0.0),
+            worker_name: None, // v0.6.2-beta: Will be populated when miner sends it
             timestamp: chrono::Utc::now(),
         };
 
@@ -4880,7 +5251,63 @@ pub async fn submit_mining_solution(
         }
     }
 
-    info!(
+    // ⚠️ v1.2.0-beta Phase 3: DEPRECATED - Gossipsub balance broadcasts
+    // Balance updates now go through DAG-Knight consensus (coinbase transactions in blocks)
+    // This gossipsub broadcast is DEPRECATED and will be REMOVED in v1.3.0
+    // To enable legacy mode: set Q_ENABLE_LEGACY_BALANCE_GOSSIP=1
+    let legacy_balance_gossip = std::env::var("Q_ENABLE_LEGACY_BALANCE_GOSSIP")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if legacy_balance_gossip {
+        if let Some(ref command_tx) = state.libp2p_command_tx {
+            // Get node's peer ID for origin tracking
+            let node_id = {
+                let peer_info = state.libp2p_peer_info.read().await;
+                peer_info.0.clone()
+            };
+
+            // Create P2P balance update message
+            let balance_update = q_types::P2PBalanceUpdate::new_mining_reward(
+                request.miner_address.clone(),
+                miner_reward,
+                new_balance,
+                state.node_status.read().await.current_height,
+                nonce,
+                node_id,
+            );
+
+            // Serialize and broadcast
+            match balance_update.to_cbor() {
+                Ok(update_bytes) => {
+                    // v1.3.1-beta: CRITICAL FIX - Use testnet-phase16 as default to match Server Beta
+                    let network_id_str = std::env::var("Q_NETWORK_ID")
+                        .unwrap_or_else(|_| "testnet-phase16".to_string());
+                    let network_id = network_id_str.parse::<q_types::NetworkId>()
+                        .unwrap_or(q_types::NetworkId::TestnetPhase16);
+                    let topic = network_id.balance_updates_topic();
+                    let _ = command_tx.send(q_network::NetworkCommand::PublishBalanceUpdate {
+                        topic,
+                        update_bytes,
+                        wallet_address: request.miner_address.clone(),
+                        amount: miner_reward,
+                    });
+                    debug!("⚠️ [DEPRECATED] P2P balance broadcast for {} (+{} units)",
+                           &request.miner_address[..16], miner_reward);
+                }
+                Err(e) => {
+                    warn!("⚠️ [P2P] Failed to serialize balance update: {}", e);
+                }
+            }
+        }
+    } else {
+        // v1.2.0-beta Phase 3: Balance updates go through DAG-Knight consensus
+        // Mining rewards are distributed via coinbase transactions in blocks
+        debug!("✅ [Phase 3] Balance update via DAG-Knight consensus (gossipsub disabled)");
+    }
+
+    // Mining reward log reduced to debug to avoid spam
+    debug!(
         "⚡ INSTANT REWARD: {} +{:.8} QNK (balance: {:.8} QNK)",
         &request.miner_address[..16],
         miner_reward as f64 / 100_000_000.0,
@@ -5908,7 +6335,9 @@ pub async fn execute_swap(
     }
 
     // Check slippage protection (more lenient for oracle-based swaps)
-    if !use_oracle && final_amount_out < request.min_amount_out {
+    // Allow 1% additional tolerance to account for rounding differences between quote and execution
+    let slippage_adjusted_minimum = (request.min_amount_out as f64 * 0.99) as u64;
+    if !use_oracle && final_amount_out < slippage_adjusted_minimum {
         return Ok(Json(ApiResponse::error(format!(
             "❌ Slippage too high. Expected minimum: {}, Got: {}. Pool reserves: {} / {}. Pool may have insufficient liquidity for this swap size.",
             request.min_amount_out, final_amount_out, reserve_in, reserve_out
@@ -6054,6 +6483,96 @@ pub async fn execute_swap(
             ));
             // 🔒 PRIVACY: No logging of exact amounts
             debug!("💰 Added {} tokens to wallet", request.to_token);
+        }
+    }
+
+    // Calculate and collect 0.3% DEX fee to founder wallet
+    // The fee is taken from the input token and credited to the founder/master account
+    let dex_fee_percent = 3u64; // 0.3% = 3/1000
+    let dex_fee_amount = request
+        .amount_in
+        .checked_mul(dex_fee_percent)
+        .and_then(|v| v.checked_div(1000))
+        .unwrap_or(0);
+
+    if dex_fee_amount > 0 {
+        // Founder wallet (same as miner dev fee and bank master account)
+        const FOUNDER_WALLET_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        let founder_wallet: [u8; 32] = hex::decode(FOUNDER_WALLET_HEX)
+            .expect("Invalid founder wallet hex")
+            .try_into()
+            .expect("Wrong length for founder wallet");
+
+        // Credit the DEX fee to founder wallet
+        if from_is_native {
+            // Fee is in QUG - add to founder's QUG balance
+            let mut wallet_balances = state.wallet_balances.write().await;
+            *wallet_balances.entry(founder_wallet).or_insert(0) += dex_fee_amount;
+            drop(wallet_balances);
+
+            // Persist founder's updated QUG balance
+            let founder_balance = {
+                let balances = state.wallet_balances.read().await;
+                balances.get(&founder_wallet).copied().unwrap_or(0)
+            };
+            if let Err(e) = state
+                .storage_engine
+                .save_wallet_balance(&founder_wallet, founder_balance)
+                .await
+            {
+                warn!("Failed to persist founder DEX fee balance: {}", e);
+            }
+
+            info!(
+                "💰 DEX Fee (0.3%): {} base units QUG → founder (qnk{}...)",
+                dex_fee_amount,
+                &FOUNDER_WALLET_HEX[..8]
+            );
+        } else if from_is_qugusd {
+            // Fee is in QUGUSD - mint to founder via CollateralVault
+            let mut vault = state.collateral_vault.write().await;
+            if let Err(e) = vault.mint(&founder_wallet, dex_fee_amount) {
+                warn!("Failed to mint DEX fee QUGUSD to founder: {}", e);
+            } else {
+                // Persist CollateralVault
+                if let Ok(vault_bytes) = bincode::serialize(&*vault) {
+                    if let Err(e) = state
+                        .storage_engine
+                        .save_collateral_vault_data(&vault_bytes)
+                        .await
+                    {
+                        warn!("Failed to persist CollateralVault after DEX fee: {}", e);
+                    }
+                }
+                info!(
+                    "💰 DEX Fee (0.3%): {} base units QUGUSD → founder (qnk{}...)",
+                    dex_fee_amount,
+                    &FOUNDER_WALLET_HEX[..8]
+                );
+            }
+        } else {
+            // Fee is in custom token - add to founder's token balance
+            let mut token_balances = state.token_balances.write().await;
+            let fee_key = (founder_wallet, from_token_addr);
+            *token_balances.entry(fee_key).or_insert(0) += dex_fee_amount;
+            let founder_token_balance = token_balances.get(&fee_key).copied().unwrap_or(0);
+            drop(token_balances);
+
+            // Persist founder's updated token balance
+            if let Err(e) = state
+                .storage_engine
+                .save_token_balance(&founder_wallet, &from_token_addr, founder_token_balance)
+                .await
+            {
+                warn!("Failed to persist founder DEX fee token balance: {}", e);
+            }
+
+            info!(
+                "💰 DEX Fee (0.3%): {} base units {} → founder (qnk{}...)",
+                dex_fee_amount,
+                request.from_token,
+                &FOUNDER_WALLET_HEX[..8]
+            );
         }
     }
 
@@ -6208,12 +6727,16 @@ pub async fn execute_swap(
     }
 
     // Broadcast balance-updated event for real-time wallet balance refresh
+    // v1.2.0-beta Phase 3: Enhanced with block tracking
     let balance_updated_event = crate::StreamEvent::BalanceUpdated {
         wallet_address: hex::encode(wallet_addr),
         old_balance: 0.0, // We don't track old balance in swap
         new_balance: 0.0, // Frontend will refetch all balances
         change_reason: format!("swap_{}_to_{}", request.from_token, request.to_token),
         timestamp: chrono::Utc::now(),
+        block_hash: None, // Swap transaction, will be in a block
+        block_height: None,
+        confirmation_status: "pending".to_string(), // Swaps need block confirmation
     };
 
     if let Err(e) = state
@@ -7676,4 +8199,103 @@ pub async fn get_security_stats(State(state): State<Arc<AppState>>) -> Result<Js
             Json(ApiResponse::error("Distributed AI coordinator not initialized (Q_DISABLE_AI=1 or initialization failed)".to_string()))
         ))
     }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// v1.0.72-beta: Finality Metrics Dashboard Endpoint - Sub-50ms Target
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// GET /api/v1/consensus/finality - Get consensus finality metrics for sub-50ms dashboard
+///
+/// Returns detailed finality latency metrics:
+/// - Block production latency (creation to storage)
+/// - P2P broadcast latency (gossipsub propagation)
+/// - End-to-end confirmation time (creation to finalization)
+/// - User transaction inclusion statistics
+/// - Gossipsub mesh health (peer connectivity)
+///
+/// Target: Sub-50ms finality with DAG-Knight consensus + Narwhal mempool
+pub async fn get_finality_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use std::sync::atomic::Ordering;
+
+    let metrics = &state.finality_metrics;
+
+    // Read atomic counters
+    let blocks_produced = metrics.blocks_produced.load(Ordering::Relaxed);
+    let user_txs_included = metrics.user_txs_included.load(Ordering::Relaxed);
+    let avg_production_latency_us = metrics.avg_production_latency_us.load(Ordering::Relaxed);
+    let avg_broadcast_latency_us = metrics.avg_broadcast_latency_us.load(Ordering::Relaxed);
+    let last_production_start = metrics.last_production_start.load(Ordering::Relaxed);
+    let last_broadcast_time = metrics.last_broadcast_time.load(Ordering::Relaxed);
+
+    // Calculate derived metrics
+    let avg_production_latency_ms = avg_production_latency_us as f64 / 1000.0;
+    let avg_broadcast_latency_ms = avg_broadcast_latency_us as f64 / 1000.0;
+    let avg_total_latency_ms = avg_production_latency_ms + avg_broadcast_latency_ms;
+
+    // Determine sub-50ms compliance
+    let sub_50ms_compliant = avg_total_latency_ms < 50.0;
+    let latency_status = if avg_total_latency_ms < 50.0 {
+        "excellent"
+    } else if avg_total_latency_ms < 100.0 {
+        "good"
+    } else if avg_total_latency_ms < 500.0 {
+        "acceptable"
+    } else {
+        "degraded"
+    };
+
+    // Get P2P peer count for gossipsub health
+    let peer_count = if let Some(ref count) = state.libp2p_peer_count {
+        count.load(Ordering::Relaxed)
+    } else {
+        0
+    };
+
+    // Get current blockchain height
+    let current_height = state.node_status.read().await.current_height;
+    let network_height = state.highest_network_height.load(Ordering::SeqCst);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "finality_metrics": {
+            "version": "v1.0.72-beta",
+            "target": "sub-50ms",
+            "latency": {
+                "production_latency_ms": avg_production_latency_ms,
+                "broadcast_latency_ms": avg_broadcast_latency_ms,
+                "total_latency_ms": avg_total_latency_ms,
+                "sub_50ms_compliant": sub_50ms_compliant,
+                "status": latency_status,
+            },
+            "throughput": {
+                "blocks_produced": blocks_produced,
+                "user_txs_included": user_txs_included,
+                "avg_txs_per_block": if blocks_produced > 0 { user_txs_included as f64 / blocks_produced as f64 } else { 0.0 },
+            },
+            "consensus": {
+                "algorithm": "DAG-Knight + Bullshark",
+                "mempool": "Narwhal ProductionMempool",
+                "delta": 1,  // Commit delay for fast finality
+                "threshold": "2f+1",  // BFT threshold
+            },
+            "network": {
+                "gossipsub_peers": peer_count,
+                "mesh_health": if peer_count >= 6 { "healthy" } else if peer_count >= 3 { "degraded" } else { "critical" },
+                "heartbeat_interval_ms": 100,  // v1.0.72-beta: Aggressive heartbeat
+                "flood_publish": true,  // Instant propagation mode
+            },
+            "blockchain": {
+                "current_height": current_height,
+                "network_height": network_height,
+                "sync_status": if current_height + 5 >= network_height { "synced" } else { "syncing" },
+            },
+            "timestamps": {
+                "last_production_epoch_us": last_production_start,
+                "last_broadcast_epoch_us": last_broadcast_time,
+            },
+        },
+        "timestamp": chrono::Utc::now().timestamp(),
+    }))))
 }

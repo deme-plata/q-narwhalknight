@@ -28,6 +28,7 @@ libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
 q-tor-client = { path = "../q-tor-client" } # Re-enabled for consensus integration
 q-vm = { path = "../q-vm" }
 q-quantum-mixing = { path = "../q-quantum-mixing" }
+q-mining = { path = "../q-mining", features = ["mining-vrf"] }  # v1.3.1-beta: Ring-LWE VRF mining enabled by default
 q-tui = { path = "../q-tui", optional = true }
 
 # Web framework
@@ -78,6 +79,8 @@ tracing-subscriber = { workspace = true }
 config = { workspace = true }
 dotenvy = "0.15"  # Load .env file for environment variables (Stripe keys, etc.)
 dirs = "5.0"  # Home directory detection for AEGIS-QL key loading
+once_cell = "1.19"  # v1.1.9: Lazy static for P2P balance deduplication cache
+lru = "0.12"  # v1.1.9: LRU cache for P2P balance update deduplication
 
 # Database - using RocksDB quantum storage
 q-storage = { path = "../q-storage" }
@@ -91,9 +94,10 @@ q-crypto-simd = { path = "../q-crypto-simd" }
 # Critical missing integrations for complete functionality
 q-zk-stark = { path = "../q-zk-stark" } # ✅ ENABLED - compilation successful!
 q-zk-snark = { path = "../q-zk-snark" } # ✅ ENABLED - arkworks compatibility resolved!
+q-lattice-guard = { path = "../q-lattice-guard" } # ✅ Post-quantum lattice-based zk-SNARK (RLWE)
 q-sharding = { path = "../q-sharding" }
 # q-cache = { path = "../q-cache" } # Temporarily disabled due to compilation errors
-q-dag-knight = { path = "../q-dag-knight" }
+q-dag-knight = { path = "../q-dag-knight", features = ["advanced-crypto"] }  # v1.0.60-beta: Genus-2 VDF enabled by default
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-resonance = { path = "../q-resonance" } # ✅ ENABLED - K-Parameter quantum phase analysis!
 q-vdf = { path = "../q-vdf" }
@@ -179,9 +183,12 @@ q-kernel-io = { path = "../q-kernel-io" }
 q-benchmarks = { path = "../q-benchmarks" }
 
 [features]
+# v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
+# Note: advanced-crypto optional until FROST integration complete
 default = ["tui"]
 tui = ["q-tui"]
 # ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
+# ⚠️ Requires additional dependencies (aes_gcm, pbkdf2, hmac)
 advanced-crypto = ["q-crypto-advanced"]
 
 [dev-dependencies]

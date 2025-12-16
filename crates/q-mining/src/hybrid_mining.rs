@@ -9,16 +9,37 @@
 /// - GPUs are efficient (they're naturally good at SHA-3)
 /// - Network stays decentralized (needs both types of miners)
 /// - No need to track hardware prices or adjust manually
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │                    HYBRID MINING BLOCK                           │
+/// ├─────────────────────────────────────────────────────────────────┤
+/// │  CPU COMPONENT (50% reward)     │  GPU COMPONENT (50% reward)   │
+/// │  ─────────────────────────────  │  ────────────────────────────  │
+/// │  • VDF Proof (sequential)       │  • SHA-3 PoW Hash (parallel)  │
+/// │  • Memory-bound computation     │  • Compute-bound hashing      │
+/// │  • ~2-4 seconds per proof       │  • Millions of hashes/sec     │
+/// │  • Cannot be parallelized       │  • Highly parallel on GPU     │
+/// └─────────────────────────────────────────────────────────────────┘
+/// ```
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::{info, warn, debug, error};
 
 use crate::{QuantumPoWBlock, MiningTemplate};
-use q_dag_knight::{QuantumVDFProof, QuantumVDF};
+use q_dag_knight::{QuantumVDFProof, QuantumVDF, QuantumVDFConfig, VDFSecurityLevel};
 use q_types::Address;
+
+#[cfg(feature = "gpu-mining")]
+use crate::gpu::{GPUMiner, GPUMinerConfig, GPUMiningJob, GPUSolution};
 
 /// Hybrid mining block that requires both CPU and GPU work
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +335,16 @@ impl HybridMiningCoordinator {
         }
     }
 
+    /// Get the CPU mining pool
+    pub fn cpu_pool(&self) -> Arc<CPUMiningPool> {
+        self.cpu_pool.clone()
+    }
+
+    /// Get the GPU mining pool
+    pub fn gpu_pool(&self) -> Arc<GPUMiningPool> {
+        self.gpu_pool.clone()
+    }
+
     /// Submit CPU work (VDF proof)
     pub async fn submit_cpu_work(
         &self,
@@ -366,6 +397,328 @@ impl HybridMiningCoordinator {
         self.cpu_pool.pending_vdf_proofs.read().await.len()
     }
 }
+
+// ============================================================================
+// INTEGRATED HYBRID MINER
+// ============================================================================
+
+/// Full hybrid miner that manages both CPU VDF and GPU SHA-3 mining
+pub struct IntegratedHybridMiner {
+    /// Coordinator for CPU/GPU work submission
+    coordinator: Arc<HybridMiningCoordinator>,
+
+    /// VDF engine for CPU mining
+    vdf_engine: Arc<QuantumVDF>,
+
+    /// GPU miner for SHA-3 mining
+    #[cfg(feature = "gpu-mining")]
+    gpu_miner: Arc<GPUMiner>,
+
+    /// Miner address
+    miner_address: Address,
+
+    /// Mining statistics
+    stats: Arc<HybridMiningStats>,
+
+    /// Stop signal
+    should_stop: Arc<AtomicBool>,
+}
+
+/// Statistics for hybrid mining
+#[derive(Debug, Default)]
+pub struct HybridMiningStats {
+    /// VDF proofs computed (CPU)
+    pub vdf_proofs: AtomicU64,
+    /// SHA-3 hashes computed (GPU)
+    pub gpu_hashes: AtomicU64,
+    /// Blocks found
+    pub blocks_found: AtomicU64,
+    /// CPU hashrate equivalent
+    pub cpu_hashrate: AtomicU64,
+    /// GPU hashrate
+    pub gpu_hashrate: AtomicU64,
+    /// Total rewards earned
+    pub total_rewards: AtomicU64,
+}
+
+impl IntegratedHybridMiner {
+    /// Create new integrated hybrid miner
+    pub async fn new(
+        miner_address: Address,
+        block_reward: u64,
+    ) -> Result<Self> {
+        info!("🔧 Initializing Integrated Hybrid Miner...");
+
+        let coordinator = Arc::new(HybridMiningCoordinator::new(block_reward));
+
+        // Initialize VDF engine for CPU mining
+        let vdf_config = QuantumVDFConfig {
+            base_difficulty: 1000,
+            quantum_enhancement: 0.7,
+            parallel_threads: 2,
+            qrng_seed_interval: Duration::from_secs(300),
+            security_level: VDFSecurityLevel::PostQuantum,
+        };
+        let vdf_engine = Arc::new(QuantumVDF::new(vdf_config).await?);
+
+        // Initialize GPU miner
+        #[cfg(feature = "gpu-mining")]
+        let gpu_miner = Arc::new(GPUMiner::new(GPUMinerConfig::default())?);
+
+        info!("✅ Hybrid miner initialized - CPU (VDF) + GPU (SHA-3)");
+
+        Ok(Self {
+            coordinator,
+            vdf_engine,
+            #[cfg(feature = "gpu-mining")]
+            gpu_miner,
+            miner_address,
+            stats: Arc::new(HybridMiningStats::default()),
+            should_stop: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Mine a hybrid block (requires both CPU and GPU work)
+    pub async fn mine_hybrid_block(
+        &self,
+        height: u64,
+        previous_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        target: [u8; 32],
+        difficulty: u32,
+    ) -> Result<Option<HybridMiningBlock>> {
+        info!("⛏️ Starting hybrid mining for block {}", height);
+
+        let mining_start = Instant::now();
+
+        // Start CPU (VDF) and GPU (SHA-3) mining in parallel
+        let vdf_handle = {
+            let vdf = self.vdf_engine.clone();
+            let miner = self.miner_address.clone();
+            let coordinator = self.coordinator.clone();
+            let stats = self.stats.clone();
+            let should_stop = self.should_stop.clone();
+
+            tokio::spawn(async move {
+                // Create VDF challenge from block data
+                let mut challenge = [0u8; 32];
+                let mut hasher = Sha3_256::new();
+                hasher.update(&height.to_le_bytes());
+                hasher.update(&previous_hash);
+                let hash = hasher.finalize();
+                challenge.copy_from_slice(&hash);
+
+                // Compute VDF proof
+                match vdf.compute_proof(&challenge).await {
+                    Ok(vdf_result) => {
+                        stats.vdf_proofs.fetch_add(1, Ordering::Relaxed);
+
+                        // Clone the proof before submitting
+                        let proof_for_return = vdf_result.proof.clone();
+
+                        // Submit to coordinator
+                        let _ = coordinator
+                            .submit_cpu_work(vdf_result.proof, miner, height)
+                            .await;
+
+                        info!(
+                            "✅ CPU VDF proof computed for block {} (quality: {:.3})",
+                            height, vdf_result.quantum_quality
+                        );
+                        Some(proof_for_return)
+                    }
+                    Err(e) => {
+                        error!("❌ VDF computation failed: {}", e);
+                        None
+                    }
+                }
+            })
+        };
+
+        // GPU SHA-3 mining
+        #[cfg(feature = "gpu-mining")]
+        let gpu_result = {
+            // Build header for GPU mining
+            let mut header = Vec::new();
+            header.extend_from_slice(&height.to_le_bytes());
+            header.extend_from_slice(&previous_hash);
+            header.extend_from_slice(&merkle_root);
+            header.extend_from_slice(&self.miner_address);
+
+            let job = GPUMiningJob {
+                header,
+                target,
+                height,
+            };
+
+            self.gpu_miner.mine(job).await?
+        };
+
+        #[cfg(not(feature = "gpu-mining"))]
+        let gpu_result: Option<GPUSolution> = {
+            // CPU fallback for SHA-3 mining
+            self.cpu_sha3_mining(height, &previous_hash, &merkle_root, &target).await?
+        };
+
+        // Wait for VDF to complete
+        let vdf_result = vdf_handle.await?;
+
+        // Combine results
+        if let (Some(_vdf_proof), Some(gpu_sol)) = (vdf_result, gpu_result) {
+            let elapsed = mining_start.elapsed();
+
+            // Get the pending VDF proof from coordinator
+            if let Some(vdf_pending) = self.coordinator.cpu_pool.consume_vdf_proof(height).await {
+                let block = HybridMiningBlock::new(
+                    height,
+                    previous_hash,
+                    merkle_root,
+                    vdf_pending.proof,
+                    vdf_pending.miner_address,
+                    gpu_sol.hash,
+                    gpu_sol.nonce,
+                    self.miner_address.clone(),
+                );
+
+                self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
+
+                info!(
+                    "🎉 Hybrid block {} mined in {:?}!\n  \
+                     CPU miner: {}\n  \
+                     GPU miner: {}\n  \
+                     Hash: {}",
+                    height,
+                    elapsed,
+                    hex::encode(&block.cpu_miner_address),
+                    hex::encode(&block.gpu_miner_address),
+                    hex::encode(&block.hash()[..8])
+                );
+
+                return Ok(Some(block));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// CPU fallback for SHA-3 mining when GPU is not available
+    #[cfg(not(feature = "gpu-mining"))]
+    async fn cpu_sha3_mining(
+        &self,
+        height: u64,
+        previous_hash: &[u8; 32],
+        merkle_root: &[u8; 32],
+        target: &[u8; 32],
+    ) -> Result<Option<GPUSolution>> {
+        warn!("⚠️ GPU mining not available, using CPU fallback");
+
+        let start = Instant::now();
+        let mut nonce = 0u64;
+
+        while !self.should_stop.load(Ordering::Relaxed) {
+            // Build input
+            let mut input = Vec::new();
+            input.extend_from_slice(&height.to_le_bytes());
+            input.extend_from_slice(previous_hash);
+            input.extend_from_slice(merkle_root);
+            input.extend_from_slice(&nonce.to_le_bytes());
+
+            // Hash
+            let hash = Sha3_256::digest(&input);
+            let mut hash_arr = [0u8; 32];
+            hash_arr.copy_from_slice(&hash);
+
+            // Check target
+            if Self::meets_target(&hash_arr, target) {
+                self.stats.gpu_hashes.fetch_add(nonce, Ordering::Relaxed);
+
+                return Ok(Some(GPUSolution {
+                    nonce,
+                    hash: hash_arr,
+                    gpu_index: 0,
+                    hashes_computed: nonce,
+                }));
+            }
+
+            nonce += 1;
+
+            // Yield periodically
+            if nonce % 100_000 == 0 {
+                tokio::task::yield_now().await;
+            }
+
+            // Timeout after 5 minutes
+            if start.elapsed() > Duration::from_secs(300) {
+                warn!("CPU SHA-3 mining timeout");
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check if hash meets target
+    fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+        for i in 0..32 {
+            if hash[i] < target[i] {
+                return true;
+            } else if hash[i] > target[i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Stop mining
+    pub fn stop(&self) {
+        self.should_stop.store(true, Ordering::Relaxed);
+
+        #[cfg(feature = "gpu-mining")]
+        self.gpu_miner.stop();
+    }
+
+    /// Get mining statistics
+    pub fn get_stats(&self) -> HybridMiningStatsSnapshot {
+        HybridMiningStatsSnapshot {
+            vdf_proofs: self.stats.vdf_proofs.load(Ordering::Relaxed),
+            gpu_hashes: self.stats.gpu_hashes.load(Ordering::Relaxed),
+            blocks_found: self.stats.blocks_found.load(Ordering::Relaxed),
+            cpu_hashrate: self.stats.cpu_hashrate.load(Ordering::Relaxed),
+            gpu_hashrate: self.stats.gpu_hashrate.load(Ordering::Relaxed),
+            total_rewards: self.stats.total_rewards.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Get coordinator for external submissions
+    pub fn coordinator(&self) -> Arc<HybridMiningCoordinator> {
+        self.coordinator.clone()
+    }
+}
+
+/// Snapshot of hybrid mining statistics
+#[derive(Debug, Clone)]
+pub struct HybridMiningStatsSnapshot {
+    pub vdf_proofs: u64,
+    pub gpu_hashes: u64,
+    pub blocks_found: u64,
+    pub cpu_hashrate: u64,
+    pub gpu_hashrate: u64,
+    pub total_rewards: u64,
+}
+
+/// GPU solution type for non-GPU builds
+#[cfg(not(feature = "gpu-mining"))]
+#[derive(Debug, Clone)]
+pub struct GPUSolution {
+    pub nonce: u64,
+    pub hash: [u8; 32],
+    pub gpu_index: usize,
+    pub hashes_computed: u64,
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
 
 #[cfg(test)]
 mod tests {

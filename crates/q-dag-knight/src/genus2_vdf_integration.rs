@@ -36,8 +36,8 @@
 
 #[cfg(feature = "advanced-crypto")]
 use q_crypto_advanced::genus2_vdf::{
-    Genus2Params, Genus2Vdf, VdfSecurityLevel as Genus2Level,
-    VdfOutput, VdfProof, JacobianPoint, FieldElement, VdfBatchVerifier,
+    Genus2Params, Genus2Vdf, Genus2Level,
+    VdfOutput, VdfBatchVerifier,
 };
 
 use anyhow::{anyhow, Result};
@@ -247,7 +247,7 @@ impl Genus2VDFEngine {
 
     /// Verify VDF result
     pub fn verify(&self, result: &Genus2VDFResult) -> Result<bool> {
-        let output = VdfOutput::from_bytes(&result.output)?;
+        let output = VdfOutput::from_bytes(&result.output, &self.params)?;
 
         if self.config.parallel_verification && !result.checkpoints.is_empty() {
             // Use parallel checkpoint verification
@@ -270,7 +270,7 @@ impl Genus2VDFEngine {
         if result.checkpoints.is_empty() {
             // Fall back to standard verification if no checkpoints
             return self.vdf
-                .verify(&result.challenge, &VdfOutput::from_bytes(&result.output)?)
+                .verify(&result.challenge, &VdfOutput::from_bytes(&result.output, &self.params)?)
                 .map_err(|e| anyhow!("Verification failed: {}", e));
         }
 
@@ -301,7 +301,7 @@ impl Genus2VDFEngine {
             };
 
             // Verify segment
-            let output = VdfOutput::from_bytes(&checkpoint[..])?;
+            let output = VdfOutput::from_bytes(&checkpoint[..], &self.params)?;
             if !self.vdf.verify(&segment_start, &output)? {
                 warn!("Checkpoint {} verification failed", i);
                 return Ok(false);
@@ -313,8 +313,8 @@ impl Genus2VDFEngine {
         let final_start = result.checkpoints.last()
             .copied()
             .unwrap_or(result.challenge);
-        let final_output = VdfOutput::from_bytes(&result.output)?;
-        self.vdf.verify(&final_start, &final_output)
+        let final_output = VdfOutput::from_bytes(&result.output, &self.params)?;
+        Ok(self.vdf.verify(&final_start, &final_output)?)
     }
 
     /// Generate checkpoints for parallel verification
@@ -323,14 +323,14 @@ impl Genus2VDFEngine {
         challenge: &[u8; 32],
         iterations: u64,
     ) -> Result<Vec<[u8; 32]>> {
-        let num_checkpoints = 8; // 8 checkpoints for ~8x parallel verification speedup
-        let segment_size = iterations / (num_checkpoints + 1);
+        let num_checkpoints: usize = 8; // 8 checkpoints for ~8x parallel verification speedup
+        let segment_size = iterations / (num_checkpoints as u64 + 1);
 
         let mut checkpoints = Vec::with_capacity(num_checkpoints);
         let mut current = *challenge;
 
         for i in 0..num_checkpoints {
-            let target_iteration = (i + 1) as u64 * segment_size;
+            let _target_iteration = ((i + 1) as u64) * segment_size;
             let output = self.vdf.evaluate(&current, segment_size)?;
 
             let mut checkpoint = [0u8; 32];
@@ -378,6 +378,7 @@ impl Genus2VDFEngine {
 #[cfg(feature = "advanced-crypto")]
 pub struct Genus2BatchVerifier {
     verifier: VdfBatchVerifier,
+    params: Genus2Params,
     results: Vec<Genus2VDFResult>,
 }
 
@@ -392,10 +393,11 @@ impl Genus2BatchVerifier {
         };
 
         let params = Genus2Params::new(level)?;
-        let verifier = VdfBatchVerifier::new(params);
+        let verifier = VdfBatchVerifier::new(params.clone());
 
         Ok(Self {
             verifier,
+            params,
             results: Vec::new(),
         })
     }
@@ -406,17 +408,32 @@ impl Genus2BatchVerifier {
     }
 
     /// Verify all results in batch
-    pub fn verify_all(&self) -> Result<bool> {
+    ///
+    /// Returns true if ALL results verified successfully, false otherwise.
+    pub fn verify_all(&mut self) -> Result<bool> {
+        // Add all pending results to the verifier
         for result in &self.results {
-            let output = VdfOutput::from_bytes(&result.output)?;
-            self.verifier.add(&result.challenge, &output);
+            let output = VdfOutput::from_bytes(&result.output, &self.params)?;
+            self.verifier.add(result.challenge.to_vec(), output);
         }
-        self.verifier.verify_all()
+
+        // Verify and check all results
+        let verification_results = self.verifier.verify_all()
+            .map_err(|e| anyhow!("Batch verification failed: {}", e))?;
+
+        // Return true only if ALL verifications passed
+        Ok(verification_results.iter().all(|&v| v))
     }
 
     /// Get number of results in batch
     pub fn count(&self) -> usize {
         self.results.len()
+    }
+
+    /// Clear all pending verifications
+    pub fn clear(&mut self) {
+        self.results.clear();
+        self.verifier.clear();
     }
 }
 

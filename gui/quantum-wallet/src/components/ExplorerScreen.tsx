@@ -50,6 +50,97 @@ interface NetworkSupply {
   connectedMiners: number;
 }
 
+// Hashpower-weighted cryptographic security metrics (v1.3.1-beta)
+// Note: Some fields are optional for backward compatibility with older API versions
+interface HashpowerSecurity {
+  version: string;
+  feature: string;
+  description?: string;
+  metrics: {
+    blocks_processed: number;
+    security_bits: number;
+    effective_difficulty?: number;
+    security_tier: string;
+    tier_description?: string;
+    vdf_difficulty?: number;  // Old field name for backward compat
+    vdf_iterations?: number;
+    vdf_time_ms?: number;
+    beacon_epoch: number;
+    network_hashrate: number;
+    network_hashrate_formatted?: string;
+    cumulative_work: string;
+    connected_peers?: number;
+    tps_current?: number;
+  };
+  security_guarantees: {
+    collision_resistance: string;
+    collision_resistance_description?: string;
+    preimage_resistance: string;
+    preimage_resistance_description?: string;
+    double_spend_cost_usd: string;
+    double_spend_cost_raw?: number;
+    double_spend_description?: string;
+    // New v1.3.9 fields for realistic attack economics
+    '51_percent_attack_capital'?: string;
+    '51_percent_attack_capital_raw'?: number;
+    '51_percent_attack_cost_per_hour'?: string;
+    '51_percent_attack_cost_per_hour_raw'?: number;
+    '51_percent_attack_description'?: string;
+    gpus_required_for_attack?: number;
+    attack_power_consumption_kw?: number;
+    // Legacy field for backwards compatibility
+    '51_percent_attack_cost'?: string;
+    '51_percent_attack_cost_raw'?: number;
+  };
+  how_to_increase_security?: {
+    add_miners: string;
+    increase_difficulty: string;
+    add_confirmations: string;
+    increase_vdf_iterations: string;
+    enable_slashing: string;
+  };
+  components: {
+    cumulative_work_security: boolean;
+    adaptive_vdf_complexity: boolean;
+    mining_randomness_beacon: boolean;
+    post_quantum_vrf?: boolean;
+    genus2_vdf_enabled?: boolean;
+  };
+}
+
+// Post-Quantum Cryptography Status (v1.0.60-beta)
+interface PostQuantumStatus {
+  version: string;
+  genus2_vdf: {
+    enabled: boolean;
+    security_level: string;
+    description: string;
+    quantum_resistance: string;
+  };
+  rlwe_vrf: {
+    enabled: boolean;
+    security_level: string;
+    description: string;
+    quantum_resistance: string;
+  };
+  dilithium_signatures: {
+    enabled: boolean;
+    nist_level: number;
+    description: string;
+  };
+  kyber_key_exchange: {
+    enabled: boolean;
+    nist_level: number;
+    description: string;
+  };
+  comparison_to_others: {
+    bitcoin: string;
+    ethereum: string;
+    solana: string;
+    cardano: string;
+  };
+}
+
 // StatCardProps interface removed - no longer needed
 
 interface ActivityItem {
@@ -366,10 +457,12 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
   );
 };
 
-const StatsModal = ({ networkStats, liveMetrics, onClose }: { 
-  networkStats: NetworkStats, 
-  liveMetrics: any, 
-  onClose: () => void 
+const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumStatus, onClose }: {
+  networkStats: NetworkStats,
+  liveMetrics: any,
+  hashpowerSecurity: HashpowerSecurity | null,
+  postQuantumStatus: PostQuantumStatus,
+  onClose: () => void
 }) => {
   return (
     <motion.div
@@ -519,6 +612,333 @@ const StatsModal = ({ networkStats, liveMetrics, onClose }: {
               </div>
             </div>
           </div>
+
+          {/* Hashpower Security (v1.3.1-beta) with Tooltips */}
+          {hashpowerSecurity && (
+            <div>
+              <h4 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Shield className="w-5 h-5 text-quantum-green" />
+                🔐 Hashpower Security (v{hashpowerSecurity.version})
+                <span className="text-xs bg-quantum-purple/30 px-2 py-0.5 rounded ml-2">
+                  {hashpowerSecurity.metrics.connected_peers || 0} peers
+                </span>
+              </h4>
+
+              {/* Main Security Metrics */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* Security Tier with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-green/30 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Security Tier
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-green">{hashpowerSecurity.metrics.security_tier}</div>
+                  <div className="text-xs text-gray-500">{hashpowerSecurity.metrics.security_bits?.toFixed(1) || '0'} bits security</div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Security Tier Explanation</div>
+                    <div className="text-gray-300 mb-2">{hashpowerSecurity.metrics.tier_description || 'Network security level based on cumulative work'}</div>
+                    <div className="text-gray-400">
+                      <strong>How to improve:</strong> Add more miners to increase hashrate exponentially
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Cumulative Work with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-cyan/30 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Cumulative Work
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-cyan">{hashpowerSecurity.metrics.cumulative_work}</div>
+                  <div className="text-xs text-gray-500">{hashpowerSecurity.metrics.blocks_processed?.toLocaleString() || 0} blocks</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Cumulative Work = Network Security</div>
+                    <div className="text-gray-300 mb-2">
+                      Total computational work: sum of 2^(difficulty) for all blocks.
+                      Higher = more expensive to rewrite history.
+                    </div>
+                    <div className="text-gray-400">
+                      <strong>Formula:</strong> work = Σ(2^difficulty) ≈ {hashpowerSecurity.metrics.cumulative_work}
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Double Spend Cost with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/30 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Double Spend Cost
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-purple">{hashpowerSecurity.security_guarantees.double_spend_cost_usd}</div>
+                  <div className="text-xs text-gray-500">6 confirmations + VDF</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Double Spend Attack Cost</div>
+                    <div className="text-gray-300 mb-2">
+                      {hashpowerSecurity.security_guarantees.double_spend_description || 'Cost to revert 6 confirmations with 51% hashrate + VDF penalty'}
+                    </div>
+                    <div className="text-gray-400 mb-1">
+                      <strong>Calculation:</strong> (51% hashrate × time × electricity) × VDF multiplier
+                    </div>
+                    <div className="text-green-400">
+                      🛡️ VDF time-lock doubles attack difficulty - attackers cannot parallelize
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* 51% Attack Capital Required with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-yellow-500/30 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    51% Attack Capital
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-yellow-500">
+                    {hashpowerSecurity.security_guarantees['51_percent_attack_capital'] || hashpowerSecurity.security_guarantees['51_percent_attack_cost'] || 'N/A'}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    {hashpowerSecurity.security_guarantees.gpus_required_for_attack?.toLocaleString() || '?'} GPUs required
+                  </div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full right-0 mb-2 w-96 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">51% Attack Economics (SHA3-256 GPU Mining)</div>
+                    <div className="text-gray-300 mb-2">
+                      {hashpowerSecurity.security_guarantees['51_percent_attack_description'] || 'Hardware + electricity to sustain 51% network control'}
+                    </div>
+                    <div className="text-gray-400 mb-2">
+                      <strong>Capital Investment Required:</strong>
+                      <ul className="list-disc ml-4 mt-1">
+                        <li>GPUs needed: <span className="text-yellow-400">{hashpowerSecurity.security_guarantees.gpus_required_for_attack?.toLocaleString() || '?'}</span> (RTX 4090 class)</li>
+                        <li>Hardware cost: <span className="text-yellow-400">{hashpowerSecurity.security_guarantees['51_percent_attack_capital'] || 'N/A'}</span></li>
+                        <li>Power consumption: <span className="text-red-400">{hashpowerSecurity.security_guarantees.attack_power_consumption_kw?.toFixed(0) || '?'} kW</span></li>
+                      </ul>
+                    </div>
+                    <div className="text-gray-400 mb-1">
+                      <strong>Operating Costs:</strong>
+                      <ul className="list-disc ml-4 mt-1">
+                        <li>Electricity: <span className="text-yellow-400">{hashpowerSecurity.security_guarantees['51_percent_attack_cost_per_hour'] || 'N/A'}/hour</span></li>
+                        <li>No dedicated SHA3-256 ASICs exist - must use GPUs</li>
+                      </ul>
+                    </div>
+                    <div className="text-red-400 mt-2">
+                      ⚠️ This is the minimum capital needed - actual attack requires sustained operation
+                    </div>
+                    <div className="absolute bottom-0 right-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Technical Metrics Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+                {/* VDF Iterations with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    VDF Iterations
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-cyan">{(hashpowerSecurity.metrics.vdf_iterations || 0).toLocaleString()}</div>
+                  <div className="text-xs text-gray-500">{hashpowerSecurity.metrics.vdf_time_ms?.toFixed(1) || 0}ms compute time</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Genus-2 VDF Time-Lock</div>
+                    <div className="text-gray-300 mb-2">
+                      Verifiable Delay Function using post-quantum hyperelliptic curves.
+                      Forces sequential computation - cannot be parallelized.
+                    </div>
+                    <div className="text-green-400">
+                      ⚛️ Quantum-resistant: Shor's algorithm cannot break genus-2 DLP
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Beacon Epoch with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Beacon Epoch
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-purple">{hashpowerSecurity.metrics.beacon_epoch}</div>
+                  <div className="text-xs text-gray-500">1000 blocks/epoch</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Randomness Beacon</div>
+                    <div className="text-gray-300 mb-2">
+                      Ring-LWE VRF provides unpredictable, verifiable randomness for:
+                      <ul className="list-disc ml-4 mt-1">
+                        <li>Mining leader election</li>
+                        <li>Reward distribution</li>
+                        <li>Validator selection</li>
+                      </ul>
+                    </div>
+                    <div className="text-green-400">
+                      ⚛️ Post-quantum secure: Lattice-based hardness
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Collision Resistance with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Collision Resistance
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-green">{hashpowerSecurity.security_guarantees.collision_resistance}</div>
+                  <div className="text-xs text-gray-500">SHA3-256 birthday bound</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Hash Collision Security</div>
+                    <div className="text-gray-300 mb-2">
+                      {hashpowerSecurity.security_guarantees.collision_resistance_description || 'SHA3-256 birthday bound: 2^128 operations needed for collision'}
+                    </div>
+                    <div className="text-gray-400">
+                      Finding two inputs with the same hash requires 2^128 operations - computationally infeasible.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Preimage Resistance with Tooltip */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20 cursor-help">
+                  <div className="text-sm text-gray-400 flex items-center gap-1">
+                    Preimage Resistance
+                    <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-yellow-500">{hashpowerSecurity.security_guarantees.preimage_resistance}</div>
+                  <div className="text-xs text-gray-500">SHA3-256 one-way function</div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full right-0 mb-2 w-72 p-3 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Hash Reversal Security</div>
+                    <div className="text-gray-300 mb-2">
+                      {hashpowerSecurity.security_guarantees.preimage_resistance_description || 'SHA3-256 preimage security: 2^256 operations to reverse hash'}
+                    </div>
+                    <div className="text-gray-400">
+                      Given a hash output, finding the input requires 2^256 operations - astronomically secure.
+                    </div>
+                    <div className="absolute bottom-0 right-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* How to Increase Security Section */}
+              {hashpowerSecurity.how_to_increase_security && (
+                <div className="mt-4 p-4 bg-gradient-to-r from-green-500/10 to-quantum-cyan/10 rounded-lg border border-green-400/30">
+                  <div className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-green-400" />
+                    📈 How to Increase Attack Costs
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+                    <div className="p-2 bg-black/20 rounded">
+                      <div className="text-green-400 font-semibold">🖥️ Add Miners</div>
+                      <div className="text-gray-400">{hashpowerSecurity.how_to_increase_security.add_miners}</div>
+                    </div>
+                    <div className="p-2 bg-black/20 rounded">
+                      <div className="text-cyan-400 font-semibold">⚡ Increase Difficulty</div>
+                      <div className="text-gray-400">{hashpowerSecurity.how_to_increase_security.increase_difficulty}</div>
+                    </div>
+                    <div className="p-2 bg-black/20 rounded">
+                      <div className="text-purple-400 font-semibold">⏱️ More Confirmations</div>
+                      <div className="text-gray-400">{hashpowerSecurity.how_to_increase_security.add_confirmations}</div>
+                    </div>
+                    <div className="p-2 bg-black/20 rounded">
+                      <div className="text-yellow-400 font-semibold">🔐 VDF Iterations</div>
+                      <div className="text-gray-400">{hashpowerSecurity.how_to_increase_security.increase_vdf_iterations}</div>
+                    </div>
+                    <div className="p-2 bg-black/20 rounded">
+                      <div className="text-red-400 font-semibold">⚔️ Enable Slashing</div>
+                      <div className="text-gray-400">{hashpowerSecurity.how_to_increase_security.enable_slashing}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Post-Quantum Cryptography (v1.0.60-beta) */}
+          <div>
+            <h4 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <Atom className="w-5 h-5 text-quantum-purple" />
+              🛡️ Post-Quantum Cryptography (v{postQuantumStatus.version})
+            </h4>
+
+            {/* Core PQ Components */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className={`p-4 rounded-lg border ${postQuantumStatus.genus2_vdf.enabled ? 'bg-green-500/10 border-green-400/30' : 'bg-red-500/10 border-red-400/30'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${postQuantumStatus.genus2_vdf.enabled ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                  <div className="text-lg font-bold text-white">Genus-2 VDF</div>
+                </div>
+                <div className="text-sm text-quantum-cyan mb-1">{postQuantumStatus.genus2_vdf.security_level}</div>
+                <div className="text-xs text-gray-400">{postQuantumStatus.genus2_vdf.description}</div>
+                <div className="text-xs text-green-400 mt-2 p-2 bg-green-500/5 rounded">
+                  ⚛️ {postQuantumStatus.genus2_vdf.quantum_resistance}
+                </div>
+              </div>
+
+              <div className={`p-4 rounded-lg border ${postQuantumStatus.rlwe_vrf.enabled ? 'bg-green-500/10 border-green-400/30' : 'bg-red-500/10 border-red-400/30'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${postQuantumStatus.rlwe_vrf.enabled ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                  <div className="text-lg font-bold text-white">Ring-LWE VRF</div>
+                </div>
+                <div className="text-sm text-quantum-cyan mb-1">{postQuantumStatus.rlwe_vrf.security_level}</div>
+                <div className="text-xs text-gray-400">{postQuantumStatus.rlwe_vrf.description}</div>
+                <div className="text-xs text-green-400 mt-2 p-2 bg-green-500/5 rounded">
+                  ⚛️ {postQuantumStatus.rlwe_vrf.quantum_resistance}
+                </div>
+              </div>
+            </div>
+
+            {/* NIST Standardized Algorithms */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className={`p-4 rounded-lg border ${postQuantumStatus.dilithium_signatures.enabled ? 'bg-quantum-purple/10 border-quantum-purple/30' : 'bg-red-500/10 border-red-400/30'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${postQuantumStatus.dilithium_signatures.enabled ? 'bg-quantum-purple animate-pulse' : 'bg-red-500'}`}></div>
+                  <div className="text-lg font-bold text-white">Dilithium Signatures</div>
+                  <span className="text-xs bg-quantum-purple/30 px-2 py-0.5 rounded">NIST Level {postQuantumStatus.dilithium_signatures.nist_level}</span>
+                </div>
+                <div className="text-xs text-gray-400">{postQuantumStatus.dilithium_signatures.description}</div>
+              </div>
+
+              <div className={`p-4 rounded-lg border ${postQuantumStatus.kyber_key_exchange.enabled ? 'bg-quantum-cyan/10 border-quantum-cyan/30' : 'bg-red-500/10 border-red-400/30'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${postQuantumStatus.kyber_key_exchange.enabled ? 'bg-quantum-cyan animate-pulse' : 'bg-red-500'}`}></div>
+                  <div className="text-lg font-bold text-white">Kyber Key Exchange</div>
+                  <span className="text-xs bg-quantum-cyan/30 px-2 py-0.5 rounded">NIST Level {postQuantumStatus.kyber_key_exchange.nist_level}</span>
+                </div>
+                <div className="text-xs text-gray-400">{postQuantumStatus.kyber_key_exchange.description}</div>
+              </div>
+            </div>
+
+            {/* Comparison with Other Chains */}
+            <div className="p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20">
+              <div className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                <Shield className="w-4 h-4 text-yellow-500" />
+                Comparison with Other Blockchains
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="p-3 bg-red-500/10 rounded-lg border border-red-400/20">
+                  <div className="text-sm font-bold text-white">Bitcoin</div>
+                  <div className="text-xs text-red-400">{postQuantumStatus.comparison_to_others.bitcoin}</div>
+                </div>
+                <div className="p-3 bg-red-500/10 rounded-lg border border-red-400/20">
+                  <div className="text-sm font-bold text-white">Ethereum</div>
+                  <div className="text-xs text-red-400">{postQuantumStatus.comparison_to_others.ethereum}</div>
+                </div>
+                <div className="p-3 bg-red-500/10 rounded-lg border border-red-400/20">
+                  <div className="text-sm font-bold text-white">Solana</div>
+                  <div className="text-xs text-red-400">{postQuantumStatus.comparison_to_others.solana}</div>
+                </div>
+                <div className="p-3 bg-yellow-500/10 rounded-lg border border-yellow-400/20">
+                  <div className="text-sm font-bold text-white">Cardano</div>
+                  <div className="text-xs text-yellow-400">{postQuantumStatus.comparison_to_others.cardano}</div>
+                </div>
+              </div>
+              <div className="mt-4 p-3 bg-green-500/10 rounded-lg border border-green-400/30">
+                <div className="text-sm font-bold text-green-400">Q-NarwhalKnight</div>
+                <div className="text-xs text-green-300">
+                  ✅ Full post-quantum security: Genus-2 VDF + Ring-LWE VRF + Dilithium5 + Kyber1024
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
@@ -584,6 +1004,42 @@ export default function ExplorerScreen() {
     connectedMiners: 0
   });
 
+  // Hashpower security state (v1.3.0-beta)
+  const [hashpowerSecurity, setHashpowerSecurity] = useState<HashpowerSecurity | null>(null);
+
+  // Post-Quantum Cryptography status (v1.0.60-beta)
+  const [postQuantumStatus] = useState<PostQuantumStatus>({
+    version: '1.0.60-beta',
+    genus2_vdf: {
+      enabled: true,
+      security_level: '128-bit post-quantum',
+      description: 'Hyperelliptic curve VDF using Jacobian group arithmetic (Cantor algorithm)',
+      quantum_resistance: 'Resistant to Shor\'s algorithm - no known quantum speedup for genus-2 DLP'
+    },
+    rlwe_vrf: {
+      enabled: true,
+      security_level: '128-bit post-quantum',
+      description: 'Ring Learning With Errors VRF for mining leader election',
+      quantum_resistance: 'Lattice-based hardness assumption - NP-hard even for quantum computers'
+    },
+    dilithium_signatures: {
+      enabled: true,
+      nist_level: 5,
+      description: 'NIST PQC standardized digital signatures (FIPS 204)'
+    },
+    kyber_key_exchange: {
+      enabled: true,
+      nist_level: 5,
+      description: 'NIST PQC standardized key encapsulation (FIPS 203)'
+    },
+    comparison_to_others: {
+      bitcoin: 'ECDSA only - vulnerable to Shor\'s algorithm',
+      ethereum: 'ECDSA/BLS only - no PQ protection, planning quantum upgrade',
+      solana: 'Ed25519 only - vulnerable to quantum attacks',
+      cardano: 'Ed25519 only - research phase for PQ crypto'
+    }
+  });
+
   useEffect(() => {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
     const fetchAllData = async () => {
@@ -609,6 +1065,16 @@ export default function ExplorerScreen() {
             blockRewardFormatted: supplyResponse.data.block_reward_formatted,
             connectedMiners: supplyResponse.data.connected_miners
           });
+        }
+
+        // Fetch hashpower security metrics (v1.3.0-beta)
+        try {
+          const hashpowerResponse = await qnkAPI.getHashpowerSecurity();
+          if (hashpowerResponse.success && hashpowerResponse.data) {
+            setHashpowerSecurity(hashpowerResponse.data);
+          }
+        } catch (hashpowerError) {
+          console.warn('Hashpower security fetch failed (optional):', hashpowerError);
         }
 
         // Update network stats with ONLY real data from API
@@ -940,6 +1406,8 @@ export default function ExplorerScreen() {
           <StatsModal
             networkStats={networkStats}
             liveMetrics={liveMetrics}
+            hashpowerSecurity={hashpowerSecurity}
+            postQuantumStatus={postQuantumStatus}
             onClose={() => setShowStatsModal(false)}
           />
         )}

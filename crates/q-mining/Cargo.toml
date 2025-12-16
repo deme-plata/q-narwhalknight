@@ -11,6 +11,8 @@ q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 # ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
 q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+# ✨ v1.0.60-beta: Post-quantum VRF for mining leader election (replaces broken X-VRF)
+q-rlwe-vrf = { path = "../q-rlwe-vrf", optional = true }
 q-network = { path = "../q-network" }
 q-aegis-ql = { path = "../q-aegis-ql" }
 q-precision = { path = "../q-precision" }
@@ -47,15 +49,24 @@ libp2p = "0.53"
 
 # Performance
 rayon = "1.8"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
 
 # GPU acceleration (optional)
 opencl3 = { version = "0.9", optional = true }
 
+# System info
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
-default = []
+# v1.0.60-beta: Ring-LWE VRF enabled by default for post-quantum mining security
+default = ["mining-vrf"]
 gpu-mining = ["opencl3"]
 # ✨ v1.0.58-beta: Enable Bulletproofs v2 for confidential mining rewards
 advanced-crypto = ["q-crypto-advanced"]
+# ✨ v1.0.60-beta: Enable Ring-LWE VRF for post-quantum mining leader election
+mining-vrf = ["q-rlwe-vrf"]
 
 [dev-dependencies]
 tempfile = "3.8"

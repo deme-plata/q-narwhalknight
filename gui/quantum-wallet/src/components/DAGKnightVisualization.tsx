@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Activity, Zap, TrendingUp, GitBranch, X, Sparkles, Layers, Orbit } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Activity, Zap, TrendingUp, GitBranch, X, Sparkles, Layers, Orbit, Box } from 'lucide-react';
 
 interface DAGBlock {
   id: string; // block hash
@@ -9,6 +9,7 @@ interface DAGBlock {
   parents: string[];
   isBlueSet: boolean;
   x: number;
+  y: number; // Use actual Y position for curved paths
   miner?: string;
   txCount: number;
   reward: number;
@@ -17,7 +18,8 @@ interface DAGBlock {
   dagRound?: number;
   minerCount?: number;
   age?: number; // Age in milliseconds since creation (for entrance animation)
-  producerId?: number; // Phase 2: Producer ID for parallel visualization
+  producerId?: number;
+  hashPrefix?: string; // First 8 chars of hash for coloring
 }
 
 interface Particle {
@@ -35,8 +37,26 @@ interface DAGKnightVisualizationProps {
   currentHeight: number;
 }
 
+// Hash function to generate consistent lane from block hash
+const hashToLane = (hash: string, numLanes: number): number => {
+  if (!hash || hash.length < 8) return 0;
+  // Use first 8 chars of hash as hex, convert to number
+  const hashNum = parseInt(hash.substring(0, 8), 16);
+  return Math.abs(hashNum) % numLanes;
+};
+
+// Generate color from block hash for variety
+const hashToColor = (hash: string): string => {
+  if (!hash || hash.length < 6) return '#60a5fa';
+  const r = parseInt(hash.substring(0, 2), 16);
+  const g = parseInt(hash.substring(2, 4), 16);
+  const b = parseInt(hash.substring(4, 6), 16);
+  // Ensure colors are vibrant (shift towards brighter)
+  const minBrightness = 100;
+  return `rgb(${Math.max(r, minBrightness)}, ${Math.max(g, minBrightness)}, ${Math.max(b, minBrightness)})`;
+};
+
 export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisualizationProps) {
-  // Accept currentHeight prop (used for initial sync check)
   const canvasRef = useRef<HTMLCanvasElement>(null);
   console.log('DAG Visualizer initialized at height:', currentHeight);
   const [blocks, setBlocks] = useState<DAGBlock[]>([]);
@@ -47,68 +67,62 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
     totalBlocks: 0,
     blocksPerSecond: 0,
   });
-  const [visualMode, setVisualMode] = useState<'normal' | 'quantum' | 'constellation' | 'heatmap'>('quantum');
+  const [visualMode, setVisualMode] = useState<'flow' | 'quantum' | 'constellation' | 'matrix'>('quantum');
   const [particles, setParticles] = useState<Particle[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
 
   const scrollOffset = useRef(0);
   const lastBlockTime = useRef(Date.now());
   const animationFrameId = useRef<number | undefined>(undefined);
-  const laneAssignments = useRef<Map<number, number>>(new Map()); // height -> lane mapping
   const laneOccupancy = useRef<Map<number, number>>(new Map()); // lane -> rightmost x position
 
-  // Phase 2 Constants: 8 parallel producers!
-  const BLOCK_WIDTH = 60;
-  const BLOCK_HEIGHT = 40;
-  const LANE_HEIGHT = 70;
-  const NUM_LANES = 8; // Phase 2: 8 producers = 8 lanes
-  const SCROLL_SPEED = 200; // Faster for excitement
-  const MIN_BLOCK_SPACING = 100; // Minimum horizontal spacing between blocks in same lane
+  // Configuration - 4 lanes for better visual density
+  const BLOCK_SIZE = 48; // Square blocks
+  const BLOCK_RADIUS = 8; // Rounded corners
+  const LANE_HEIGHT = 80;
+  const NUM_LANES = 4;
+  const SCROLL_SPEED = 150;
+  const MIN_BLOCK_SPACING = 120;
+  const CANVAS_HEIGHT = NUM_LANES * LANE_HEIGHT + 120;
 
-  // Assign lane based on producer_id for true Phase 2 parallelism
-  const assignLane = (height: number, producerId?: number): number => {
-    if (laneAssignments.current.has(height)) {
-      return laneAssignments.current.get(height)!;
-    }
-
-    // Phase 2: Use producer_id for true parallel block production visualization
-    let lane: number;
-    if (producerId !== undefined) {
-      // True parallelism: each producer gets its own lane (0-7)
-      lane = producerId % NUM_LANES;
-    } else {
-      // Fallback: distribute blocks across lanes for visual variety
-      lane = (height * 7 + height % 3) % NUM_LANES;
-    }
-
-    laneAssignments.current.set(height, lane);
-    return lane;
-  };
+  // Color palette for lanes
+  const LANE_COLORS = [
+    { primary: '#60a5fa', secondary: '#3b82f6', glow: 'rgba(96, 165, 250, 0.6)' },  // Blue
+    { primary: '#a78bfa', secondary: '#8b5cf6', glow: 'rgba(167, 139, 250, 0.6)' }, // Purple
+    { primary: '#34d399', secondary: '#10b981', glow: 'rgba(52, 211, 153, 0.6)' },  // Green
+    { primary: '#f472b6', secondary: '#ec4899', glow: 'rgba(244, 114, 182, 0.6)' }, // Pink
+  ];
 
   // Create quantum particles around a block
-  const createParticles = (x: number, y: number, count: number = 20) => {
+  const createParticles = useCallback((x: number, y: number, color: string, count: number = 15) => {
     const newParticles: Particle[] = [];
     for (let i = 0; i < count; i++) {
-      const angle = (Math.PI * 2 * i) / count;
-      const speed = 30 + Math.random() * 50;
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+      const speed = 40 + Math.random() * 60;
       newParticles.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         life: 0,
-        maxLife: 800 + Math.random() * 400,
-        color: ['#60a5fa', '#a78bfa', '#ec4899', '#10b981'][Math.floor(Math.random() * 4)],
-        size: 2 + Math.random() * 3,
+        maxLife: 600 + Math.random() * 400,
+        color,
+        size: 2 + Math.random() * 4,
       });
     }
-    setParticles(prev => [...prev, ...newParticles]);
-  };
+    setParticles(prev => [...prev.slice(-100), ...newParticles]); // Keep max 100 particles
+  }, []);
 
   // Listen for new blocks via SSE
   useEffect(() => {
-    console.log('🎨 DAG Visualization starting (Phase 2 Mode - 8 Producers), connecting to SSE stream...');
+    console.log('🎨 DAG Visualization starting, connecting to SSE stream...');
 
     const eventSource = new EventSource('/api/v1/events');
+
+    eventSource.onopen = () => {
+      console.log('🎨 SSE connection opened');
+      setIsConnected(true);
+    };
 
     eventSource.addEventListener('new-block', (event) => {
       try {
@@ -117,22 +131,18 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
 
         // Handle tagged enum format: {type: "NewBlock", data: {...}}
         const blockData = data.data || data;
-        console.log('🎨 DAGKnight: Extracted block data:', blockData);
-        console.log('🎨 DAGKnight: producer_id from event:', blockData.producer_id);
+        const blockHash = blockData.hash || `block-${blockData.height}`;
 
         const now = Date.now();
         const timeSinceLastBlock = (now - lastBlockTime.current) / 1000;
 
-        // Phase 2: Extract producer_id from block data
-        const producerId = blockData.producer_id !== undefined ? blockData.producer_id : blockData.height % 8;
-        console.log('🎨 DAGKnight: Using producerId:', producerId, '(from event or fallback)');
-
-        // Assign lane for this block (Phase 2: based on producer_id)
-        const assignedLane = assignLane(blockData.height, producerId);
+        // Use block hash for lane assignment (creates visual variety)
+        const assignedLane = hashToLane(blockHash, NUM_LANES);
+        const laneColor = LANE_COLORS[assignedLane];
 
         // Calculate X position with collision avoidance
         const canvasWidth = canvasRef.current?.width || 1200;
-        const frontierX = scrollOffset.current + canvasWidth - 100;
+        const frontierX = scrollOffset.current + canvasWidth - 150;
 
         // Check if there's already a block in this lane recently
         const laneLastX = laneOccupancy.current.get(assignedLane) || 0;
@@ -141,34 +151,41 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         // Position block at frontier or further right if lane is occupied
         const blockX = Math.max(frontierX, minRequiredX);
 
+        // Add slight Y variation within the lane for organic feel
+        const laneY = assignedLane * LANE_HEIGHT + 60;
+        const yVariation = (Math.sin(blockData.height * 0.7) * 8);
+        const blockY = laneY + yVariation;
+
         // Update lane occupancy tracking
         laneOccupancy.current.set(assignedLane, blockX);
 
         const newBlock: DAGBlock = {
-          id: blockData.hash || `block-${blockData.height}`,
+          id: blockHash,
           height: blockData.height,
           lane: assignedLane,
           timestamp: now,
           parents: blockData.prev_hash ? [blockData.prev_hash] : (blockData.height > 0 ? [`block-${blockData.height - 1}`] : []),
-          isBlueSet: true, // All blocks are blue in Phase 2
+          isBlueSet: true,
           x: blockX,
-          miner: `Producer #${producerId}`,
+          y: blockY,
+          miner: `Block Producer`,
           txCount: blockData.tx_count || blockData.solutions_count || 0,
           reward: blockData.block_reward || 0,
           prevHash: blockData.prev_hash,
           totalDifficulty: blockData.total_difficulty,
           dagRound: blockData.dag_round,
           minerCount: blockData.miner_count,
-          age: 0, // Track age for entrance animation
-          producerId,
+          age: 0,
+          producerId: blockData.producer_id || 0,
+          hashPrefix: blockHash.substring(0, 8),
         };
 
         setBlocks(prev => {
           const updated = [...prev, newBlock];
-          // Clean up old blocks that scrolled off-screen
-          const filtered = updated.filter(b => b.x > scrollOffset.current - 300);
+          // Keep last 50 blocks for performance
+          const filtered = updated.filter(b => b.x > scrollOffset.current - 400).slice(-50);
 
-          // Clean up lane occupancy for off-screen blocks
+          // Update lane occupancy for visible blocks
           const visibleLaneMaxX = new Map<number, number>();
           filtered.forEach(block => {
             const currentMax = visibleLaneMaxX.get(block.lane) || 0;
@@ -179,14 +196,11 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
           return filtered;
         });
 
-        // Create quantum particles for new block (if in quantum mode)
-        if (visualMode === 'quantum') {
-          const canvas = canvasRef.current;
-          if (canvas) {
-            const blockScreenX = blockX - scrollOffset.current + BLOCK_WIDTH / 2;
-            const blockScreenY = assignedLane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
-            createParticles(blockScreenX, blockScreenY, 30);
-          }
+        // Create particles for new block
+        if (visualMode === 'quantum' || visualMode === 'constellation') {
+          const blockScreenX = blockX - scrollOffset.current + BLOCK_SIZE / 2;
+          const blockScreenY = blockY + BLOCK_SIZE / 2;
+          createParticles(blockScreenX, blockScreenY, laneColor.primary, 20);
         }
 
         // Update stats
@@ -195,11 +209,10 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
           totalBlocks: blockData.height,
           blueSetCount: blockData.height,
           redSetCount: 0,
-          blocksPerSecond: timeSinceLastBlock > 0 ? 1 / timeSinceLastBlock : 0,
+          blocksPerSecond: timeSinceLastBlock > 0 ? Math.min(1 / timeSinceLastBlock, 10) : 0,
         }));
 
         lastBlockTime.current = now;
-        console.log('✨ Block added to visualization:', newBlock);
       } catch (error) {
         console.error('Error processing new-block event:', error);
       }
@@ -207,13 +220,14 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
 
     eventSource.onerror = (error) => {
       console.error('SSE connection error:', error);
+      setIsConnected(false);
     };
 
     return () => {
       console.log('Closing SSE connection');
       eventSource.close();
     };
-  }, [visualMode]);
+  }, [visualMode, createParticles]);
 
   // Handle canvas click to select blocks
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -221,30 +235,31 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    const clickX = event.clientX - rect.left;
-    const clickY = event.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clickX = (event.clientX - rect.left) * scaleX;
+    const clickY = (event.clientY - rect.top) * scaleY;
 
     // Find clicked block
     for (const block of blocks) {
       const blockX = block.x - scrollOffset.current;
-      const blockY = block.lane * LANE_HEIGHT + 50;
+      const blockY = block.y;
 
       if (
         clickX >= blockX &&
-        clickX <= blockX + BLOCK_WIDTH &&
+        clickX <= blockX + BLOCK_SIZE &&
         clickY >= blockY &&
-        clickY <= blockY + BLOCK_HEIGHT
+        clickY <= blockY + BLOCK_SIZE
       ) {
         setSelectedBlock(block);
         return;
       }
     }
 
-    // Click outside blocks - deselect
     setSelectedBlock(null);
   };
 
-  // Animation loop for scrolling and effects
+  // Animation loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -277,49 +292,172 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
             x: p.x + p.vx * deltaTime,
             y: p.y + p.vy * deltaTime,
             life: p.life + deltaTime * 1000,
-            vx: p.vx * 0.98, // Slow down over time
-            vy: p.vy * 0.98,
+            vx: p.vx * 0.96,
+            vy: p.vy * 0.96,
           }))
           .filter(p => p.life < p.maxLife)
       );
 
       // Clear canvas with gradient background
       const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-      gradient.addColorStop(0, '#0a0a1a');
-      gradient.addColorStop(1, '#1a0a2a');
+      gradient.addColorStop(0, '#0a0a1e');
+      gradient.addColorStop(0.5, '#0d0d24');
+      gradient.addColorStop(1, '#0a0a1e');
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Draw grid lines for lanes (Phase 2: 8 lanes)
-      ctx.strokeStyle = 'rgba(139, 92, 246, 0.1)';
+      // Draw animated background grid
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.05)';
       ctx.lineWidth = 1;
-      for (let i = 0; i <= NUM_LANES; i++) {
-        const y = i * LANE_HEIGHT + 50;
+      const gridOffset = (scrollOffset.current * 0.3) % 40;
+      for (let x = -gridOffset; x < canvas.width + 40; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y < canvas.height; y += 40) {
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(canvas.width, y);
         ctx.stroke();
-
-        // Lane labels (Producer #0 - Producer #7)
-        if (i < NUM_LANES) {
-          ctx.fillStyle = 'rgba(139, 92, 246, 0.4)';
-          ctx.font = '10px monospace';
-          ctx.fillText(`Producer #${i}`, 10, y + 20);
-        }
       }
 
-      // Constellation mode: draw all connections between nearby blocks
+      // Draw lane guides with glow
+      for (let i = 0; i < NUM_LANES; i++) {
+        const laneY = i * LANE_HEIGHT + 60 + BLOCK_SIZE / 2;
+        const laneColor = LANE_COLORS[i];
+
+        // Glowing lane line
+        ctx.strokeStyle = laneColor.glow.replace('0.6', '0.15');
+        ctx.lineWidth = 2;
+        ctx.setLineDash([10, 20]);
+        ctx.beginPath();
+        ctx.moveTo(0, laneY);
+        ctx.lineTo(canvas.width, laneY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Lane label with glow
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = laneColor.primary;
+        ctx.fillStyle = laneColor.primary;
+        ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Lane ${i}`, 12, laneY - 25);
+        ctx.shadowBlur = 0;
+      }
+
+      // Sort blocks by height for proper connection drawing
+      const sortedBlocks = [...blocks].sort((a, b) => a.height - b.height);
+
+      // Draw connections between blocks (DAG edges)
+      // Connect each block to its parent (previous height) AND add cross-lane DAG connections
+      sortedBlocks.forEach((block, index) => {
+        const blockCenterX = block.x - scrollOffset.current + BLOCK_SIZE / 2;
+        const blockCenterY = block.y + BLOCK_SIZE / 2;
+
+        // Skip if off-screen
+        if (blockCenterX < -100 || blockCenterX > canvas.width + 100) return;
+
+        const laneColor = LANE_COLORS[block.lane];
+
+        // Find parent by height (block with height - 1)
+        const parent = sortedBlocks.find(b => b.height === block.height - 1);
+
+        if (parent) {
+          const parentCenterX = parent.x - scrollOffset.current + BLOCK_SIZE / 2;
+          const parentCenterY = parent.y + BLOCK_SIZE / 2;
+
+          // Only draw if parent is visible
+          if (parentCenterX > -100 && parentCenterX < canvas.width + 100) {
+            // Draw curved connection
+            const isNewConnection = (block.age || 0) < 500;
+            const connectionAlpha = isNewConnection ? 0.4 + 0.4 * Math.min((block.age || 0) / 500, 1) : 0.6;
+
+            // Gradient line
+            const connGradient = ctx.createLinearGradient(parentCenterX, parentCenterY, blockCenterX, blockCenterY);
+            connGradient.addColorStop(0, LANE_COLORS[parent.lane].glow.replace('0.6', String(connectionAlpha * 0.7)));
+            connGradient.addColorStop(1, laneColor.glow.replace('0.6', String(connectionAlpha)));
+            ctx.strokeStyle = connGradient;
+            ctx.lineWidth = 2.5;
+
+            // Always use curved path for DAG feel
+            const midX = (parentCenterX + blockCenterX) / 2;
+            const curveOffset = (block.lane - parent.lane) * 15; // Curve based on lane difference
+
+            ctx.beginPath();
+            ctx.moveTo(parentCenterX, parentCenterY);
+            ctx.bezierCurveTo(
+              midX - curveOffset, parentCenterY + curveOffset,
+              midX + curveOffset, blockCenterY - curveOffset,
+              blockCenterX, blockCenterY
+            );
+            ctx.stroke();
+
+            // Glowing arrow head
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = laneColor.primary;
+            const arrowSize = 7;
+            ctx.fillStyle = laneColor.glow.replace('0.6', String(connectionAlpha));
+            ctx.beginPath();
+            ctx.moveTo(blockCenterX - BLOCK_SIZE/2 - 2, blockCenterY);
+            ctx.lineTo(
+              blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
+              blockCenterY - arrowSize/2
+            );
+            ctx.lineTo(
+              blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
+              blockCenterY + arrowSize/2
+            );
+            ctx.closePath();
+            ctx.fill();
+            ctx.shadowBlur = 0;
+          }
+        }
+
+        // DAG-style: Also connect to grandparent (height - 2) with thinner line for DAG feel
+        const grandparent = sortedBlocks.find(b => b.height === block.height - 2);
+        if (grandparent && Math.random() > 0.3) { // 70% chance to show grandparent connection
+          const gpCenterX = grandparent.x - scrollOffset.current + BLOCK_SIZE / 2;
+          const gpCenterY = grandparent.y + BLOCK_SIZE / 2;
+
+          if (gpCenterX > -100 && gpCenterX < canvas.width + 100) {
+            const gpAlpha = 0.25;
+            ctx.strokeStyle = `rgba(139, 92, 246, ${gpAlpha})`;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 6]);
+
+            const midX = (gpCenterX + blockCenterX) / 2;
+            ctx.beginPath();
+            ctx.moveTo(gpCenterX, gpCenterY);
+            ctx.bezierCurveTo(
+              midX, gpCenterY,
+              midX, blockCenterY,
+              blockCenterX, blockCenterY
+            );
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
+      });
+
+      // Draw constellation connections (connect nearby blocks)
       if (visualMode === 'constellation') {
         blocks.forEach((block, i) => {
+          const blockX = block.x - scrollOffset.current + BLOCK_SIZE / 2;
+          const blockY = block.y + BLOCK_SIZE / 2;
+          if (blockX < 0 || blockX > canvas.width) return;
+
           blocks.slice(i + 1).forEach(otherBlock => {
-            const blockX = block.x - scrollOffset.current + BLOCK_WIDTH / 2;
-            const blockY = block.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
-            const otherX = otherBlock.x - scrollOffset.current + BLOCK_WIDTH / 2;
-            const otherY = otherBlock.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
+            const otherX = otherBlock.x - scrollOffset.current + BLOCK_SIZE / 2;
+            const otherY = otherBlock.y + BLOCK_SIZE / 2;
+            if (otherX < 0 || otherX > canvas.width) return;
 
             const dist = Math.sqrt((blockX - otherX) ** 2 + (blockY - otherY) ** 2);
-            if (dist < 200) {
-              ctx.strokeStyle = `rgba(139, 92, 246, ${0.3 * (1 - dist / 200)})`;
+            if (dist < 180 && dist > 50) {
+              const alpha = 0.15 * (1 - dist / 180);
+              ctx.strokeStyle = `rgba(139, 92, 246, ${alpha})`;
               ctx.lineWidth = 1;
               ctx.beginPath();
               ctx.moveTo(blockX, blockY);
@@ -330,168 +468,93 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         });
       }
 
-      // Draw parent connection lines first (behind blocks)
-      blocks.forEach(block => {
-        const blockX = block.x - scrollOffset.current + BLOCK_WIDTH / 2;
-        const blockY = block.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
+      // Draw particles
+      particles.forEach(p => {
+        const alpha = Math.max(0, 1 - (p.life / p.maxLife));
+        const size = p.size * (1 - p.life / p.maxLife * 0.5);
 
-        block.parents.forEach(parentId => {
-          const parent = blocks.find(b => b.id === parentId);
-          if (!parent) return;
-
-          const parentX = parent.x - scrollOffset.current + BLOCK_WIDTH / 2;
-          const parentY = parent.lane * LANE_HEIGHT + 50 + BLOCK_HEIGHT / 2;
-
-          // Rainbow gradient for connections in quantum mode
-          if (visualMode === 'quantum') {
-            const gradient = ctx.createLinearGradient(parentX, parentY, blockX, blockY);
-            gradient.addColorStop(0, 'rgba(96, 165, 250, 0.6)');
-            gradient.addColorStop(0.5, 'rgba(167, 139, 250, 0.6)');
-            gradient.addColorStop(1, 'rgba(236, 72, 153, 0.6)');
-            ctx.strokeStyle = gradient;
-          } else {
-            ctx.strokeStyle = block.isBlueSet
-              ? 'rgba(59, 130, 246, 0.5)'
-              : 'rgba(239, 68, 68, 0.4)';
-          }
-          ctx.lineWidth = 2;
-
-          // Bezier curves for cross-lane connections
-          if (Math.abs(block.lane - parent.lane) > 0) {
-            const controlPoint1X = parentX + (blockX - parentX) * 0.3;
-            const controlPoint1Y = parentY;
-            const controlPoint2X = parentX + (blockX - parentX) * 0.7;
-            const controlPoint2Y = blockY;
-
-            ctx.beginPath();
-            ctx.moveTo(parentX, parentY);
-            ctx.bezierCurveTo(controlPoint1X, controlPoint1Y, controlPoint2X, controlPoint2Y, blockX, blockY);
-            ctx.stroke();
-
-            // Arrow head
-            const arrowSize = 6;
-            const angle = Math.atan2(blockY - controlPoint2Y, blockX - controlPoint2X);
-            ctx.beginPath();
-            ctx.moveTo(blockX, blockY);
-            ctx.lineTo(
-              blockX - arrowSize * Math.cos(angle - Math.PI / 6),
-              blockY - arrowSize * Math.sin(angle - Math.PI / 6)
-            );
-            ctx.moveTo(blockX, blockY);
-            ctx.lineTo(
-              blockX - arrowSize * Math.cos(angle + Math.PI / 6),
-              blockY - arrowSize * Math.sin(angle + Math.PI / 6)
-            );
-            ctx.stroke();
-          } else {
-            // Same lane connection
-            ctx.beginPath();
-            ctx.moveTo(parentX, parentY);
-            ctx.lineTo(blockX, blockY);
-            ctx.stroke();
-
-            const arrowSize = 6;
-            ctx.beginPath();
-            ctx.moveTo(blockX - arrowSize, blockY - 3);
-            ctx.lineTo(blockX, blockY);
-            ctx.lineTo(blockX - arrowSize, blockY + 3);
-            ctx.stroke();
-          }
-        });
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = p.color;
+        ctx.fillStyle = p.color.replace('rgb', 'rgba').replace(')', `, ${alpha})`);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
       });
-
-      // Draw particles (quantum mode)
-      if (visualMode === 'quantum') {
-        particles.forEach(p => {
-          const alpha = 1 - (p.life / p.maxLife);
-          ctx.fillStyle = p.color.replace(')', `, ${alpha})`).replace('rgb', 'rgba');
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fill();
-
-          // Trailing effect
-          ctx.shadowBlur = 10;
-          ctx.shadowColor = p.color;
-        });
-      }
 
       // Draw blocks
       blocks.forEach(block => {
         const x = block.x - scrollOffset.current;
-        const y = block.lane * LANE_HEIGHT + 50;
+        const y = block.y;
 
         // Skip if off-screen
-        if (x < -BLOCK_WIDTH || x > canvas.width + BLOCK_WIDTH) return;
+        if (x < -BLOCK_SIZE || x > canvas.width + BLOCK_SIZE) return;
 
         const isSelected = selectedBlock?.id === block.id;
+        const laneColor = LANE_COLORS[block.lane];
 
         // Entrance animation
         const age = block.age !== undefined ? block.age : 10000;
-        const isNewBlock = age < 1000;
-        const animationProgress = Math.min(age / 1000, 1);
+        const isNewBlock = age < 800;
+        const animationProgress = Math.min(age / 800, 1);
 
-        // Scale and pulse
-        const scale = isNewBlock ? 0.7 + (0.3 * animationProgress) : 1.0;
-        const opacity = isNewBlock ? animationProgress : 1.0;
-        const pulse = age < 500 ? 1 + (0.3 * Math.sin((age / 500) * Math.PI * 4)) : 1.0;
+        // Scale and glow effects
+        const scale = isNewBlock ? 0.5 + (0.5 * animationProgress) : 1.0;
+        const opacity = isNewBlock ? 0.5 + 0.5 * animationProgress : 1.0;
+        const glowIntensity = isNewBlock ? 30 * (1 - animationProgress) + 10 : (isSelected ? 20 : 8);
 
-        const scaledWidth = BLOCK_WIDTH * scale * pulse;
-        const scaledHeight = BLOCK_HEIGHT * scale * pulse;
-        const scaledX = x + (BLOCK_WIDTH - scaledWidth) / 2;
-        const scaledY = y + (BLOCK_HEIGHT - scaledHeight) / 2;
+        const scaledSize = BLOCK_SIZE * scale;
+        const scaledX = x + (BLOCK_SIZE - scaledSize) / 2;
+        const scaledY = y + (BLOCK_SIZE - scaledSize) / 2;
 
-        // Heatmap mode: color based on transaction count
-        if (visualMode === 'heatmap') {
-          const intensity = Math.min(block.txCount / 100, 1);
-          const gradient = ctx.createLinearGradient(scaledX, scaledY, scaledX, scaledY + scaledHeight);
-          gradient.addColorStop(0, `rgba(${255 * intensity}, ${255 * (1 - intensity)}, 100, ${opacity})`);
-          gradient.addColorStop(1, `rgba(${200 * intensity}, ${200 * (1 - intensity)}, 80, ${0.8 * opacity})`);
-          ctx.fillStyle = gradient;
-          ctx.shadowColor = `rgba(${255 * intensity}, ${255 * (1 - intensity)}, 100, 0.8)`;
-          ctx.shadowBlur = 15 + intensity * 20;
-        } else {
-          // Normal/quantum mode: gradient based on blue set
-          const gradient = ctx.createLinearGradient(scaledX, scaledY, scaledX, scaledY + scaledHeight);
-          if (block.isBlueSet) {
-            gradient.addColorStop(0, isSelected ? `rgba(96, 165, 250, ${opacity})` : `rgba(59, 130, 246, ${0.9 * opacity})`);
-            gradient.addColorStop(1, isSelected ? `rgba(59, 130, 246, ${0.9 * opacity})` : `rgba(37, 99, 235, ${0.7 * opacity})`);
-            ctx.fillStyle = gradient;
-            ctx.shadowColor = isNewBlock ? `rgba(96, 165, 250, ${0.9 * opacity})` : (isSelected ? 'rgba(96, 165, 250, 0.8)' : 'rgba(59, 130, 246, 0.5)');
-          } else {
-            gradient.addColorStop(0, isSelected ? `rgba(248, 113, 113, ${opacity})` : `rgba(239, 68, 68, ${0.9 * opacity})`);
-            gradient.addColorStop(1, isSelected ? `rgba(239, 68, 68, ${0.9 * opacity})` : `rgba(220, 38, 38, ${0.7 * opacity})`);
-            ctx.fillStyle = gradient;
-            ctx.shadowColor = isNewBlock ? `rgba(248, 113, 113, ${0.9 * opacity})` : (isSelected ? 'rgba(248, 113, 113, 0.8)' : 'rgba(239, 68, 68, 0.5)');
-          }
-          ctx.shadowBlur = isNewBlock ? 30 * pulse : (isSelected ? 20 : 10);
-        }
+        // Glow effect
+        ctx.shadowBlur = glowIntensity;
+        ctx.shadowColor = laneColor.glow;
 
-        // Draw block
+        // Block gradient fill
+        const blockGradient = ctx.createLinearGradient(scaledX, scaledY, scaledX + scaledSize, scaledY + scaledSize);
+        blockGradient.addColorStop(0, laneColor.primary);
+        blockGradient.addColorStop(1, laneColor.secondary);
+        ctx.fillStyle = blockGradient;
+        ctx.globalAlpha = opacity;
+
+        // Draw rounded rectangle
         ctx.beginPath();
-        ctx.roundRect(scaledX, scaledY, scaledWidth, scaledHeight, 6);
+        ctx.roundRect(scaledX, scaledY, scaledSize, scaledSize, BLOCK_RADIUS * scale);
         ctx.fill();
 
         // Border
-        ctx.strokeStyle = block.isBlueSet
-          ? (isSelected ? `rgba(147, 197, 253, ${opacity})` : `rgba(96, 165, 250, ${0.8 * opacity})`)
-          : (isSelected ? `rgba(252, 165, 165, ${opacity})` : `rgba(248, 113, 113, ${0.8 * opacity})`);
-        ctx.lineWidth = isSelected ? 3 : 2;
+        ctx.strokeStyle = isSelected ? '#ffffff' : laneColor.primary;
+        ctx.lineWidth = isSelected ? 3 : 1.5;
         ctx.stroke();
 
-        // Reset shadow
+        ctx.globalAlpha = 1;
         ctx.shadowBlur = 0;
 
-        // Block height text
-        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`#${block.height}`, x + BLOCK_WIDTH / 2, y + BLOCK_HEIGHT / 2);
+        // Block content (only if not too small)
+        if (scale > 0.7) {
+          // Height number
+          ctx.fillStyle = '#ffffff';
+          ctx.font = `bold ${Math.round(12 * scale)}px Inter, system-ui, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`${block.height}`, x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2 - 4);
 
-        // Transaction count (if > 0)
-        if (block.txCount > 0) {
-          ctx.font = '8px monospace';
-          ctx.fillStyle = `rgba(16, 185, 129, ${opacity})`;
-          ctx.fillText(`${block.txCount} tx`, x + BLOCK_WIDTH / 2, y + BLOCK_HEIGHT / 2 + 12);
+          // TX count badge
+          if (block.txCount > 0) {
+            ctx.font = `${Math.round(8 * scale)}px Inter, system-ui, sans-serif`;
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.9)';
+            ctx.fillText(`${block.txCount} tx`, x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2 + 12);
+          }
+        }
+
+        // Matrix mode: draw falling characters
+        if (visualMode === 'matrix' && Math.random() > 0.97) {
+          const chars = '0123456789ABCDEF';
+          const char = chars[Math.floor(Math.random() * chars.length)];
+          ctx.font = '10px monospace';
+          ctx.fillStyle = `rgba(16, 185, 129, ${0.3 + Math.random() * 0.5})`;
+          ctx.fillText(char, x + Math.random() * BLOCK_SIZE, y + BLOCK_SIZE + 20 + Math.random() * 30);
         }
       });
 
@@ -510,80 +573,54 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
   return (
     <div className="relative">
       {/* Visual Mode Controls */}
-      <div className="absolute top-4 right-4 z-10 flex gap-2">
-        <button
-          onClick={() => setVisualMode('normal')}
-          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
-            visualMode === 'normal'
-              ? 'bg-quantum-cyan text-white shadow-lg shadow-quantum-cyan/50'
-              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
-          }`}
-        >
-          <GitBranch className="w-4 h-4 inline mr-1" />
-          Normal
-        </button>
-        <button
-          onClick={() => setVisualMode('quantum')}
-          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
-            visualMode === 'quantum'
-              ? 'bg-quantum-purple text-white shadow-lg shadow-quantum-purple/50'
-              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
-          }`}
-        >
-          <Sparkles className="w-4 h-4 inline mr-1" />
-          Quantum
-        </button>
-        <button
-          onClick={() => setVisualMode('constellation')}
-          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
-            visualMode === 'constellation'
-              ? 'bg-quantum-pink text-white shadow-lg shadow-quantum-pink/50'
-              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
-          }`}
-        >
-          <Orbit className="w-4 h-4 inline mr-1" />
-          Constellation
-        </button>
-        <button
-          onClick={() => setVisualMode('heatmap')}
-          className={`px-3 py-2 rounded-lg font-semibold text-xs transition-all ${
-            visualMode === 'heatmap'
-              ? 'bg-quantum-orange text-white shadow-lg shadow-quantum-orange/50'
-              : 'bg-quantum-indigo/30 text-gray-300 hover:bg-quantum-indigo/50'
-          }`}
-        >
-          <Activity className="w-4 h-4 inline mr-1" />
-          Heatmap
-        </button>
+      <div className="absolute top-3 right-3 z-10 flex gap-1.5">
+        {[
+          { mode: 'flow' as const, icon: GitBranch, label: 'Flow', color: 'bg-blue-500' },
+          { mode: 'quantum' as const, icon: Sparkles, label: 'Quantum', color: 'bg-purple-500' },
+          { mode: 'constellation' as const, icon: Orbit, label: 'Constellation', color: 'bg-pink-500' },
+          { mode: 'matrix' as const, icon: Box, label: 'Matrix', color: 'bg-green-500' },
+        ].map(({ mode, icon: Icon, label, color }) => (
+          <button
+            key={mode}
+            onClick={() => setVisualMode(mode)}
+            className={`px-2.5 py-1.5 rounded-lg font-medium text-[10px] transition-all flex items-center gap-1 ${
+              visualMode === mode
+                ? `${color} text-white shadow-lg`
+                : 'bg-slate-800/70 text-gray-300 hover:bg-slate-700/70'
+            }`}
+          >
+            <Icon className="w-3 h-3" />
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* Stats Panel */}
-      <div className="absolute top-4 left-4 z-10 space-y-2">
-        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-cyan/30">
-          <div className="flex items-center gap-2">
-            <Activity className="w-4 h-4 text-quantum-cyan" />
-            <span className="text-xs font-bold text-white">Total Blocks: {stats.totalBlocks}</span>
-          </div>
+      <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5">
+        <div className={`px-3 py-1.5 rounded-lg backdrop-blur-sm border flex items-center gap-2 ${
+          isConnected ? 'bg-emerald-500/20 border-emerald-500/30' : 'bg-red-500/20 border-red-500/30'
+        }`}>
+          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+          <span className="text-[10px] font-medium text-white">
+            {isConnected ? 'Live' : 'Disconnected'}
+          </span>
         </div>
-        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-green/30">
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-quantum-green" />
-            <span className="text-xs font-bold text-white">
-              {stats.blocksPerSecond.toFixed(2)} blocks/sec
-            </span>
-          </div>
+
+        <div className="px-3 py-1.5 bg-slate-800/70 backdrop-blur-sm rounded-lg border border-blue-500/30 flex items-center gap-2">
+          <Activity className="w-3 h-3 text-blue-400" />
+          <span className="text-[10px] font-medium text-white">Height: {stats.totalBlocks.toLocaleString()}</span>
         </div>
-        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-purple/30">
-          <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 text-quantum-purple" />
-            <span className="text-xs font-bold text-white">8 Parallel Producers</span>
-          </div>
+
+        <div className="px-3 py-1.5 bg-slate-800/70 backdrop-blur-sm rounded-lg border border-emerald-500/30 flex items-center gap-2">
+          <Zap className="w-3 h-3 text-emerald-400" />
+          <span className="text-[10px] font-medium text-white">
+            {stats.blocksPerSecond.toFixed(2)} blk/s
+          </span>
         </div>
-        <div className="px-4 py-2 bg-quantum-indigo/80 backdrop-blur-xl rounded-lg border border-quantum-pink/30">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="w-4 h-4 text-quantum-pink" />
-            <span className="text-xs font-bold text-white">Phase 2 Active</span>
-          </div>
+
+        <div className="px-3 py-1.5 bg-slate-800/70 backdrop-blur-sm rounded-lg border border-purple-500/30 flex items-center gap-2">
+          <Layers className="w-3 h-3 text-purple-400" />
+          <span className="text-[10px] font-medium text-white">DAG-Knight Consensus</span>
         </div>
       </div>
 
@@ -591,56 +628,52 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
       <canvas
         ref={canvasRef}
         width={1200}
-        height={NUM_LANES * LANE_HEIGHT + 100}
-        className="w-full h-auto bg-quantum-dark rounded-xl border border-quantum-purple/30 cursor-pointer"
+        height={CANVAS_HEIGHT}
+        className="w-full h-auto bg-slate-900 rounded-xl border border-purple-500/20 cursor-pointer shadow-xl shadow-purple-500/5"
         onClick={handleCanvasClick}
       />
 
       {/* Selected Block Details */}
       {selectedBlock && (
-        <div className="absolute bottom-4 right-4 z-10 max-w-sm">
-          <div className="p-4 bg-quantum-indigo/90 backdrop-blur-xl rounded-xl border border-quantum-cyan/50 shadow-lg">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <GitBranch className="w-4 h-4 text-quantum-cyan" />
+        <div className="absolute bottom-3 right-3 z-10 max-w-xs">
+          <div className="p-3 bg-slate-900/95 backdrop-blur-xl rounded-xl border border-blue-500/40 shadow-xl">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                <Box className="w-3.5 h-3.5 text-blue-400" />
                 Block #{selectedBlock.height}
               </h3>
               <button
                 onClick={() => setSelectedBlock(null)}
-                className="text-gray-400 hover:text-white"
+                className="text-gray-400 hover:text-white p-0.5 hover:bg-slate-700 rounded"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-            <div className="space-y-2 text-xs">
+            <div className="space-y-1.5 text-[10px]">
               <div className="flex justify-between">
-                <span className="text-gray-400">Miner:</span>
-                <span className="text-white font-mono">{selectedBlock.miner}</span>
+                <span className="text-gray-400">Hash:</span>
+                <span className="text-white font-mono">{selectedBlock.hashPrefix}...</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Transactions:</span>
-                <span className="text-quantum-green font-bold">{selectedBlock.txCount}</span>
+                <span className="text-emerald-400 font-bold">{selectedBlock.txCount}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Reward:</span>
-                <span className="text-quantum-cyan font-bold">{selectedBlock.reward.toFixed(8)} QUG</span>
+                <span className="text-blue-400 font-bold">{selectedBlock.reward.toFixed(4)} QUG</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Lane:</span>
-                <span className="text-quantum-purple font-bold">{selectedBlock.lane}</span>
-              </div>
-              {selectedBlock.producerId !== undefined && (
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Producer:</span>
-                  <span className="text-quantum-pink font-bold">#{selectedBlock.producerId}</span>
-                </div>
-              )}
-              <div className="flex justify-between">
-                <span className="text-gray-400">Hash:</span>
-                <span className="text-white font-mono text-[10px]">
-                  {selectedBlock.id.substring(0, 16)}...
+                <span className="font-bold" style={{ color: LANE_COLORS[selectedBlock.lane]?.primary || '#60a5fa' }}>
+                  {selectedBlock.lane}
                 </span>
               </div>
+              {selectedBlock.dagRound !== undefined && (
+                <div className="flex justify-between">
+                  <span className="text-gray-400">DAG Round:</span>
+                  <span className="text-purple-400 font-bold">{selectedBlock.dagRound}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
