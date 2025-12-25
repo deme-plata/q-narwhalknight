@@ -25,11 +25,12 @@ lz4 = { workspace = true }
 zstd = "0.13"
 rmp-serde = "1.1"  # v0.9.65: MessagePack fallback for cross-version compatibility
 
-# Cryptography for hashing
+# Cryptography for hashing and signatures
 blake3 = "1.5"
 sha2 = { workspace = true }
 sha3 = { workspace = true }
 hex = "0.4"
+ed25519-dalek = { workspace = true }  # v1.0.95-beta: Block signature verification
 
 # Encryption-at-rest (v1.0.39-beta)
 argon2 = { version = "0.5", features = ["std"] }
@@ -80,6 +81,7 @@ prometheus = { workspace = true }
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 rocksdb = { workspace = true }
 libc = "0.2"
+memmap2 = "0.9"  # v2.1.0-DELTA-V: Memory-mapped files for zero-copy block access
 
 # Sled works on all platforms including Windows
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -104,6 +106,18 @@ path = "src/bin/fix_corrupted_pointer.rs"
 [[bin]]
 name = "migrate_to_phase2"
 path = "src/bin/migrate_to_phase2.rs"
+
+[[bin]]
+name = "cleanup-gaps"
+path = "src/bin/cleanup_gaps.rs"
+
+[[bin]]
+name = "diagnose-block"
+path = "src/bin/diagnose_block.rs"
+
+[[bin]]
+name = "restore-from-backup"
+path = "src/bin/restore_from_backup.rs"
 
 [build-dependencies]
 cc = "1.0"

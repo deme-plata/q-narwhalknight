@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import TokenDetailsModal from './TokenDetailsModal';
 import LiquidityModal from './LiquidityModal';
 import TokenSelectorModal from './TokenSelectorModal';
@@ -8,6 +8,15 @@ import NitroSuccessModal from './NitroSuccessModal';
 import MintQUGUSDModal from './MintQUGUSDModal';
 import SwapSuccessModal from './SwapSuccessModal';
 import { qnkAPI } from '../services/api';
+
+// DEX Settings Interface
+interface DexSettings {
+  slippageTolerance: number; // in percentage (0.1, 0.5, 1.0, custom)
+  transactionDeadline: number; // in minutes
+  expertMode: boolean;
+  multihops: boolean;
+  gasPreference: 'low' | 'medium' | 'high';
+}
 
 interface Token {
   id: string;
@@ -78,6 +87,49 @@ export default function DexScreen() {
   } | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Trigger for refetching tokens
 
+  // DEX Settings Modal State
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [dexSettings, setDexSettings] = useState<DexSettings>(() => {
+    // Load from localStorage on init
+    const saved = localStorage.getItem('dexSettings');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // Fall back to defaults
+      }
+    }
+    return {
+      slippageTolerance: 0.5,
+      transactionDeadline: 20,
+      expertMode: false,
+      multihops: true,
+      gasPreference: 'medium' as const,
+    };
+  });
+  const [customSlippage, setCustomSlippage] = useState('');
+
+  // AI Token Analyzer State
+  const [aiAnalyzingToken, setAiAnalyzingToken] = useState<Token | null>(null);
+  const [aiAnalysisLoading, setAiAnalysisLoading] = useState(false);
+  const [aiAnalysisResult, setAiAnalysisResult] = useState<{
+    score: number;
+    verdict: 'GOOD' | 'CAUTION' | 'RISKY';
+    summary: string;
+    metrics: {
+      liquidity: { value: string; status: 'good' | 'warn' | 'bad' };
+      activity: { value: string; status: 'good' | 'warn' | 'bad' };
+      holders: { value: string; status: 'good' | 'warn' | 'bad' };
+      priceStability: { value: string; status: 'good' | 'warn' | 'bad' };
+      volume: { value: string; status: 'good' | 'warn' | 'bad' };
+    };
+  } | null>(null);
+
+  // Save DEX settings to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem('dexSettings', JSON.stringify(dexSettings));
+  }, [dexSettings]);
+
   // Load Nitro points from localStorage and boosted tokens from backend with SSE real-time updates
   useEffect(() => {
     let mounted = true;
@@ -103,6 +155,28 @@ export default function DexScreen() {
 
     // Listen for custom event from TokenBar when nitro points are purchased
     window.addEventListener('nitroPointsUpdated', handleNitroPointsUpdate);
+
+    // v1.4.10-beta: Listen for custom token balance updates via SSE
+    const handleTokenBalanceUpdate = (event: CustomEvent) => {
+      if (!mounted) return;
+      const { tokenAddress, tokenSymbol, newBalance, reason } = event.detail;
+      console.log('🪙 [DEX] Token balance updated via SSE:', { tokenSymbol, tokenAddress, newBalance, reason });
+
+      // Update the token balance in the tokens state
+      setTokens(prev => prev.map(token => {
+        // Match by token address (with or without qnk prefix)
+        const tokenId = token.id.startsWith('qnk') ? token.id.substring(3) : token.id;
+        const eventAddr = tokenAddress.startsWith('qnk') ? tokenAddress.substring(3) : tokenAddress;
+
+        if (tokenId === eventAddr) {
+          console.log(`✅ [DEX] Updated ${token.symbol} balance: ${token.balance} → ${newBalance}`);
+          return { ...token, balance: newBalance };
+        }
+        return token;
+      }));
+    };
+
+    window.addEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
 
     // Also listen for storage events (works across tabs/windows)
     window.addEventListener('storage', (e) => {
@@ -265,6 +339,7 @@ export default function DexScreen() {
     return () => {
       mounted = false;
       window.removeEventListener('nitroPointsUpdated', handleNitroPointsUpdate);
+      window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
       if (eventSource) {
         console.log('🔌 Closing SSE connection for Nitro boosts');
         eventSource.close();
@@ -619,7 +694,8 @@ export default function DexScreen() {
             .filter(apiToken => apiToken.symbol !== 'QUG' && apiToken.symbol !== 'QUGUSD' && apiToken.symbol !== 'ORBUSD')
             .map(async (apiToken) => {
               // Calculate actual supply using decimals from API
-              const decimals = apiToken.decimals || 18;
+              // ✅ FIX: Backend defaults to 8 decimals, not 18!
+              const decimals = apiToken.decimals || 8;
               const rawSupply = apiToken.total_supply || 0;
               const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
 
@@ -744,7 +820,8 @@ export default function DexScreen() {
             });
 
             // Calculate actual supply using decimals
-            const decimals = contract.decimals || 18;
+            // ✅ FIX: Backend defaults to 8 decimals, not 18!
+            const decimals = contract.decimals || 8;
             const rawSupply = contract.total_supply || 0;
             const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
 
@@ -1145,25 +1222,29 @@ export default function DexScreen() {
       const walletAddress = localStorage.getItem('walletAddress') || '';
       let tokenBalance = 0;
 
+      // Create token object with real data from blockchain
+      // Calculate actual supply using decimals
+      // ✅ FIX: Backend defaults to 8 decimals, not 18!
+      const decimals = contract.decimals || 8;
+      const rawSupply = contract.total_supply || 0;
+      const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+
       if (walletAddress) {
         // Try to fetch token balance
         const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, customTokenAddress);
         if (balanceResponse.success && balanceResponse.data) {
-          tokenBalance = balanceResponse.data.balance || 0;
+          // v1.4.9: Fix - Convert raw balance to human-readable using decimals
+          const rawBalance = balanceResponse.data.balance || 0;
+          tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
+          console.log(`✅ [Custom Token] Converted balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
         }
       }
-
-      // Create token object with real data from blockchain
-      // Calculate actual supply using decimals
-      const decimals = contract.decimals || 18;
-      const rawSupply = contract.total_supply || 0;
-      const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
 
       const customToken: Token = {
         id: customTokenAddress,
         symbol: contract.token_symbol || contract.symbol || 'CUSTOM',
         name: contract.token_name || contract.name || 'Custom Token',
-        balance: tokenBalance, // Balance is already in human-readable form from backend
+        balance: tokenBalance, // v1.4.9: Now properly converted from raw balance
         price: 1.0, // Default price, can be calculated from liquidity pools later
         change1h: 0,
         change24h: 0,
@@ -1207,6 +1288,125 @@ export default function DexScreen() {
       setBoostCost(Math.max(50, maxBoost));
     } else if (boostCost < 50) {
       setBoostCost(50);
+    }
+  };
+
+  // AI Token Analyzer - sends token data to AI for analysis
+  const handleAIAnalyze = async (token: Token) => {
+    setAiAnalyzingToken(token);
+    setAiAnalysisLoading(true);
+    setAiAnalysisResult(null);
+
+    try {
+      // Prepare token metrics for AI analysis
+      const tokenData = {
+        symbol: token.symbol,
+        name: token.name,
+        price: token.price,
+        marketCap: token.marketCap,
+        liquidity: token.liquidity,
+        volume24h: token.volume24h,
+        change1h: token.change1h,
+        change24h: token.change24h,
+        change7d: token.change7d,
+        holders: token.holders,
+        totalSupply: token.totalSupply,
+        circulatingSupply: token.circulatingSupply,
+        features: token.features,
+        fees: token.fees,
+      };
+
+      // Call the AI chat API for token analysis
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `Analyze this token for investment quality. Provide a score 0-100, verdict (GOOD/CAUTION/RISKY), and key metrics analysis. Token data: ${JSON.stringify(tokenData)}`,
+          context: 'token_analysis',
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('AI analysis request failed');
+      }
+
+      const data = await response.json();
+
+      // Parse AI response or generate analysis from token metrics
+      // If AI is unavailable, generate analysis from raw metrics
+      const liquidityScore = token.liquidity > 100000 ? 'good' : token.liquidity > 10000 ? 'warn' : 'bad';
+      const volumeScore = token.volume24h > 50000 ? 'good' : token.volume24h > 5000 ? 'warn' : 'bad';
+      const holdersScore = token.holders > 100 ? 'good' : token.holders > 10 ? 'warn' : 'bad';
+      const priceStabilityScore = Math.abs(token.change24h) < 10 ? 'good' : Math.abs(token.change24h) < 30 ? 'warn' : 'bad';
+      const activityScore = token.volume24h > 0 && token.liquidity > 0 ? 'good' : 'bad';
+
+      // Calculate overall score
+      const scoreMap = { good: 25, warn: 15, bad: 5 };
+      const overallScore = Math.min(100,
+        scoreMap[liquidityScore] +
+        scoreMap[volumeScore] +
+        scoreMap[holdersScore] +
+        scoreMap[priceStabilityScore] +
+        scoreMap[activityScore]
+      );
+
+      const verdict = overallScore >= 75 ? 'GOOD' : overallScore >= 50 ? 'CAUTION' : 'RISKY';
+
+      // Try to parse AI response if available
+      let summary = data.response || data.message || '';
+      if (!summary) {
+        summary = `${token.symbol} has ${token.liquidity > 100000 ? 'strong' : token.liquidity > 10000 ? 'moderate' : 'low'} liquidity ($${token.liquidity.toLocaleString()}), ` +
+          `${token.volume24h > 50000 ? 'high' : token.volume24h > 5000 ? 'moderate' : 'low'} trading volume ($${token.volume24h.toLocaleString()}/24h), ` +
+          `and ${token.holders > 100 ? 'good' : token.holders > 10 ? 'moderate' : 'limited'} holder distribution (${token.holders} holders). ` +
+          `Price ${token.change24h >= 0 ? 'up' : 'down'} ${Math.abs(token.change24h).toFixed(2)}% in 24h.`;
+      }
+
+      setAiAnalysisResult({
+        score: overallScore,
+        verdict,
+        summary,
+        metrics: {
+          liquidity: { value: `$${token.liquidity.toLocaleString()}`, status: liquidityScore as 'good' | 'warn' | 'bad' },
+          activity: { value: token.volume24h > 0 ? 'Active' : 'Inactive', status: activityScore as 'good' | 'warn' | 'bad' },
+          holders: { value: token.holders.toLocaleString(), status: holdersScore as 'good' | 'warn' | 'bad' },
+          priceStability: { value: `${token.change24h >= 0 ? '+' : ''}${token.change24h.toFixed(2)}%`, status: priceStabilityScore as 'good' | 'warn' | 'bad' },
+          volume: { value: `$${token.volume24h.toLocaleString()}`, status: volumeScore as 'good' | 'warn' | 'bad' },
+        },
+      });
+    } catch (error) {
+      console.error('AI analysis error:', error);
+      // Generate fallback analysis from raw metrics
+      const liquidityScore = token.liquidity > 100000 ? 'good' : token.liquidity > 10000 ? 'warn' : 'bad';
+      const volumeScore = token.volume24h > 50000 ? 'good' : token.volume24h > 5000 ? 'warn' : 'bad';
+      const holdersScore = token.holders > 100 ? 'good' : token.holders > 10 ? 'warn' : 'bad';
+      const priceStabilityScore = Math.abs(token.change24h) < 10 ? 'good' : Math.abs(token.change24h) < 30 ? 'warn' : 'bad';
+      const activityScore = token.volume24h > 0 && token.liquidity > 0 ? 'good' : 'bad';
+
+      const scoreMap = { good: 25, warn: 15, bad: 5 };
+      const overallScore = Math.min(100,
+        scoreMap[liquidityScore] +
+        scoreMap[volumeScore] +
+        scoreMap[holdersScore] +
+        scoreMap[priceStabilityScore] +
+        scoreMap[activityScore]
+      );
+
+      const verdict = overallScore >= 75 ? 'GOOD' : overallScore >= 50 ? 'CAUTION' : 'RISKY';
+
+      setAiAnalysisResult({
+        score: overallScore,
+        verdict,
+        summary: `${token.symbol} metrics analysis: Liquidity $${token.liquidity.toLocaleString()}, Volume $${token.volume24h.toLocaleString()}/24h, ${token.holders} holders, ${token.change24h >= 0 ? '+' : ''}${token.change24h.toFixed(2)}% 24h change.`,
+        metrics: {
+          liquidity: { value: `$${token.liquidity.toLocaleString()}`, status: liquidityScore as 'good' | 'warn' | 'bad' },
+          activity: { value: token.volume24h > 0 ? 'Active' : 'Inactive', status: activityScore as 'good' | 'warn' | 'bad' },
+          holders: { value: token.holders.toLocaleString(), status: holdersScore as 'good' | 'warn' | 'bad' },
+          priceStability: { value: `${token.change24h >= 0 ? '+' : ''}${token.change24h.toFixed(2)}%`, status: priceStabilityScore as 'good' | 'warn' | 'bad' },
+          volume: { value: `$${token.volume24h.toLocaleString()}`, status: volumeScore as 'good' | 'warn' | 'bad' },
+        },
+      });
+    } finally {
+      setAiAnalysisLoading(false);
     }
   };
 
@@ -1694,7 +1894,10 @@ export default function DexScreen() {
               <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-quantum-cyan/20 p-6 space-y-4">
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="text-xl font-bold text-white">Swap Tokens</h2>
-                  <button className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                  <button
+                    onClick={() => setIsSettingsModalOpen(true)}
+                    className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                  >
                     <Settings className="w-5 h-5 text-gray-400" />
                   </button>
                 </div>
@@ -2383,18 +2586,20 @@ export default function DexScreen() {
                                   if (contractInfo.success && contractInfo.data) {
                                     const contract = contractInfo.data;
                                     const walletAddress = localStorage.getItem('walletAddress') || '';
+                                    // ✅ FIX: Backend defaults to 8 decimals, not 18!
+                                    const decimals = contract.decimals || 8;
+                                    const rawSupply = contract.total_supply || 0;
+                                    const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
                                     let tokenBalance = 0;
 
                                     if (walletAddress) {
                                       const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, pool.token0);
                                       if (balanceResponse.success && balanceResponse.data) {
-                                        tokenBalance = balanceResponse.data.balance || 0;
+                                        // v1.4.9: Fix - Convert raw balance to human-readable using decimals
+                                        const rawBalance = balanceResponse.data.balance || 0;
+                                        tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
                                       }
                                     }
-
-                                    const decimals = contract.decimals || 18;
-                                    const rawSupply = contract.total_supply || 0;
-                                    const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
 
                                     token0Obj = {
                                       id: pool.token0,
@@ -2456,18 +2661,20 @@ export default function DexScreen() {
                                       if (contractInfo.success && contractInfo.data) {
                                         const contract = contractInfo.data;
                                         const walletAddress = localStorage.getItem('walletAddress') || '';
+                                        // ✅ FIX: Backend defaults to 8 decimals, not 18!
+                                        const decimals = contract.decimals || 8;
+                                        const rawSupply = contract.total_supply || 0;
+                                        const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
                                         let tokenBalance = 0;
 
                                         if (walletAddress) {
                                           const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, foundToken.address);
                                           if (balanceResponse.success && balanceResponse.data) {
-                                            tokenBalance = balanceResponse.data.balance || 0;
+                                            // v1.4.9: Fix - Convert raw balance to human-readable using decimals
+                                            const rawBalance = balanceResponse.data.balance || 0;
+                                            tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
                                           }
                                         }
-
-                                        const decimals = contract.decimals || 18;
-                                        const rawSupply = contract.total_supply || 0;
-                                        const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
 
                                         token0Obj = {
                                           id: foundToken.address,
@@ -2833,6 +3040,17 @@ export default function DexScreen() {
                                 />
                               )}
                             </motion.button>
+                            {/* AI Token Analyzer Button */}
+                            <motion.button
+                              onClick={() => handleAIAnalyze(token)}
+                              className="px-4 py-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 rounded-lg text-white font-medium hover:shadow-lg hover:shadow-violet-500/50 transition-all flex items-center gap-2"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              title="AI Token Analysis"
+                            >
+                              <Brain className="w-4 h-4" />
+                              AI
+                            </motion.button>
                           </div>
                         </td>
                       </motion.tr>
@@ -2888,6 +3106,386 @@ export default function DexScreen() {
           transactionHash={swapSuccessData.transactionHash}
         />
       )}
+
+      {/* AI Token Analysis Modal */}
+      <AnimatePresence>
+        {aiAnalyzingToken && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => {
+              setAiAnalyzingToken(null);
+              setAiAnalysisResult(null);
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="relative w-full max-w-lg bg-gradient-to-b from-slate-900 to-slate-950 rounded-2xl border border-violet-500/30 shadow-2xl overflow-hidden"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between p-6 border-b border-white/10">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                    <Brain className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-white">AI Token Analysis</h2>
+                    <p className="text-sm text-gray-400">{aiAnalyzingToken.symbol} - {aiAnalyzingToken.name}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setAiAnalyzingToken(null);
+                    setAiAnalysisResult(null);
+                  }}
+                  className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-6">
+                {aiAnalysisLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12">
+                    <Loader2 className="w-12 h-12 text-violet-500 animate-spin mb-4" />
+                    <p className="text-gray-400">Analyzing {aiAnalyzingToken.symbol}...</p>
+                    <p className="text-sm text-gray-500 mt-2">Checking liquidity, activity, and safety metrics</p>
+                  </div>
+                ) : aiAnalysisResult ? (
+                  <>
+                    {/* Score & Verdict */}
+                    <div className="flex items-center justify-between p-4 bg-slate-800/50 rounded-xl border border-white/5">
+                      <div className="flex items-center gap-4">
+                        <div className={`w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold ${
+                          aiAnalysisResult.verdict === 'GOOD' ? 'bg-green-500/20 text-green-400 border-2 border-green-500/50' :
+                          aiAnalysisResult.verdict === 'CAUTION' ? 'bg-yellow-500/20 text-yellow-400 border-2 border-yellow-500/50' :
+                          'bg-red-500/20 text-red-400 border-2 border-red-500/50'
+                        }`}>
+                          {aiAnalysisResult.score}
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-400">Investment Score</p>
+                          <p className={`text-lg font-bold ${
+                            aiAnalysisResult.verdict === 'GOOD' ? 'text-green-400' :
+                            aiAnalysisResult.verdict === 'CAUTION' ? 'text-yellow-400' :
+                            'text-red-400'
+                          }`}>
+                            {aiAnalysisResult.verdict === 'GOOD' ? 'Looks Good' :
+                             aiAnalysisResult.verdict === 'CAUTION' ? 'Use Caution' :
+                             'High Risk'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className={`px-4 py-2 rounded-lg font-semibold ${
+                        aiAnalysisResult.verdict === 'GOOD' ? 'bg-green-500/20 text-green-400' :
+                        aiAnalysisResult.verdict === 'CAUTION' ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        {aiAnalysisResult.verdict}
+                      </div>
+                    </div>
+
+                    {/* Summary */}
+                    <div className="p-4 bg-slate-800/30 rounded-xl border border-white/5">
+                      <p className="text-sm text-gray-300 leading-relaxed">{aiAnalysisResult.summary}</p>
+                    </div>
+
+                    {/* Metrics Grid */}
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(aiAnalysisResult.metrics).map(([key, metric]) => (
+                        <div
+                          key={key}
+                          className="p-3 bg-slate-800/30 rounded-lg border border-white/5"
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs text-gray-500 capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                            <div className={`w-2 h-2 rounded-full ${
+                              metric.status === 'good' ? 'bg-green-500' :
+                              metric.status === 'warn' ? 'bg-yellow-500' :
+                              'bg-red-500'
+                            }`} />
+                          </div>
+                          <p className={`text-sm font-medium ${
+                            metric.status === 'good' ? 'text-green-400' :
+                            metric.status === 'warn' ? 'text-yellow-400' :
+                            'text-red-400'
+                          }`}>
+                            {metric.value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Disclaimer */}
+                    <div className="flex items-start gap-2 p-3 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
+                      <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-xs text-yellow-400/80">
+                        This analysis is for informational purposes only and should not be considered financial advice. Always DYOR (Do Your Own Research) before investing.
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-8 text-gray-400">
+                    <p>Analysis failed. Please try again.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 p-6 border-t border-white/10">
+                <motion.button
+                  onClick={() => {
+                    setAiAnalyzingToken(null);
+                    setAiAnalysisResult(null);
+                  }}
+                  className="px-6 py-2.5 bg-slate-700 hover:bg-slate-600 rounded-xl text-white font-medium transition-colors"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  Close
+                </motion.button>
+                {aiAnalysisResult && (
+                  <motion.button
+                    onClick={() => {
+                      setSwapFrom(aiAnalyzingToken.symbol);
+                      setAiAnalyzingToken(null);
+                      setAiAnalysisResult(null);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="px-6 py-2.5 bg-gradient-to-r from-violet-500 to-fuchsia-500 rounded-xl text-white font-medium transition-all hover:shadow-lg hover:shadow-violet-500/30"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    Trade {aiAnalyzingToken.symbol}
+                  </motion.button>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* DEX Settings Modal */}
+      <AnimatePresence>
+        {isSettingsModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => setIsSettingsModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="relative w-full max-w-md bg-gradient-to-b from-slate-900 to-slate-950 rounded-2xl border border-quantum-cyan/30 shadow-2xl overflow-hidden"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between p-6 border-b border-white/10">
+                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                  <Settings className="w-5 h-5 text-quantum-cyan" />
+                  Transaction Settings
+                </h3>
+                <button
+                  onClick={() => setIsSettingsModalOpen(false)}
+                  className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-6">
+                {/* Slippage Tolerance */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                      <Shield className="w-4 h-4 text-quantum-cyan" />
+                      Slippage Tolerance
+                    </label>
+                    <span className="text-quantum-cyan font-medium">
+                      {dexSettings.slippageTolerance}%
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    {[0.1, 0.5, 1.0].map((value) => (
+                      <button
+                        key={value}
+                        onClick={() => {
+                          setDexSettings(prev => ({ ...prev, slippageTolerance: value }));
+                          setCustomSlippage('');
+                        }}
+                        className={`flex-1 py-2 px-3 rounded-lg font-medium transition-all ${
+                          dexSettings.slippageTolerance === value && !customSlippage
+                            ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                            : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                        }`}
+                      >
+                        {value}%
+                      </button>
+                    ))}
+                    <div className="relative flex-1">
+                      <input
+                        type="number"
+                        value={customSlippage}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCustomSlippage(val);
+                          if (val && parseFloat(val) > 0) {
+                            setDexSettings(prev => ({ ...prev, slippageTolerance: parseFloat(val) }));
+                          }
+                        }}
+                        placeholder="Custom"
+                        className="w-full py-2 px-3 bg-white/5 border border-white/10 rounded-lg text-white text-center focus:outline-none focus:border-quantum-cyan/50"
+                      />
+                      {customSlippage && (
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">%</span>
+                      )}
+                    </div>
+                  </div>
+                  {dexSettings.slippageTolerance > 5 && (
+                    <div className="flex items-center gap-2 text-yellow-500 text-xs">
+                      <AlertTriangle className="w-4 h-4" />
+                      High slippage may result in unfavorable rates
+                    </div>
+                  )}
+                </div>
+
+                {/* Transaction Deadline */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-quantum-cyan" />
+                      Transaction Deadline
+                    </label>
+                    <span className="text-quantum-cyan font-medium">
+                      {dexSettings.transactionDeadline} min
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    {[10, 20, 30].map((value) => (
+                      <button
+                        key={value}
+                        onClick={() => setDexSettings(prev => ({ ...prev, transactionDeadline: value }))}
+                        className={`flex-1 py-2 px-3 rounded-lg font-medium transition-all ${
+                          dexSettings.transactionDeadline === value
+                            ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                            : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                        }`}
+                      >
+                        {value}m
+                      </button>
+                    ))}
+                    <div className="relative flex-1">
+                      <input
+                        type="number"
+                        value={dexSettings.transactionDeadline === 10 || dexSettings.transactionDeadline === 20 || dexSettings.transactionDeadline === 30 ? '' : dexSettings.transactionDeadline}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          if (val > 0) {
+                            setDexSettings(prev => ({ ...prev, transactionDeadline: val }));
+                          }
+                        }}
+                        placeholder="Custom"
+                        className="w-full py-2 px-3 bg-white/5 border border-white/10 rounded-lg text-white text-center focus:outline-none focus:border-quantum-cyan/50"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Expert Mode Toggle */}
+                <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl">
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-orange-500" />
+                      Expert Mode
+                    </label>
+                    <p className="text-xs text-gray-500">Allow high price impact trades without confirmation</p>
+                  </div>
+                  <button
+                    onClick={() => setDexSettings(prev => ({ ...prev, expertMode: !prev.expertMode }))}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      dexSettings.expertMode ? 'bg-orange-500' : 'bg-gray-600'
+                    }`}
+                  >
+                    <motion.div
+                      className="absolute top-1 w-4 h-4 bg-white rounded-full shadow"
+                      animate={{ left: dexSettings.expertMode ? '26px' : '4px' }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                    />
+                  </button>
+                </div>
+
+                {/* Multihops Toggle */}
+                <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl">
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium text-gray-300">Multihops</label>
+                    <p className="text-xs text-gray-500">Allow routing through multiple pools for best price</p>
+                  </div>
+                  <button
+                    onClick={() => setDexSettings(prev => ({ ...prev, multihops: !prev.multihops }))}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      dexSettings.multihops ? 'bg-quantum-cyan' : 'bg-gray-600'
+                    }`}
+                  >
+                    <motion.div
+                      className="absolute top-1 w-4 h-4 bg-white rounded-full shadow"
+                      animate={{ left: dexSettings.multihops ? '26px' : '4px' }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                    />
+                  </button>
+                </div>
+
+                {/* Gas Preference */}
+                <div className="space-y-3">
+                  <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-quantum-cyan" />
+                    Gas Preference
+                  </label>
+                  <div className="flex gap-2">
+                    {(['low', 'medium', 'high'] as const).map((preference) => (
+                      <button
+                        key={preference}
+                        onClick={() => setDexSettings(prev => ({ ...prev, gasPreference: preference }))}
+                        className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                          dexSettings.gasPreference === preference
+                            ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                            : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                        }`}
+                      >
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="capitalize">{preference}</span>
+                          <span className="text-xs opacity-70">
+                            {preference === 'low' ? 'Slower' : preference === 'medium' ? 'Normal' : 'Fastest'}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="p-6 border-t border-white/10">
+                <button
+                  onClick={() => setIsSettingsModalOpen(false)}
+                  className="w-full py-3 px-6 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl text-white font-bold hover:shadow-lg hover:shadow-quantum-cyan/30 transition-all"
+                >
+                  Save Settings
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }

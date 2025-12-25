@@ -84,6 +84,8 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
   const SCROLL_SPEED = 150;
   const MIN_BLOCK_SPACING = 120;
   const CANVAS_HEIGHT = NUM_LANES * LANE_HEIGHT + 120;
+  const OFFSCREEN_BUFFER = 800; // Keep blocks further off-screen for connection continuity
+  const MAX_VISIBLE_BLOCKS = 80; // Increased from 50 to maintain more connections
 
   // Color palette for lanes
   const LANE_COLORS = [
@@ -182,8 +184,9 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
 
         setBlocks(prev => {
           const updated = [...prev, newBlock];
-          // Keep last 50 blocks for performance
-          const filtered = updated.filter(b => b.x > scrollOffset.current - 400).slice(-50);
+          // Keep more blocks for better connection continuity
+          // Use larger off-screen buffer to maintain parent-child connections
+          const filtered = updated.filter(b => b.x > scrollOffset.current - OFFSCREEN_BUFFER).slice(-MAX_VISIBLE_BLOCKS);
 
           // Update lane occupancy for visible blocks
           const visibleLaneMaxX = new Map<number, number>();
@@ -351,30 +354,51 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
       // Sort blocks by height for proper connection drawing
       const sortedBlocks = [...blocks].sort((a, b) => a.height - b.height);
 
+      // Build a map of blocks by height for efficient lookup
+      const blocksByHeight = new Map<number, DAGBlock>();
+      sortedBlocks.forEach(block => {
+        blocksByHeight.set(block.height, block);
+      });
+
       // Draw connections between blocks (DAG edges)
       // Connect each block to its parent (previous height) AND add cross-lane DAG connections
-      sortedBlocks.forEach((block, index) => {
+      sortedBlocks.forEach((block) => {
         const blockCenterX = block.x - scrollOffset.current + BLOCK_SIZE / 2;
         const blockCenterY = block.y + BLOCK_SIZE / 2;
 
-        // Skip if off-screen
-        if (blockCenterX < -100 || blockCenterX > canvas.width + 100) return;
+        // Skip if block is too far off-screen (but allow some buffer for connections)
+        if (blockCenterX < -300 || blockCenterX > canvas.width + 300) return;
 
         const laneColor = LANE_COLORS[block.lane];
 
         // Find parent by height (block with height - 1)
-        const parent = sortedBlocks.find(b => b.height === block.height - 1);
+        const parent = blocksByHeight.get(block.height - 1);
 
         if (parent) {
           const parentCenterX = parent.x - scrollOffset.current + BLOCK_SIZE / 2;
           const parentCenterY = parent.y + BLOCK_SIZE / 2;
 
-          // Only draw if parent is visible
-          if (parentCenterX > -100 && parentCenterX < canvas.width + 100) {
-            // Draw curved connection
-            const isNewConnection = (block.age || 0) < 500;
-            const connectionAlpha = isNewConnection ? 0.4 + 0.4 * Math.min((block.age || 0) / 500, 1) : 0.6;
+          // Draw connection even if parent is off-screen (for continuity)
+          // Calculate fade based on how far off-screen the connection goes
+          const leftmostX = Math.min(parentCenterX, blockCenterX);
+          const rightmostX = Math.max(parentCenterX, blockCenterX);
 
+          // Fade out connections that are mostly off-screen
+          let edgeFade = 1.0;
+          if (leftmostX < 0) {
+            edgeFade = Math.max(0.1, 1.0 + leftmostX / 300); // Gradual fade as it goes off left
+          }
+          if (rightmostX > canvas.width) {
+            edgeFade = Math.min(edgeFade, Math.max(0.1, 1.0 - (rightmostX - canvas.width) / 300));
+          }
+
+          // Draw curved connection
+          const isNewConnection = (block.age || 0) < 500;
+          const baseAlpha = isNewConnection ? 0.4 + 0.4 * Math.min((block.age || 0) / 500, 1) : 0.7;
+          const connectionAlpha = baseAlpha * edgeFade;
+
+          // Only draw if connection has meaningful visibility
+          if (connectionAlpha > 0.05) {
             // Gradient line
             const connGradient = ctx.createLinearGradient(parentCenterX, parentCenterY, blockCenterX, blockCenterY);
             connGradient.addColorStop(0, LANE_COLORS[parent.lane].glow.replace('0.6', String(connectionAlpha * 0.7)));
@@ -395,35 +419,49 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
             );
             ctx.stroke();
 
-            // Glowing arrow head
-            ctx.shadowBlur = 8;
-            ctx.shadowColor = laneColor.primary;
-            const arrowSize = 7;
-            ctx.fillStyle = laneColor.glow.replace('0.6', String(connectionAlpha));
-            ctx.beginPath();
-            ctx.moveTo(blockCenterX - BLOCK_SIZE/2 - 2, blockCenterY);
-            ctx.lineTo(
-              blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
-              blockCenterY - arrowSize/2
-            );
-            ctx.lineTo(
-              blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
-              blockCenterY + arrowSize/2
-            );
-            ctx.closePath();
-            ctx.fill();
-            ctx.shadowBlur = 0;
+            // Glowing arrow head (only if visible on screen)
+            if (blockCenterX > 0 && blockCenterX < canvas.width) {
+              ctx.shadowBlur = 8 * edgeFade;
+              ctx.shadowColor = laneColor.primary;
+              const arrowSize = 7;
+              ctx.fillStyle = laneColor.glow.replace('0.6', String(connectionAlpha));
+              ctx.beginPath();
+              ctx.moveTo(blockCenterX - BLOCK_SIZE/2 - 2, blockCenterY);
+              ctx.lineTo(
+                blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
+                blockCenterY - arrowSize/2
+              );
+              ctx.lineTo(
+                blockCenterX - BLOCK_SIZE/2 - arrowSize - 5,
+                blockCenterY + arrowSize/2
+              );
+              ctx.closePath();
+              ctx.fill();
+              ctx.shadowBlur = 0;
+            }
           }
         }
 
         // DAG-style: Also connect to grandparent (height - 2) with thinner line for DAG feel
-        const grandparent = sortedBlocks.find(b => b.height === block.height - 2);
-        if (grandparent && Math.random() > 0.3) { // 70% chance to show grandparent connection
+        // Use deterministic selection based on block hash to avoid flickering
+        const grandparent = blocksByHeight.get(block.height - 2);
+        // Use hash to deterministically decide if grandparent connection should show (avoid random flickering)
+        const showGrandparent = grandparent && block.hashPrefix &&
+          (parseInt(block.hashPrefix.charAt(0), 16) % 3 !== 0); // ~67% of blocks show grandparent
+
+        if (showGrandparent && grandparent) {
           const gpCenterX = grandparent.x - scrollOffset.current + BLOCK_SIZE / 2;
           const gpCenterY = grandparent.y + BLOCK_SIZE / 2;
 
-          if (gpCenterX > -100 && gpCenterX < canvas.width + 100) {
-            const gpAlpha = 0.25;
+          // Calculate edge fade for grandparent connection too
+          const gpLeftX = Math.min(gpCenterX, blockCenterX);
+          let gpFade = 1.0;
+          if (gpLeftX < 0) {
+            gpFade = Math.max(0.05, 1.0 + gpLeftX / 400);
+          }
+
+          if (gpFade > 0.05) {
+            const gpAlpha = 0.25 * gpFade;
             ctx.strokeStyle = `rgba(139, 92, 246, ${gpAlpha})`;
             ctx.lineWidth = 1;
             ctx.setLineDash([4, 6]);

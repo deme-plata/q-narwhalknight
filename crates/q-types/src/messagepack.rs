@@ -24,8 +24,15 @@ pub const TRANSACTION_VERSION: &str = "qnk-tx-v1";
 /**
  * Versioned Block Wrapper
  *
- * Wraps a QBlock with version information for MessagePack serialization.
- * The #[serde(flatten)] attribute merges the block fields with the version field.
+ * Wraps a QBlock with version information for P2P serialization.
+ *
+ * ⚠️ v1.1.5-beta: REMOVED #[serde(flatten)] - caused u128 serialization errors
+ * ROOT CAUSE: #[serde(flatten)] buffers through serde::private::de::Content
+ * which doesn't support u128 (total_difficulty field in BlockHeader)
+ * See: https://github.com/serde-rs/json/issues/625
+ *
+ * The block is now serialized as a nested field instead of flattened.
+ * This is a BREAKING CHANGE for P2P protocol - old nodes cannot read new format.
  *
  * # Example
  * ```
@@ -35,10 +42,11 @@ pub const TRANSACTION_VERSION: &str = "qnk-tx-v1";
  * let block = QBlock { /* ... */ };
  * let versioned = VersionedBlock::new(block);
  *
- * // Serialize to MessagePack
+ * // Serialize to MessagePack or JSON
  * let bytes = rmp_serde::to_vec(&versioned)?;
+ * // OR: let bytes = serde_json::to_vec(&versioned)?;
  *
- * // Deserialize from MessagePack
+ * // Deserialize
  * let decoded: VersionedBlock = rmp_serde::from_slice(&bytes)?;
  *
  * assert_eq!(decoded.version, "qnk-block-v1");
@@ -49,8 +57,8 @@ pub struct VersionedBlock {
     /// Protocol version (e.g., "qnk-block-v1")
     pub version: String,
 
-    /// The actual block data (flattened into the same level as version)
-    #[serde(flatten)]
+    /// The actual block data (as nested field, NOT flattened)
+    /// v1.1.5-beta: Removed #[serde(flatten)] to fix u128 serialization
     pub block: QBlock,
 }
 

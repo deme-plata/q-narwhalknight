@@ -133,11 +133,7 @@ where
                 message: "Invalid X-Wallet-Auth header format".to_string(),
             })?;
 
-        eprintln!(
-            "🔍 [AUTH DEBUG] Received X-Wallet-Auth header: {}",
-            auth_header
-        );
-        eprintln!("🔍 [AUTH DEBUG] Request path: {}", parts.uri.path());
+        // AUTH DEBUG logging removed - was spamming logs
 
         // Parse JSON authentication header
         let auth: AuthHeader = serde_json::from_str(auth_header).map_err(|e| AuthError {
@@ -145,10 +141,7 @@ where
             message: format!("Invalid authentication JSON: {}", e),
         })?;
 
-        eprintln!(
-            "🔍 [AUTH DEBUG] Parsed auth - address: {}, timestamp: {}, scheme: {:?}",
-            auth.address, auth.timestamp, auth.scheme
-        );
+        // AUTH DEBUG logging removed - was spamming logs
 
         // Check timestamp to prevent replay attacks (max 5 minutes old)
         let now = Utc::now().timestamp();
@@ -193,10 +186,7 @@ where
         hasher.update(parts.uri.path().as_bytes());
         let message = hasher.finalize();
 
-        eprintln!(
-            "🔍 [AUTH DEBUG] Challenge message hash: {}",
-            hex::encode(&message)
-        );
+        // AUTH DEBUG logging removed - was spamming logs
 
         // Verify signature(s) based on scheme
         match auth.scheme {
@@ -242,18 +232,7 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
         message: "Ed25519 signature required for this scheme".to_string(),
     })?;
 
-    eprintln!(
-        "🔍 [AUTH DEBUG] Verifying Ed25519 signature: {}",
-        signature_hex
-    );
-    eprintln!(
-        "🔍 [AUTH DEBUG] Message to verify: {}",
-        hex::encode(message)
-    );
-    eprintln!(
-        "🔍 [AUTH DEBUG] Public key (address): {}",
-        hex::encode(address)
-    );
+    // AUTH DEBUG logging removed - was spamming logs
 
     let sig_bytes = hex::decode(signature_hex).map_err(|_| AuthError {
         error: "invalid_signature".to_string(),

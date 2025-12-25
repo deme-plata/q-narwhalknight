@@ -129,7 +129,8 @@ pub struct MistralRsConfig {
 impl Default for MistralRsConfig {
     fn default() -> Self {
         Self {
-            model_path: "/opt/orobit/shared/q-narwhalknight/models/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf".to_string(),
+            // v1.1.7+: Use Ministral-3B for faster CPU inference (2.1GB vs 4.1GB)
+            model_path: "./models/Ministral-3B-Instruct-Q4_K_M.gguf".to_string(),
             enable_distributed: false, // Start with local inference for speed
             privacy: PrivacyConfig::default(),
             enable_kv_cache: true,
@@ -222,10 +223,21 @@ impl MistralRsEngine {
         // FULLY LOCAL APPROACH: Both tokenizer and GGUF from local files
         // Everything served via nginx - zero HuggingFace dependencies!
 
-        // Get absolute paths to avoid HuggingFace API calls
-        let current_dir = std::env::current_dir()?;
-        let models_dir = current_dir.join("models");
-        let local_gguf_path = models_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
+        // Use the model path from config - this allows Ministral-3B or other models
+        let model_path = std::path::PathBuf::from(&config.model_path);
+
+        // If the path is absolute, use it directly; otherwise, resolve relative to current dir
+        let local_gguf_path = if model_path.is_absolute() {
+            model_path.clone()
+        } else {
+            let current_dir = std::env::current_dir()?;
+            current_dir.join(&model_path)
+        };
+
+        // Models directory is parent of the GGUF file
+        let models_dir = local_gguf_path.parent()
+            .ok_or_else(|| anyhow!("Invalid model path: no parent directory"))?
+            .to_path_buf();
         let tokenizer_json = models_dir.join("tokenizer.json");
         let tokenizer_config = models_dir.join("tokenizer_config.json");
 

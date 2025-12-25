@@ -61,7 +61,8 @@ impl QuantumTransport {
         info!("🚀 Initializing quantum transport for Phase {:?}", config.phase);
         
         // Create base libp2p transport
-        let tcp_config = TcpConfig::new();
+        // v1.4.14-beta: Enable TCP_NODELAY for lower latency (disables Nagle's algorithm)
+        let tcp_config = TcpConfig::new().nodelay(true);
         let dns_config = DnsConfig::system(tcp_config).await?;
         
         // For Phase 1, we use Noise for base security + Kyber1024 for post-quantum layer

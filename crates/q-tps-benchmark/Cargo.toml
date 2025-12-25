@@ -45,3 +45,7 @@ bytes = "1.5"       # Zero-copy byte manipulation
 
 # WebSocket support for 1M+ TPS
 tokio-tungstenite = "0.21"  # WebSocket client
+
+[dev-dependencies]
+# Additional test dependencies for benchmark tests
+rmp-serde = "1.3"

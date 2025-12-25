@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     dandelion::DandelionStatistics,
+    dedicated_circuits::{IsolatedCircuitStats, OperationType},
     quantum_seeding::{EntropyQuality, RandomnessTest},
 };
 
@@ -81,6 +82,24 @@ pub struct TorPrometheusMetrics {
     traffic_analysis_resistance: Gauge,
     /// Circuit diversity (unique paths)
     circuit_diversity_ratio: Gauge,
+
+    // Per-operation type metrics (Proposal 368 dedicated circuits)
+    /// Latency per operation type
+    operation_latency_seconds: GaugeVec,
+    /// Bytes sent per operation type
+    operation_bytes_sent_total: CounterVec,
+    /// Bytes received per operation type
+    operation_bytes_received_total: CounterVec,
+    /// Requests served per operation type
+    operation_requests_total: CounterVec,
+    /// Failures per operation type
+    operation_failures_total: CounterVec,
+    /// Circuit rotations per operation type
+    operation_rotations_total: CounterVec,
+    /// Circuit age (seconds since last rotation) per operation type
+    operation_circuit_age_seconds: GaugeVec,
+    /// Circuit health status per operation type (1=healthy, 0=unhealthy)
+    operation_circuit_health: GaugeVec,
 
     /// Last update timestamp
     last_update: Arc<RwLock<Instant>>,
@@ -241,6 +260,55 @@ impl TorPrometheusMetrics {
             "Circuit path diversity ratio (0.0 - 1.0)"
         )?;
 
+        // Per-operation type metrics (Proposal 368 dedicated circuits)
+        let operation_latency_seconds = register_gauge_vec!(
+            "q_tor_operation_latency_seconds",
+            "Average latency per operation type",
+            &["operation"]
+        )?;
+
+        let operation_bytes_sent_total = register_counter_vec!(
+            "q_tor_operation_bytes_sent_total",
+            "Total bytes sent per operation type",
+            &["operation"]
+        )?;
+
+        let operation_bytes_received_total = register_counter_vec!(
+            "q_tor_operation_bytes_received_total",
+            "Total bytes received per operation type",
+            &["operation"]
+        )?;
+
+        let operation_requests_total = register_counter_vec!(
+            "q_tor_operation_requests_total",
+            "Total requests served per operation type",
+            &["operation"]
+        )?;
+
+        let operation_failures_total = register_counter_vec!(
+            "q_tor_operation_failures_total",
+            "Total failures per operation type",
+            &["operation"]
+        )?;
+
+        let operation_rotations_total = register_counter_vec!(
+            "q_tor_operation_rotations_total",
+            "Total circuit rotations per operation type",
+            &["operation"]
+        )?;
+
+        let operation_circuit_age_seconds = register_gauge_vec!(
+            "q_tor_operation_circuit_age_seconds",
+            "Circuit age (seconds since last rotation) per operation type",
+            &["operation"]
+        )?;
+
+        let operation_circuit_health = register_gauge_vec!(
+            "q_tor_operation_circuit_health",
+            "Circuit health status per operation type (1=healthy, 0=unhealthy)",
+            &["operation"]
+        )?;
+
         let metrics = Self {
             registry,
             active_circuits,
@@ -265,6 +333,14 @@ impl TorPrometheusMetrics {
             anonymity_score,
             traffic_analysis_resistance,
             circuit_diversity_ratio,
+            operation_latency_seconds,
+            operation_bytes_sent_total,
+            operation_bytes_received_total,
+            operation_requests_total,
+            operation_failures_total,
+            operation_rotations_total,
+            operation_circuit_age_seconds,
+            operation_circuit_health,
             last_update: Arc::new(RwLock::new(Instant::now())),
         };
 
@@ -495,8 +571,175 @@ impl TorPrometheusMetrics {
             .set(traffic_resistance.clamp(0.0, 1.0));
         self.circuit_diversity_ratio.set(diversity.clamp(0.0, 1.0));
 
-        debug!("📊 Updated privacy metrics: anonymity={:.3}, traffic_resistance={:.3}, diversity={:.3}", 
+        debug!("📊 Updated privacy metrics: anonymity={:.3}, traffic_resistance={:.3}, diversity={:.3}",
                anonymity, traffic_resistance, diversity);
+    }
+
+    /// Update metrics for a specific operation type from circuit stats
+    pub async fn update_operation_metrics(
+        &self,
+        operation: OperationType,
+        stats: &IsolatedCircuitStats,
+    ) {
+        let op_name = operation.name();
+
+        // Update latency
+        self.operation_latency_seconds
+            .with_label_values(&[op_name])
+            .set(stats.average_latency_ms / 1000.0);
+
+        // Update bytes transferred (use set instead of inc_by for gauges)
+        self.operation_bytes_sent_total
+            .with_label_values(&[op_name])
+            .inc_by(stats.bytes_sent as f64);
+
+        self.operation_bytes_received_total
+            .with_label_values(&[op_name])
+            .inc_by(stats.bytes_received as f64);
+
+        // Update request count
+        self.operation_requests_total
+            .with_label_values(&[op_name])
+            .inc_by(stats.requests_served as f64);
+
+        // Update failures
+        self.operation_failures_total
+            .with_label_values(&[op_name])
+            .inc_by(stats.failures as f64);
+
+        // Update rotation count
+        self.operation_rotations_total
+            .with_label_values(&[op_name])
+            .inc_by(stats.circuit_rotations as f64);
+
+        // Update circuit age (seconds since last rotation)
+        let age_seconds = stats.last_rotation.elapsed().as_secs_f64();
+        self.operation_circuit_age_seconds
+            .with_label_values(&[op_name])
+            .set(age_seconds);
+
+        // Calculate health status (1=healthy if age < rotation_interval, 0=unhealthy)
+        let rotation_interval = operation.rotation_interval().as_secs_f64();
+        let health_ratio = age_seconds / rotation_interval;
+        let is_healthy = if health_ratio < 0.9 && stats.failures < 3 {
+            1.0
+        } else {
+            0.0
+        };
+        self.operation_circuit_health
+            .with_label_values(&[op_name])
+            .set(is_healthy);
+
+        debug!(
+            "📊 Updated operation metrics for {}: latency={:.1}ms, requests={}, failures={}, age={:.1}s",
+            op_name,
+            stats.average_latency_ms,
+            stats.requests_served,
+            stats.failures,
+            age_seconds
+        );
+    }
+
+    /// Update metrics for all operation types from a map of stats
+    pub async fn update_all_operation_metrics(
+        &self,
+        all_stats: &std::collections::HashMap<OperationType, IsolatedCircuitStats>,
+    ) {
+        for (operation, stats) in all_stats {
+            self.update_operation_metrics(*operation, stats).await;
+        }
+    }
+
+    /// Record a single operation request for a specific operation type
+    pub async fn record_operation_request(&self, operation: OperationType) {
+        let op_name = operation.name();
+        self.operation_requests_total
+            .with_label_values(&[op_name])
+            .inc();
+    }
+
+    /// Record an operation failure for a specific operation type
+    pub async fn record_operation_failure(&self, operation: OperationType) {
+        let op_name = operation.name();
+        self.operation_failures_total
+            .with_label_values(&[op_name])
+            .inc();
+        warn!("📊 Recorded operation failure for {}", op_name);
+    }
+
+    /// Record operation latency for a specific operation type
+    pub async fn record_operation_latency(&self, operation: OperationType, latency_ms: f64) {
+        let op_name = operation.name();
+        self.operation_latency_seconds
+            .with_label_values(&[op_name])
+            .set(latency_ms / 1000.0);
+    }
+
+    /// Record a circuit rotation for a specific operation type
+    pub async fn record_operation_rotation(&self, operation: OperationType) {
+        let op_name = operation.name();
+        self.operation_rotations_total
+            .with_label_values(&[op_name])
+            .inc();
+
+        // Reset circuit age
+        self.operation_circuit_age_seconds
+            .with_label_values(&[op_name])
+            .set(0.0);
+
+        info!("📊 Recorded circuit rotation for {}", op_name);
+    }
+
+    /// Get a summary of per-operation metrics
+    pub async fn get_operation_summary(&self) -> OperationMetricsSummary {
+        let operations = [
+            OperationType::BlockPropagation,
+            OperationType::PeerDiscovery,
+            OperationType::TransactionSubmission,
+            OperationType::P2PSync,
+            OperationType::ValidatorCommunication,
+            OperationType::AIInference,
+            OperationType::QuantumEntropy,
+            OperationType::General,
+        ];
+
+        let mut summary = OperationMetricsSummary::default();
+
+        for op in operations {
+            let op_name = op.name();
+
+            let op_summary = OperationMetricEntry {
+                operation: op_name.to_string(),
+                latency_ms: self.operation_latency_seconds
+                    .with_label_values(&[op_name])
+                    .get() * 1000.0,
+                requests: self.operation_requests_total
+                    .with_label_values(&[op_name])
+                    .get() as u64,
+                failures: self.operation_failures_total
+                    .with_label_values(&[op_name])
+                    .get() as u64,
+                bytes_sent: self.operation_bytes_sent_total
+                    .with_label_values(&[op_name])
+                    .get() as u64,
+                bytes_received: self.operation_bytes_received_total
+                    .with_label_values(&[op_name])
+                    .get() as u64,
+                rotations: self.operation_rotations_total
+                    .with_label_values(&[op_name])
+                    .get() as u64,
+                circuit_age_secs: self.operation_circuit_age_seconds
+                    .with_label_values(&[op_name])
+                    .get(),
+                is_healthy: self.operation_circuit_health
+                    .with_label_values(&[op_name])
+                    .get() > 0.5,
+            };
+
+            summary.operations.push(op_summary);
+        }
+
+        summary
     }
 
     /// Record randomness test results
@@ -599,6 +842,66 @@ pub struct MetricsSummary {
     pub dandelion_transactions: u64,
     pub circuit_failures: u64,
     pub last_update: SystemTime,
+}
+
+/// Per-operation metrics entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationMetricEntry {
+    pub operation: String,
+    pub latency_ms: f64,
+    pub requests: u64,
+    pub failures: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub rotations: u64,
+    pub circuit_age_secs: f64,
+    pub is_healthy: bool,
+}
+
+/// Summary of per-operation metrics
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OperationMetricsSummary {
+    pub operations: Vec<OperationMetricEntry>,
+}
+
+impl OperationMetricsSummary {
+    /// Get healthy operation count
+    pub fn healthy_count(&self) -> usize {
+        self.operations.iter().filter(|o| o.is_healthy).count()
+    }
+
+    /// Get total requests across all operations
+    pub fn total_requests(&self) -> u64 {
+        self.operations.iter().map(|o| o.requests).sum()
+    }
+
+    /// Get total failures across all operations
+    pub fn total_failures(&self) -> u64 {
+        self.operations.iter().map(|o| o.failures).sum()
+    }
+
+    /// Get average latency across all operations
+    pub fn average_latency_ms(&self) -> f64 {
+        let active_ops: Vec<_> = self.operations.iter()
+            .filter(|o| o.requests > 0)
+            .collect();
+
+        if active_ops.is_empty() {
+            return 0.0;
+        }
+
+        let sum: f64 = active_ops.iter().map(|o| o.latency_ms).sum();
+        sum / active_ops.len() as f64
+    }
+
+    /// Get failure rate (failures / requests)
+    pub fn failure_rate(&self) -> f64 {
+        let total_requests = self.total_requests();
+        if total_requests == 0 {
+            return 0.0;
+        }
+        self.total_failures() as f64 / total_requests as f64
+    }
 }
 
 #[cfg(test)]

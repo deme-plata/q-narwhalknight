@@ -143,33 +143,51 @@ export class AIWorkerNode {
       console.log('📊 Detected capability:', this.capability)
 
       // Create libp2p node
+      console.log('🔧 Creating libp2p node...')
       this.node = await this.createNode()
       this.peerId = this.node.peerId
 
       console.log('🆔 Peer ID:', this.peerId.toString())
 
       // Start node
+      console.log('🚀 Starting libp2p node...')
       await this.node.start()
+      console.log('✅ libp2p node started')
 
       // Subscribe to AI topics
+      console.log('📡 Subscribing to AI topics...')
       await this.subscribeToTopics()
 
       // Connect to bootstrap peers with circuit breaker
-      await this.connectToBootstrap()
+      // NOTE: Bootstrap connection is optional - worker can still run in standalone mode
+      console.log('🔗 Attempting bootstrap connection...')
+      try {
+        await this.connectToBootstrap()
+      } catch (bootstrapError) {
+        console.warn('⚠️ Bootstrap connection failed, running in standalone mode:', bootstrapError)
+        // Continue without bootstrap - worker can still function for local inference
+      }
 
-      // Announce worker capability
-      await this.announceWorker()
+      // Announce worker capability (only if connected to peers)
+      if (this.connectedPeers.size > 0) {
+        await this.announceWorker()
+      } else {
+        console.log('📢 Skipping worker announcement (no peers connected)')
+      }
 
       // Start heartbeat
       this.startHeartbeat()
 
       this.isRunning = true
       console.log('✅ AI Worker Node initialized successfully')
+      console.log(`   Mode: ${this.connectedPeers.size > 0 ? 'Connected' : 'Standalone'}`)
+      console.log(`   Capability: ${this.capability.type}`)
 
       return true
     } catch (error) {
-      console.error('❌ Failed to initialize AI Worker Node:', error)
-      this.onError?.(error as Error)
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error('❌ Failed to initialize AI Worker Node:', errorMsg)
+      this.onError?.(new Error(`Worker init failed: ${errorMsg}`))
       return false
     }
   }

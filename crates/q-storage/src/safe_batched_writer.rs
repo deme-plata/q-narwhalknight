@@ -230,10 +230,16 @@ impl SafeBatchedWriter {
         Ok(())
     }
 
-    /// Flush batch with simple sync (Phase 1A - minimal implementation)
+    /// Flush batch with spawn_blocking (LAMINAR 2.3: COMBUSTION CHAMBER)
     ///
-    /// Note: This is a simplified version for Phase 1A.
-    /// Phase 1B will add: retry logic, stall detection, spawn_blocking
+    /// 🚀 v1.7.0-LAMINAR: CRITICAL FIX - Use spawn_blocking to prevent Tokio executor starvation
+    /// BEFORE: RocksDB write_opt() called directly on async executor (BLOCKS other tasks!)
+    /// AFTER:  RocksDB operations moved to dedicated blocking thread pool
+    ///
+    /// Why this matters:
+    /// - RocksDB write_opt() can block 2-50ms depending on disk and data size
+    /// - Blocking the Tokio executor starves other async tasks
+    /// - This caused the infamous "23-minute sync stall" bug
     async fn flush_batch(
         &mut self,
         batch: &mut WriteBatch,
@@ -247,38 +253,59 @@ impl SafeBatchedWriter {
         let mut to_flush = WriteBatch::default();
         std::mem::swap(batch, &mut to_flush);
 
-        // Step 1: Write batch to WAL (unsynced, fast)
-        let mut write_opts = WriteOptions::default();
-        write_opts.set_sync(false);  // Don't fsync yet
-        write_opts.disable_wal(false);  // Keep WAL enabled!
+        // Clone Arc<DB> for move into spawn_blocking
+        let db = self.db.clone();
+        let block_count_copy = block_count;
+        let wal_bytes_copy = wal_bytes;
 
-        self.db.write_opt(to_flush, &write_opts)
-            .context("Failed to write batch to WAL")?;
+        // 🚀 v1.7.0-LAMINAR (COMBUSTION CHAMBER): All RocksDB ops in single spawn_blocking
+        // This is the key optimization: ONE spawn_blocking call for BOTH operations
+        // Instead of: spawn_blocking(write) + spawn_blocking(sync) = 2x overhead
+        // We do:      spawn_blocking(write + sync) = 1x overhead
+        let flush_result = tokio::task::spawn_blocking(move || {
+            let blocking_start = std::time::Instant::now();
 
-        // Step 2: Sync WAL to disk (single fsync for entire batch)
-        // Note: DB is Arc<DB>, we need to call flush() or use internal method
-        // RocksDB doesn't expose sync_wal directly on DB type
-        // For Phase 1A, we use write with sync=true for the final operation
-        let mut sync_opts = WriteOptions::default();
-        sync_opts.set_sync(true);  // This triggers fsync
-        sync_opts.disable_wal(false);
+            // Step 1: Write batch to WAL (unsynced, fast ~0.1-1ms)
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(false);  // Don't fsync yet
+            write_opts.disable_wal(false);  // Keep WAL enabled!
 
-        // Write empty batch with sync=true to trigger WAL sync
-        let empty_batch = WriteBatch::default();
-        self.db.write_opt(empty_batch, &sync_opts)
-            .context("Failed to sync WAL")?;
+            db.write_opt(to_flush, &write_opts)
+                .map_err(|e| anyhow::anyhow!("Failed to write batch to WAL: {}", e))?;
+
+            // Step 2: Sync WAL to disk (single fsync for entire batch ~2-10ms)
+            // RocksDB doesn't expose sync_wal directly, so we use write with sync=true
+            let mut sync_opts = WriteOptions::default();
+            sync_opts.set_sync(true);  // This triggers fsync
+            sync_opts.disable_wal(false);
+
+            // Write empty batch with sync=true to trigger WAL sync
+            let empty_batch = WriteBatch::default();
+            db.write_opt(empty_batch, &sync_opts)
+                .map_err(|e| anyhow::anyhow!("Failed to sync WAL: {}", e))?;
+
+            debug!(
+                "🔥 [LAMINAR] spawn_blocking flush: {} blocks in {:?}",
+                block_count_copy,
+                blocking_start.elapsed()
+            );
+
+            Ok::<(usize, usize), anyhow::Error>((block_count_copy, wal_bytes_copy))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
 
         let duration = start.elapsed();
 
         // Update metrics
         {
             let mut metrics = self.metrics.lock().unwrap();
-            metrics.blocks_flushed_total += block_count as u64;
+            metrics.blocks_flushed_total += flush_result.0 as u64;
             metrics.batches_flushed_total += 1;
         }
 
         info!(
-            "✅ Flushed batch: {} blocks, {} KiB WAL, {}ms",
+            "✅ [LAMINAR] Flushed batch: {} blocks, {} KiB WAL, {}ms",
             block_count,
             wal_bytes / 1024,
             duration.as_millis()
@@ -310,13 +337,14 @@ impl SafeBatchedWriter {
         // Calculate block hash
         let block_hash = block.calculate_hash();
 
-        // Store by height
+        // Store by height (PRIMARY - full block data)
         let height_key = format!("qblock:height:{}", block.header.height);
         batch.put_cf(&cf_hot, height_key.as_bytes(), &block_data);
 
-        // Store by hash
+        // 🚀 v1.3.5-beta: Store hash→height reference only (8 bytes, saves 50% storage!)
         let hash_key = format!("qblock:hash:{}", hex::encode(&block_hash));
-        batch.put_cf(&cf_hot, hash_key.as_bytes(), &block_data);
+        let height_ref = block.header.height.to_be_bytes();
+        batch.put_cf(&cf_hot, hash_key.as_bytes(), &height_ref);
 
         // Update height pointer (v1.0.2-beta: Fix #2 - Add logging for gap detection)
         // Note: OrderedBlockBuffer ensures these blocks are sequential,

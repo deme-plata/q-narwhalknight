@@ -21,7 +21,11 @@ impl Default for SyncActivationConfig {
     fn default() -> Self {
         Self {
             cold_start_timeout: Duration::from_secs(30),
-            retry_interval: Duration::from_secs(60),
+            // v1.4.13-beta: CRITICAL FIX - Reduced from 60s to 2s
+            // BUG FOUND: 60s retry_interval caused sync to stall after initial burst.
+            // Docker test showed node stuck at 7999 blocks because it waited 60s between syncs.
+            // Fix: Continuous sync with 2s interval for maximum throughput.
+            retry_interval: Duration::from_secs(2),
             min_peers: 1,
             aggressive_mode: false,
             stagnant_threshold_blocks: 100, // Node is stagnant if >100 blocks behind network
@@ -53,22 +57,14 @@ impl TimeoutBasedSyncActivation {
         peer_count: usize,
         network_height: u64,
     ) -> bool {
-        // 🔍🔍🔍 v1.0.19-rc1: LOUD DIAGNOSTIC LOGGING
-        // This function is CRITICAL - if it's not called or returns wrong value, sync won't work
-        error!("🔍🔍🔍 [SYNC ACTIVATION] should_force_sync() CALLED!");
-        error!("    current_height: {}", current_height);
-        error!("    network_height: {}", network_height);
-        error!("    peer_count: {}", peer_count);
+        // v1.0.65-beta: Removed diagnostic spam - only log occasionally
+        // This function is called frequently, so avoid logging on every call
 
         let now = Instant::now();
         let since_startup = now.duration_since(self.startup_time);
 
         let clearly_behind = network_height > current_height + 5;
         let gap = network_height.saturating_sub(current_height);
-
-        // More diagnostic logging
-        error!("    gap: {}", gap);
-        error!("    clearly_behind: {}", clearly_behind);
 
         // ✅ KIMI AI FIX: Remove hardcoded 13000 threshold
         // Dynamic stagnation check: node is stagnant if significantly behind network OR at very low height

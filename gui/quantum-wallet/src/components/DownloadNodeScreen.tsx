@@ -89,15 +89,15 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v1.3.9-beta"
+              href="/downloads/q-api-server-v1.3.10-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v1.3.9-beta)
+              Download Linux Binary (v1.3.10-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 168 MB | Ring-LWE VRF Mining + Genus-2 VDF + PQC Security
+              Size: 169 MB | P2P Turbo Sync Fixed + Ring-LWE VRF + Genus-2 VDF
             </p>
           </div>
 
@@ -105,9 +105,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v1.3.9-beta
-chmod +x q-api-server-v1.3.9-beta
-./q-api-server-v1.3.9-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v1.3.10-beta
+chmod +x q-api-server-v1.3.10-beta
+./q-api-server-v1.3.10-beta --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               Auto-discovers peers via bootstrap node (185.182.185.227:8080)

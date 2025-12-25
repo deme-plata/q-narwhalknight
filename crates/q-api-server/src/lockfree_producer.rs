@@ -1182,6 +1182,8 @@ impl LockFreeProducerPool {
     /// Each producer is queried via channel, completely independently.
     ///
     /// ✅ v1.0.13-beta: Now handles Result<bool, Error> from should_produce()
+    /// ✅ v1.1.30-beta: FIX - Only ONE producer should produce per round to prevent double rewards!
+    ///    The bug was: both producers could produce at the same height, causing 2x mining rewards.
     pub async fn produce_blocks(&self) -> Vec<(usize, QBlock)> {
         let mut blocks = Vec::new();
 
@@ -1197,6 +1199,10 @@ impl LockFreeProducerPool {
                             producer_id, block.header.height
                         );
                         blocks.push((producer_id, block));
+                        // ✅ v1.1.30-beta CRITICAL FIX: Only ONE block per round!
+                        // Multiple producers can share solution load, but only ONE should produce
+                        // the actual block. Otherwise we get duplicate blocks at same height.
+                        break;
                     }
                 }
                 Ok(false) => {
@@ -1571,9 +1577,13 @@ impl LockFreeProducerPool {
                     );
                 }
 
-                // 🚨 v1.0.3-beta EMERGENCY FIX: Monitor consensus, don't block on it
-                // Background consensus check (non-blocking)
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                // 🚀 v1.0.95-beta: REMOVED 100ms sleep that was blocking sync performance!
+                // The sleep was originally for producer convergence, but:
+                // 1. Producers converge naturally via eventual consistency
+                // 2. During sync, this adds 100ms per block = HUGE slowdown
+                // 3. The consensus check is just for logging, not correctness
+                //
+                // Changed from 100ms to 0ms - immediate check with no blocking
                 if let Some((consensus_height, count)) = self.get_height_consensus().await {
                     if consensus_height != new_height || count != self.num_producers {
                         // ✅ CRITICAL FIX: Log only, don't return error!

@@ -135,8 +135,15 @@ impl ModelMetadata {
                     8.0,
                     5120, // ~5.1 GB with Q4_K_M quantization
                 )
+            } else if name.contains("Ministral-3B") || name.contains("ministral-3b") {
+                (
+                    "Ministral-3B-Instruct-Q4_K_M.gguf".to_string(),
+                    32, // 32 layers for 3B model
+                    3.0,
+                    2150, // ~2.15 GB with Q4_K_M quantization
+                )
             } else {
-                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Llama-7B, Llama-13B, Llama-70B, Qwen3-VL-8B", name));
+                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Ministral-3B, Llama-7B, Llama-13B, Llama-70B, Qwen3-VL-8B", name));
             };
 
         let download_url = format!("{}/downloads/{}", base_url, gguf_filename);

@@ -31,9 +31,28 @@ pub mod block_vertex_map;
 // ✨ v0.6.0-beta: Liquidity pool P2P broadcasting (DEX Decentralization Phase 2)
 pub mod liquidity_pool;
 
+// ✨ v1.0.80-beta: Legacy struct definitions for backwards-compatible block deserialization
+pub mod legacy;
+
+// ✨ v1.1.8-beta: P2P balance update messages for decentralized mining
+pub mod balance_update;
+
 // ✨ v1.0.58-beta: Advanced cryptographic primitives (FROST, AEGIS, SQIsign, Bulletproofs, etc.)
 #[cfg(feature = "advanced-crypto")]
 pub mod advanced_crypto;
+
+/// Phase 3 Week 11: Equivocation detection and slashing types
+#[doc = "Equivocation detection proofs and slashing transactions"]
+pub mod equivocation;
+
+/// v1.4.1-beta: Block-height activated upgrades for safe mainnet evolution
+#[doc = "Network upgrade framework - deploy new features without coordinated restarts"]
+pub mod upgrades;
+
+/// v1.5.0-beta: CHIRON-style execution hints for parallel sync
+/// Enables ~30% faster node synchronization via parallel state application
+#[doc = "Transaction dependency graphs and parallel execution batches"]
+pub mod execution_hints;
 
 // Re-export block types for convenience
 pub use block::{
@@ -41,11 +60,21 @@ pub use block::{
     QuantumMetadata, HypergraphCoordinates, EnergyComponents,
     SpectralSignature, SignaturePhase, VDFProof, FinalityStatus, FinalizedBlock,
     FinalityCertificate,
+    // v1.4.5-beta: VDF security parameters for chain binding
+    AdaptiveVDFParams, SecurityTier,
 };
 
 // Re-export signature verification functions
 pub use signature_verification::{
-    verify_spectral_signature, verify_block_signature,
+    verify_spectral_signature, verify_spectral_signature_extended,
+    verify_block_signature,
+    // SQIsign compact signatures (v1.0.86-beta) - 95.6% smaller than Dilithium5
+    SQISIGN_PK_SIZE, SQISIGN_SIG_SIZE,
+};
+
+#[cfg(feature = "signing")]
+pub use signature_verification::{
+    sign_ed25519, sign_sqisign,
 };
 
 // Re-export PQC key management types
@@ -72,6 +101,16 @@ pub use block_vertex_map::BlockVertexMap;
 pub use liquidity_pool::{
     PoolAnnouncement, PoolSyncRequest, PoolSyncResponse,
     PoolAnnouncementRateLimiter,
+};
+
+// Re-export P2P balance update types (v1.1.9-beta: security hardened decentralized mining)
+pub use balance_update::{
+    P2PBalanceUpdate, P2PMinerStats, BalanceUpdateType, BalanceUpdateError,
+};
+
+// Re-export CHIRON execution hints types (v1.5.0-beta: parallel sync)
+pub use execution_hints::{
+    BlockExecutionHints, TxAccessSet, TxIndex,
 };
 
 // P2P block synchronization types are defined at the end of this file (BlockRequest, BlockResponse)
@@ -160,6 +199,54 @@ pub const BANK_MASTER_ACCOUNT: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+// ============================================================================
+// Fee System Constants (v1.4.5-beta)
+// ============================================================================
+
+/// Base gas for a simple transfer (21,000 gas units like Ethereum)
+pub const BASE_GAS: u64 = 21_000;
+
+/// Minimum fee per gas unit in smallest denomination (1 = 0.00000001 QUG)
+/// Set to 1 satoshi-equivalent to prevent zero-fee spam while keeping fees low
+pub const MIN_FEE_PER_GAS: u64 = 1;
+
+/// Minimum total fee for any transaction (BASE_GAS * MIN_FEE_PER_GAS)
+/// This is 0.00021 QUG for a simple transfer
+pub const MIN_TRANSACTION_FEE: u64 = BASE_GAS * MIN_FEE_PER_GAS;
+
+/// Maximum fee to prevent accidental overpayment (10 QUG = 1_000_000_000 satoshis)
+pub const MAX_TRANSACTION_FEE: u64 = 1_000_000_000;
+
+/// Fee accumulation limit per block to prevent overflow (1M QUG)
+pub const MAX_BLOCK_FEE_ACCUMULATION: u64 = 100_000_000_000_000;
+
+// ============================================================================
+// Founder Wallet Timelock Protection (v1.4.5-beta)
+// ============================================================================
+
+/// Founder wallet address (receives 1% dev fee)
+pub const FOUNDER_WALLET: [u8; 32] = [
+    0xef, 0xca, 0x1e, 0x8c, 0x1f, 0x46, 0xe9, 0x10,
+    0x13, 0xb4, 0x07, 0x38, 0x98, 0xc7, 0x71, 0xbb,
+    0x3d, 0x56, 0x64, 0x53, 0x53, 0x7c, 0xcf, 0x87,
+    0xe8, 0x34, 0x50, 0x59, 0x25, 0xe5, 0x07, 0x23,
+];
+
+/// Minimum timelock duration for founder wallet withdrawals (7 days in seconds)
+/// Any withdrawal from the founder wallet must wait 7 days after announcement
+pub const FOUNDER_TIMELOCK_DURATION: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
+
+/// Maximum single withdrawal from founder wallet (1% of max supply = 210,000 QUG)
+/// This prevents catastrophic loss in case of compromise
+pub const FOUNDER_MAX_SINGLE_WITHDRAWAL: u64 = 21_000_000_000_000; // 210,000 QUG in atomic units
+
+/// Cooldown between founder withdrawals (24 hours in seconds)
+pub const FOUNDER_WITHDRAWAL_COOLDOWN: u64 = 24 * 60 * 60; // 86,400 seconds
+
+/// Block height before which founder cannot withdraw (vesting period)
+/// First 200,000 blocks (~90 days) for network stability
+pub const FOUNDER_VESTING_END_HEIGHT: u64 = 200_000;
+
 impl TokenInfo {
     /// Get QUG token information
     pub fn qug() -> Self {
@@ -202,6 +289,934 @@ impl TokenType {
     }
 }
 
+// ============================================================================
+// v1.0.60-beta: Extended Transaction Types for Full State Sync
+// All state mutations go through transactions for decentralized consensus
+// ============================================================================
+
+/// Extended transaction type enum for comprehensive state sync
+/// Every state mutation in the system must be represented as one of these transaction types
+/// This enables full decentralized state replication via block synchronization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum TransactionType {
+    // ========== Core Token Operations (0x00-0x0F) ==========
+    /// Native QUG transfer between addresses
+    Transfer = 0x00,
+    /// Mining coinbase reward (from == [0u8; 32])
+    Coinbase = 0x01,
+    /// Token burn (sent to burn address)
+    Burn = 0x02,
+    /// Fee payment (automatically deducted)
+    Fee = 0x03,
+
+    // ========== Custom Token Operations (0x10-0x1F) ==========
+    /// Create a new custom token (SPL-like token creation)
+    TokenCreate = 0x10,
+    /// Mint new tokens (for mintable tokens, requires authority)
+    TokenMint = 0x11,
+    /// Transfer custom token (not QUG/QUGUSD)
+    TokenTransfer = 0x12,
+    /// Burn custom token
+    TokenBurn = 0x13,
+    /// Freeze token account (compliance feature)
+    TokenFreeze = 0x14,
+    /// Unfreeze token account
+    TokenUnfreeze = 0x15,
+    /// Set token metadata (name, symbol, decimals)
+    TokenSetMetadata = 0x16,
+    /// Transfer token mint authority
+    TokenTransferAuthority = 0x17,
+
+    // ========== DEX Operations (0x20-0x2F) ==========
+    /// Create a new liquidity pool
+    PoolCreate = 0x20,
+    /// Add liquidity to a pool
+    PoolAddLiquidity = 0x21,
+    /// Remove liquidity from a pool
+    PoolRemoveLiquidity = 0x22,
+    /// Token swap via AMM
+    Swap = 0x23,
+    /// Place limit order (order book)
+    LimitOrder = 0x24,
+    /// Cancel limit order
+    CancelOrder = 0x25,
+    /// Fill limit order (market taker)
+    FillOrder = 0x26,
+    /// Flash loan execution
+    FlashLoan = 0x27,
+
+    // ========== Smart Contract Operations (0x30-0x3F) ==========
+    /// Deploy new smart contract
+    ContractDeploy = 0x30,
+    /// Call smart contract function
+    ContractCall = 0x31,
+    /// Upgrade smart contract (if upgradeable)
+    ContractUpgrade = 0x32,
+    /// Destroy contract and recover state rent
+    ContractDestroy = 0x33,
+    /// Set contract storage directly (admin only)
+    ContractSetStorage = 0x34,
+
+    // ========== Stablecoin/Vault Operations (0x40-0x4F) ==========
+    /// Lock QUG as collateral in vault
+    VaultLock = 0x40,
+    /// Unlock collateral from vault
+    VaultUnlock = 0x41,
+    /// Mint QUGUSD against collateral
+    StableMint = 0x42,
+    /// Burn QUGUSD to reduce debt
+    StableBurn = 0x43,
+    /// Liquidate undercollateralized vault
+    VaultLiquidate = 0x44,
+    /// Oracle price update for collateral ratio
+    OraclePriceUpdate = 0x45,
+
+    // ========== AI/Compute Credits (0x50-0x5F) ==========
+    /// Purchase AI compute credits
+    AICreditPurchase = 0x50,
+    /// Spend AI credits for inference
+    AICreditSpend = 0x51,
+    /// Transfer AI credits between accounts
+    AICreditTransfer = 0x52,
+    /// Earn AI credits (node operators)
+    AICreditEarn = 0x53,
+    /// Register as AI compute provider
+    AIProviderRegister = 0x54,
+    /// Submit AI inference result
+    AIInferenceResult = 0x55,
+
+    // ========== Governance Operations (0x60-0x6F) ==========
+    /// Create governance proposal
+    ProposalCreate = 0x60,
+    /// Vote on proposal
+    ProposalVote = 0x61,
+    /// Execute passed proposal
+    ProposalExecute = 0x62,
+    /// Delegate voting power
+    DelegateVotes = 0x63,
+    /// Undelegate voting power
+    UndelegateVotes = 0x64,
+
+    // ========== Staking Operations (0x70-0x7F) ==========
+    /// Stake tokens for consensus participation
+    Stake = 0x70,
+    /// Unstake tokens (starts unbonding period)
+    Unstake = 0x71,
+    /// Claim staking rewards
+    ClaimRewards = 0x72,
+    /// Redelegate to different validator
+    Redelegate = 0x73,
+    /// Slash validator for misbehavior
+    Slash = 0x74,
+
+    // ========== System Operations (0xF0-0xFF) ==========
+    /// System parameter update (via governance)
+    SystemParamUpdate = 0xF0,
+    /// Emergency pause (multisig required)
+    EmergencyPause = 0xF1,
+    /// Resume from pause
+    EmergencyResume = 0xF2,
+    /// State root checkpoint (for light clients)
+    StateCheckpoint = 0xF3,
+    /// Genesis block special transaction
+    Genesis = 0xFE,
+    /// Unknown/legacy transaction type
+    Unknown = 0xFF,
+}
+
+impl TransactionType {
+    /// Get the transaction type from a byte
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0x00 => TransactionType::Transfer,
+            0x01 => TransactionType::Coinbase,
+            0x02 => TransactionType::Burn,
+            0x03 => TransactionType::Fee,
+            0x10 => TransactionType::TokenCreate,
+            0x11 => TransactionType::TokenMint,
+            0x12 => TransactionType::TokenTransfer,
+            0x13 => TransactionType::TokenBurn,
+            0x14 => TransactionType::TokenFreeze,
+            0x15 => TransactionType::TokenUnfreeze,
+            0x16 => TransactionType::TokenSetMetadata,
+            0x17 => TransactionType::TokenTransferAuthority,
+            0x20 => TransactionType::PoolCreate,
+            0x21 => TransactionType::PoolAddLiquidity,
+            0x22 => TransactionType::PoolRemoveLiquidity,
+            0x23 => TransactionType::Swap,
+            0x24 => TransactionType::LimitOrder,
+            0x25 => TransactionType::CancelOrder,
+            0x26 => TransactionType::FillOrder,
+            0x27 => TransactionType::FlashLoan,
+            0x30 => TransactionType::ContractDeploy,
+            0x31 => TransactionType::ContractCall,
+            0x32 => TransactionType::ContractUpgrade,
+            0x33 => TransactionType::ContractDestroy,
+            0x34 => TransactionType::ContractSetStorage,
+            0x40 => TransactionType::VaultLock,
+            0x41 => TransactionType::VaultUnlock,
+            0x42 => TransactionType::StableMint,
+            0x43 => TransactionType::StableBurn,
+            0x44 => TransactionType::VaultLiquidate,
+            0x45 => TransactionType::OraclePriceUpdate,
+            0x50 => TransactionType::AICreditPurchase,
+            0x51 => TransactionType::AICreditSpend,
+            0x52 => TransactionType::AICreditTransfer,
+            0x53 => TransactionType::AICreditEarn,
+            0x54 => TransactionType::AIProviderRegister,
+            0x55 => TransactionType::AIInferenceResult,
+            0x60 => TransactionType::ProposalCreate,
+            0x61 => TransactionType::ProposalVote,
+            0x62 => TransactionType::ProposalExecute,
+            0x63 => TransactionType::DelegateVotes,
+            0x64 => TransactionType::UndelegateVotes,
+            0x70 => TransactionType::Stake,
+            0x71 => TransactionType::Unstake,
+            0x72 => TransactionType::ClaimRewards,
+            0x73 => TransactionType::Redelegate,
+            0x74 => TransactionType::Slash,
+            0xF0 => TransactionType::SystemParamUpdate,
+            0xF1 => TransactionType::EmergencyPause,
+            0xF2 => TransactionType::EmergencyResume,
+            0xF3 => TransactionType::StateCheckpoint,
+            0xFE => TransactionType::Genesis,
+            _ => TransactionType::Unknown,
+        }
+    }
+
+    /// Get the byte representation of this transaction type
+    pub fn as_byte(&self) -> u8 {
+        *self as u8
+    }
+
+    /// Check if this is a coinbase (mining reward) transaction
+    pub fn is_coinbase(&self) -> bool {
+        matches!(self, TransactionType::Coinbase)
+    }
+
+    /// Check if this is a token operation
+    pub fn is_token_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::TokenCreate
+                | TransactionType::TokenMint
+                | TransactionType::TokenTransfer
+                | TransactionType::TokenBurn
+                | TransactionType::TokenFreeze
+                | TransactionType::TokenUnfreeze
+                | TransactionType::TokenSetMetadata
+                | TransactionType::TokenTransferAuthority
+        )
+    }
+
+    /// Check if this is a DEX operation
+    pub fn is_dex_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::PoolCreate
+                | TransactionType::PoolAddLiquidity
+                | TransactionType::PoolRemoveLiquidity
+                | TransactionType::Swap
+                | TransactionType::LimitOrder
+                | TransactionType::CancelOrder
+                | TransactionType::FillOrder
+                | TransactionType::FlashLoan
+        )
+    }
+
+    /// Check if this is a smart contract operation
+    pub fn is_contract_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::ContractDeploy
+                | TransactionType::ContractCall
+                | TransactionType::ContractUpgrade
+                | TransactionType::ContractDestroy
+                | TransactionType::ContractSetStorage
+        )
+    }
+
+    /// Check if this is a stablecoin/vault operation
+    pub fn is_vault_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::VaultLock
+                | TransactionType::VaultUnlock
+                | TransactionType::StableMint
+                | TransactionType::StableBurn
+                | TransactionType::VaultLiquidate
+                | TransactionType::OraclePriceUpdate
+        )
+    }
+
+    /// Check if this is an AI credits operation
+    pub fn is_ai_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::AICreditPurchase
+                | TransactionType::AICreditSpend
+                | TransactionType::AICreditTransfer
+                | TransactionType::AICreditEarn
+                | TransactionType::AIProviderRegister
+                | TransactionType::AIInferenceResult
+        )
+    }
+
+    /// Check if this is a governance operation
+    pub fn is_governance_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::ProposalCreate
+                | TransactionType::ProposalVote
+                | TransactionType::ProposalExecute
+                | TransactionType::DelegateVotes
+                | TransactionType::UndelegateVotes
+        )
+    }
+
+    /// Check if this is a staking operation
+    pub fn is_staking_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::Stake
+                | TransactionType::Unstake
+                | TransactionType::ClaimRewards
+                | TransactionType::Redelegate
+                | TransactionType::Slash
+        )
+    }
+
+    /// Check if this is a system operation (requires elevated permissions)
+    pub fn is_system_operation(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::SystemParamUpdate
+                | TransactionType::EmergencyPause
+                | TransactionType::EmergencyResume
+                | TransactionType::StateCheckpoint
+                | TransactionType::Genesis
+        )
+    }
+
+    /// Get the gas cost multiplier for this transaction type
+    /// Base gas is multiplied by this factor
+    pub fn gas_multiplier(&self) -> u64 {
+        match self {
+            // Simple transfers: 1x base gas
+            TransactionType::Transfer | TransactionType::Coinbase => 1,
+            TransactionType::Burn | TransactionType::Fee => 1,
+
+            // Token operations: 2x base gas (more state changes)
+            TransactionType::TokenTransfer | TransactionType::TokenBurn => 2,
+            TransactionType::TokenMint | TransactionType::TokenFreeze => 2,
+            TransactionType::TokenUnfreeze => 2,
+
+            // Token creation: 10x base gas (significant state)
+            TransactionType::TokenCreate | TransactionType::TokenSetMetadata => 10,
+            TransactionType::TokenTransferAuthority => 5,
+
+            // DEX operations: 3-5x base gas (multiple state updates)
+            TransactionType::Swap => 3,
+            TransactionType::PoolAddLiquidity | TransactionType::PoolRemoveLiquidity => 4,
+            TransactionType::PoolCreate => 20,
+            TransactionType::LimitOrder | TransactionType::CancelOrder => 3,
+            TransactionType::FillOrder => 4,
+            TransactionType::FlashLoan => 10,
+
+            // Contract operations: variable based on complexity
+            TransactionType::ContractCall => 5,
+            TransactionType::ContractDeploy => 100, // Very expensive
+            TransactionType::ContractUpgrade => 50,
+            TransactionType::ContractDestroy => 10,
+            TransactionType::ContractSetStorage => 20,
+
+            // Vault operations: 3-5x base gas
+            TransactionType::VaultLock | TransactionType::VaultUnlock => 3,
+            TransactionType::StableMint | TransactionType::StableBurn => 4,
+            TransactionType::VaultLiquidate => 10,
+            TransactionType::OraclePriceUpdate => 2,
+
+            // AI operations: 2-5x base gas
+            TransactionType::AICreditPurchase | TransactionType::AICreditTransfer => 2,
+            TransactionType::AICreditSpend | TransactionType::AICreditEarn => 3,
+            TransactionType::AIProviderRegister => 10,
+            TransactionType::AIInferenceResult => 5,
+
+            // Governance: 5-20x base gas
+            TransactionType::ProposalCreate => 20,
+            TransactionType::ProposalVote => 5,
+            TransactionType::ProposalExecute => 50, // Depends on proposal
+            TransactionType::DelegateVotes | TransactionType::UndelegateVotes => 3,
+
+            // Staking: 3-10x base gas
+            TransactionType::Stake | TransactionType::Unstake => 5,
+            TransactionType::ClaimRewards => 3,
+            TransactionType::Redelegate => 8,
+            TransactionType::Slash => 20,
+
+            // System operations: high gas (privileged)
+            TransactionType::SystemParamUpdate => 100,
+            TransactionType::EmergencyPause | TransactionType::EmergencyResume => 50,
+            TransactionType::StateCheckpoint => 10,
+            TransactionType::Genesis => 0, // Free (only at genesis)
+            TransactionType::Unknown => 1,
+        }
+    }
+
+    /// Get human-readable name for this transaction type
+    pub fn name(&self) -> &'static str {
+        match self {
+            TransactionType::Transfer => "Transfer",
+            TransactionType::Coinbase => "Coinbase",
+            TransactionType::Burn => "Burn",
+            TransactionType::Fee => "Fee",
+            TransactionType::TokenCreate => "Token Create",
+            TransactionType::TokenMint => "Token Mint",
+            TransactionType::TokenTransfer => "Token Transfer",
+            TransactionType::TokenBurn => "Token Burn",
+            TransactionType::TokenFreeze => "Token Freeze",
+            TransactionType::TokenUnfreeze => "Token Unfreeze",
+            TransactionType::TokenSetMetadata => "Token Set Metadata",
+            TransactionType::TokenTransferAuthority => "Token Transfer Authority",
+            TransactionType::PoolCreate => "Pool Create",
+            TransactionType::PoolAddLiquidity => "Pool Add Liquidity",
+            TransactionType::PoolRemoveLiquidity => "Pool Remove Liquidity",
+            TransactionType::Swap => "Swap",
+            TransactionType::LimitOrder => "Limit Order",
+            TransactionType::CancelOrder => "Cancel Order",
+            TransactionType::FillOrder => "Fill Order",
+            TransactionType::FlashLoan => "Flash Loan",
+            TransactionType::ContractDeploy => "Contract Deploy",
+            TransactionType::ContractCall => "Contract Call",
+            TransactionType::ContractUpgrade => "Contract Upgrade",
+            TransactionType::ContractDestroy => "Contract Destroy",
+            TransactionType::ContractSetStorage => "Contract Set Storage",
+            TransactionType::VaultLock => "Vault Lock",
+            TransactionType::VaultUnlock => "Vault Unlock",
+            TransactionType::StableMint => "Stable Mint",
+            TransactionType::StableBurn => "Stable Burn",
+            TransactionType::VaultLiquidate => "Vault Liquidate",
+            TransactionType::OraclePriceUpdate => "Oracle Price Update",
+            TransactionType::AICreditPurchase => "AI Credit Purchase",
+            TransactionType::AICreditSpend => "AI Credit Spend",
+            TransactionType::AICreditTransfer => "AI Credit Transfer",
+            TransactionType::AICreditEarn => "AI Credit Earn",
+            TransactionType::AIProviderRegister => "AI Provider Register",
+            TransactionType::AIInferenceResult => "AI Inference Result",
+            TransactionType::ProposalCreate => "Proposal Create",
+            TransactionType::ProposalVote => "Proposal Vote",
+            TransactionType::ProposalExecute => "Proposal Execute",
+            TransactionType::DelegateVotes => "Delegate Votes",
+            TransactionType::UndelegateVotes => "Undelegate Votes",
+            TransactionType::Stake => "Stake",
+            TransactionType::Unstake => "Unstake",
+            TransactionType::ClaimRewards => "Claim Rewards",
+            TransactionType::Redelegate => "Redelegate",
+            TransactionType::Slash => "Slash",
+            TransactionType::SystemParamUpdate => "System Param Update",
+            TransactionType::EmergencyPause => "Emergency Pause",
+            TransactionType::EmergencyResume => "Emergency Resume",
+            TransactionType::StateCheckpoint => "State Checkpoint",
+            TransactionType::Genesis => "Genesis",
+            TransactionType::Unknown => "Unknown",
+        }
+    }
+}
+
+impl Default for TransactionType {
+    fn default() -> Self {
+        TransactionType::Transfer
+    }
+}
+
+impl std::fmt::Display for TransactionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+// ============================================================================
+// v1.0.60-beta: StateChange - Atomic State Mutations
+// Every transaction produces one or more StateChanges that modify global state
+// ============================================================================
+
+/// Represents an atomic state change produced by a transaction
+/// Each transaction type maps to a specific set of state changes
+/// State changes are applied atomically and can be reversed for reorgs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum StateChange {
+    // ========== Balance Changes ==========
+    /// Credit tokens to an account (balance increase)
+    BalanceCredit {
+        /// Account receiving tokens (32-byte address)
+        account: [u8; 32],
+        /// Token address (QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS, or custom)
+        token: [u8; 32],
+        /// Amount to credit
+        amount: u64,
+    },
+    /// Debit tokens from an account (balance decrease)
+    BalanceDebit {
+        /// Account losing tokens
+        account: [u8; 32],
+        /// Token address
+        token: [u8; 32],
+        /// Amount to debit
+        amount: u64,
+    },
+
+    // ========== Custom Token State ==========
+    /// Create a new token
+    TokenCreate {
+        /// Token address (derived from creator + nonce)
+        token_address: [u8; 32],
+        /// Token name (max 32 bytes)
+        name: [u8; 32],
+        /// Token symbol (max 8 bytes)
+        symbol: [u8; 8],
+        /// Decimal places (0-18)
+        decimals: u8,
+        /// Initial supply
+        initial_supply: u64,
+        /// Max supply (0 = unlimited)
+        max_supply: u64,
+        /// Mint authority (can mint more tokens)
+        mint_authority: [u8; 32],
+        /// Freeze authority (can freeze accounts)
+        freeze_authority: Option<[u8; 32]>,
+        /// Is mintable after creation
+        is_mintable: bool,
+    },
+    /// Update token metadata
+    TokenMetadataUpdate {
+        token_address: [u8; 32],
+        name: Option<[u8; 32]>,
+        symbol: Option<[u8; 8]>,
+        /// URI for extended metadata (IPFS/HTTP)
+        metadata_uri: Option<Vec<u8>>,
+    },
+    /// Transfer mint authority
+    TokenAuthorityTransfer {
+        token_address: [u8; 32],
+        old_authority: [u8; 32],
+        new_authority: [u8; 32],
+    },
+    /// Freeze a token account
+    TokenAccountFreeze {
+        token_address: [u8; 32],
+        account: [u8; 32],
+        frozen: bool,
+    },
+
+    // ========== DEX State ==========
+    /// Create a new liquidity pool
+    PoolCreate {
+        /// Pool ID (hash of token_a + token_b)
+        pool_id: [u8; 32],
+        /// First token in the pair
+        token_a: [u8; 32],
+        /// Second token in the pair
+        token_b: [u8; 32],
+        /// Fee tier (in basis points, e.g., 30 = 0.3%)
+        fee_bps: u16,
+        /// Initial liquidity for token A
+        initial_a: u64,
+        /// Initial liquidity for token B
+        initial_b: u64,
+        /// Creator receives LP tokens
+        creator: [u8; 32],
+        /// Initial LP token supply
+        lp_supply: u64,
+    },
+    /// Update pool reserves (after swap or liquidity change)
+    PoolReservesUpdate {
+        pool_id: [u8; 32],
+        reserve_a: u64,
+        reserve_b: u64,
+        lp_supply: u64,
+    },
+    /// Credit LP tokens to liquidity provider
+    LPTokenCredit {
+        pool_id: [u8; 32],
+        account: [u8; 32],
+        amount: u64,
+    },
+    /// Debit LP tokens from liquidity provider
+    LPTokenDebit {
+        pool_id: [u8; 32],
+        account: [u8; 32],
+        amount: u64,
+    },
+
+    // ========== Smart Contract State ==========
+    /// Deploy new contract
+    ContractDeploy {
+        /// Contract address (derived from deployer + nonce)
+        contract_address: [u8; 32],
+        /// Bytecode hash (for verification)
+        code_hash: [u8; 32],
+        /// Deployer address
+        deployer: [u8; 32],
+        /// Contract is upgradeable
+        is_upgradeable: bool,
+    },
+    /// Update contract storage slot
+    ContractStorageUpdate {
+        contract_address: [u8; 32],
+        /// Storage key (32-byte slot)
+        key: [u8; 32],
+        /// New value (variable length)
+        value: Vec<u8>,
+    },
+    /// Destroy contract and mark as inactive
+    ContractDestroy {
+        contract_address: [u8; 32],
+        /// Remaining balance sent to this address
+        beneficiary: [u8; 32],
+    },
+
+    // ========== Vault/Stablecoin State ==========
+    /// Create or update a collateral vault
+    VaultUpdate {
+        /// Vault ID (owner address for single-vault, or hash for multi-vault)
+        vault_id: [u8; 32],
+        /// Owner of the vault
+        owner: [u8; 32],
+        /// Collateral locked (in QUG)
+        collateral_amount: u64,
+        /// Debt minted (in QUGUSD)
+        debt_amount: u64,
+        /// Collateralization ratio (in basis points, e.g., 15000 = 150%)
+        collateral_ratio_bps: u32,
+    },
+    /// Update oracle price feed
+    OraclePriceUpdate {
+        /// Price feed ID (e.g., QUG/USD)
+        feed_id: [u8; 32],
+        /// Price in 8 decimal fixed point (e.g., 1.50 USD = 150_000_000)
+        price: u64,
+        /// Timestamp of price observation
+        timestamp: i64,
+        /// Number of oracle signatures
+        num_signatures: u8,
+    },
+
+    // ========== AI Credits State ==========
+    /// Update AI credits balance
+    AICreditsUpdate {
+        account: [u8; 32],
+        /// New balance (after credit/debit)
+        balance: u64,
+        /// Credits earned (lifetime)
+        earned: u64,
+        /// Credits spent (lifetime)
+        spent: u64,
+    },
+    /// Register/update AI provider
+    AIProviderUpdate {
+        provider_id: [u8; 32],
+        /// Provider wallet address
+        wallet: [u8; 32],
+        /// Compute capacity (TFLOPS)
+        capacity: u64,
+        /// Price per credit
+        price_per_credit: u64,
+        /// Is active
+        is_active: bool,
+    },
+
+    // ========== Governance State ==========
+    /// Create a governance proposal
+    ProposalCreate {
+        proposal_id: [u8; 32],
+        proposer: [u8; 32],
+        /// Start block height
+        start_height: u64,
+        /// End block height
+        end_height: u64,
+        /// Required quorum (in basis points of total supply)
+        quorum_bps: u32,
+        /// Execution data hash
+        execution_hash: [u8; 32],
+    },
+    /// Update proposal vote counts
+    ProposalVoteUpdate {
+        proposal_id: [u8; 32],
+        /// Votes in favor
+        votes_for: u64,
+        /// Votes against
+        votes_against: u64,
+        /// Abstentions
+        votes_abstain: u64,
+    },
+    /// Mark proposal as executed/cancelled
+    ProposalStatusUpdate {
+        proposal_id: [u8; 32],
+        /// 0=pending, 1=active, 2=succeeded, 3=failed, 4=executed, 5=cancelled
+        status: u8,
+    },
+    /// Update vote delegation
+    DelegationUpdate {
+        delegator: [u8; 32],
+        delegate: Option<[u8; 32]>,
+        voting_power: u64,
+    },
+
+    // ========== Staking State ==========
+    /// Update staking position
+    StakeUpdate {
+        staker: [u8; 32],
+        validator: [u8; 32],
+        staked_amount: u64,
+        /// Unbonding end timestamp (0 if not unbonding)
+        unbonding_end: i64,
+        /// Accumulated rewards
+        pending_rewards: u64,
+    },
+    /// Update validator state
+    ValidatorUpdate {
+        validator_id: [u8; 32],
+        /// Total stake from all delegators
+        total_stake: u64,
+        /// Commission rate (basis points)
+        commission_bps: u16,
+        /// Is validator active in consensus
+        is_active: bool,
+        /// Slash count
+        slash_count: u32,
+    },
+
+    // ========== System State ==========
+    /// Update system parameter
+    SystemParamUpdate {
+        /// Parameter key
+        key: [u8; 32],
+        /// New value
+        value: Vec<u8>,
+    },
+    /// Nonce increment (prevents replay)
+    NonceIncrement {
+        account: [u8; 32],
+        new_nonce: u64,
+    },
+    /// State root checkpoint
+    StateRootCheckpoint {
+        height: u64,
+        /// Merkle Patricia Trie root
+        state_root: [u8; 32],
+        /// Hash of all transactions in this checkpoint
+        tx_root: [u8; 32],
+    },
+}
+
+impl StateChange {
+    /// Get the primary key affected by this state change
+    /// Used for indexing and conflict detection
+    pub fn primary_key(&self) -> Vec<u8> {
+        match self {
+            StateChange::BalanceCredit { account, token, .. } |
+            StateChange::BalanceDebit { account, token, .. } => {
+                let mut key = Vec::with_capacity(65);
+                key.push(0x01); // Balance prefix
+                key.extend_from_slice(account);
+                key.extend_from_slice(token);
+                key
+            }
+            StateChange::TokenCreate { token_address, .. } |
+            StateChange::TokenMetadataUpdate { token_address, .. } |
+            StateChange::TokenAuthorityTransfer { token_address, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x02); // Token prefix
+                key.extend_from_slice(token_address);
+                key
+            }
+            StateChange::TokenAccountFreeze { token_address, account, .. } => {
+                let mut key = Vec::with_capacity(65);
+                key.push(0x03); // Token account prefix
+                key.extend_from_slice(token_address);
+                key.extend_from_slice(account);
+                key
+            }
+            StateChange::PoolCreate { pool_id, .. } |
+            StateChange::PoolReservesUpdate { pool_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x10); // Pool prefix
+                key.extend_from_slice(pool_id);
+                key
+            }
+            StateChange::LPTokenCredit { pool_id, account, .. } |
+            StateChange::LPTokenDebit { pool_id, account, .. } => {
+                let mut key = Vec::with_capacity(65);
+                key.push(0x11); // LP token prefix
+                key.extend_from_slice(pool_id);
+                key.extend_from_slice(account);
+                key
+            }
+            StateChange::ContractDeploy { contract_address, .. } |
+            StateChange::ContractDestroy { contract_address, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x20); // Contract prefix
+                key.extend_from_slice(contract_address);
+                key
+            }
+            StateChange::ContractStorageUpdate { contract_address, key: slot, .. } => {
+                let mut k = Vec::with_capacity(65);
+                k.push(0x21); // Contract storage prefix
+                k.extend_from_slice(contract_address);
+                k.extend_from_slice(slot);
+                k
+            }
+            StateChange::VaultUpdate { vault_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x30); // Vault prefix
+                key.extend_from_slice(vault_id);
+                key
+            }
+            StateChange::OraclePriceUpdate { feed_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x31); // Oracle prefix
+                key.extend_from_slice(feed_id);
+                key
+            }
+            StateChange::AICreditsUpdate { account, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x40); // AI credits prefix
+                key.extend_from_slice(account);
+                key
+            }
+            StateChange::AIProviderUpdate { provider_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x41); // AI provider prefix
+                key.extend_from_slice(provider_id);
+                key
+            }
+            StateChange::ProposalCreate { proposal_id, .. } |
+            StateChange::ProposalVoteUpdate { proposal_id, .. } |
+            StateChange::ProposalStatusUpdate { proposal_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x50); // Proposal prefix
+                key.extend_from_slice(proposal_id);
+                key
+            }
+            StateChange::DelegationUpdate { delegator, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x51); // Delegation prefix
+                key.extend_from_slice(delegator);
+                key
+            }
+            StateChange::StakeUpdate { staker, validator, .. } => {
+                let mut key = Vec::with_capacity(65);
+                key.push(0x60); // Stake prefix
+                key.extend_from_slice(staker);
+                key.extend_from_slice(validator);
+                key
+            }
+            StateChange::ValidatorUpdate { validator_id, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0x61); // Validator prefix
+                key.extend_from_slice(validator_id);
+                key
+            }
+            StateChange::SystemParamUpdate { key, .. } => {
+                let mut k = Vec::with_capacity(33);
+                k.push(0xF0); // System param prefix
+                k.extend_from_slice(key);
+                k
+            }
+            StateChange::NonceIncrement { account, .. } => {
+                let mut key = Vec::with_capacity(33);
+                key.push(0xF1); // Nonce prefix
+                key.extend_from_slice(account);
+                key
+            }
+            StateChange::StateRootCheckpoint { height, .. } => {
+                let mut key = Vec::with_capacity(9);
+                key.push(0xFE); // Checkpoint prefix
+                key.extend_from_slice(&height.to_be_bytes());
+                key
+            }
+        }
+    }
+
+    /// Get the category of this state change for routing to appropriate storage
+    pub fn category(&self) -> StateChangeCategory {
+        match self {
+            StateChange::BalanceCredit { .. } | StateChange::BalanceDebit { .. } => {
+                StateChangeCategory::Balance
+            }
+            StateChange::TokenCreate { .. } |
+            StateChange::TokenMetadataUpdate { .. } |
+            StateChange::TokenAuthorityTransfer { .. } |
+            StateChange::TokenAccountFreeze { .. } => {
+                StateChangeCategory::Token
+            }
+            StateChange::PoolCreate { .. } |
+            StateChange::PoolReservesUpdate { .. } |
+            StateChange::LPTokenCredit { .. } |
+            StateChange::LPTokenDebit { .. } => {
+                StateChangeCategory::Dex
+            }
+            StateChange::ContractDeploy { .. } |
+            StateChange::ContractStorageUpdate { .. } |
+            StateChange::ContractDestroy { .. } => {
+                StateChangeCategory::Contract
+            }
+            StateChange::VaultUpdate { .. } | StateChange::OraclePriceUpdate { .. } => {
+                StateChangeCategory::Vault
+            }
+            StateChange::AICreditsUpdate { .. } | StateChange::AIProviderUpdate { .. } => {
+                StateChangeCategory::AI
+            }
+            StateChange::ProposalCreate { .. } |
+            StateChange::ProposalVoteUpdate { .. } |
+            StateChange::ProposalStatusUpdate { .. } |
+            StateChange::DelegationUpdate { .. } => {
+                StateChangeCategory::Governance
+            }
+            StateChange::StakeUpdate { .. } | StateChange::ValidatorUpdate { .. } => {
+                StateChangeCategory::Staking
+            }
+            StateChange::SystemParamUpdate { .. } |
+            StateChange::NonceIncrement { .. } |
+            StateChange::StateRootCheckpoint { .. } => {
+                StateChangeCategory::System
+            }
+        }
+    }
+}
+
+/// Category of state changes for routing to storage column families
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StateChangeCategory {
+    Balance,
+    Token,
+    Dex,
+    Contract,
+    Vault,
+    AI,
+    Governance,
+    Staking,
+    System,
+}
+
+impl StateChangeCategory {
+    /// Get the RocksDB column family name for this category
+    pub fn column_family(&self) -> &'static str {
+        match self {
+            StateChangeCategory::Balance => "cf_balances",
+            StateChangeCategory::Token => "cf_tokens",
+            StateChangeCategory::Dex => "cf_dex",
+            StateChangeCategory::Contract => "cf_contracts",
+            StateChangeCategory::Vault => "cf_vaults",
+            StateChangeCategory::AI => "cf_ai",
+            StateChangeCategory::Governance => "cf_governance",
+            StateChangeCategory::Staking => "cf_staking",
+            StateChangeCategory::System => "cf_system",
+        }
+    }
+}
+
 /// Hash256 type for general cryptographic hashing
 pub type Hash256 = [u8; 32];
 
@@ -209,6 +1224,7 @@ pub type Hash256 = [u8; 32];
 pub type FixedPoint28 = i64;
 
 /// Transaction structure
+/// v1.0.60-beta: Extended with tx_type field for comprehensive state sync
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: TxHash,
@@ -224,6 +1240,10 @@ pub struct Transaction {
     pub token_type: TokenType, // QUG or QUGUSD
     #[serde(default = "default_fee_token_type")]
     pub fee_token_type: TokenType, // Token used to pay fees (default: QUGUSD)
+    /// v1.0.60-beta: Transaction type for state sync processing
+    /// Determines how this transaction affects global state
+    #[serde(default = "default_tx_type")]
+    pub tx_type: TransactionType,
 }
 
 /// Default token type for backwards compatibility
@@ -234,6 +1254,12 @@ fn default_token_type() -> TokenType {
 /// Default fee token type
 fn default_fee_token_type() -> TokenType {
     TokenType::QUGUSD
+}
+
+/// Default transaction type for backwards compatibility
+/// Infers type from transaction fields for legacy transactions
+fn default_tx_type() -> TransactionType {
+    TransactionType::Transfer
 }
 
 /// DAG vertex (Narwhal block)
@@ -463,6 +1489,411 @@ impl Transaction {
         hasher.update(&encoded);
         hasher.finalize().into()
     }
+
+    /// v1.0.60-beta: Check if this is a coinbase (mining reward) transaction
+    /// Coinbase transactions have from == [0u8; 32] (zero address)
+    pub fn is_coinbase(&self) -> bool {
+        self.from == [0u8; 32]
+    }
+
+    /// v1.0.60-beta: Infer the effective transaction type
+    /// For legacy transactions without explicit tx_type, infers from fields
+    pub fn effective_tx_type(&self) -> TransactionType {
+        // If tx_type is explicitly set to something other than default, use it
+        if self.tx_type != TransactionType::Transfer {
+            return self.tx_type;
+        }
+
+        // Infer type from transaction fields for backwards compatibility
+        if self.is_coinbase() {
+            TransactionType::Coinbase
+        } else if !self.data.is_empty() {
+            // Has data payload - could be contract call or other operation
+            // Check first byte of data for operation hint
+            if self.data.len() > 0 {
+                match self.data[0] {
+                    // First byte can indicate operation type
+                    0x20..=0x2F => TransactionType::Swap, // DEX operation range
+                    0x30..=0x3F => TransactionType::ContractCall, // Contract range
+                    0x40..=0x4F => TransactionType::VaultLock, // Vault range
+                    _ => TransactionType::Transfer, // Default with data
+                }
+            } else {
+                TransactionType::Transfer
+            }
+        } else {
+            TransactionType::Transfer
+        }
+    }
+
+    /// v1.0.60-beta: Calculate gas cost for this transaction
+    /// Base gas * type multiplier + data size overhead
+    pub fn gas_cost(&self, base_gas: u64) -> u64 {
+        let type_multiplier = self.effective_tx_type().gas_multiplier();
+        let data_gas = (self.data.len() as u64) * 16; // 16 gas per data byte
+        base_gas * type_multiplier + data_gas
+    }
+
+    /// v1.0.60-beta: Validate transaction type matches its fields
+    /// Returns error message if type doesn't match expected fields
+    pub fn validate_tx_type(&self) -> Result<(), String> {
+        match self.tx_type {
+            TransactionType::Coinbase => {
+                if self.from != [0u8; 32] {
+                    return Err("Coinbase tx must have zero 'from' address".to_string());
+                }
+                if self.fee != 0 {
+                    return Err("Coinbase tx must have zero fee".to_string());
+                }
+            }
+            TransactionType::TokenCreate | TransactionType::PoolCreate => {
+                if self.data.is_empty() {
+                    return Err(format!("{} tx requires data payload", self.tx_type.name()));
+                }
+            }
+            TransactionType::ContractDeploy => {
+                if self.data.is_empty() {
+                    return Err("Contract deploy requires bytecode in data".to_string());
+                }
+                if self.to != [0u8; 32] {
+                    return Err("Contract deploy must have zero 'to' address".to_string());
+                }
+            }
+            TransactionType::ContractCall => {
+                if self.data.is_empty() {
+                    return Err("Contract call requires data payload".to_string());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// v1.4.5-beta: Validate transaction fee meets minimum requirements
+    ///
+    /// This prevents:
+    /// - Zero-fee spam/griefing attacks
+    /// - Accidental overpayment (max fee check)
+    /// - Insufficient gas coverage for complex operations
+    ///
+    /// # Exempt Transactions
+    /// - Coinbase (mining rewards)
+    /// - Genesis transactions
+    /// - System parameter updates
+    pub fn validate_fee(&self) -> Result<(), String> {
+        // Coinbase and system transactions are exempt from fee validation
+        if self.is_coinbase() || self.tx_type.is_system_operation() {
+            return Ok(());
+        }
+
+        // Calculate minimum required fee based on transaction type
+        let gas_units = BASE_GAS.saturating_mul(self.tx_type.gas_multiplier());
+        let min_required_fee = gas_units.saturating_mul(MIN_FEE_PER_GAS);
+
+        // Check minimum fee requirement
+        if self.fee < min_required_fee {
+            return Err(format!(
+                "Insufficient fee: {} provided, minimum {} required ({}x gas multiplier for {:?})",
+                self.fee, min_required_fee, self.tx_type.gas_multiplier(), self.tx_type
+            ));
+        }
+
+        // Check maximum fee (prevent accidental overpayment)
+        if self.fee > MAX_TRANSACTION_FEE {
+            return Err(format!(
+                "Fee too high: {} exceeds maximum {}. This is likely a mistake.",
+                self.fee, MAX_TRANSACTION_FEE
+            ));
+        }
+
+        // Ensure fee doesn't exceed amount for non-contract transactions
+        // (to prevent dust attacks where fee > amount)
+        if !matches!(self.tx_type, TransactionType::ContractCall | TransactionType::ContractDeploy) {
+            if self.amount > 0 && self.fee > self.amount {
+                // Allow if it's a small transfer where min fee > amount
+                if self.fee > min_required_fee * 10 {
+                    return Err(format!(
+                        "Fee ({}) significantly exceeds transfer amount ({}). Possible dust attack.",
+                        self.fee, self.amount
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// v1.4.5-beta: Validate founder wallet withdrawal restrictions
+    ///
+    /// Protections:
+    /// - Maximum single withdrawal amount
+    /// - Vesting period (no withdrawals before block 200,000)
+    /// - Requires explicit unlock (not just signature)
+    ///
+    /// Note: Timelock and cooldown tracking requires storage state and must be
+    /// validated at the application layer (handlers.rs), not here.
+    pub fn validate_founder_withdrawal(&self, current_block_height: u64) -> Result<(), String> {
+        // Only applies to transfers FROM the founder wallet
+        if self.from != FOUNDER_WALLET {
+            return Ok(());
+        }
+
+        // Check vesting period
+        if current_block_height < FOUNDER_VESTING_END_HEIGHT {
+            return Err(format!(
+                "Founder wallet is vested until block {}. Current: {}. {} blocks remaining.",
+                FOUNDER_VESTING_END_HEIGHT,
+                current_block_height,
+                FOUNDER_VESTING_END_HEIGHT.saturating_sub(current_block_height)
+            ));
+        }
+
+        // Check maximum withdrawal amount
+        if self.amount > FOUNDER_MAX_SINGLE_WITHDRAWAL {
+            return Err(format!(
+                "Withdrawal amount {} exceeds maximum {} per transaction. \
+                This protects against catastrophic loss.",
+                self.amount, FOUNDER_MAX_SINGLE_WITHDRAWAL
+            ));
+        }
+
+        // Timelock and cooldown validation requires storage state
+        // and must be done at application layer
+
+        Ok(())
+    }
+
+    /// Check if this transaction is from the founder wallet
+    pub fn is_from_founder_wallet(&self) -> bool {
+        self.from == FOUNDER_WALLET
+    }
+
+    /// v1.2.0-beta Phase 3: Get the payload that should be signed
+    /// SHA3-256(from || to || amount || fee || nonce || timestamp_ms || data || token_type || fee_token_type || tx_type)
+    pub fn signing_payload(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(&self.from);
+        hasher.update(&self.to);
+        hasher.update(&self.amount.to_le_bytes());
+        hasher.update(&self.fee.to_le_bytes());
+        hasher.update(&self.nonce.to_le_bytes());
+        hasher.update(&self.timestamp.timestamp_millis().to_le_bytes());
+        hasher.update(&self.data);
+        hasher.update(&[self.token_type as u8]);
+        hasher.update(&[self.fee_token_type as u8]);
+        hasher.update(&[self.tx_type.as_byte()]);
+        hasher.finalize().into()
+    }
+
+    /// v1.2.0-beta Phase 3: Verify the transaction signature
+    /// Returns Ok(()) if signature is valid, Err with reason otherwise
+    ///
+    /// # Security Note
+    /// Coinbase transactions (from == [0u8; 32]) do not require user signatures
+    /// as they are created by block producers and signed at the block level.
+    ///
+    /// # Signature Format
+    /// Existing transactions sign the tx_hash (32 bytes).
+    /// The public key is derived from the 'data' field if present (first 32 bytes),
+    /// otherwise the 'from' field is used directly as the public key.
+    pub fn verify_signature(&self) -> Result<(), String> {
+        // Coinbase transactions are exempt - they're signed at block level
+        if self.is_coinbase() {
+            return Ok(());
+        }
+
+        // Phase 3: Signature is MANDATORY for all non-coinbase transactions
+        if self.signature.is_empty() {
+            return Err("Transaction signature is missing (Phase 3 requires all transactions to be signed)".to_string());
+        }
+
+        // Ed25519 signature verification
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+        // Extract public key - check if stored in data field (first 32 bytes)
+        // or fall back to using 'from' as the public key
+        let public_key_bytes: [u8; 32] = if self.data.len() >= 32 {
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&self.data[..32]);
+            pk
+        } else {
+            self.from
+        };
+
+        let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
+            .map_err(|e| format!("Invalid public key: {}", e))?;
+
+        // Ed25519 signatures are 64 bytes
+        if self.signature.len() != 64 {
+            return Err(format!(
+                "Invalid signature length: expected 64 bytes, got {}",
+                self.signature.len()
+            ));
+        }
+
+        let signature_bytes: [u8; 64] = self.signature.clone().try_into()
+            .map_err(|_| "Failed to convert signature to fixed-size array")?;
+
+        let signature = Signature::from_bytes(&signature_bytes);
+
+        // Use tx_hash as message (matches existing signing in send_transaction)
+        let tx_hash = self.hash();
+
+        verifying_key.verify(&tx_hash, &signature)
+            .map_err(|e| format!("Signature verification failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// v1.2.0-beta Phase 3: Check if transaction has a valid signature
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty() && self.signature.len() == 64
+    }
+
+    /// v1.2.0-beta Phase 3: Sign this transaction with an Ed25519 secret key
+    #[cfg(feature = "signing")]
+    pub fn sign(&mut self, secret_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+        let payload = self.signing_payload();
+        let signature = secret_key.sign(&payload);
+        self.signature = signature.to_bytes().to_vec();
+    }
+
+    // =========================================================================
+    // v1.2.0-beta Phase 3 Step 6: Coinbase Transaction Security
+    // =========================================================================
+
+    /// Sign this coinbase transaction with the block producer's key
+    ///
+    /// # Format
+    /// The signature field will contain:
+    /// - Bytes 0-3: Magic marker [0xC0, 0x1B, 0xA5, 0xE6] ("COINBASE" + version)
+    /// - Bytes 4-35: Producer public key (32 bytes)
+    /// - Bytes 36-99: Ed25519 signature (64 bytes)
+    ///
+    /// Total: 100 bytes
+    pub fn sign_as_coinbase(&mut self, signing_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+
+        // Compute signing payload (same as regular tx signing)
+        let payload = self.signing_payload();
+
+        // Sign with producer key
+        let signature = signing_key.sign(&payload);
+        let public_key = signing_key.verifying_key();
+
+        // Pack: magic (4) + public_key (32) + signature (64) = 100 bytes
+        let mut sig_bytes = Vec::with_capacity(100);
+        sig_bytes.extend_from_slice(&[0xC0, 0x1B, 0xA5, 0xE6]); // Magic v2 marker
+        sig_bytes.extend_from_slice(&public_key.to_bytes());
+        sig_bytes.extend_from_slice(&signature.to_bytes());
+
+        self.signature = sig_bytes;
+    }
+
+    /// Verify the producer signature on a coinbase transaction
+    ///
+    /// Returns Ok(producer_public_key) if valid, Err with reason otherwise
+    pub fn verify_coinbase_signature(&self) -> Result<[u8; 32], String> {
+        // Must be a coinbase transaction
+        if !self.is_coinbase() {
+            return Err("Not a coinbase transaction".to_string());
+        }
+
+        // Check for legacy marker (4 bytes) - backward compatible, no verification needed
+        if self.signature.len() == 4 && self.signature == [0xC0, 0x1B, 0xA5, 0xE] {
+            return Err("Legacy coinbase (no producer signature)".to_string());
+        }
+
+        // Phase 3 format: magic (4) + public_key (32) + signature (64) = 100 bytes
+        if self.signature.len() != 100 {
+            return Err(format!(
+                "Invalid coinbase signature length: expected 100 bytes, got {}",
+                self.signature.len()
+            ));
+        }
+
+        // Verify magic marker
+        if &self.signature[0..4] != &[0xC0, 0x1B, 0xA5, 0xE6] {
+            return Err("Invalid coinbase signature magic marker".to_string());
+        }
+
+        // Extract public key and signature
+        let mut producer_key_bytes = [0u8; 32];
+        producer_key_bytes.copy_from_slice(&self.signature[4..36]);
+
+        let mut signature_bytes = [0u8; 64];
+        signature_bytes.copy_from_slice(&self.signature[36..100]);
+
+        // Verify signature
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+        let verifying_key = VerifyingKey::from_bytes(&producer_key_bytes)
+            .map_err(|e| format!("Invalid producer public key: {}", e))?;
+
+        let signature = Signature::from_bytes(&signature_bytes);
+        let payload = self.signing_payload();
+
+        verifying_key.verify(&payload, &signature)
+            .map_err(|e| format!("Coinbase signature verification failed: {}", e))?;
+
+        Ok(producer_key_bytes)
+    }
+
+    /// Check if this coinbase transaction has a Phase 3 producer signature
+    pub fn has_producer_signature(&self) -> bool {
+        self.is_coinbase() &&
+        self.signature.len() == 100 &&
+        &self.signature[0..4] == &[0xC0, 0x1B, 0xA5, 0xE6]
+    }
+
+    /// Validate coinbase transaction amount against emission schedule
+    ///
+    /// # Arguments
+    /// * `block_height` - The height of the block containing this coinbase
+    /// * `is_dev_fee` - Whether this is the 1% development fee transaction
+    ///
+    /// # Returns
+    /// * `Ok(())` if amount is valid
+    /// * `Err(reason)` if amount violates emission rules
+    pub fn validate_coinbase_amount(
+        &self,
+        block_height: u64,
+        is_dev_fee: bool,
+    ) -> Result<(), String> {
+        const ADAPTIVE_ACTIVATION_HEIGHT: u64 = 200_000;
+        const LEGACY_FIXED_REWARD: u64 = 5_000_000; // 0.05 QUG
+        const DEV_FEE_PERCENT: f64 = 0.01;
+
+        // Maximum allowed reward (with some tolerance for floating point)
+        let max_reward = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
+            LEGACY_FIXED_REWARD
+        } else {
+            // Adaptive phase: max ~0.1 QUG per block at start
+            10_000_000u64
+        };
+
+        if is_dev_fee {
+            // Dev fee should be ~1% of max reward
+            let max_dev_fee = (max_reward as f64 * DEV_FEE_PERCENT * 1.1) as u64; // 10% tolerance
+            if self.amount > max_dev_fee {
+                return Err(format!(
+                    "Dev fee too high: {} > max {}",
+                    self.amount, max_dev_fee
+                ));
+            }
+        } else {
+            // Miner reward (99% split)
+            if self.amount > max_reward {
+                return Err(format!(
+                    "Miner reward too high: {} > max {}",
+                    self.amount, max_reward
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Vertex {
@@ -540,13 +1971,14 @@ impl PhaseSignature {
     }
 
     /// Get signature size for this phase
+    /// Note: Phase2+ now use SQIsign (204 bytes) instead of Dilithium5 (4,627 bytes)
     pub fn signature_size(&self) -> usize {
         match self.phase {
             Phase::Phase0 => 64,       // Ed25519: 64 bytes
             Phase::Phase1 => 4627,     // Dilithium5: ~4,627 bytes
-            Phase::Phase2 => 4627,     // Dilithium5 (with QRNG)
-            Phase::Phase3 => 4627,     // Dilithium5 (with STARK)
-            Phase::Phase4 => 4627,     // Dilithium5 (with QKD)
+            Phase::Phase2 => 204,      // SQIsign: 204 bytes (was Dilithium5)
+            Phase::Phase3 => 204,      // SQIsign: 204 bytes (was Dilithium5)
+            Phase::Phase4 => 204,      // SQIsign: 204 bytes (was Dilithium5)
         }
     }
 
@@ -771,7 +2203,51 @@ pub enum NetworkId {
     #[serde(rename = "testnet-phase12")]
     TestnetPhase12,
 
-    /// Mainnet (Launch: TBD - After Phase 12 testing complete)
+    /// Phase 13: Gap-Proof Sync (v1.1.0-beta) - December 2025 (DEPRECATED)
+    /// - Fresh database (data-mine13)
+    /// - ✅ CRITICAL FIX: Gap detection finds FIRST gap, not highest block
+    /// - ✅ CRITICAL FIX: Post-write verification prevents pointer drift
+    /// - ✅ CRITICAL FIX: Single-writer lock for turbo sync batches
+    /// - ✅ CRITICAL FIX: Stranded block detection and warning
+    /// - ✅ Stability milestone: Gap-proof blockchain synchronization
+    #[serde(rename = "testnet-phase13")]
+    TestnetPhase13,
+
+    /// Phase 14: Database Durability & P2P Security (v1.1.9-beta) - December 2025 (DEPRECATED)
+    /// - Fresh database (data-mine14)
+    /// - ✅ CRITICAL FIX: Global write lock across all block write paths
+    /// - ✅ CRITICAL FIX: WAL flush before pointer updates (crash safety)
+    /// - ✅ CRITICAL FIX: Pointer verification on every read
+    /// - ✅ CRITICAL FIX: Periodic cache verification against database
+    /// - ✅ SECURITY: P2P balance update deduplication via LRU cache
+    /// - ✅ SECURITY: Mandatory signature validation for balance updates
+    /// - ✅ Stability milestone: Zero database corruption under any load
+    #[serde(rename = "testnet-phase14")]
+    TestnetPhase14,
+
+    /// Phase 15: Safe Batched Sync & Genesis Checkpoint (v1.1.22-beta) - December 2025
+    /// - Fresh database (data-mine15)
+    /// - ✅ CRITICAL FIX: Sync only from ACTUALLY CONNECTED peers (connected_peers())
+    /// - ✅ CRITICAL FIX: Genesis checkpoint validation prevents chain forks
+    /// - ✅ CRITICAL FIX: Peer genesis hash verification in handshake
+    /// - ✅ CRITICAL FIX: Block chain ancestry validation during sync
+    /// - ✅ NETWORK: Proper peer selection for reliable block requests
+    /// - ✅ STABILITY: Fork-proof network synchronization
+    #[serde(rename = "testnet-phase15")]
+    TestnetPhase15,
+
+    /// Phase 16: P2P Sync Priority Fix & DAG-Knight Stability (v1.3.1-beta) - December 2025
+    /// - Fresh database (data-mine16)
+    /// - ✅ CRITICAL FIX: Biased tokio::select! for P2P response priority
+    /// - ✅ CRITICAL FIX: Block pack responses processed before swarm events
+    /// - ✅ CRITICAL FIX: Prevents ResponseOmission timeouts and peer blacklisting
+    /// - ✅ SHA3-256: NIST FIPS 202 quantum-resistant block verification
+    /// - ✅ PEER REPUTATION: Automatic 24-hour banning for malicious peers
+    /// - ✅ LRU CACHE: 10,000-entry block verification cache
+    #[serde(rename = "testnet-phase16")]
+    TestnetPhase16,
+
+    /// Mainnet (Launch: TBD - After Phase 16 testing complete)
     Mainnet,
 }
 
@@ -786,7 +2262,11 @@ impl NetworkId {
             NetworkId::TestnetPhase9 => "testnet-phase9",
             NetworkId::TestnetPhase10 => "testnet-phase10",
             NetworkId::TestnetPhase11 => "testnet-phase11",
-            NetworkId::TestnetPhase12 => "testnet-phase12", // ✅ Phase 12 added
+            NetworkId::TestnetPhase12 => "testnet-phase12",
+            NetworkId::TestnetPhase13 => "testnet-phase13", // ✅ Phase 13: Gap-Proof Sync (DEPRECATED)
+            NetworkId::TestnetPhase14 => "testnet-phase14", // ✅ Phase 14: Database Durability & P2P Security (DEPRECATED)
+            NetworkId::TestnetPhase15 => "testnet-phase15", // ✅ Phase 15: Safe Batched Sync & Genesis Checkpoint (DEPRECATED)
+            NetworkId::TestnetPhase16 => "testnet-phase16", // ✅ Phase 16: P2P Sync Priority Fix & DAG-Knight Stability
             NetworkId::Mainnet => "mainnet",
         }
     }
@@ -801,7 +2281,11 @@ impl NetworkId {
             NetworkId::TestnetPhase9 => "Q-NarwhalKnight Testnet Phase 9 (Deprecated - Pre-Durability Fixes)",
             NetworkId::TestnetPhase10 => "Q-NarwhalKnight Testnet Phase 10 (Deprecated - Pre-Data-Loss-Fix)",
             NetworkId::TestnetPhase11 => "Q-NarwhalKnight Testnet Phase 11 (Deprecated - Pre-PQC)",
-            NetworkId::TestnetPhase12 => "Q-NarwhalKnight Testnet Phase 12 - Post-Quantum Security (v1.0.12-beta)", // ✅ Phase 12 added
+            NetworkId::TestnetPhase12 => "Q-NarwhalKnight Testnet Phase 12 (Deprecated - Pre-Gap-Proof)",
+            NetworkId::TestnetPhase13 => "Q-NarwhalKnight Testnet Phase 13 (Deprecated - Pre-Durability)",
+            NetworkId::TestnetPhase14 => "Q-NarwhalKnight Testnet Phase 14 (Deprecated - Pre-Safe-Sync)",
+            NetworkId::TestnetPhase15 => "Q-NarwhalKnight Testnet Phase 15 - Safe Batched Sync & Genesis Checkpoint (DEPRECATED)", // ✅ Phase 15 (DEPRECATED)
+            NetworkId::TestnetPhase16 => "Q-NarwhalKnight Testnet Phase 16 - P2P Sync Priority Fix & DAG-Knight Stability (v1.3.1-beta)", // ✅ Phase 16 - CURRENT
             NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
         }
     }
@@ -816,7 +2300,11 @@ impl NetworkId {
             NetworkId::TestnetPhase9 => 8080,
             NetworkId::TestnetPhase10 => 8080,
             NetworkId::TestnetPhase11 => 8080,
-            NetworkId::TestnetPhase12 => 8080, // ✅ Phase 12 added
+            NetworkId::TestnetPhase12 => 8080,
+            NetworkId::TestnetPhase13 => 8080,
+            NetworkId::TestnetPhase14 => 8080,
+            NetworkId::TestnetPhase15 => 8080, // ✅ Phase 15: Safe Batched Sync & Genesis Checkpoint (DEPRECATED)
+            NetworkId::TestnetPhase16 => 8080, // ✅ Phase 16: P2P Sync Priority Fix & DAG-Knight Stability
             NetworkId::Mainnet => 8081,
         }
     }
@@ -831,7 +2319,11 @@ impl NetworkId {
             NetworkId::TestnetPhase9 => 9001,
             NetworkId::TestnetPhase10 => 9001,
             NetworkId::TestnetPhase11 => 9001,
-            NetworkId::TestnetPhase12 => 9001, // ✅ Phase 12 added
+            NetworkId::TestnetPhase12 => 9001,
+            NetworkId::TestnetPhase13 => 9001,
+            NetworkId::TestnetPhase14 => 9001,
+            NetworkId::TestnetPhase15 => 9001, // ✅ Phase 15: Safe Batched Sync & Genesis Checkpoint (DEPRECATED)
+            NetworkId::TestnetPhase16 => 9001, // ✅ Phase 16: P2P Sync Priority Fix & DAG-Knight Stability
             NetworkId::Mainnet => 9002,
         }
     }
@@ -893,6 +2385,77 @@ impl NetworkId {
     pub fn block_pack_responses_topic(&self) -> String {
         format!("{}/block-pack-responses", self.gossipsub_topic_prefix())
     }
+
+    /// Get the DEX pools gossipsub topic for this network
+    /// ✅ v1.0.90-beta: Real-time DEX pool state synchronization
+    /// Nodes publish pool updates (create, add_liquidity, remove_liquidity) on this topic
+    pub fn dex_pools_topic(&self) -> String {
+        format!("{}/dex-pools", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the contract deployments gossipsub topic for this network
+    /// ✅ v1.0.90-beta: Smart contract code and state synchronization
+    /// Nodes publish contract deployments and upgrades on this topic
+    pub fn contract_deployments_topic(&self) -> String {
+        format!("{}/contract-deployments", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the AI credits gossipsub topic for this network
+    /// ✅ v1.0.90-beta: AI inference credit transactions synchronization
+    /// Nodes publish AI credit purchases, usage, and transfers on this topic
+    pub fn ai_credits_topic(&self) -> String {
+        format!("{}/ai-credits", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the balance updates gossipsub topic for this network
+    /// ✅ v1.1.8-beta: P2P balance synchronization for decentralized mining
+    /// Nodes publish mining rewards and balance updates on this topic
+    /// This enables mining to localhost while syncing balances across all nodes
+    pub fn balance_updates_topic(&self) -> String {
+        format!("{}/balance-updates", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the miner stats gossipsub topic for this network
+    /// ✅ v1.1.8-beta: P2P hashrate aggregation for network-wide mining statistics
+    /// Nodes publish their miner statistics (hashrate, solutions) on this topic
+    pub fn miner_stats_topic(&self) -> String {
+        format!("{}/miner-stats", self.gossipsub_topic_prefix())
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 🔐 v1.3.12-beta: DAG-KNIGHT DECENTRALIZED CONSENSUS TOPICS
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// Get the vertex broadcast topic for DAG-Knight consensus
+    /// Validators broadcast new vertices (containing transactions) on this topic
+    /// Other validators receive and sign vertices with their SQIsign keys
+    pub fn vertex_broadcast_topic(&self) -> String {
+        format!("{}/consensus/vertices", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the signature request topic for collecting 2f+1 signatures
+    /// When a validator creates a vertex, they request signatures from others
+    pub fn signature_request_topic(&self) -> String {
+        format!("{}/consensus/sig-requests", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the signature response topic for returning SQIsign signatures
+    /// Validators respond with their SQIsign signatures over vertices
+    pub fn signature_response_topic(&self) -> String {
+        format!("{}/consensus/sig-responses", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the certificate broadcast topic for finalized certificates
+    /// Once 2f+1 signatures are collected, the certificate is broadcast
+    pub fn certificate_topic(&self) -> String {
+        format!("{}/consensus/certificates", self.gossipsub_topic_prefix())
+    }
+
+    /// Get the validator registry topic for announcing validators
+    /// Validators announce their SQIsign public keys on this topic
+    pub fn validator_announce_topic(&self) -> String {
+        format!("{}/consensus/validators", self.gossipsub_topic_prefix())
+    }
 }
 
 impl std::str::FromStr for NetworkId {
@@ -907,7 +2470,11 @@ impl std::str::FromStr for NetworkId {
             "testnet-phase9" => Ok(NetworkId::TestnetPhase9),
             "testnet-phase10" => Ok(NetworkId::TestnetPhase10),
             "testnet-phase11" => Ok(NetworkId::TestnetPhase11),
-            "testnet-phase12" => Ok(NetworkId::TestnetPhase12), // ✅ CRITICAL: Bug #1 fix - Phase 12 parser added
+            "testnet-phase12" => Ok(NetworkId::TestnetPhase12),
+            "testnet-phase13" => Ok(NetworkId::TestnetPhase13),
+            "testnet-phase14" => Ok(NetworkId::TestnetPhase14),
+            "testnet-phase15" => Ok(NetworkId::TestnetPhase15), // ✅ Phase 15 parser (DEPRECATED)
+            "testnet-phase16" => Ok(NetworkId::TestnetPhase16), // ✅ CRITICAL: Phase 16 parser added (Bug #1 fix)
             "mainnet" => Ok(NetworkId::Mainnet),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
@@ -916,8 +2483,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        // ✅ v1.0.12-beta: Default to Phase 12 (Post-Quantum Security - 0.05 QUG/block)
-        NetworkId::TestnetPhase12
+        // ✅ v1.3.1-beta: Default to Phase 16 (P2P Sync Priority Fix & DAG-Knight Stability)
+        NetworkId::TestnetPhase16
     }
 }
 
@@ -953,9 +2520,9 @@ impl NetworkConfig {
     /// Create testnet configuration
     pub fn testnet() -> Self {
         Self {
-            // ✅ v1.0.12-beta: Phase 12 - Post-Quantum Security (0.05 QUG/block)
-            // ✅ CRITICAL: Bug #3 fix - NetworkConfig updated to Phase 12
-            network_id: NetworkId::TestnetPhase12,
+            // ✅ v1.3.1-beta: Phase 16 - P2P Sync Priority Fix & DAG-Knight Stability (fresh database: data-mine16)
+            // ✅ CRITICAL: NetworkConfig updated to Phase 16 (Bug #3 fix)
+            network_id: NetworkId::TestnetPhase16,
             genesis_hash: [
                 // Testnet genesis hash (October 2025)
                 0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
@@ -1021,7 +2588,11 @@ impl NetworkConfig {
             NetworkId::TestnetPhase9 => Self::testnet(),  // Phase 9 (Deprecated - Pre-Durability Fixes)
             NetworkId::TestnetPhase10 => Self::testnet(), // Phase 10 (Deprecated - Pre-Data-Loss-Fix)
             NetworkId::TestnetPhase11 => Self::testnet(), // Phase 11 (Deprecated - Pre-PQC)
-            NetworkId::TestnetPhase12 => Self::testnet(), // ✅ Phase 12 (Post-Quantum Security - v1.0.12-beta)
+            NetworkId::TestnetPhase12 => Self::testnet(), // Phase 12 (Deprecated - Pre-Gap-Proof)
+            NetworkId::TestnetPhase13 => Self::testnet(), // Phase 13 (Deprecated - Pre-Durability)
+            NetworkId::TestnetPhase14 => Self::testnet(), // Phase 14 (Deprecated - Pre-Safe-Sync)
+            NetworkId::TestnetPhase15 => Self::testnet(), // Phase 15 (DEPRECATED)
+            NetworkId::TestnetPhase16 => Self::testnet(), // ✅ Phase 16 (P2P Sync Priority Fix & DAG-Knight Stability - v1.3.1-beta)
             NetworkId::Mainnet => Self::mainnet(),
         }
     }
@@ -1220,6 +2791,35 @@ pub trait BlockRangeFetcher: Send {
         start_height: u64,
         end_height: u64,
     ) -> anyhow::Result<Vec<QBlock>>;
+}
+
+// ============================================
+// v0.6.2-beta: Mining Rewards History & Worker Stats
+// ============================================
+
+/// Mining reward record for persistent storage
+/// Stores detailed information about each mining reward for historical queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningRewardRecord {
+    pub miner_address: String,
+    pub reward_qnk: f64,
+    pub nonce: u64,
+    pub block_height: u64,
+    pub difficulty: String,
+    pub hash_rate: f64,
+    pub worker_name: Option<String>,
+    pub timestamp: i64, // Unix timestamp for efficient sorting
+}
+
+/// Per-worker mining statistics for multi-miner setups
+/// Aggregated data showing performance breakdown by worker
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStats {
+    pub worker_name: String,
+    pub blocks_found: u64,
+    pub total_rewards_qnk: f64,
+    pub average_hash_rate: f64,
+    pub last_block_time: i64,
 }
 
 #[cfg(test)]

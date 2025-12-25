@@ -200,6 +200,32 @@ export interface NetworkSupply {
   timestamp: string;
 }
 
+// Hashpower-weighted cryptographic security metrics (v1.3.0-beta)
+export interface HashpowerSecurityData {
+  version: string;
+  feature: string;
+  metrics: {
+    blocks_processed: number;
+    security_bits: number;
+    security_tier: string;
+    vdf_difficulty: number;
+    beacon_epoch: number;
+    network_hashrate: number;
+    cumulative_work: string;
+  };
+  security_guarantees: {
+    collision_resistance: string;
+    preimage_resistance: string;
+    double_spend_cost_usd: string;
+    '51_percent_attack_cost': string;
+  };
+  components: {
+    cumulative_work_security: boolean;
+    adaptive_vdf_complexity: boolean;
+    mining_randomness_beacon: boolean;
+  };
+}
+
 export interface WalletData {
   id: string;
   address: number[];
@@ -525,6 +551,59 @@ class QNarwhalKnightAPI {
   // Get network supply statistics (max supply, mined coins, hashrate)
   async getNetworkSupply(): Promise<ApiResponse<NetworkSupply>> {
     return this.request<NetworkSupply>('/v1/network/supply');
+  }
+
+  // Get hashpower-weighted security metrics (v1.3.0-beta)
+  async getHashpowerSecurity(): Promise<ApiResponse<HashpowerSecurityData>> {
+    return this.request<HashpowerSecurityData>('/v1/security/hashpower');
+  }
+
+  // v1.4.15-beta: Get startup progress for DAG integrity check display
+  async getStartupProgress(): Promise<ApiResponse<{
+    phase: string;
+    message: string;
+    phase_progress: number;
+    total_blocks: number;
+    blocks_checked: number;
+    is_ready: boolean;
+    elapsed_seconds: number;
+    current_height: number;
+    network_height: number;
+  }>> {
+    return this.request<{
+      phase: string;
+      message: string;
+      phase_progress: number;
+      total_blocks: number;
+      blocks_checked: number;
+      is_ready: boolean;
+      elapsed_seconds: number;
+      current_height: number;
+      network_height: number;
+    }>('/v1/startup-progress');
+  }
+
+  // v1.4.12-beta: Get P2P network health status (for peer dropdown)
+  async getP2PHealth(): Promise<ApiResponse<{
+    connected_peers: number;
+    network_height: number;
+    current_height: number;
+    sync_progress_percent: number;
+    network_status: string;
+    turbo_sync_available: boolean;
+    bootstrap_peer_configured: boolean;
+    gossipsub_topics: string[];
+  }>> {
+    return this.request<{
+      connected_peers: number;
+      network_height: number;
+      current_height: number;
+      sync_progress_percent: number;
+      network_status: string;
+      turbo_sync_available: boolean;
+      bootstrap_peer_configured: boolean;
+      gossipsub_topics: string[];
+    }>('/v1/p2p/health');
   }
 
   // Create a new wallet (or import with mnemonic)
@@ -1351,7 +1430,9 @@ class QNarwhalKnightAPI {
       }
     });
 
-    eventSource.addEventListener('balance_updated', (e: MessageEvent) => {
+    // v1.1.9-beta: FIX - Listen for 'balance-updated' (hyphen) not 'balance_updated' (underscore)
+    // Backend sends: "balance-updated" (streaming.rs:765)
+    eventSource.addEventListener('balance-updated', (e: MessageEvent) => {
       console.log('📨 SSE: Received balance_updated event');
       try {
         const data = JSON.parse(e.data);
@@ -1359,8 +1440,10 @@ class QNarwhalKnightAPI {
         console.log('📨 SSE: Comparing addresses:', { received: data.wallet_address, expected: walletAddress, match: data.wallet_address === walletAddress });
         console.log('📨 SSE: Change reason:', data.change_reason);
         // Backend now sends addresses WITH "qnk" prefix - compare directly
-        // Accept mining_reward, mining_reward_batch_X, and development_fee reasons
+        // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, and development_fee reasons
         const isMiningReward = data.change_reason === 'mining_reward' ||
+                               data.change_reason === 'mining_reward_instant' ||
+                               data.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards
                                (data.change_reason && data.change_reason.startsWith('mining_reward_batch_'));
         const isDevFee = data.change_reason === 'development_fee';
         if (data.wallet_address === walletAddress && (isMiningReward || isDevFee)) {
@@ -1393,6 +1476,36 @@ class QNarwhalKnightAPI {
         }
       } catch (error) {
         console.error('❌ SSE: Failed to parse mining_stats event:', error);
+      }
+    });
+
+    // v1.3.9-beta: Listen for pending_mining_reward events from P2P gossipsub
+    // This enables instant balance updates when mining to localhost but frontend connected to bootstrap
+    // The bootstrap receives miner stats via P2P and emits PendingMiningReward SSE events
+    eventSource.addEventListener('pending_mining_reward', (e: MessageEvent) => {
+      console.log('📨 SSE: Received pending_mining_reward event (P2P propagated)');
+      try {
+        const data = JSON.parse(e.data);
+        console.log('📨 SSE: pending_mining_reward data:', data);
+        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, match: data.miner_address === walletAddress });
+
+        if (data.miner_address === walletAddress) {
+          console.log('✅ SSE: Address matches! Processing pending mining reward');
+          // Convert to balance update event format for the callback
+          const balanceUpdateEvent: BalanceUpdateEvent = {
+            wallet_address: data.miner_address,
+            old_balance: 0, // We don't have old balance from pending reward
+            new_balance: data.pending_reward_qnk * 100_000_000, // Convert QNK to base units
+            change_reason: 'pending_mining_reward',
+            timestamp: data.timestamp || new Date().toISOString()
+          };
+          console.log('💎 SSE: Emitting pending reward as balance update:', balanceUpdateEvent);
+          onBalanceUpdate(balanceUpdateEvent);
+        } else {
+          console.log('❌ SSE: Address mismatch, ignoring pending_mining_reward event');
+        }
+      } catch (error) {
+        console.error('❌ SSE: Failed to parse pending_mining_reward event:', error);
       }
     });
 
@@ -1481,6 +1594,172 @@ class QNarwhalKnightAPI {
       method: 'POST'
     });
   }
+
+  // ============================================
+  // QNO STAKING ENDPOINTS
+  // ============================================
+
+  /**
+   * Stake QUG for QNO prediction rewards
+   */
+  async stakePrediction(params: {
+    domain: string;
+    amount: number;
+    confidence: number;  // Frontend sends 10-100
+    lockDays: number;
+    walletAddress: string;
+    predictionValue: number;  // v1.4.3: User's predicted value for resolution
+  }): Promise<ApiResponse<StakingResponse>> {
+    return this.authenticatedRequest<StakingResponse>('/v1/qno/stake', {
+      method: 'POST',
+      body: JSON.stringify({
+        domain: params.domain,
+        amount: params.amount.toString(),  // Backend expects string
+        confidence: params.confidence / 100,  // Convert 10-100 to 0.1-1.0
+        lock_days: params.lockDays,
+        prediction_value: params.predictionValue  // v1.4.3: Captured for oracle resolution
+      })
+    });
+  }
+
+  /**
+   * Get active staking positions for authenticated wallet
+   */
+  async getStakingPositions(_walletAddress?: string): Promise<ApiResponse<StakingPosition[]>> {
+    // Backend uses authentication, not wallet address in URL
+    return this.authenticatedRequest<StakingPosition[]>('/v1/qno/stakes');
+  }
+
+  /**
+   * Claim staking rewards for a completed prediction
+   */
+  async claimStakingReward(stakeId: string): Promise<ApiResponse<ClaimResponse>> {
+    return this.authenticatedRequest<ClaimResponse>(`/v1/qno/stakes/${stakeId}/claim`, {
+      method: 'POST'
+    });
+  }
+
+  /**
+   * Get QNO prediction domains and their current stats
+   */
+  async getPredictionDomains(): Promise<ApiResponse<PredictionDomain[]>> {
+    return this.request<PredictionDomain[]>('/v1/qno/domains');
+  }
+
+  /**
+   * Get QNO staking statistics
+   */
+  async getStakingStats(): Promise<ApiResponse<StakingStats>> {
+    return this.request<StakingStats>('/v1/qno/stats');
+  }
+
+  /**
+   * Get resolution history for a domain (v1.4.3)
+   */
+  async getResolutionHistory(domain: string): Promise<ApiResponse<ResolutionResult[]>> {
+    return this.request<ResolutionResult[]>(`/v1/qno/domains/${domain}/resolutions`);
+  }
+
+  /**
+   * Get oracle data for a domain (v1.4.3)
+   */
+  async getOracleData(domain: string): Promise<ApiResponse<OracleData>> {
+    return this.request<OracleData>(`/v1/qno/domains/${domain}/oracle`);
+  }
+
+  /**
+   * Get resolution configuration (v1.4.3)
+   */
+  async getResolutionConfig(): Promise<ApiResponse<ResolutionConfig>> {
+    return this.request<ResolutionConfig>('/v1/qno/resolution-config');
+  }
+}
+
+// QNO Staking interfaces
+export interface StakingResponse {
+  stake_id: string;
+  domain: string;
+  amount: number;
+  confidence: number;
+  lock_end: number;
+  predicted_value?: number;
+  status: 'active' | 'pending' | 'claimable';
+  transaction_hash: string;
+}
+
+export interface StakingPosition {
+  id: string;
+  domain: string;
+  amount: number;
+  confidence: number;
+  lock_end: number;
+  predicted_value: number;
+  status: 'active' | 'pending' | 'claimable';
+  reward: number;
+  created_at: number;
+}
+
+export interface ClaimResponse {
+  success: boolean;
+  reward_amount: number;
+  transaction_hash: string;
+}
+
+export interface PredictionDomain {
+  id: string;
+  name: string;
+  description: string;
+  apy: number;
+  risk_level: 'low' | 'medium' | 'high';
+  total_staked: number;
+  accuracy: number;
+  active_predictions: number;
+}
+
+export interface StakingStats {
+  total_staked: number;
+  total_rewards_distributed: number;
+  active_stakers: number;
+  average_apy: number;
+  total_predictions: number;
+  successful_predictions: number;
+}
+
+// v1.4.3: Resolution and Oracle interfaces
+export interface ResolutionResult {
+  stake_id: string;
+  domain: string;
+  predicted_value: number;
+  actual_value: number;
+  accuracy_score: number;  // 0.0-1.0
+  reward_adjustment: number;  // + or - QUG
+  slashing_applied: number;
+  resolved_at: number;
+  is_accurate: boolean;
+}
+
+export interface OracleData {
+  domain: string;
+  value: number;
+  confidence: number;
+  timestamp: number;
+  sources: OracleSource[];
+}
+
+export interface OracleSource {
+  provider: string;
+  value: number;
+  confidence: number;
+  timestamp: number;
+}
+
+export interface ResolutionConfig {
+  accuracy_threshold: number;  // As percentage (0-100)
+  slash_after_failures: number;
+  base_slash_percentage: number;
+  max_slash_percentage: number;
+  accuracy_bonus_multiplier: number;
+  inaccuracy_penalty_multiplier: number;
 }
 
 // Mining reward event interfaces
@@ -1491,6 +1770,7 @@ export interface MiningRewardEvent {
   block_height: number;
   difficulty: string;
   hash_rate: number;
+  worker_name?: string; // v0.6.2-beta: Worker identification (optional for backward compatibility)
   timestamp: string;
 }
 

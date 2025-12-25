@@ -56,11 +56,14 @@ pub struct PipelineConfig {
 
 impl Default for PipelineConfig {
     fn default() -> Self {
+        // v1.4.12-beta: AGGRESSIVE PIPELINING for 100+ blocks/s sync
+        // Testing showed 2-depth was limiting throughput on high-bandwidth links
+        // New values maximize parallelism while still preventing peer overload
         Self {
-            initial_depth: 2,        // Conservative: 2 concurrent requests
-            min_depth: 1,            // Never go below 1 (would be sequential)
-            max_depth: 8,            // Never exceed 8 (prevents peer overload)
-            target_rtt_ms: 100,      // Target 100ms RTT (adjust window to maintain)
+            initial_depth: 4,        // v1.4.12: Start with 4 concurrent requests (was 2)
+            min_depth: 2,            // v1.4.12: Never go below 2 (was 1)
+            max_depth: 16,           // v1.4.12: Allow up to 16 parallel (was 8)
+            target_rtt_ms: 50,       // v1.4.12: Target 50ms RTT for faster adaptation (was 100)
             rtt_window_size: 10,     // Average last 10 RTT samples
             request_timeout: Duration::from_secs(30),
             enable_flow_control: true,

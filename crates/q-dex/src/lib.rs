@@ -98,16 +98,13 @@ impl QuantumDexManager {
         // Initialize quantum-enhanced tokens
         self.setup_quantum_tokens().await?;
 
-        // Start quantum API server in background (don't block initialization!)
-        // v1.0.51-beta: CRITICAL FIX - api_server.start().await? was blocking forever
-        // because axum::serve() never returns. This prevented Phase 3 event loop from starting.
-        let api_server_clone = self.api_server.clone();
-        tokio::spawn(async move {
-            if let Err(e) = api_server_clone.start().await {
-                tracing::error!("❌ DEX API server error: {}", e);
-            }
-        });
-        info!("🚀 Quantum DEX API server spawned in background");
+        // v1.1.23-beta: DISABLED - DEX API is now integrated into main server at /api/dex
+        // Starting a separate server on port 8080 caused port conflicts:
+        // - DEX server would grab port 8080 first
+        // - Main HTTP server (with mining routes) would fall back to 8082
+        // - Users mapping port 8080 in Docker would hit DEX, not main server
+        // The DEX routes are already integrated via .nest("/api/dex", ...) in main.rs
+        info!("🚀 Quantum DEX routes integrated into main HTTP server (no separate server)");
 
         // Initialize quantum DexScreener integration
         self.screener.initialize().await?;

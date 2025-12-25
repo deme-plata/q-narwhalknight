@@ -288,9 +288,29 @@ impl ProductionMempool {
             return Ok(false);
         }
 
+        // v1.4.5-beta: Validate fee meets minimum requirements (prevent zero-fee spam)
+        if let Err(fee_error) = transaction.validate_fee() {
+            warn!("💸 Transaction fee validation failed: {}", fee_error);
+            let mut metrics = self.metrics.write().await;
+            metrics.invalid_transactions += 1;
+            return Ok(false);
+        }
+
         // Create mempool transaction
         let tx_fee = transaction.fee;
         let tx_size = bincode::serialized_size(&transaction).unwrap_or(256) as usize;
+
+        // v1.4.5-beta: Enforce min_fee_per_byte from config
+        let min_required_fee = (tx_size as u64).saturating_mul(self.config.min_fee_per_byte);
+        if tx_fee < min_required_fee {
+            warn!(
+                "💸 Transaction fee {} below minimum {} ({} bytes × {} per byte)",
+                tx_fee, min_required_fee, tx_size, self.config.min_fee_per_byte
+            );
+            let mut metrics = self.metrics.write().await;
+            metrics.invalid_transactions += 1;
+            return Ok(false);
+        }
         let mempool_tx = MempoolTransaction {
             fee: tx_fee,
             size: tx_size,
@@ -539,7 +559,10 @@ impl ProductionMempool {
         let pending = self.pending_transactions.read().await;
         let metrics = self.metrics.read().await;
 
-        let total_fees: u64 = pending.values().map(|tx| tx.fee).sum();
+        // v1.4.5-beta: Use saturating fold to prevent overflow
+        let total_fees: u64 = pending
+            .values()
+            .fold(0u64, |acc, tx| acc.saturating_add(tx.fee));
         let average_fee = if pending.is_empty() {
             0
         } else {

@@ -41,10 +41,12 @@ members = [
     "crates/q-zk-stark",      # ZK-STARK proofs with GPU acceleration
     "crates/q-zk-snark",      # ZK-SNARK toolkit (Groth16, PLONK, Marlin)
     "crates/q-lattice-guard", # Post-quantum lattice-based zk-SNARK (RLWE)
+    "crates/q-recursive-proofs", # Recursive SNARKs for eliminating weak subjectivity
     "crates/q-rlwe-vrf",      # Post-quantum VRF based on Ring-LWE for mining
     "crates/q-zk-p2p",        # Zero-knowledge enhanced P2P networking
     "crates/q-dex",           # Decentralized exchange with ZK privacy
     "crates/q-oracle",        # Oracle network for price feeds
+    "crates/q-neural-oracle", # Quantum Neural Oracle - ML prediction infrastructure
     "crates/q-stablecoin",    # Algorithmic stablecoin management
     "crates/q-narwhalknight", # High-level developer-friendly API wrapper for proven DNS-Phantom mesh networking
     "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
@@ -61,7 +63,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced"]  # v1.0.54: FROST threshold sigs, AEGIS-256, Circle STARKs
 
 [workspace.package]
-version = "1.1.24-beta"  # v1.1.24-beta: Phase 16 - Mainnet Safety Infrastructure (Checkpoints, Integrity Monitor, Backup)
+version = "2.1.0-DELTA-V"  # 🚀 Project APOLLO Phase 6: Zero-copy blocks, pre-compressed storage, io_uring, PID controller, Kalman predictor
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"

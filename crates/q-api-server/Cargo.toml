@@ -18,8 +18,8 @@ path = "src/main.rs"
 [dependencies]
 q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
-# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
-q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+# 🔐 v1.3.12-beta: Required for SQIsign post-quantum consensus signatures
+q-crypto-advanced = { path = "../q-crypto-advanced" }  # Was optional, now required for consensus
 q-aegis-ql = { path = "../q-aegis-ql" }
 libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
@@ -114,6 +114,9 @@ q-plugin-system = { path = "../q-plugin-system" }
 q-ai-inference = { path = "../q-ai-inference" } # AI inference with KV-cache
 candle-core = { workspace = true } # For Device type in AI inference
 
+# ✨ v1.4.0-beta: Recursive SNARKs for eliminating weak subjectivity
+q-recursive-proofs = { path = "../q-recursive-proofs" } # Post-quantum recursive proofs for ~10ms light client bootstrap
+
 # Metrics
 prometheus = { workspace = true }
 
@@ -184,12 +187,12 @@ q-benchmarks = { path = "../q-benchmarks" }
 
 [features]
 # v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
-# Note: advanced-crypto optional until FROST integration complete
+# 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus
 default = ["tui"]
 tui = ["q-tui"]
 # ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
-# ⚠️ Requires additional dependencies (aes_gcm, pbkdf2, hmac)
-advanced-crypto = ["q-crypto-advanced"]
+# Note: q-crypto-advanced is now always included for SQIsign consensus
+advanced-crypto = []  # Feature flag kept for backwards compat, but dep is always included
 
 [dev-dependencies]
 tokio-test = "0.4"

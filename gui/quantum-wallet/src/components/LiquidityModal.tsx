@@ -6,10 +6,17 @@ interface Token {
   id: string;
   symbol: string;
   name: string;
-  balance: number;
+  balance: number | string;  // v1.4.9: Handle both number and string balances from API
   price: number;
   icon: string;
 }
+
+// v1.4.9: Helper function to safely convert balance to number
+const toNum = (val: number | string | undefined | null): number => {
+  if (val === undefined || val === null) return 0;
+  const num = typeof val === 'string' ? parseFloat(val) : val;
+  return isNaN(num) ? 0 : num;
+};
 
 interface LiquidityModalProps {
   token: Token;
@@ -19,12 +26,20 @@ interface LiquidityModalProps {
 }
 
 export default function LiquidityModal({ token, availableTokens, onClose, onAddLiquidity }: LiquidityModalProps) {
-  const [selectedPairToken, setSelectedPairToken] = useState<string>('QUG');
+  // v1.0.50-beta: FIX - Filter out the current token from pair options to prevent QUG/QUG pools
+  // This fixes the bug where both tokens are QUG and balance gets deducted twice
+  const validPairTokens = availableTokens.filter(t => t.symbol !== token.symbol);
+
+  // Initialize pair token to first valid option (not the current token)
+  const defaultPairToken = validPairTokens.length > 0 ? validPairTokens[0].symbol : '';
+
+  const [selectedPairToken, setSelectedPairToken] = useState<string>(defaultPairToken);
   const [amount1, setAmount1] = useState('');
   const [amount2, setAmount2] = useState('');
   const [mode, setMode] = useState<'add' | 'remove'>('add');
 
-  const pairToken = availableTokens.find(t => t.symbol === selectedPairToken);
+  // v1.0.50-beta: Use filtered list to find pair token - prevents same-token selection
+  const pairToken = validPairTokens.find(t => t.symbol === selectedPairToken);
 
   // Calculate equivalent amount based on price ratio
   const handleAmount1Change = (value: string) => {
@@ -52,14 +67,16 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
       const amt1 = parseFloat(amount1);
       const amt2 = parseFloat(amount2);
 
-      // Validate balances
-      if (amt1 > token.balance) {
-        alert(`❌ Insufficient ${token.symbol} balance!\n\nYou need ${amt1.toFixed(4)} ${token.symbol}\nBut you only have ${token.balance.toFixed(4)} ${token.symbol}`);
+      // Validate balances - v1.4.9: Use toNum() for safe comparison
+      const tokenBal = toNum(token.balance);
+      if (amt1 > tokenBal) {
+        alert(`❌ Insufficient ${token.symbol} balance!\n\nYou need ${amt1.toFixed(4)} ${token.symbol}\nBut you only have ${tokenBal.toFixed(4)} ${token.symbol}`);
         return;
       }
 
-      if (pairToken && amt2 > pairToken.balance) {
-        alert(`❌ Insufficient ${pairToken.symbol} balance!\n\nYou need ${amt2.toFixed(4)} ${pairToken.symbol}\nBut you only have ${pairToken.balance.toFixed(4)} ${pairToken.symbol}`);
+      const pairBal = toNum(pairToken?.balance);
+      if (pairToken && amt2 > pairBal) {
+        alert(`❌ Insufficient ${pairToken.symbol} balance!\n\nYou need ${amt2.toFixed(4)} ${pairToken.symbol}\nBut you only have ${pairBal.toFixed(4)} ${pairToken.symbol}`);
         return;
       }
 
@@ -152,7 +169,7 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           </div>
                           <div className="text-right">
                             <div className="text-xs text-gray-400">Balance</div>
-                            <div className="text-sm text-white font-medium">{token.balance.toFixed(4)}</div>
+                            <div className="text-sm text-white font-medium">{toNum(token.balance).toFixed(4)}</div>
                           </div>
                         </div>
                         <input
@@ -161,14 +178,14 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           onChange={(e) => handleAmount1Change(e.target.value)}
                           placeholder="0.0"
                           className={`w-full bg-transparent text-2xl font-bold focus:outline-none ${
-                            parseFloat(amount1 || '0') > token.balance ? 'text-red-500' : 'text-white'
+                            parseFloat(amount1 || '0') > toNum(token.balance) ? 'text-red-500' : 'text-white'
                           }`}
                         />
                         <div className="flex items-center justify-between mt-1">
                           <div className="text-xs text-gray-500">
                             ≈ ${(parseFloat(amount1 || '0') * token.price).toFixed(2)} USD
                           </div>
-                          {parseFloat(amount1 || '0') > token.balance && (
+                          {parseFloat(amount1 || '0') > toNum(token.balance) && (
                             <div className="text-xs text-red-500 font-medium">
                               Insufficient balance
                             </div>
@@ -197,7 +214,7 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                             onChange={(e) => setSelectedPairToken(e.target.value)}
                             className="bg-transparent text-white font-bold text-lg focus:outline-none cursor-pointer"
                           >
-                            {availableTokens.filter(t => t.symbol !== token.symbol).map(t => (
+                            {validPairTokens.map(t => (
                               <option key={t.id} value={t.symbol} className="bg-quantum-dark">
                                 {t.icon} {t.symbol} - {t.name}
                               </option>
@@ -205,7 +222,7 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           </select>
                           <div className="text-right">
                             <div className="text-xs text-gray-400">Balance</div>
-                            <div className="text-sm text-white font-medium">{pairToken?.balance.toFixed(4)}</div>
+                            <div className="text-sm text-white font-medium">{toNum(pairToken?.balance).toFixed(4)}</div>
                           </div>
                         </div>
                         <input
@@ -214,14 +231,14 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           onChange={(e) => handleAmount2Change(e.target.value)}
                           placeholder="0.0"
                           className={`w-full bg-transparent text-2xl font-bold focus:outline-none ${
-                            pairToken && parseFloat(amount2 || '0') > pairToken.balance ? 'text-red-500' : 'text-white'
+                            pairToken && parseFloat(amount2 || '0') > toNum(pairToken.balance) ? 'text-red-500' : 'text-white'
                           }`}
                         />
                         <div className="flex items-center justify-between mt-1">
                           <div className="text-xs text-gray-500">
                             ≈ ${(parseFloat(amount2 || '0') * (pairToken?.price || 0)).toFixed(2)} USD
                           </div>
-                          {pairToken && parseFloat(amount2 || '0') > pairToken.balance && (
+                          {pairToken && parseFloat(amount2 || '0') > toNum(pairToken.balance) && (
                             <div className="text-xs text-red-500 font-medium">
                               Insufficient balance
                             </div>
@@ -262,8 +279,8 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                     disabled={
                       !amount1 ||
                       !amount2 ||
-                      parseFloat(amount1) > token.balance ||
-                      (pairToken && parseFloat(amount2) > pairToken.balance)
+                      parseFloat(amount1) > toNum(token.balance) ||
+                      (pairToken && parseFloat(amount2) > toNum(pairToken.balance))
                     }
                     className="w-full py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >

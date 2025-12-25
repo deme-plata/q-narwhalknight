@@ -35,6 +35,9 @@ libp2p-websocket = "0.45" # 🌐 WebSocket transport for browser connections
 # 🌐 v2.0.0: WebRTC-Direct transport for true browser P2P (optional)
 libp2p-webrtc = { version = "0.9.0-alpha.1", features = ["tokio"], optional = true }
 
+# MessagePack serialization for gossipsub block decoding (v2.1.7-DELTA-V)
+rmp-serde = "1.3"
+
 # Async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -86,6 +89,9 @@ chrono = { workspace = true }
 rand = { workspace = true }
 crossbeam = { workspace = true }
 
+# 🚀 v1.7.0-LAMINAR: Lock-free concurrent collections
+dashmap = { workspace = true }
+
 # System info for hardware capability detection
 sysinfo = "0.30"
 num_cpus = "1.16"
@@ -100,6 +106,12 @@ tokio-util = { version = "0.7", features = ["codec"] }
 
 # void crate for libp2p 0.53 connection_limits (v1.0.17-beta)
 void = "1.0"
+
+# Lazy static for Tor Prometheus metrics
+lazy_static = "1.4"
+
+# Prometheus metrics for Tor integration
+prometheus = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -13,6 +13,11 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Role**: Testing node for development builds, Docker container hosting
 - **Environment**: Docker containers for isolated testing
 - **Purpose**: Test new features before Server Beta deployment
+- **Docker Test Container**: `q-v1098` (or similar) - used for sync testing
+- **⚠️ IMPORTANT**: Do NOT SSH into Server Alpha from Server Beta
+- **Protocol**: Ask the user for information from Server Alpha (logs, status, etc.)
+- **Note**: When checking sync test status, the container runs on Server Alpha, not Beta
+- **To get sync status**: Ask user to run `docker logs q-v1098 2>&1 | tail -50` on Server Alpha
 
 #### **Server Beta (Production/Bootstrap Node)**
 - **IP Address**: `185.182.185.227`
@@ -24,15 +29,59 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Frontend**: Nginx serving from `gui/quantum-wallet/dist-final/`
 - **Domain**: `quillon.xyz`
 
+#### **⚠️ PROCESS MANAGEMENT - USE kill -9 NOT killall**
+- **IMPORTANT**: `killall` does NOT work reliably on this system
+- **To kill processes, ALWAYS use**:
+  ```bash
+  # Kill by PID (find PID first with pgrep)
+  pgrep -f "cargo" | xargs -I{} kill -9 {}
+
+  # Or for a specific process
+  ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {}
+
+  # Server restart (preferred method)
+  ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null; sleep 2; systemctl start q-api-server
+  ```
+- **NEVER use**: `killall -9 q-api-server` (does not work)
+
+#### **⚠️ PRIVATE BLOCKCHAIN - API AUTHENTICATION REQUIRED**
+- **This is a PRIVATE blockchain - ALL balance/wallet API endpoints require authentication**
+- **DO NOT attempt to curl balance endpoints** - they will return empty without proper auth tokens
+- **DO NOT try alternative balance endpoint formats** - none of them work without auth
+- Balance information is only accessible through:
+  1. The frontend UI at `quillon.xyz` (uses session-based auth)
+  2. Server logs (journalctl)
+  3. SSE stream events (for real-time monitoring)
+
+**How to check mining rewards and balances:**
+```bash
+# Check P2P balance updates being broadcast/applied:
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "P2P BALANCE|balance_updates"
+
+# Check miner stats via P2P:
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "miner-stats|MiningStats"
+
+# Check SSE stream for mining stats (these are public):
+timeout 10 curl -s -N "http://localhost:8080/api/v1/events" | grep -E "MiningStats|MiningReward"
+
+# Check Docker node logs for mining activity:
+docker logs q-docker-test 2>&1 | tail -50 | grep -E "miner|balance|reward"
+```
+
+**Mining reward discrepancy testing:**
+- Mining rewards are credited locally on the node that receives the mining submission
+- Rewards propagate via P2P gossipsub to other nodes
+- To compare rewards between nodes, check the server logs, NOT the API endpoints
+
 ### **P2P Network Bootstrap:**
-- **Bootstrap Peer ID**: `12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg` (Server Beta actual PeerID as of 2025-11-18)
-- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg`
-- **Network ID**: `testnet-phase2`
+- **Bootstrap Peer ID**: `12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu` (Server Beta actual PeerID as of 2025-12-15, from ./data-mine16/libp2p_identity.key)
+- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu`
+- **Network ID**: `testnet-phase16`
 - **Gossipsub Topics**:
-  - `/qnk/testnet-phase2/blocks` - Block propagation
-  - `/qnk/testnet-phase2/peer-heights` - Network height announcements
-  - `/qnk/testnet-phase2/turbo-sync-request` - Batch sync requests
-  - `/qnk/testnet-phase2/turbo-sync-response` - Batch sync responses
+  - `/qnk/testnet-phase16/blocks` - Block propagation
+  - `/qnk/testnet-phase16/peer-heights` - Network height announcements
+  - `/qnk/testnet-phase16/turbo-sync-request` - Batch sync requests
+  - `/qnk/testnet-phase16/turbo-sync-response` - Batch sync responses
 
 ---
 
@@ -182,6 +231,42 @@ git config user.email "server-beta@q-narwhalknight.dev"
    - **User Downloads**: ALWAYS copy binaries to `/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/`
    - **IMPORTANT**: The correct path is the FULL PATH starting with `/opt/orobit/`, NOT the relative path
 
+   **🚀 MANDATORY DEPLOYMENT CHECKLIST (After Every Release Build):**
+
+   When deploying a new version (e.g., v1.1.8-beta), ALWAYS:
+
+   ```bash
+   # 1. Build release binary
+   timeout 36000 cargo build --release --package q-api-server --bin q-api-server
+
+   # 2. Copy to downloads folder for wget access
+   VERSION="v1.1.8-beta"  # Update this for each release
+   cp /opt/orobit/shared/q-narwhalknight/target/release/q-api-server \
+      /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-${VERSION}
+
+   # 3. Copy to /usr/bin for local service
+   cp /opt/orobit/shared/q-narwhalknight/target/release/q-api-server /usr/bin/q-api-server-${VERSION}
+   ln -sf /usr/bin/q-api-server-${VERSION} /usr/bin/q-api-server
+
+   # 4. Restart service
+   killall -9 q-api-server 2>/dev/null; sleep 2 && systemctl start q-api-server
+
+   # 5. Verify deployment
+   systemctl status q-api-server --no-pager | head -20
+   ```
+
+   **📥 LATEST WGET DOWNLOAD LINK (Update after each deploy):**
+   ```
+   Current Version: v1.4.1-beta
+   wget https://quillon.xyz/downloads/q-api-server-v1.4.1-beta
+   chmod +x q-api-server-v1.4.1-beta
+   ```
+
+   **IMPORTANT**: After EVERY deployment, tell the user the wget link:
+   ```
+   wget https://quillon.xyz/downloads/q-api-server-v1.4.1-beta && chmod +x q-api-server-v1.4.1-beta
+   ```
+
 5. **🚨 PRE-COMMIT SAFETY CHECKLIST**
 
    Before EVERY commit involving sync/consensus/storage code, verify:
@@ -211,7 +296,94 @@ git config user.email "server-beta@q-narwhalknight.dev"
 
    **If ANY checkbox fails: DO NOT COMMIT!**
 
-6. **NEVER DELETE USER DOWNLOAD BINARIES**
+6. **🚨 MAINNET-SAFE CODE CHANGES (v1.4.1-beta+)**
+
+   **THE GOLDEN RULE: Old blocks must ALWAYS validate the same way.**
+
+   On mainnet, we can't reset phases. Any code change that affects validation
+   or consensus MUST be wrapped in a block-height check.
+
+   **Before You Write Code - Ask Yourself:**
+   ```
+   ┌─────────────────────────────────────────────────────────┐
+   │  MAINNET SAFETY CHECKLIST (2 questions)                │
+   ├─────────────────────────────────────────────────────────┤
+   │                                                         │
+   │  1. Does this change validation or consensus?           │
+   │     └─ NO  → You're fine, proceed                       │
+   │     └─ YES → Continue to question 2                     │
+   │                                                         │
+   │  2. Is it wrapped in a height check?                    │
+   │     └─ YES → Safe, proceed                              │
+   │     └─ NO  → STOP! Wrap it first                        │
+   │                                                         │
+   └─────────────────────────────────────────────────────────┘
+   ```
+
+   **What counts as "validation or consensus"?**
+   - Block validation rules
+   - Transaction validation rules
+   - Signature verification
+   - Balance calculations
+   - Mining/reward logic
+   - Any `if` statement that determines if a block is valid
+
+   **CORRECT Pattern (mainnet-safe):**
+   ```rust
+   // ✅ SAFE: Height-gated change
+   fn validate_signature(&self, block: &Block) -> Result<()> {
+       if block.height >= UPGRADE_PQ_SIGS_HEIGHT {
+           // New rule: require post-quantum signatures
+           self.verify_dilithium_sig(block)?;
+       } else {
+           // Old rule: Ed25519 still valid for historical blocks
+           self.verify_ed25519_sig(block)?;
+       }
+       Ok(())
+   }
+   ```
+
+   **WRONG Pattern (breaks mainnet):**
+   ```rust
+   // ❌ DANGEROUS: Changes validation for ALL blocks including history!
+   fn validate_signature(&self, block: &Block) -> Result<()> {
+       // This breaks old blocks that used Ed25519!
+       self.verify_dilithium_sig(block)?;
+       Ok(())
+   }
+   ```
+
+   **How to Add a New Upgrade:**
+   1. Define activation height in `crates/q-types/src/upgrades.rs`
+   2. Wrap your code change in a height check
+   3. Test that OLD blocks still validate with OLD rules
+   4. Test that NEW blocks validate with NEW rules
+   5. Set activation height ~2 weeks in the future (20,000+ blocks)
+
+   **Safe Deployment Flow:**
+   ```
+   1. Code change with height check
+   2. Test on Docker (fresh sync)
+   3. Test on Server Alpha (24-48 hours)
+   4. Announce upgrade + activation height to users
+   5. Deploy to Server Beta
+   6. Wait for activation height
+   7. New rules activate automatically (no restart needed!)
+   ```
+
+   **Emergency: Bug Found Before Activation**
+   - If activation height not reached: Users can stay on old binary
+   - Announce "delay upgrade" on Discord
+   - Fix bug, set new activation height further in future
+   - No data loss, no reset needed
+
+   **Use the Safe Deploy Script:**
+   ```bash
+   ./scripts/safe-deploy.sh full    # Build → Docker test → Deploy
+   ./scripts/safe-deploy.sh rollback # If something goes wrong
+   ```
+
+7. **NEVER DELETE USER DOWNLOAD BINARIES**
    - When updating frontend, PRESERVE the downloads folder
    - Users rely on downloading binaries with specific version names
    - After building, always copy to the CORRECT location:

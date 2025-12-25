@@ -26,7 +26,28 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
 
     // Refresh every 10 seconds
     const interval = setInterval(fetchCustomTokens, 10000);
-    return () => clearInterval(interval);
+
+    // v1.4.10-beta: Listen for token balance updates via SSE for instant refresh
+    const handleTokenBalanceUpdate = (event: CustomEvent) => {
+      const { tokenSymbol, newBalance, reason } = event.detail;
+      console.log('🪙 [CustomTokens] Balance update received via SSE:', { tokenSymbol, newBalance, reason });
+
+      // Update the balance for the matching token immediately
+      setCustomTokens(prev => prev.map(token => {
+        if (token.symbol === tokenSymbol) {
+          console.log(`✅ [CustomTokens] Updated ${token.symbol} balance: ${token.balance} → ${newBalance}`);
+          return { ...token, balance: newBalance };
+        }
+        return token;
+      }));
+    };
+
+    window.addEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
+    };
   }, []);
 
   const fetchCustomTokens = async () => {

@@ -108,6 +108,57 @@ impl TorConfig {
         }
     }
 
+    /// Create configuration for mandatory Tor mode with dedicated circuits (Arti 1.8.0)
+    ///
+    /// This is the recommended production configuration that:
+    /// - Uses embedded Arti client (no external Tor daemon needed)
+    /// - Enables mandatory Tor (no clearnet fallback allowed)
+    /// - Uses dedicated circuits per operation type for traffic analysis resistance
+    /// - Enables Dandelion++ for additional privacy
+    /// - Uses 8 circuits (one per operation type)
+    pub fn mandatory_dedicated_circuits() -> Self {
+        Self {
+            enabled: true,
+            use_embedded_arti: true,
+            tor_only: true, // NO CLEARNET FALLBACK - All traffic MUST go through Tor
+            enable_dandelion: true,
+            latency_target_ms: Some(300),
+            circuit_count: 8, // One per operation type (see OperationType enum)
+            socks_proxy_addr: None, // Not needed with embedded Arti
+            data_dir: Some(PathBuf::from("/var/lib/qnk/tor")),
+            cache_dir: Some(PathBuf::from("/var/cache/qnk/tor")),
+            enable_prometheus_metrics: true,
+            ..Default::default()
+        }
+    }
+
+    /// Check if this configuration enforces mandatory Tor
+    pub fn is_mandatory_tor(&self) -> bool {
+        self.enabled && self.tor_only && self.use_embedded_arti
+    }
+
+    /// Convert to DedicatedCircuitConfig for the new circuit manager
+    pub fn to_dedicated_circuit_config(&self) -> super::dedicated_circuits::DedicatedCircuitConfig {
+        super::dedicated_circuits::DedicatedCircuitConfig {
+            data_directory: self.data_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/var/lib/qnk/tor".to_string()),
+            cache_directory: self.cache_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/var/cache/qnk/tor".to_string()),
+            tor_mandatory: self.tor_only,
+            bootstrap_timeout: Duration::from_secs(120),
+            prewarm_circuits: true,
+            log_level: "info".to_string(),
+            adaptive_rotation: true,
+            min_rotation_interval: Duration::from_secs(60),
+            max_rotation_interval: Duration::from_secs(3600),
+            auto_enforce_diversity: true,
+        }
+    }
+
     /// Validate configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.enabled {

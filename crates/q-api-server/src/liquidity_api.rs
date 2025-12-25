@@ -332,6 +332,17 @@ pub async fn add_liquidity(
         )));
     }
 
+    // v1.0.50-beta: CRITICAL FIX - Prevent same-token pairs (e.g., QUG/QUG)
+    // This would cause double deduction from the same balance
+    let token0_normalized = request.token0.to_uppercase();
+    let token1_normalized = request.token1.to_uppercase();
+    if token0_normalized == token1_normalized {
+        return Ok(Json(ApiResponse::error(format!(
+            "Cannot create liquidity pool with the same token on both sides: {} / {}",
+            request.token0, request.token1
+        ))));
+    }
+
     // ========================================
     // v1.0.49-beta: CRITICAL FIX - Normalize ALL token identifiers to addresses FIRST
     // This ensures consistent pool lookup regardless of input format (symbol vs address)
@@ -1002,39 +1013,56 @@ pub async fn add_liquidity(
         }
     }
 
-    // Create transaction history entry
-    let tx_hash = format!(
-        "liquidity-{}-{}",
-        hex::encode(provider),
-        chrono::Utc::now().timestamp_millis()
-    );
-    let transaction = Transaction {
-        id: [0u8; 32], // Would be properly hashed in production
-        from: provider,
-        to: [0u8; 32],
-        amount: request.amount0,
-        fee: 0,
-        nonce: 0,
-        signature: vec![],
-        timestamp: chrono::Utc::now(),
-        data: format!(
-            "Add liquidity: {} {} + {} {}",
-            request.amount0, request.token0, request.amount1, request.token1
-        )
-        .into_bytes(),
-        token_type: q_types::TokenType::QUG,
-        fee_token_type: q_types::TokenType::QUGUSD,
-    };
+    // ============================================================================
+    // v1.0.91-beta: PROPER TRANSACTION HANDLING
+    // Fixes 10 critical design flaws from v1.0.90-beta:
+    // 1. Proper cryptographic transaction ID (SHA3-256 hash)
+    // 2. Nonce management for replay attack prevention
+    // 3. Pending status (not Confirmed immediately)
+    // 4. Block production queue integration
+    // 5. Proper broadcast mechanism
+    // ============================================================================
 
-    // Store transaction
+    // Get next nonce for this wallet (prevents replay attacks)
+    let nonce = state.nonce_tracker.get_and_increment(&provider);
+
+    // Create transaction with proper cryptographic ID
+    let transaction = q_api_server::transaction_utils::TransactionBuilder::new()
+        .from(provider)
+        .to([0u8; 32]) // Pool contract address
+        .amount(request.amount0)
+        .fee(0) // No fee for liquidity provision
+        .data(
+            format!(
+                "add_liquidity:{}:{}:{}:{}:{}",
+                final_pool_id, request.token0, request.token1, request.amount0, request.amount1
+            )
+            .into_bytes(),
+        )
+        .token_type(q_types::TokenType::QUG)
+        .fee_token_type(q_types::TokenType::QUGUSD)
+        .tx_type(q_types::TransactionType::PoolAddLiquidity)
+        .build_with_nonce(nonce, chrono::Utc::now());
+
     let tx_id = transaction.id;
-    state.tx_pool.insert(tx_id, transaction);
-    state.tx_status.insert(
-        tx_id,
-        TxStatus::Confirmed {
-            block_height: 0,
-            round: 0,
-        },
+    let tx_hash = format!("0x{}", hex::encode(tx_id));
+
+    // Submit transaction properly: pool, mempool queue, and broadcast
+    let submission_result = q_api_server::transaction_utils::submit_transaction(
+        transaction,
+        &state.tx_pool,
+        &state.tx_status,
+        state.production_mempool.as_ref(),
+        state.libp2p_discovery.as_ref(),
+    ).await;
+
+    tracing::info!(
+        "📤 [LIQUIDITY] Add liquidity tx submitted for pool {}: {} (nonce={}, broadcast={}, queued={})",
+        final_pool_id,
+        &tx_hash[..16],
+        nonce,
+        submission_result.broadcast_success,
+        submission_result.queued_for_block
     );
 
     Ok(Json(ApiResponse::success(AddLiquidityResponse {

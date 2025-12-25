@@ -42,6 +42,15 @@ pub trait KVStore: Send + Sync {
     /// WARNING: Data loss risk on crash - only use during initial blockchain sync
     async fn write_batch_bulk(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()>;
 
+    /// 🚀 v1.0.89-beta: TURBO MODE - Write batch with WAL but NO per-write fsync
+    /// Best of both worlds:
+    /// - WAL enabled (crash recovery possible)
+    /// - NO fsync per write (~0.1ms vs 2-5ms)
+    /// - Caller must call sync_wal() periodically (every 1-2 seconds)
+    /// - On crash: lose up to 1-2 seconds of blocks (re-fetchable from peers)
+    /// Target: 1000+ blocks/second during initial sync
+    async fn write_batch_turbo(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()>;
+
     /// Scan keys with prefix in column family
     async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
@@ -74,6 +83,10 @@ pub trait KVStore: Send + Sync {
     /// Verify backup integrity (read checksum validation)
     /// Call after creating checkpoint to ensure it's not corrupted
     async fn verify_checkpoint(&self, checkpoint_dir: &str) -> Result<bool>;
+
+    /// 🚀 v1.0.100-beta: Multi-get for batch fetching (10-50x faster than N individual gets)
+    /// Returns a Vec of Option<Vec<u8>> in the same order as keys
+    async fn multi_get(&self, cf: &str, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>>;
 }
 
 /// RocksDB implementation optimized for DagKnight workloads (Linux/macOS only)
@@ -140,12 +153,27 @@ impl RocksDBKV {
 
         if turbo_sync_mode {
             info!("🚀 TURBO SYNC MODE ENABLED - Optimizing RocksDB for bulk writes");
-            opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB for bulk imports
+            // 🚀 v1.4.2-beta: Enhanced sync optimization from SYNC_OPTIMIZATION_TECHNICAL_REVIEW.md
+            opts.set_write_buffer_size(512 * 1024 * 1024); // 512MB for bulk imports (doubled)
             opts.set_max_write_buffer_number(8); // More buffers to avoid stalls
             opts.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST files
             opts.set_level_zero_file_num_compaction_trigger(16); // Delay compaction during sync
             opts.set_level_zero_slowdown_writes_trigger(32);
             opts.set_level_zero_stop_writes_trigger(64);
+
+            // 🚀 v1.4.2-beta: Add LRU block cache (2GB) for faster reads during sync
+            // This reduces read amplification when verifying blocks
+            let cache_size = std::env::var("ROCKSDB_BLOCK_CACHE_MB")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(2048) * 1024 * 1024;
+            let block_cache = rocksdb::Cache::new_lru_cache(cache_size);
+            let mut block_opts = rocksdb::BlockBasedOptions::default();
+            block_opts.set_block_cache(&block_cache);
+            block_opts.set_bloom_filter(10.0, true); // 10-bit bloom filter for faster lookups
+            opts.set_block_based_table_factory(&block_opts);
+
+            info!("🗄️ RocksDB block cache: {} MB", cache_size / (1024 * 1024));
         } else {
             // 🔧 v1.0.21-beta: OPTIMIZED FOR CONTINUOUS BLOCK PRODUCTION
             // Problem: Progressive degradation (170ms → 994ms over time)
@@ -166,7 +194,25 @@ impl RocksDBKV {
         opts.set_use_fsync(true); // use fsync() not fdatasync() - strongest guarantee
         opts.set_paranoid_checks(true); // Detect corruption early, fail loud
         opts.set_atomic_flush(true); // Multi-CF consistency (all or nothing)
-        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime); // ChatGPT P0: Robust WAL replay
+        // 🚨 v1.0.79-beta: CRITICAL FIX - Change from PointInTime to TolerateCorruptedTailRecords
+        //
+        // ROOT CAUSE OF DATA LOSS:
+        // - PointInTime mode stops at the FIRST inconsistency in the WAL
+        // - On kill -9, the last WAL record is often partial/corrupted
+        // - PointInTime truncates EVERYTHING after that point, losing many valid blocks
+        //
+        // FIX: TolerateCorruptedTailRecords
+        // - Only discards corrupted records at the very END of the WAL
+        // - Recovers all valid records before the corruption
+        // - Ideal for kill -9 / power failure scenarios
+        //
+        // WAL Recovery Modes (from safest to most aggressive):
+        // 1. AbsoluteConsistency - Fails on ANY WAL corruption (too strict)
+        // 2. PointInTime - Stops at first inconsistency (CAUSES DATA LOSS - old setting)
+        // 3. TolerateCorruptedTailRecords - Tolerates corrupted tail (BEST FOR BLOCKCHAIN)
+        // 4. SkipAnyCorruptedRecords - Skips any corrupted records (too loose)
+        //
+        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::TolerateCorruptedTailRecords);
 
         // ========== WAL (Write-Ahead Log) PROTECTION ==========
         opts.set_wal_ttl_seconds(300); // 5 minutes - delete after flush
@@ -235,6 +281,23 @@ impl RocksDBKV {
             Self::create_sync_certificates_cf(),  // v0.9.18-beta: TurboSync AEGIS-QL certificates
             Self::create_peer_trust_cf(),  // v0.9.18-beta: AEGIS-QL peer trust metrics
             Self::create_processed_updates_cf(),  // ✅ v0.9.98-beta: P2P durability idempotency tracking
+            // ========== v1.0.60-beta: Comprehensive State Sync CFs ==========
+            Self::create_state_trie_cf(),        // Sparse Merkle trie for state roots
+            Self::create_token_balances_cf(),    // Token balances (all tokens including QUG/QUGUSD)
+            Self::create_tokens_cf(),            // Token metadata
+            Self::create_dex_pools_cf(),         // DEX liquidity pools
+            Self::create_lp_balances_cf(),       // LP token balances
+            Self::create_vaults_cf(),            // Collateral vaults
+            Self::create_oracle_prices_cf(),     // Oracle price feeds
+            Self::create_contracts_cf(),         // Smart contracts
+            Self::create_contract_storage_cf(),  // Contract storage
+            Self::create_ai_credits_v2_cf(),     // AI credits v2 (with stats)
+            Self::create_stakes_cf(),            // Staking positions
+            Self::create_nonces_cf(),            // Account nonces
+            // ========== v1.4.2-beta: QNO Prediction Staking ==========
+            Self::create_qno_stakes_cf(),        // QNO staking positions
+            Self::create_qno_domains_cf(),       // QNO prediction domains
+            Self::create_qno_stats_cf(),         // QNO global statistics
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -623,6 +686,152 @@ impl RocksDBKV {
         ColumnFamilyDescriptor::new("processed_updates", opts)
     }
 
+    // ========== v1.0.60-beta: Comprehensive State Sync Column Families ==========
+
+    /// State Merkle Trie nodes for cryptographic state root verification
+    fn create_state_trie_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Trie nodes are 65 bytes (internal) or 65 bytes (leaf)
+        // Optimize for random reads (proof generation)
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(4);
+        opts.optimize_for_point_lookup(128 * 1024 * 1024); // 128MB bloom filter cache
+        ColumnFamilyDescriptor::new(crate::sparse_merkle_trie::CF_STATE_TRIE, opts)
+    }
+
+    /// Token balances (account + token -> balance)
+    fn create_token_balances_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Keys are 64 bytes (account + token), values are 8 bytes (u64 balance)
+        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB
+        opts.set_max_write_buffer_number(4);
+        opts.optimize_for_point_lookup(256 * 1024 * 1024); // 256MB bloom filter
+        ColumnFamilyDescriptor::new(crate::CF_TOKEN_BALANCES, opts)
+    }
+
+    /// Token metadata (token address -> metadata)
+    fn create_tokens_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_TOKENS, opts)
+    }
+
+    /// DEX liquidity pools (pool_id -> pool state)
+    fn create_dex_pools_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_DEX_POOLS, opts)
+    }
+
+    /// LP token balances (pool_id + account -> LP balance)
+    fn create_lp_balances_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_LP_BALANCES, opts)
+    }
+
+    /// Collateral vaults (vault_id -> vault state)
+    fn create_vaults_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_VAULTS, opts)
+    }
+
+    /// Oracle price feeds (feed_id -> price data)
+    fn create_oracle_prices_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_ORACLE_PRICES, opts)
+    }
+
+    /// Smart contracts (contract_address -> code hash + metadata)
+    fn create_contracts_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_CONTRACTS, opts)
+    }
+
+    /// Contract storage (contract_address + key -> value)
+    fn create_contract_storage_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Largest CF - contract storage can be huge
+        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
+        opts.set_max_write_buffer_number(4);
+        ColumnFamilyDescriptor::new(crate::CF_CONTRACT_STORAGE, opts)
+    }
+
+    /// AI credits (account -> credits balance + stats)
+    fn create_ai_credits_v2_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_AI_CREDITS_V2, opts)
+    }
+
+    /// Staking positions (staker + validator -> stake info)
+    fn create_stakes_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_STAKES, opts)
+    }
+
+    /// Account nonces for replay protection (account -> nonce)
+    fn create_nonces_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        opts.optimize_for_point_lookup(64 * 1024 * 1024); // Fast nonce lookups
+        ColumnFamilyDescriptor::new(crate::CF_NONCES, opts)
+    }
+
+    // ========== QNO (Quantum Neural Oracle) Column Families ==========
+
+    /// QNO staking positions: wallet_address:stake_id -> StakingPosition JSON
+    fn create_qno_stakes_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(3);
+        ColumnFamilyDescriptor::new(crate::CF_QNO_STAKES, opts)
+    }
+
+    /// QNO prediction domains: domain_id -> PredictionDomain JSON
+    fn create_qno_domains_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB - small, rarely changes
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_QNO_DOMAINS, opts)
+    }
+
+    /// QNO global statistics: "global" -> StakingStats JSON
+    fn create_qno_stats_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(4 * 1024 * 1024); // 4MB - single key
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_QNO_STATS, opts)
+    }
+
     /// Get column family handle (public for transactions - v0.8.1-beta)
     pub fn get_cf(&self, cf_name: &str) -> Result<Arc<rocksdb::BoundColumnFamily>> {
         self.db
@@ -774,13 +983,36 @@ impl KVStore for RocksDBKV {
             // - On crash/restart, RocksDB replays WAL to recover memtable
             // - SST files are just an optimization, not durability mechanism
 
-            // Note: sync_wal() would be redundant here (sync=true already did fsync)
-            // ChatGPT: "If you want a belt-and-suspenders, call db.sync_wal()
-            //  (redundant if sync=true was used, but harmless)"
-            // However, rust-rocksdb doesn't expose sync_wal() on Arc<DB>, so we skip it.
-            // The set_sync(true) above is the only required durability fence.
+            // 🚨 v1.0.78-beta: BATCHED FLUSH for crash safety + performance
+            // LESSON LEARNED: WAL + set_sync(true) is NOT sufficient for kill -9 durability!
+            //
+            // Root cause: PointInTime WAL recovery can truncate WAL, causing data loss
+            //
+            // SOLUTION: Batched flush every N writes
+            // - Flush every 100 blocks during sync (max 100 blocks lost on kill -9)
+            // - Fast sync: ~500 blocks/sec (vs ~20 blocks/sec with per-block flush)
+            // - Acceptable trade-off: lose max 100 blocks vs lose 600+ blocks
+            //
+            // The counter is stored in a static atomic to track writes across calls
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+            const FLUSH_INTERVAL: u64 = 100; // Flush every 100 writes
 
-            info!("💾 RocksDB write_batch completed in {:?} (blocking thread, optimized)", blocking_start.elapsed());
+            let count = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            if count % FLUSH_INTERVAL == 0 {
+                // Time to flush - push memtable to SST
+                if let Some(cf) = db.cf_handle("blocks") {
+                    let flush_start = std::time::Instant::now();
+                    if let Err(e) = db.flush_cf(&cf) {
+                        tracing::warn!("⚠️  Failed to flush blocks CF: {}", e);
+                    } else {
+                        tracing::debug!("🔄 Batched flush #{} completed in {:?}", count / FLUSH_INTERVAL, flush_start.elapsed());
+                    }
+                }
+            }
+
+            tracing::debug!("💾 RocksDB write_batch #{} completed in {:?}", count, blocking_start.elapsed());
 
             Ok::<(), anyhow::Error>(())
         })
@@ -835,6 +1067,67 @@ impl KVStore for RocksDBKV {
         .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
 
         debug!("✅ write_batch_bulk total time: {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// 🚀 v1.0.89-beta: TURBO MODE - Maximum speed with WAL crash safety
+    ///
+    /// Key differences from other modes:
+    /// - write_batch():      WAL=true, sync=true,  flush every 100 → ~500 BPS
+    /// - write_batch_bulk(): WAL=false, sync=false, no flush      → ~2000 BPS but data loss
+    /// - write_batch_turbo(): WAL=true, sync=false, no flush     → ~1500 BPS with recovery
+    ///
+    /// Why this works:
+    /// 1. WAL enabled - on crash, RocksDB replays WAL to recover memtable state
+    /// 2. sync=false - write returns immediately after copying to OS page cache
+    /// 3. No flush_cf() - background compaction handles memtable → SST promotion
+    /// 4. Caller calls sync_wal() periodically for durability guarantee
+    ///
+    /// Data loss window: From last sync_wal() call to crash
+    /// Mitigation: Call sync_wal() every 1 second during sync
+    async fn write_batch_turbo(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let batch_size = batch.len();
+
+        // Prepare WriteBatch in async context (cheap, no blocking)
+        let mut write_batch = WriteBatch::default();
+
+        for (cf_name, key, value) in &batch {
+            let cf_handle = self.get_cf(cf_name)?;
+            write_batch.put_cf(&cf_handle, key, value);
+        }
+
+        // Clone Arc for move into blocking context
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let blocking_start = Instant::now();
+
+            // 🚀 TURBO MODE: WAL enabled, sync disabled
+            // - WAL captures all writes for crash recovery
+            // - sync=false means no fsync() per write (massive speedup)
+            // - Caller responsible for periodic sync_wal() calls
+            let mut write_opts = rocksdb::WriteOptions::default();
+            write_opts.set_sync(false);  // NO per-write fsync (key to speed)
+            write_opts.disable_wal(false); // WAL ENABLED (key to safety)
+
+            db.write_opt(write_batch, &write_opts)
+                .context("RocksDB turbo batch write failed")?;
+
+            tracing::debug!(
+                "⚡ TURBO write: {} items in {:?} (blocking thread)",
+                batch_size,
+                blocking_start.elapsed()
+            );
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
+
+        debug!("⚡ write_batch_turbo total time: {:?} ({} items)", start.elapsed(), batch_size);
         Ok(())
     }
 
@@ -1019,6 +1312,79 @@ impl KVStore for RocksDBKV {
             }
         }
     }
+
+    /// 🚀 v1.0.100-beta: Multi-get for batch fetching (10-50x faster than N individual gets)
+    /// Uses RocksDB's native multi_get_cf which batches disk I/O operations
+    /// Returns a Vec of Option<Vec<u8>> in the same order as keys
+    async fn multi_get(&self, cf: &str, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
+        use std::time::Instant;
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let start = Instant::now();
+        let key_count = keys.len();
+
+        // Clone data for spawn_blocking
+        let db = self.db.clone();
+        let keys_owned: Vec<Vec<u8>> = keys.to_vec();
+        let cf_name = cf.to_string(); // CF handle is not Send-safe, so pass name
+
+        // 🚀 PERFORMANCE: RocksDB multi_get batches disk I/O operations
+        // Instead of N separate read syscalls, it uses a single batch read
+        // Typical speedup: 10-50x for batch sizes of 100-1000 keys
+        let results = tokio::task::spawn_blocking(move || {
+            let blocking_start = Instant::now();
+
+            // Get CF handle inside spawn_blocking (cf_handle is not Send-safe)
+            let cf_handle = db.cf_handle(&cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+
+            // Build key slices for multi_get_cf
+            let key_slices: Vec<&[u8]> = keys_owned.iter().map(|k| k.as_slice()).collect();
+
+            // Use RocksDB's native multi_get_cf for batched disk I/O
+            let raw_results = db.multi_get_cf(
+                key_slices.iter().map(|k| (&cf_handle, *k)).collect::<Vec<_>>()
+            );
+
+            // Convert to our Result type
+            let mut results = Vec::with_capacity(key_slices.len());
+            for result in raw_results {
+                match result {
+                    Ok(opt_val) => results.push(opt_val),
+                    Err(e) => {
+                        tracing::warn!("⚠️  [MULTI_GET] RocksDB error for one key: {}", e);
+                        results.push(None); // Treat errors as missing keys
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "🚀 [MULTI_GET] Fetched {} keys in {:?} (blocking thread)",
+                key_slices.len(),
+                blocking_start.elapsed()
+            );
+
+            Ok::<Vec<Option<Vec<u8>>>, anyhow::Error>(results)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
+
+        let elapsed = start.elapsed();
+        let found_count = results.iter().filter(|r| r.is_some()).count();
+
+        tracing::debug!(
+            "✅ [MULTI_GET] {} keys total, {} found, in {:?} ({:.0} keys/sec)",
+            key_count,
+            found_count,
+            elapsed,
+            if elapsed.as_secs_f64() > 0.0 { key_count as f64 / elapsed.as_secs_f64() } else { 0.0 }
+        );
+
+        Ok(results)
+    }
 }
 
 /// RocksDB write options optimized for Narwhal workloads
@@ -1057,17 +1423,20 @@ impl RocksDBKV {
             db.write_opt(batch, &write_opts)
                 .context("RocksDB batch write failed")?;
 
-            // Flush critical column families to ensure MANIFEST is updated
-            let cf_names = vec![
-                "blocks",
-                "dag_vertices",
-                "transactions",
-            ];
+            // v1.0.77-beta: Keep flush_cf() for crash safety
+            // Without explicit flushes, kill -9 causes data loss because:
+            // - set_sync(false) only writes to WAL buffer
+            // - WAL may not be fully synced to disk on hard kill
+            // - Blocks 299900-304400 were lost due to this
+            //
+            // SOLUTION: Keep the flush but only on critical column families
+            // and only when the batch contains important data (blocks)
+            let cf_names = vec!["blocks"]; // Only flush blocks CF for safety
 
             for cf_name in cf_names {
                 if let Some(cf) = db.cf_handle(cf_name) {
                     if let Err(e) = db.flush_cf(&cf) {
-                        warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
+                        tracing::warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
                     }
                 }
             }

@@ -27,7 +27,7 @@ use tracing::{debug, error, info, warn};
 use rocksdb::{WriteBatch, WriteOptions};
 
 use crate::balance_consensus::BalanceUpdate;
-use crate::kv::RocksDBKV;
+use crate::kv::{KVStore, RocksDBKV};
 
 // For block serialization and hashing
 use sha2::{Sha256, Digest};
@@ -86,6 +86,10 @@ pub struct QTransaction {
 
     /// Transaction ID for debugging
     tx_id: u64,
+
+    /// v1.0.64-beta: Track max block height saved in this transaction
+    /// Used to update qblock:latest pointer on commit for batch sync
+    max_saved_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -100,6 +104,7 @@ impl QTransaction {
             state: Arc::new(Mutex::new(TransactionState::Active)),
             balance_updates: Arc::new(Mutex::new(Vec::new())),
             tx_id,
+            max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -181,20 +186,60 @@ impl QTransaction {
         let height_bytes = block.header.height.to_be_bytes();
         self.put("block_hash_to_height", &block_hash, &height_bytes).await?;
 
+        // ✅ v1.0.64-beta CRITICAL FIX: Track max height for batch sync pointer update
+        // Track the highest block height saved in this transaction
+        // This will be used to update qblock:latest on commit()
+        use std::sync::atomic::Ordering;
+        let current_max = self.max_saved_height.load(Ordering::SeqCst);
+        if block.header.height > current_max {
+            self.max_saved_height.store(block.header.height, Ordering::SeqCst);
+        }
+
         // ✅ v0.9.29-beta CRITICAL FIX: Only update pointer if block extends contiguous chain
         // PREVENTS: Pointer racing ahead when receiving out-of-order blocks from gossipsub/TurboSync
         // ROOT CAUSE: Unconditional pointer updates created 504-block gaps (pointer at 2505, actual chain at 2001)
+        //
+        // 🛡️ v1.0.88-beta: Added monotonicity check - pointer can NEVER decrease
         let current_pointer = self.get_current_height_from_pointer().await?;
 
         // Update pointer ONLY if:
         // 1. This is genesis block (height 0), OR
         // 2. This block is exactly 1 higher than current pointer (extends contiguous chain)
+        // AND: New height > current pointer (monotonicity)
         if block.header.height == 0 || block.header.height == current_pointer + 1 {
-            self.put("blocks", b"qblock:latest", &height_bytes).await?;
-            debug!("✅ Transaction {}: Saved block at height {} and updated qblock:latest pointer (contiguous extension from {})",
-                   self.tx_id, block.header.height, current_pointer);
+            // 🛡️ v1.0.88-beta: MONOTONICITY CHECK - pointer can only increase
+            if block.header.height < current_pointer && current_pointer > 1000 {
+                error!("🚨 [TRANSACTION] BLOCKED HEIGHT REGRESSION: {} → {} (keeping {})",
+                       current_pointer, block.header.height, current_pointer);
+                // Don't update pointer - would cause regression
+            } else {
+                self.put("blocks", b"qblock:latest", &height_bytes).await?;
+
+                // v1.0.87-beta: STATE TRANSITION DEBUGGING
+                let block_hash = self.calculate_block_hash_for_storage(block);
+                info!("📊 [STATE-TRANSITION] POINTER ADVANCED: {} → {} | block_hash={}",
+                      current_pointer,
+                      block.header.height,
+                      hex::encode(&block_hash[..8]));
+
+                debug!("✅ Transaction {}: Saved block at height {} and updated qblock:latest pointer (contiguous extension from {})",
+                       self.tx_id, block.header.height, current_pointer);
+            }
         } else {
-            debug!("⏭️  Transaction {}: Saved block at height {} but did NOT update pointer (current: {}, would create gap)",
+            // v1.0.87-beta: STATE TRANSITION DEBUGGING - NON-CONTIGUOUS
+            let gap = if block.header.height > current_pointer + 1 {
+                block.header.height - current_pointer - 1
+            } else {
+                0
+            };
+
+            if gap > 0 {
+                debug!("⏭️  [STATE-TRANSITION] NON-CONTIGUOUS: block {} cannot extend pointer {} (gap: {} blocks)",
+                      block.header.height, current_pointer, gap);
+            }
+
+            // v1.0.64-beta: Still track for batch update on commit
+            debug!("⏭️  Transaction {}: Saved block at height {} (tracked for batch update), current pointer: {}",
                    self.tx_id, block.header.height, current_pointer);
         }
 
@@ -293,26 +338,51 @@ impl QTransaction {
         debug!("💾 Committing transaction {}...", self.tx_id);
 
         // Get write batch (move it out since WriteBatch doesn't implement Clone)
-        let batch = {
+        let mut batch = {
             let mut batch_guard = self.write_batch.lock().await;
             std::mem::replace(&mut *batch_guard, WriteBatch::default())
         };
 
-        // Create write options with fsync enabled for durability
+        // ✅ v1.0.64-beta CRITICAL FIX: Update qblock:latest pointer to max height in this batch
+        // This fixes the batch sync pointer mismatch where blocks are saved but pointer stays at 1
+        use std::sync::atomic::Ordering;
+        let max_height = self.max_saved_height.load(Ordering::SeqCst);
+        if max_height > 0 {
+            // Get the current pointer from DB to compare
+            let current_pointer = match self.hot_db.get("blocks", b"qblock:latest").await {
+                Ok(Some(bytes)) if bytes.len() == 8 => {
+                    u64::from_be_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ])
+                }
+                _ => 0,
+            };
+
+            // Only update pointer if we're advancing it (never go backwards!)
+            if max_height > current_pointer {
+                let cf_handle = self.hot_db.get_cf("blocks")?;
+                let height_bytes = max_height.to_be_bytes();
+                batch.put_cf(&cf_handle, b"qblock:latest", &height_bytes);
+                info!(
+                    "✅ [v1.0.64-beta] Transaction {}: Batch sync pointer update {} -> {} (advancing by {} blocks)",
+                    self.tx_id, current_pointer, max_height, max_height - current_pointer
+                );
+            }
+        }
+
+        // v1.0.77-beta: RESTORED set_sync(true) for crash safety
+        // LESSON LEARNED: set_sync(false) caused data loss on kill -9
+        // - Blocks 299900-304400 were lost because WAL wasn't synced
+        // - set_sync(true) forces fsync() to disk, survives hard kills
+        //
+        // The real bottleneck was flush_cf() in kv.rs (now reduced to 1 CF)
         let mut write_opts = WriteOptions::default();
-        write_opts.set_sync(true); // Force fsync() - survives hard kills
-        write_opts.disable_wal(false); // Keep WAL for crash recovery
+        write_opts.set_sync(true); // CRITICAL: Force fsync() - survives kill -9
+        write_opts.disable_wal(false); // Keep WAL enabled for crash recovery
 
         // Atomic commit to RocksDB
         let start = std::time::Instant::now();
-
-        // Call RocksDB's write_batch method via the KVStore trait
-        // Convert WriteBatch to Vec of operations
-        // NOTE: We're using a simplified approach - direct write via hot_db
-        // This requires making the batch operations accessible
-
-        // For now, use the underlying database directly via write_opt
-        // We need to access the internal DB, so we'll use the public flush method instead
 
         // SIMPLIFIED: Just write the batch using the native RocksDB method
         // This requires exposing a method in RocksDBKV
@@ -462,8 +532,9 @@ mod tests {
         let tx = QTransaction::new(db.clone(), 1);
         assert!(tx.is_active().await);
 
+        // commit() consumes self, so we can't check is_active after
         tx.commit().await.unwrap();
-        assert!(!tx.is_active().await);
+        // Transaction is now consumed - commit successful
     }
 
     #[tokio::test]

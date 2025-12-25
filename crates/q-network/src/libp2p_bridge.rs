@@ -95,14 +95,16 @@ impl Libp2pBridge {
 
         // Transport: TCP + WebSocket + Noise encryption + Yamux multiplexing
         // TCP transport for node-to-node connections
-        let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default())
+        // v1.4.14-beta: Enable TCP_NODELAY for lower latency (disables Nagle's algorithm)
+        let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
             .upgrade(libp2p::core::upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key)?)
             .multiplex(yamux::Config::default());
 
         // WebSocket transport for browser-to-node connections
         // WebSocket is layered on top of TCP transport
-        let ws_tcp_transport = tcp::tokio::Transport::new(tcp::Config::default());
+        // v1.4.14-beta: Enable TCP_NODELAY for WebSocket base transport
+        let ws_tcp_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
         let ws_transport = websocket::Config::new(ws_tcp_transport)
             .upgrade(libp2p::core::upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key)?)

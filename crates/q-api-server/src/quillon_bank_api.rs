@@ -362,6 +362,7 @@ pub async fn mint_qnkusd(
         .into_bytes(),
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
+        tx_type: q_types::TransactionType::StableMint,
     };
 
     // Store transaction for Recent Activity display
@@ -845,6 +846,7 @@ pub async fn approve_loan(
         .into_bytes(),
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
+        tx_type: q_types::TransactionType::StableMint,
     };
 
     // Store transaction for Recent Activity display
@@ -1178,6 +1180,7 @@ pub async fn payback_loan(
             .into_bytes(),
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
+        tx_type: q_types::TransactionType::StableBurn,
     };
 
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {

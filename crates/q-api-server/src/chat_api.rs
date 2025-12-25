@@ -95,6 +95,8 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
         let model_dir = std::path::PathBuf::from("./models");
         tokio::fs::create_dir_all(&model_dir).await?;
 
+        // 🚀 v1.4.5-beta: Use Mistral-7B (4.1GB) - Ministral-3B uses unsupported mistral3 arch
+        // The mistral.rs library doesn't yet support the newer mistral3 architecture
         let model_path = model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
         let tokenizer_config_path = model_dir.join("tokenizer_config.json");
         let tokenizer_json_path = model_dir.join("tokenizer.json");
@@ -558,21 +560,117 @@ pub async fn send_message(
                         }
                     }
                     None => {
-                        error!("No inference engine available");
-                        let fallback =
-                            "I received your message, but AI inference is not configured."
-                                .to_string();
-                        (
-                            fallback,
-                            GenerationStats {
-                                total_tokens: 0,
-                                latency_ms: 0,
-                                tokens_per_second: 0.0,
-                                privacy_overhead_ms: 0,
-                                zk_proof_time_ms: 0,
-                                distributed_nodes_used: 0,
-                            },
-                        )
+                        // Try to load model via model manager (on-demand)
+                        if let Some(ref model_manager) = state.ai_model_manager {
+                            info!("🔄 No inference engine, attempting on-demand model load via ModelManager...");
+                            match model_manager.get_or_load_model(&metadata.model).await {
+                                Ok(engine) => {
+                                    info!("✅ Model loaded on-demand: {}", metadata.model);
+
+                                    // Use the loaded engine for inference
+                                    use std::sync::Arc as StdArc;
+                                    use tokio::sync::Mutex as TokioMutex;
+
+                                    let response_text = StdArc::new(TokioMutex::new(String::new()));
+                                    let final_stats = StdArc::new(TokioMutex::new(None));
+
+                                    let response_text_clone = response_text.clone();
+                                    let final_stats_clone = final_stats.clone();
+
+                                    let result = engine.generate_stream(&formatted_prompt, max_tokens, move |event| {
+                                        let response_text = response_text_clone.clone();
+                                        let final_stats = final_stats_clone.clone();
+                                        async move {
+                                            match event {
+                                                q_ai_inference::StreamEvent::Token(token) => {
+                                                    response_text.lock().await.push_str(&token);
+                                                }
+                                                q_ai_inference::StreamEvent::Complete(stats) => {
+                                                    *final_stats.lock().await = Some(stats);
+                                                }
+                                                _ => {}
+                                            }
+                                            Ok(())
+                                        }
+                                    }).await;
+
+                                    match result {
+                                        Ok(_) => {
+                                            let response_str = response_text.lock().await.clone();
+                                            let stats_option = final_stats.lock().await.clone();
+                                            let total_time_ms = generation_start.elapsed().as_millis() as u64;
+
+                                            let stats = stats_option.unwrap_or_else(|| {
+                                                q_ai_inference::mistralrs_engine::GenerationStats {
+                                                    tokens_generated: response_str.split_whitespace().count(),
+                                                    prompt_tokens: 0,
+                                                    total_time_ms: total_time_ms as f64,
+                                                    tokens_per_second: if total_time_ms > 0 {
+                                                        (response_str.split_whitespace().count() as f64 * 1000.0) / total_time_ms as f64
+                                                    } else {
+                                                        0.0
+                                                    },
+                                                    time_to_first_token_ms: 0.0,
+                                                    kv_cache_hits: 0,
+                                                    kv_cache_misses: 0,
+                                                    speedup_factor: 1.0,
+                                                }
+                                            });
+
+                                            let gen_stats = GenerationStats {
+                                                total_tokens: stats.tokens_generated,
+                                                latency_ms: total_time_ms,
+                                                tokens_per_second: stats.tokens_per_second,
+                                                privacy_overhead_ms: if metadata.encryption_enabled { 25 } else { 0 },
+                                                zk_proof_time_ms: if metadata.zk_proofs_enabled { 100 } else { 0 },
+                                                distributed_nodes_used: 1,
+                                            };
+
+                                            info!("✨ On-demand model ({}): {} tokens in {:.2}s ({:.2} tok/s)",
+                                                metadata.model,
+                                                stats.tokens_generated,
+                                                total_time_ms as f32 / 1000.0,
+                                                stats.tokens_per_second
+                                            );
+
+                                            (response_str, gen_stats)
+                                        }
+                                        Err(e) => {
+                                            error!("On-demand model generation failed: {}", e);
+                                            let fallback = format!("I received your message, but encountered an error: {}", e);
+                                            (fallback, GenerationStats {
+                                                total_tokens: 0, latency_ms: 0, tokens_per_second: 0.0,
+                                                privacy_overhead_ms: 0, zk_proof_time_ms: 0, distributed_nodes_used: 0,
+                                            })
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to load model on-demand: {}", e);
+                                    let fallback = format!("I received your message, but failed to load AI model: {}", e);
+                                    (fallback, GenerationStats {
+                                        total_tokens: 0, latency_ms: 0, tokens_per_second: 0.0,
+                                        privacy_overhead_ms: 0, zk_proof_time_ms: 0, distributed_nodes_used: 0,
+                                    })
+                                }
+                            }
+                        } else {
+                            error!("No inference engine and no model manager available");
+                            let fallback =
+                                "I received your message, but AI inference is not configured."
+                                    .to_string();
+                            (
+                                fallback,
+                                GenerationStats {
+                                    total_tokens: 0,
+                                    latency_ms: 0,
+                                    tokens_per_second: 0.0,
+                                    privacy_overhead_ms: 0,
+                                    zk_proof_time_ms: 0,
+                                    distributed_nodes_used: 0,
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -964,15 +1062,47 @@ pub async fn stream_message(
                                 error!("❌ Failed to save placeholder message: {}", e);
                             }
 
-                            // Stream responses from network nodes
+                            // Stream responses from network nodes with timeout
+                            // v1.1.30: Add 30-second timeout - if no response, fall back to local inference
                             let cumulative_text = Arc::new(tokio::sync::RwLock::new(String::new()));
                             let storage_clone = state.storage_engine.clone();
                             let chat_id_clone = chat_id.clone();
                             let tx_clone = tx.clone();
 
                             let start_time = std::time::Instant::now();
+                            let mut got_any_response = false;
+                            let timeout_duration = tokio::time::Duration::from_secs(30);
 
-                            while let Some(chunk) = response_rx.recv().await {
+                            loop {
+                                let chunk = match tokio::time::timeout(timeout_duration, response_rx.recv()).await {
+                                    Ok(Some(c)) => {
+                                        got_any_response = true;
+                                        c
+                                    },
+                                    Ok(None) => {
+                                        // Channel closed
+                                        if !got_any_response {
+                                            warn!("⚠️ Distributed inference channel closed without response, falling back to local");
+                                            break; // Will fall through to local inference
+                                        }
+                                        break;
+                                    },
+                                    Err(_) => {
+                                        // Timeout!
+                                        if !got_any_response {
+                                            warn!("⚠️ Distributed inference timeout (30s), falling back to LOCAL inference");
+                                            let timeout_event = Event::default()
+                                                .event("progress")
+                                                .data("Distributed inference timeout, switching to local...");
+                                            let _ = tx_clone.send(Ok(timeout_event)).await;
+                                            break; // Will fall through to local inference
+                                        }
+                                        // Got some response but timed out waiting for more - treat as complete
+                                        warn!("⚠️ Distributed inference partial timeout after receiving data");
+                                        break;
+                                    }
+                                };
+
                                 match chunk {
                                     q_network::InferenceResponseChunk::Token(token) => {
                                         // Update cumulative text
@@ -1068,15 +1198,17 @@ pub async fn stream_message(
                                 }
                             }
 
-                            return;
+                            // v1.1.30: Only return if we got a successful response
+                            // If timeout occurred without response, fall through to local inference
+                            if got_any_response {
+                                return;
+                            }
+                            info!("🔄 Falling back to LOCAL inference after distributed timeout...");
+                            // Fall through to local inference below
                         }
                         Err(e) => {
-                            error!("❌ Failed to publish distributed inference request: {}", e);
-                            let error_event = Event::default()
-                                .event("error")
-                                .data(format!("Distributed inference failed: {}", e));
-                            let _ = tx.send(Ok(error_event)).await;
-                            return;
+                            warn!("⚠️ Failed to publish distributed inference request: {}, falling back to local", e);
+                            // Fall through to local inference
                         }
                     }
                 }
@@ -1084,6 +1216,7 @@ pub async fn stream_message(
         }
 
         // Use HIGH-PERFORMANCE mistral.rs engine (10-100x faster) - SINGLE NODE
+        // v1.1.30: This is now also the fallback when distributed inference times out
         // Try to load engine on-demand if not already loaded
         let engine = match ensure_ai_engine_loaded(&state).await {
             Ok(engine) => engine,

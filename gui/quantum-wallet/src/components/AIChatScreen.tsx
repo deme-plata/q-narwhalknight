@@ -25,7 +25,14 @@ import {
   Users,
   Layers,
   Brain,
-  ChevronDown
+  ChevronDown,
+  Copy,
+  Check,
+  RefreshCw,
+  ThumbsUp,
+  ThumbsDown,
+  Square,
+  Pencil
 } from 'lucide-react';
 import TransactionPreviewModal from './TransactionPreviewModal';
 import VerificationMonitor from './VerificationMonitor';
@@ -96,6 +103,14 @@ export default function AIChatScreen() {
   const [transactionPreview, setTransactionPreview] = useState<any>(null);
   const [showTransactionPreview, setShowTransactionPreview] = useState(false);
   const [pendingTransactionMessage, setPendingTransactionMessage] = useState<string>('');
+
+  // ✅ v1.4.2 - Enhanced Chat UX Features
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [copiedCodeIndex, setCopiedCodeIndex] = useState<string | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState<string>('');
+  const [messageFeedback, setMessageFeedback] = useState<Record<string, 'up' | 'down' | null>>({});
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Load wallet and usage data
   const loadWalletData = async () => {
@@ -811,6 +826,131 @@ export default function AIChatScreen() {
     setPendingTransactionMessage('');
   };
 
+  // ✅ v1.4.2 - Copy message content to clipboard
+  const copyMessageContent = async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  // ✅ v1.4.2 - Copy code block to clipboard
+  const copyCodeBlock = async (codeIndex: string, code: string) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedCodeIndex(codeIndex);
+      setTimeout(() => setCopiedCodeIndex(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy code:', err);
+    }
+  };
+
+  // ✅ v1.4.2 - Regenerate last AI response
+  const regenerateResponse = async () => {
+    if (isGenerating || messages.length === 0) return;
+
+    // Find the last user message
+    const lastUserMessageIndex = [...messages].reverse().findIndex(m => m.role === 'user');
+    if (lastUserMessageIndex === -1) return;
+
+    const actualIndex = messages.length - 1 - lastUserMessageIndex;
+    const lastUserMessage = messages[actualIndex];
+
+    // Remove the last assistant message if it exists
+    const newMessages = messages.filter((_, i) => {
+      // Keep everything up to and including the last user message
+      return i <= actualIndex;
+    });
+    setMessages(newMessages);
+
+    // Re-send the last user message
+    setInput(lastUserMessage.content);
+    // Small delay to ensure state updates, then trigger send
+    setTimeout(() => {
+      const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
+      if (sendBtn) sendBtn.click();
+    }, 100);
+  };
+
+  // ✅ v1.4.2 - Edit user message
+  const startEditingMessage = (messageId: string, content: string) => {
+    setEditingMessageId(messageId);
+    setEditingContent(content);
+  };
+
+  const cancelEditingMessage = () => {
+    setEditingMessageId(null);
+    setEditingContent('');
+  };
+
+  const saveEditedMessage = async () => {
+    if (!editingMessageId || !editingContent.trim()) return;
+
+    // Find the message index
+    const messageIndex = messages.findIndex(m => m.id === editingMessageId);
+    if (messageIndex === -1) return;
+
+    // Remove all messages after this one (including AI responses)
+    const newMessages = messages.slice(0, messageIndex);
+    setMessages(newMessages);
+
+    // Set the edited content as input and send
+    setInput(editingContent);
+    setEditingMessageId(null);
+    setEditingContent('');
+
+    // Trigger send after state updates
+    setTimeout(() => {
+      const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
+      if (sendBtn) sendBtn.click();
+    }, 100);
+  };
+
+  // ✅ v1.4.2 - Message feedback
+  const submitFeedback = async (messageId: string, feedback: 'up' | 'down') => {
+    const currentFeedback = messageFeedback[messageId];
+    const newFeedback = currentFeedback === feedback ? null : feedback;
+
+    setMessageFeedback(prev => ({
+      ...prev,
+      [messageId]: newFeedback
+    }));
+
+    // Optionally send feedback to backend
+    try {
+      await fetch('/api/chat/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_id: messageId,
+          feedback: newFeedback,
+          chat_id: currentChatId
+        })
+      });
+    } catch (err) {
+      console.error('Failed to submit feedback:', err);
+    }
+  };
+
+  // ✅ v1.4.2 - Stop generation
+  const stopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setIsGenerating(false);
+    setStreamingMessage('');
+    setStreamingReasoning('');
+    localStorage.removeItem('activeAIGeneration');
+    backgroundGenerationRef.current = false;
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || isGenerating) return;
 
@@ -995,10 +1135,29 @@ export default function AIChatScreen() {
         }
       }
 
+      // ✅ v1.4.2 FIX: Safety cleanup when stream ends without finish_reason
+      // This handles cases where connection closes unexpectedly
+      if (isGenerating) {
+        console.log('⚠️ Stream ended without finish_reason, cleaning up...');
+        setIsGenerating(false);
+        localStorage.removeItem('activeAIGeneration');
+        backgroundGenerationRef.current = false;
+
+        // If we have streaming content, try to save it
+        if (cumulativeText) {
+          console.log('📝 Preserving streamed content...');
+          // Reload messages to get any saved content
+          await loadMessages(chatId!);
+        }
+        setStreamingMessage('');
+        setStreamingReasoning('');
+      }
+
     } catch (error) {
       console.error('Failed to send message:', error);
       setIsGenerating(false);
       localStorage.removeItem('activeAIGeneration');
+      backgroundGenerationRef.current = false;
       setStreamingMessage(`Failed to send message: ${error}`);
       setTimeout(() => setStreamingMessage(''), 5000);
     }
@@ -1050,6 +1209,79 @@ export default function AIChatScreen() {
             <Plus className="w-5 h-5" />
             <span className="font-medium">New Chat</span>
           </button>
+        </div>
+
+        {/* Ask Me Anything Input - Always visible at top of sidebar */}
+        <div
+          className="px-4 py-3 border-b"
+          style={{
+            background: 'linear-gradient(180deg, rgba(20, 30, 50, 0.95) 0%, rgba(25, 35, 55, 0.95) 100%)',
+            borderColor: 'rgba(212, 175, 55, 0.15)'
+          }}
+        >
+          {/* Max Tokens Slider - Compact */}
+          <div className="mb-2 flex items-center gap-2">
+            <label className="text-amber-300 text-xs font-medium whitespace-nowrap">
+              Tokens: {maxTokens}
+            </label>
+            <input
+              type="range"
+              min="50"
+              max="2048"
+              step="50"
+              value={maxTokens}
+              onChange={(e) => setMaxTokens(parseInt(e.target.value))}
+              className="flex-1 h-1.5 rounded-lg appearance-none cursor-pointer"
+              style={{
+                background: `linear-gradient(to right, #D4AF37 0%, #D4AF37 ${((maxTokens - 50) / (2048 - 50)) * 100}%, rgba(30, 41, 59, 0.5) ${((maxTokens - 50) / (2048 - 50)) * 100}%, rgba(30, 41, 59, 0.5) 100%)`
+              }}
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+              placeholder="Ask me anything..."
+              disabled={isGenerating}
+              className="flex-1 px-3 py-2.5 rounded-lg text-amber-50 text-sm placeholder-amber-200/40 focus:outline-none transition-all disabled:opacity-50"
+              style={{
+                background: 'rgba(30, 41, 59, 0.5)',
+                border: '1px solid rgba(212, 175, 55, 0.2)',
+                boxShadow: '0 0 10px rgba(212, 175, 55, 0.05)'
+              }}
+            />
+            {isGenerating ? (
+              <button
+                onClick={stopGeneration}
+                className="px-3 py-2.5 rounded-lg font-medium transition-all hover:scale-105"
+                style={{
+                  background: 'linear-gradient(135deg, #DC2626 0%, #EF4444 50%, #DC2626 100%)',
+                  color: '#FFF',
+                  boxShadow: '0 0 15px rgba(220, 38, 38, 0.3)'
+                }}
+                title="Stop generation"
+              >
+                <Square className="w-5 h-5" />
+              </button>
+            ) : (
+              <button
+                data-send-button
+                onClick={sendMessage}
+                disabled={!input.trim()}
+                className="px-3 py-2.5 rounded-lg font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105"
+                style={{
+                  background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #D4AF37 100%)',
+                  color: '#0F172A',
+                  boxShadow: '0 0 15px rgba(212, 175, 55, 0.3)'
+                }}
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Chat List */}
@@ -1132,10 +1364,14 @@ export default function AIChatScreen() {
               <span className="font-medium text-amber-200">
                 {selectedModel.includes('Small') || selectedModel.includes('24B')
                   ? 'Mistral Small 24B'
+                  : selectedModel.includes('Ministral-3B')
+                  ? 'Ministral 3B'
+                  : selectedModel.includes('Qwen3')
+                  ? 'Qwen3 VL 8B'
                   : 'Mistral 7B'}
               </span>
               <span className="text-xs text-amber-400/60">
-                ({selectedModel.includes('Small') || selectedModel.includes('24B') ? '14 GB' : '4.3 GB'})
+                ({selectedModel.includes('Small') || selectedModel.includes('24B') ? '14 GB' : selectedModel.includes('Ministral-3B') ? '2.1 GB' : selectedModel.includes('Qwen3') ? '5.1 GB' : '4.3 GB'})
               </span>
             </div>
             <div className="flex items-center gap-4 text-sm text-amber-200/60">
@@ -1257,13 +1493,26 @@ export default function AIChatScreen() {
                               components={{
                                 code: ({ node, inline, className, children, ...props }: any) => {
                                   const match = /language-(\w+)/.exec(className || '');
+                                  const codeString = String(children).replace(/\n$/, '');
+                                  const codeIndex = `${message.id}-${match?.[1] || 'code'}-${codeString.slice(0, 20)}`;
                                   return !inline && match ? (
-                                    <div className="relative my-4">
-                                      <div className="absolute top-0 right-0 px-3 py-1 text-xs text-amber-400 bg-slate-800/50 rounded-bl-lg rounded-tr-lg border-l border-b border-amber-500/20">
-                                        {match[1]}
+                                    <div className="relative my-4 group">
+                                      <div className="absolute top-0 right-0 flex items-center gap-1 px-2 py-1 text-xs bg-slate-800/80 rounded-bl-lg rounded-tr-lg border-l border-b border-amber-500/20">
+                                        <span className="text-amber-400">{match[1]}</span>
+                                        <button
+                                          onClick={() => copyCodeBlock(codeIndex, codeString)}
+                                          className="ml-2 p-1 rounded hover:bg-amber-500/20 transition-all"
+                                          title="Copy code"
+                                        >
+                                          {copiedCodeIndex === codeIndex ? (
+                                            <Check className="w-3.5 h-3.5 text-green-400" />
+                                          ) : (
+                                            <Copy className="w-3.5 h-3.5 text-amber-400/70 hover:text-amber-400" />
+                                          )}
+                                        </button>
                                       </div>
                                       <code
-                                        className={`${className} block p-4 rounded-lg overflow-x-auto`}
+                                        className={`${className} block p-4 pt-8 rounded-lg overflow-x-auto`}
                                         style={{
                                           background: 'rgba(15, 23, 42, 0.8)',
                                           border: '1px solid rgba(212, 175, 55, 0.2)',
@@ -1316,9 +1565,41 @@ export default function AIChatScreen() {
                             </ReactMarkdown>
                           </div>
                         ) : (
-                          <p className="text-amber-50 whitespace-pre-wrap leading-relaxed">
-                            {message.content}
-                          </p>
+                          /* User Message - with inline edit support */
+                          editingMessageId === message.id ? (
+                            <div className="space-y-2">
+                              <textarea
+                                value={editingContent}
+                                onChange={(e) => setEditingContent(e.target.value)}
+                                className="w-full p-3 rounded-lg text-amber-50 bg-slate-800/50 border border-amber-500/30 focus:outline-none focus:border-amber-400 resize-none"
+                                rows={3}
+                                autoFocus
+                              />
+                              <div className="flex gap-2 justify-end">
+                                <button
+                                  onClick={cancelEditingMessage}
+                                  className="px-3 py-1.5 rounded-lg text-sm text-amber-200/70 hover:text-amber-200 hover:bg-amber-500/10 transition-all"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={saveEditedMessage}
+                                  disabled={!editingContent.trim()}
+                                  className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
+                                  style={{
+                                    background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #D4AF37 100%)',
+                                    color: '#0F172A'
+                                  }}
+                                >
+                                  Save & Resend
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-amber-50 whitespace-pre-wrap leading-relaxed">
+                              {message.content}
+                            </p>
+                          )
                         )}
 
                         {/* Kimi K2 Reasoning Display (v1.0.5) */}
@@ -1347,6 +1628,86 @@ export default function AIChatScreen() {
                             </div>
                           </div>
                         )}
+
+                        {/* ✅ v1.4.2 - Message Action Buttons */}
+                        <div className="flex items-center gap-1 mt-3 pt-2 border-t border-amber-500/10">
+                          {/* Copy Button */}
+                          <button
+                            onClick={() => copyMessageContent(message.id, message.content)}
+                            className="p-1.5 rounded-lg hover:bg-amber-500/10 transition-all group"
+                            title="Copy message"
+                          >
+                            {copiedMessageId === message.id ? (
+                              <Check className="w-4 h-4 text-green-400" />
+                            ) : (
+                              <Copy className="w-4 h-4 text-amber-200/50 group-hover:text-amber-400" />
+                            )}
+                          </button>
+
+                          {message.role === 'assistant' && (
+                            <>
+                              {/* Thumbs Up */}
+                              <button
+                                onClick={() => submitFeedback(message.id, 'up')}
+                                className={`p-1.5 rounded-lg transition-all group ${
+                                  messageFeedback[message.id] === 'up'
+                                    ? 'bg-green-500/20'
+                                    : 'hover:bg-amber-500/10'
+                                }`}
+                                title="Good response"
+                              >
+                                <ThumbsUp className={`w-4 h-4 ${
+                                  messageFeedback[message.id] === 'up'
+                                    ? 'text-green-400'
+                                    : 'text-amber-200/50 group-hover:text-amber-400'
+                                }`} />
+                              </button>
+
+                              {/* Thumbs Down */}
+                              <button
+                                onClick={() => submitFeedback(message.id, 'down')}
+                                className={`p-1.5 rounded-lg transition-all group ${
+                                  messageFeedback[message.id] === 'down'
+                                    ? 'bg-red-500/20'
+                                    : 'hover:bg-amber-500/10'
+                                }`}
+                                title="Bad response"
+                              >
+                                <ThumbsDown className={`w-4 h-4 ${
+                                  messageFeedback[message.id] === 'down'
+                                    ? 'text-red-400'
+                                    : 'text-amber-200/50 group-hover:text-amber-400'
+                                }`} />
+                              </button>
+
+                              {/* Regenerate - only show on last assistant message */}
+                              {messages[messages.length - 1]?.id === message.id && (
+                                <button
+                                  onClick={regenerateResponse}
+                                  disabled={isGenerating}
+                                  className="p-1.5 rounded-lg hover:bg-amber-500/10 transition-all group disabled:opacity-50"
+                                  title="Regenerate response"
+                                >
+                                  <RefreshCw className="w-4 h-4 text-amber-200/50 group-hover:text-amber-400" />
+                                </button>
+                              )}
+                            </>
+                          )}
+
+                          {message.role === 'user' && (
+                            <>
+                              {/* Edit Button */}
+                              <button
+                                onClick={() => startEditingMessage(message.id, message.content)}
+                                disabled={isGenerating}
+                                className="p-1.5 rounded-lg hover:bg-amber-500/10 transition-all group disabled:opacity-50"
+                                title="Edit message"
+                              >
+                                <Pencil className="w-4 h-4 text-amber-200/50 group-hover:text-amber-400" />
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -1479,71 +1840,6 @@ export default function AIChatScreen() {
           )}
         </div>
 
-        {/* Input Area */}
-        {currentChatId && (
-          <div
-            className="p-6 border-t"
-            style={{
-              background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
-              borderColor: 'rgba(212, 175, 55, 0.2)'
-            }}
-          >
-            {/* Max Tokens Slider */}
-            <div className="mb-4 flex items-center gap-3">
-              <label className="text-amber-300 text-sm font-medium whitespace-nowrap">
-                Max Tokens: {maxTokens}
-              </label>
-              <input
-                type="range"
-                min="50"
-                max="2048"
-                step="50"
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(parseInt(e.target.value))}
-                className="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
-                style={{
-                  background: `linear-gradient(to right, #D4AF37 0%, #D4AF37 ${((maxTokens - 50) / (2048 - 50)) * 100}%, rgba(30, 41, 59, 0.5) ${((maxTokens - 50) / (2048 - 50)) * 100}%, rgba(30, 41, 59, 0.5) 100%)`
-                }}
-              />
-              <span className="text-amber-200/60 text-xs whitespace-nowrap">
-                {maxTokens < 256 ? 'Short' : maxTokens < 512 ? 'Medium' : maxTokens < 1024 ? 'Long' : 'Very Long'}
-              </span>
-            </div>
-
-            <div className="flex gap-3">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-                placeholder="Ask me anything..."
-                disabled={isGenerating}
-                className="flex-1 px-6 py-4 rounded-xl text-amber-50 placeholder-amber-200/40 focus:outline-none transition-all disabled:opacity-50"
-                style={{
-                  background: 'rgba(30, 41, 59, 0.5)',
-                  border: '2px solid rgba(212, 175, 55, 0.2)',
-                  boxShadow: '0 0 20px rgba(212, 175, 55, 0.1)'
-                }}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || isGenerating}
-                className="px-6 py-4 rounded-xl font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{
-                  background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #D4AF37 100%)',
-                  color: '#0F172A',
-                  boxShadow: '0 0 20px rgba(212, 175, 55, 0.4)'
-                }}
-              >
-                {isGenerating ? (
-                  <div className="w-6 h-6 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Send className="w-6 h-6" />
-                )}
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Settings Modal */}
@@ -1613,7 +1909,7 @@ export default function AIChatScreen() {
                         AI Model
                       </label>
                       <span className="text-amber-400 font-mono text-xs px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                        {selectedModel.includes('Small') ? '24B params' : '7B params'}
+                        {selectedModel.includes('Small') ? '24B params' : selectedModel.includes('Ministral-3B') ? '3B params' : selectedModel.includes('Qwen3') ? '8B params' : '7B params'}
                       </span>
                     </div>
                     <select
@@ -1625,6 +1921,7 @@ export default function AIChatScreen() {
                         boxShadow: '0 0 20px rgba(212, 175, 55, 0.1)',
                       }}
                     >
+                      <option value="Ministral-3B-Instruct">⚡ Ministral 3B (2.1 GB) - Ultra Fast</option>
                       <option value="Mistral-7B-Instruct-v0.3">Mistral 7B Instruct (4.3 GB) - Fast</option>
                       <option value="Qwen3-VL-8B-Instruct">🖼️ Qwen3 VL 8B (5.1 GB) - Vision & Language</option>
                       <option value="Mistral-Small-3.2-24B-Instruct">Mistral Small 24B (14 GB) - Higher Quality</option>

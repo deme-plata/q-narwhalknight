@@ -31,6 +31,7 @@
 pub mod error;
 pub mod mixing_engine;
 pub mod ring_signatures;
+pub mod uc_traceable_ring_sig;
 pub mod stealth_addresses;
 pub mod zkp_prover;
 pub mod mixing_pool;
@@ -46,6 +47,10 @@ pub mod advanced_zk;
 pub use error::{MixingError, Result};
 pub use mixing_engine::QuantumMixingEngine;
 pub use ring_signatures::{QuantumRingSigner, RingSignature, KeyImage};
+pub use uc_traceable_ring_sig::{
+    UCTraceableRingSigner, UCTraceableRingSignature, UCTRSConfig,
+    VRFOutput, VRFProof, TracingTag, TracingResult,
+};
 pub use stealth_addresses::{StealthAddressGenerator, StealthAddress, DetectedPayment};
 pub use zkp_prover::{QuantumZKPProver, ZKProof, ProofType, BalanceCommitment, RangeProof, MixingProof};
 pub use quantum_entropy::{QuantumEntropyPool, EntropySource, NoiseInjector};

@@ -11,6 +11,7 @@
 
 pub mod aggregator;
 pub mod feeds;
+pub mod ml_weight_optimizer;
 pub mod network;
 pub mod privacy;
 pub mod quantum_ai;
@@ -32,6 +33,7 @@ use tracing::{error, info, warn};
 // Re-export core types
 pub use aggregator::*;
 pub use feeds::*;
+pub use ml_weight_optimizer::*;
 pub use network::*;
 pub use privacy::*;
 pub use quantum_ai::*;
@@ -56,6 +58,8 @@ pub struct QuantumOracle {
     pub verification: Arc<QuantumVerification>,
     /// Data feed manager
     pub feed_manager: Arc<QuantumFeedManager>,
+    /// ML-driven weight optimizer with adaptive uncertainty
+    pub weight_optimizer: Arc<RwLock<OracleWeightPredictor>>,
 
     // State management
     pub config: Arc<RwLock<QuantumOracleConfig>>,
@@ -74,6 +78,7 @@ impl QuantumOracle {
         info!("🌌 Initializing Quantum-Enhanced Oracle Network");
         info!("🧠 Physics-inspired AI aggregation activating...");
         info!("⚛️  Quantum uncertainty principles integrating...");
+        info!("🤖 ML-driven weight optimization enabled...");
 
         let quantum_ai = Arc::new(QuantumAIAggregator::new(&config).await?);
         let price_aggregator = Arc::new(QuantumPriceAggregator::new(&config).await?);
@@ -83,6 +88,14 @@ impl QuantumOracle {
         let verification = Arc::new(QuantumVerification::new(phase.clone()).await?);
         let feed_manager = Arc::new(QuantumFeedManager::new(&config).await?);
 
+        // Initialize ML weight optimizer with adaptive uncertainty
+        let weight_optimizer = Arc::new(RwLock::new(OracleWeightPredictor::new(
+            WeightOptimizerConfig {
+                base_uncertainty: config.uncertainty_factor as f32,
+                ..Default::default()
+            }
+        )));
+
         Ok(Self {
             quantum_ai,
             price_aggregator,
@@ -91,6 +104,7 @@ impl QuantumOracle {
             reputation_system,
             verification,
             feed_manager,
+            weight_optimizer,
             config: Arc::new(RwLock::new(config)),
             metrics: Arc::new(RwLock::new(QuantumOracleMetrics::default())),
             oracle_nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -444,19 +458,44 @@ impl QuantumOracle {
         Ok(())
     }
 
-    /// Apply quantum uncertainty principle to price value
+    /// Apply quantum uncertainty principle to price value with ML-adaptive scaling
     async fn apply_quantum_uncertainty(&self, value: &BigDecimal) -> Result<BigDecimal> {
-        let config = self.config.read().await;
-        let uncertainty = &config.uncertainty_factor;
+        // Use ML-adaptive uncertainty that scales with volatility
+        let adaptive_uncertainty = {
+            let optimizer = self.weight_optimizer.read().await;
+            optimizer.get_adaptive_uncertainty() as f64
+        };
 
-        // Apply Heisenberg uncertainty: ΔxΔp ≥ ℏ/2
-        let uncertainty_decimal = BigDecimal::from_str(&uncertainty.to_string())?;
-        let uncertainty_adjustment = value * uncertainty_decimal;
+        // Apply Heisenberg uncertainty: ΔxΔp ≥ ℏ/2 (scaled by volatility)
+        let uncertainty_decimal = BigDecimal::from_str(&adaptive_uncertainty.to_string())?;
+        let uncertainty_adjustment = value * &uncertainty_decimal;
 
         // Random quantum fluctuation based on Planck constant
+        let config = self.config.read().await;
         let quantum_noise = self.generate_quantum_noise(&config.planck_scaling).await?;
 
+        info!("🎯 [ADAPTIVE UNCERTAINTY] Applied {:.4} uncertainty (volatility-scaled)",
+              adaptive_uncertainty);
+
         Ok(value + uncertainty_adjustment + quantum_noise)
+    }
+
+    /// Get current volatility estimate from ML optimizer
+    pub async fn get_current_volatility(&self) -> f64 {
+        let optimizer = self.weight_optimizer.read().await;
+        optimizer.get_volatility() as f64
+    }
+
+    /// Get current adaptive uncertainty factor
+    pub async fn get_adaptive_uncertainty(&self) -> f64 {
+        let optimizer = self.weight_optimizer.read().await;
+        optimizer.get_adaptive_uncertainty() as f64
+    }
+
+    /// Calculate dynamic fee based on current volatility
+    pub async fn calculate_volatility_fee(&self, base_fee: f64) -> f64 {
+        let optimizer = self.weight_optimizer.read().await;
+        optimizer.calculate_dynamic_fee(base_fee)
     }
 
     /// Generate quantum noise based on Planck constant

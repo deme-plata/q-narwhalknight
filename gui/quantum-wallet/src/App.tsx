@@ -356,6 +356,47 @@ function App() {
                   currentWallet: currentHex
                 });
               }
+            } else if (type === 'token-balance-updated') {
+              // v1.4.10-beta: Handle custom token balance updates for instant DEX updates
+              const tokenData = parsedData.data || parsedData;
+
+              const currentWalletAddress = localStorage.getItem('walletAddress');
+              const currentHex = currentWalletAddress?.startsWith('qnk')
+                ? currentWalletAddress.substring(3)
+                : currentWalletAddress;
+
+              let eventHex = tokenData.wallet_address;
+              if (eventHex?.startsWith('qnk')) {
+                eventHex = eventHex.substring(3);
+              }
+
+              console.log('🪙 App.tsx: Token balance update SSE event received!', {
+                token: tokenData.token_symbol,
+                tokenAddress: tokenData.token_address,
+                eventWallet: eventHex,
+                currentWallet: currentHex,
+                match: eventHex === currentHex,
+                oldBalance: tokenData.old_balance,
+                newBalance: tokenData.new_balance,
+                reason: tokenData.change_reason
+              });
+
+              // Only dispatch if this event is for the current wallet
+              if (currentHex && eventHex === currentHex) {
+                // Dispatch custom event for DEX and Dashboard to update custom token balances
+                window.dispatchEvent(new CustomEvent('token-balance-updated', {
+                  detail: {
+                    tokenAddress: tokenData.token_address,
+                    tokenSymbol: tokenData.token_symbol,
+                    oldBalance: tokenData.old_balance,
+                    newBalance: tokenData.new_balance,
+                    reason: tokenData.change_reason,
+                    blockHeight: tokenData.block_height,
+                    confirmationStatus: tokenData.confirmation_status
+                  }
+                }));
+                console.log('📢 App.tsx: Dispatched token-balance-updated event for DEX');
+              }
             } else if (type === 'faucet-dispensed') {
               console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
               fetchNodeStatus();

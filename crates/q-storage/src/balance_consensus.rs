@@ -33,14 +33,20 @@ use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use lru::LruCache;
 use crate::emission_controller::EmissionController;
 
 /// Genesis timestamp for reward calculation (Oct 26, 2025 00:00:00 UTC)
 pub const GENESIS_TIMESTAMP: u64 = 1761436800;
 
-/// Development fee percentage (1%)
+// v1.4.5-beta: Use integer basis points instead of floating-point for cross-platform determinism
+// 100 basis points = 1% (10_000 bps = 100%)
+pub const DEV_FEE_BPS: u64 = 100; // 1% = 100 basis points
+pub const BPS_DIVISOR: u64 = 10_000; // Basis points divisor for percentage calculation
+
+/// Development fee percentage (1%) - DEPRECATED, use DEV_FEE_BPS for calculations
+#[deprecated(since = "1.4.5", note = "Use DEV_FEE_BPS/BPS_DIVISOR for integer math")]
 pub const DEV_FEE_PERCENT: f64 = 0.01;
 
 /// Founder wallet address (receives 1% dev fee) - Quillon Bank Master Account
@@ -159,7 +165,7 @@ impl BalanceConsensusEngine {
                   .map(|dt| dt.to_rfc3339())
                   .unwrap_or_else(|| "Invalid timestamp".to_string()));
         info!("   Dev wallet: {}", dev_wallet);
-        info!("   Dev fee: {}%", DEV_FEE_PERCENT * 100.0);
+        info!("   Dev fee: {}% ({} bps)", DEV_FEE_BPS as f64 / 100.0, DEV_FEE_BPS);
         info!("   🛡️  Memory protection: LRU cache limited to {} entries (~5 MB)", MAX_CACHE_SIZE);
         info!("   ✅ Adaptive rewards: Emission scales with throughput for 256-year timeline");
 
@@ -195,30 +201,96 @@ impl BalanceConsensusEngine {
         storage: &dyn BalanceStorage,
         block: &QBlock,
     ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
-        // ❌ v0.9.77-beta Phase 7: DISABLED - balance_consensus rewards cause DOUBLE REWARDS!
+        // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
-        // In Phase 7, block_producer.rs creates ALL coinbase transactions with fixed 50 QUG/block rewards.
-        // balance_consensus was ALSO creating rewards on top of that, causing hyperinflation!
+        // Previous Issue (v0.9.77-beta Phase 7):
+        // - balance_consensus was CREATING new rewards, causing DOUBLE REWARDS
+        // - block_producer.rs already creates coinbase transactions
         //
-        // CRITICAL BUG: This caused 176,082 QUG to be mined in minutes instead of hours.
-        //
-        // FIX: Disable balance_consensus reward creation entirely. Only block_producer creates rewards now.
-        //
-        // OLD behavior (Phase 6 - BROKEN):
-        // 1. block_producer creates coinbase TXs with per-solution rewards
-        // 2. balance_consensus ALSO adds time-based rewards
-        // 3. Result: DOUBLE REWARDS + hyperinflation!
-        //
-        // NEW behavior (Phase 7 - FIXED):
-        // 1. block_producer creates coinbase TXs with FIXED 50 QUG/block
-        // 2. balance_consensus does NOTHING (this function returns immediately)
-        // 3. Result: Correct fixed rewards, no duplication!
+        // NEW Approach (v1.0.75-beta):
+        // - Do NOT create new rewards
+        // - INSTEAD, process existing coinbase transactions from block.transactions
+        // - This ensures synced blocks update balances correctly on all nodes
 
-        warn!("⚠️  Phase 7: balance_consensus rewards DISABLED to prevent double rewards");
-        warn!("   Block {} rewards handled by block_producer coinbase transactions only", block.header.height);
+        let mut updates = Vec::new();
 
-        // Return empty vec - no rewards created by balance_consensus
-        return Ok(Vec::new());
+        // =========================================================================
+        // 🔐 v1.2.0-beta Phase 3 Step 6: Verify Coinbase Security
+        // =========================================================================
+        // Verify coinbase merkle root if present (Phase 3+ blocks)
+        if let Err(e) = block.verify_coinbase_merkle_root() {
+            warn!("🚫 [Phase 3] Block {} coinbase merkle root verification failed: {}",
+                  block.header.height, e);
+            return Err(BalanceConsensusError::BatchOperation(
+                format!("Coinbase merkle root invalid: {}", e)
+            ));
+        }
+
+        // Verify coinbase signatures if present (Phase 3+ blocks)
+        match block.verify_coinbase_signatures() {
+            Ok(Some(producer_key)) => {
+                debug!("✅ [Phase 3] Block {} coinbase signatures verified (producer: {}...)",
+                       block.header.height, hex::encode(&producer_key[..8]));
+            }
+            Ok(None) => {
+                // Legacy block without coinbase signatures - allowed for backwards compatibility
+                debug!("📋 [Legacy] Block {} has legacy coinbase transactions (no producer signature)",
+                       block.header.height);
+            }
+            Err(e) => {
+                warn!("🚫 [Phase 3] Block {} coinbase signature verification failed: {}",
+                      block.header.height, e);
+                return Err(BalanceConsensusError::BatchOperation(
+                    format!("Coinbase signature invalid: {}", e)
+                ));
+            }
+        }
+
+        // Validate coinbase amounts against emission schedule
+        if let Err(e) = block.validate_coinbase_amounts() {
+            warn!("🚫 [Phase 3] Block {} coinbase amount validation failed: {}",
+                  block.header.height, e);
+            return Err(BalanceConsensusError::BatchOperation(
+                format!("Coinbase amount invalid: {}", e)
+            ));
+        }
+
+        // Process existing coinbase transactions from the block
+        for (idx, block_tx) in block.transactions.iter().enumerate() {
+            // Check if this is a coinbase transaction (mining reward)
+            if block_tx.is_coinbase() || block_tx.tx_type.is_coinbase() {
+                let miner_address = hex::encode(&block_tx.to);
+                let reward_amount = block_tx.amount;
+
+                // Apply the mining reward to the miner's balance
+                storage.add_balance(&miner_address, reward_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                updates.push(BalanceUpdate {
+                    address: miner_address.clone(),
+                    amount: reward_amount,
+                    reason: ChangeReason::MiningReward,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
+                       block.header.height, &miner_address[..16], reward_amount);
+            }
+        }
+
+        // Update stats if we processed any coinbase transactions
+        if !updates.is_empty() {
+            let mut stats = self.stats.write().await;
+            stats.blocks_processed = stats.blocks_processed.saturating_add(1);
+            stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
+            stats.total_rewards = stats.total_rewards.saturating_add(
+                updates.iter().map(|u| u.amount).sum::<u64>()
+            );
+        }
+
+        // Return updates
+        Ok(updates)
 
         // COMMENTED OUT - Old double-reward code below:
         /*
@@ -369,21 +441,71 @@ impl BalanceConsensusEngine {
         tx: &crate::transaction::QTransaction,
         block: &QBlock,
     ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
-        // ❌ v0.9.77-beta Phase 7: DISABLED - balance_consensus rewards cause DOUBLE REWARDS!
+        // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
-        // This is the TRANSACTION-BASED variant of process_block_mining_rewards() that was causing
-        // the "💰 TIME-BASED Coinbase TX" messages in logs!
+        // Previous Issue (v0.9.77-beta Phase 7):
+        // - balance_consensus was CREATING new rewards, causing DOUBLE REWARDS
+        // - block_producer.rs already creates coinbase transactions
         //
-        // In Phase 7, block_producer.rs creates ALL coinbase transactions with fixed 50 QUG/block rewards.
-        // balance_consensus was ALSO creating rewards via this TX function, causing hyperinflation!
+        // NEW Approach (v1.0.75-beta):
+        // - Do NOT create new rewards
+        // - INSTEAD, process existing coinbase transactions from block.transactions
+        // - This ensures synced blocks update balances correctly on all nodes
         //
-        // FIX: Disable balance_consensus reward creation entirely. Only block_producer creates rewards now.
+        // The coinbase transaction is already in block.transactions (created by block_producer)
+        // We just need to apply it to update balances when syncing blocks from other nodes.
 
-        warn!("⚠️  Phase 7: balance_consensus TX rewards DISABLED to prevent double rewards");
-        warn!("   Block {} rewards handled by block_producer coinbase transactions only", block.header.height);
+        let mut updates = Vec::new();
 
-        // Return empty vec - no rewards created by balance_consensus
-        return Ok(Vec::new());
+        // v1.3.10-beta: Reduced to trace! to avoid log spam during sync
+        // Empty blocks are normal in DAG-based consensus (not every block has coinbase)
+        trace!(
+            "[SYNC TX] Block {} has {} transactions",
+            block.header.height, block.transactions.len()
+        );
+
+        // Process existing coinbase transactions from the block
+        for (idx, block_tx) in block.transactions.iter().enumerate() {
+            let is_coinbase_by_from = block_tx.is_coinbase();
+            let is_coinbase_by_type = block_tx.tx_type.is_coinbase();
+
+            // Check if this is a coinbase transaction (mining reward)
+            if is_coinbase_by_from || is_coinbase_by_type {
+                let miner_address = hex::encode(&block_tx.to);
+                let reward_amount = block_tx.amount;
+
+                // Skip if already processed (check processed_blocks cache)
+                // Note: The block hash check happens at the block level, not per-tx
+
+                // Apply the mining reward to the miner's balance
+                self.add_balance_tx(tx, &miner_address, reward_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                updates.push(BalanceUpdate {
+                    address: miner_address.clone(),
+                    amount: reward_amount,
+                    reason: ChangeReason::MiningReward,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
+                       block.header.height, &miner_address[..16], reward_amount);
+            }
+        }
+
+        // Update stats if we processed any coinbase transactions
+        if !updates.is_empty() {
+            let mut stats = self.stats.write().await;
+            stats.blocks_processed = stats.blocks_processed.saturating_add(1);
+            stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
+            stats.total_rewards = stats.total_rewards.saturating_add(
+                updates.iter().map(|u| u.amount).sum::<u64>()
+            );
+        }
+
+        // Return updates (caller can use for SSE broadcast, logging, etc.)
+        Ok(updates)
 
         /*  // COMMENTED OUT - Phase 7 double-reward fix
         // 1. Check if block already processed (prevent double-processing)
@@ -406,8 +528,8 @@ impl BalanceConsensusEngine {
             return Err(BalanceConsensusError::ZeroReward(block.header.height));
         }
 
-        // 3. Calculate dev fee split
-        let dev_fee = (block_reward as f64 * DEV_FEE_PERCENT) as u64;
+        // 3. Calculate dev fee split (v1.4.5-beta: integer math for determinism)
+        let dev_fee = block_reward.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
         let miner_reward = block_reward.saturating_sub(dev_fee);
 
         debug!("💰 Block {} rewards (TX): total={}, miner={}, dev={}",
@@ -932,9 +1054,10 @@ mod tests {
         let miner_update = updates.iter().find(|u| u.reason == ChangeReason::MiningReward).unwrap();
         let dev_update = updates.iter().find(|u| u.reason == ChangeReason::DevelopmentFee).unwrap();
 
-        // Dev fee should be 1% of total
+        // Dev fee should be 1% of total (v1.4.5-beta: integer math)
         let total = miner_update.amount + dev_update.amount;
-        let expected_dev_fee = (total as f64 * DEV_FEE_PERCENT / (1.0 - DEV_FEE_PERCENT)) as u64;
+        // expected_dev_fee = total * DEV_FEE_BPS / (BPS_DIVISOR - DEV_FEE_BPS)
+        let expected_dev_fee = total.saturating_mul(DEV_FEE_BPS) / (BPS_DIVISOR - DEV_FEE_BPS);
 
         // Allow small rounding error
         assert!((dev_update.amount as i64 - expected_dev_fee as i64).abs() <= 1);

@@ -896,6 +896,55 @@ impl DistributedAICoordinator {
         Ok(())
     }
 
+    /// v1.0.74-beta: Register THIS node as an available AI worker
+    /// This should be called on startup so the node is immediately available for distributed inference
+    /// without waiting for network gossip to loop back
+    pub async fn register_self(&self) -> Result<()> {
+        info!("🔧 ========== REGISTERING SELF AS AI WORKER ==========");
+        info!("🆔 Node ID: {}", self.node_id);
+        info!("🌐 Peer ID: {}", self.peer_id);
+
+        // Detect hardware capability
+        let capability = Self::detect_hardware_capability();
+        info!("💪 Detected capability: {:?}", capability);
+
+        // Register with default values
+        self.register_node(
+            self.node_id.clone(),
+            self.peer_id.clone(),
+            capability,
+            32, // Default layers for Mistral-7B
+        ).await?;
+
+        info!("✅ Self-registration complete - node immediately available for distributed AI");
+        info!("🔚 =======================================================\n");
+
+        Ok(())
+    }
+
+    /// Detect hardware capability of this node
+    fn detect_hardware_capability() -> NodeCapability {
+        // Check for CUDA first
+        if std::env::var("CUDA_VISIBLE_DEVICES").is_ok() || std::path::Path::new("/usr/local/cuda").exists() {
+            info!("🖥️  CUDA detected - using GPU capability");
+            return NodeCapability::CUDA {
+                vram_gb: 8,
+                compute_capability: "8.0".to_string(), // Default to Ampere
+            };
+        }
+
+        // Check for Metal (macOS)
+        #[cfg(target_os = "macos")]
+        {
+            info!("🍎 macOS detected - using Metal capability");
+            return NodeCapability::Metal { vram_gb: 16 };
+        }
+
+        // Default to CPU
+        info!("💻 Using CPU capability");
+        NodeCapability::CPU { cores: num_cpus::get(), ram_gb: 16 }
+    }
+
     /// Update node heartbeat
     async fn update_node_heartbeat(
         &self,
@@ -1634,13 +1683,15 @@ impl DistributedAICoordinator {
         // This was causing a livelock that deadlocked the entire service
         // See: DEADLOCK_ROOT_CAUSE_FOUND_DISTRIBUTED_AI_SPAM.md
 
-        // Filter nodes that are active (heartbeat within last 20 seconds)
-        // FLAW #1 FIX: Reduced from 60s to 20s (2× heartbeat interval of 10s)
+        // Filter nodes that are active (heartbeat within last 45 seconds)
+        // v1.0.74-beta FIX: Increased from 20s to 45s to match 30s announcement interval
+        // With 30s announcements, 20s timeout was causing nodes to be filtered as "stale"
+        // 45s gives 1.5× buffer for network latency
         let active_nodes: Vec<AINode> = nodes
             .values()
             .filter(|node| {
                 let time_since_heartbeat = now - node.last_heartbeat;
-                time_since_heartbeat < 20
+                time_since_heartbeat < 45
             })
             .cloned()
             .collect();

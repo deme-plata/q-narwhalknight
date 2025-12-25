@@ -135,6 +135,17 @@ pub struct GasEstimateResponse {
     pub estimated_cost_usd: Option<String>,
 }
 
+// v1.4.10: Re-export ContractEventRecord from lib for use here
+use q_api_server::ContractEventRecord;
+
+/// v1.4.10: Response for contract events
+#[derive(Debug, Serialize)]
+pub struct ContractEventsResponse {
+    pub contract_address: String,
+    pub events: Vec<ContractEventRecord>,
+    pub total_count: usize,
+}
+
 /// Contract templates list response
 #[derive(Debug, Serialize)]
 pub struct TemplatesListResponse {
@@ -197,6 +208,8 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/airdrop", post(airdrop_tokens))
         .route("/pause", post(pause_contract))
         .route("/reflection", post(update_reflection_rate))
+        // v1.4.10: Contract event history endpoint
+        .route("/events/:address", get(get_contract_events))
         // User-specific endpoints
         .route("/user/:address/contracts", get(get_user_contracts))
         .route("/user/:address/deployments", get(get_user_deployments))
@@ -379,35 +392,49 @@ pub async fn deploy_contract(
                             *balance as f64 / 100_000_000.0
                         );
 
-                        // Create transaction history entry for deployment
-                        let tx_hash = format!(
-                            "deploy-{}-{}",
-                            hex::encode(contract_address.0),
-                            chrono::Utc::now().timestamp_millis()
-                        );
-                        let transaction = Transaction {
-                            id: [0u8; 32], // Would be properly hashed in production
-                            from: deployer,
-                            to: contract_address.0,
-                            amount: DEPLOYMENT_COST,
-                            fee: 0,
-                            nonce: 0,
-                            signature: vec![],
-                            timestamp: chrono::Utc::now(),
-                            data: format!("Contract deployment: {}", request.contract_type)
-                                .into_bytes(),
-                            token_type: q_types::TokenType::QUG,
-                            fee_token_type: q_types::TokenType::QUGUSD,
-                        };
-                        // Store in transaction pool for history
-                        let tx_id = transaction.id;
-                        state.tx_pool.insert(tx_id, transaction);
-                        state.tx_status.insert(
-                            tx_id,
-                            TxStatus::Confirmed {
-                                block_height: 0,
-                                round: 0,
-                            },
+                        // ============================================================================
+                        // 📡 v1.0.91-beta: PROPER CONTRACT DEPLOYMENT TRANSACTION HANDLING
+                        // - Cryptographic transaction ID (SHA3-256)
+                        // - Per-wallet nonce tracking (replay attack prevention)
+                        // - Proper status: Pending -> InMempool -> Confirmed (not immediate)
+                        // - Block production queue integration
+                        // - Gossipsub broadcast with confirmation
+                        // ============================================================================
+
+                        // Get next nonce for this wallet (prevents replay attacks)
+                        let nonce = state.nonce_tracker.get_and_increment(&deployer);
+
+                        // Create transaction with proper cryptographic ID using transaction_utils
+                        let transaction = q_api_server::transaction_utils::TransactionBuilder::new()
+                            .from(deployer)
+                            .to(contract_address.0)
+                            .amount(DEPLOYMENT_COST)
+                            .fee(0) // Fee included in deployment cost
+                            .data(format!("deploy:{}", request.contract_type).into_bytes())
+                            .token_type(q_types::TokenType::QUG)
+                            .fee_token_type(q_types::TokenType::QUGUSD)
+                            .tx_type(q_types::TransactionType::ContractDeploy)
+                            .build_with_nonce(nonce, chrono::Utc::now());
+
+                        // Submit transaction properly:
+                        // 1. Add to tx_pool with Pending status (not Confirmed!)
+                        // 2. Add to production mempool for block inclusion
+                        // 3. Broadcast to P2P network via gossipsub
+                        let submission_result = q_api_server::transaction_utils::submit_transaction(
+                            transaction.clone(),
+                            &state.tx_pool,
+                            &state.tx_status,
+                            state.production_mempool.as_ref(),
+                            state.libp2p_discovery.as_ref(),
+                        ).await;
+
+                        tracing::info!(
+                            "📝 [CONTRACT] {} deployment tx {} (nonce: {}, queued: {}, broadcast: {})",
+                            request.contract_type,
+                            &submission_result.tx_id_hex[..16],
+                            nonce,
+                            submission_result.queued_for_block,
+                            submission_result.broadcast_success
                         );
                     } else {
                         tracing::warn!(
@@ -600,10 +627,11 @@ pub async fn get_user_contracts(
         .into_iter()
         .map(|contract| {
             // Extract total_supply and decimals from deployment_params
-            // Note: The parameter is stored as "initial_supply" in deployment_params
+            // v1.4.9: Check both camelCase (initialSupply) and snake_case (initial_supply)
             let total_supply = contract
                 .deployment_params
-                .get("initial_supply")
+                .get("initialSupply")
+                .or_else(|| contract.deployment_params.get("initial_supply"))
                 .and_then(|v| {
                     // Handle both number and string formats
                     v.as_u64()
@@ -669,10 +697,11 @@ pub async fn get_contract_details(
     match ecosystem.get_contract_by_address(contract_addr).await {
         Some(contract) => {
             // Extract total_supply and decimals from deployment_params
-            // Note: The parameter is stored as "initial_supply" in deployment_params
+            // v1.4.9: Check both camelCase (initialSupply) and snake_case (initial_supply)
             let total_supply = contract
                 .deployment_params
-                .get("initial_supply")
+                .get("initialSupply")
+                .or_else(|| contract.deployment_params.get("initial_supply"))
                 .and_then(|v| {
                     // Handle both number and string formats
                     v.as_u64()
@@ -863,8 +892,9 @@ pub async fn get_token_balance(
         }
     };
 
-    tracing::debug!(
-        "🔍 Token balance query: wallet={}, token={}, balance={}",
+    // v1.4.10: Log at INFO level to diagnose DEX balance mismatch
+    tracing::info!(
+        "🔍 [DEX BALANCE] Token balance query: wallet={}, token={}, balance={}",
         hex::encode(wallet_addr),
         hex::encode(token_addr),
         balance
@@ -1046,6 +1076,28 @@ pub async fn mint_tokens(
         chrono::Utc::now().timestamp_millis()
     );
 
+    // v1.4.10: Record mint event for event history
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8) as u32;
+    let display_amount = amount as f64 / 10f64.powi(decimals as i32);
+    let event = ContractEventRecord {
+        id: format!("mint-{}", chrono::Utc::now().timestamp_millis()),
+        event_type: "mint".to_string(),
+        amount: format!("{:.4}", display_amount),
+        from: None,
+        to: Some(hex::encode(owner)),
+        recipients: None,
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        tx_hash: tx_hash.clone(),
+    };
+    {
+        let mut events = state.contract_events.write().await;
+        let contract_key = hex::encode(contract_addr);
+        events.entry(contract_key).or_insert_with(Vec::new).insert(0, event);
+    }
+
     Ok(Json(ApiResponse::success(TokenOperationResponse {
         success: true,
         transaction_hash: tx_hash,
@@ -1147,6 +1199,28 @@ pub async fn burn_tokens(
         hex::encode(contract_addr),
         chrono::Utc::now().timestamp_millis()
     );
+
+    // v1.4.10: Record burn event for event history
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8) as u32;
+    let display_amount = amount as f64 / 10f64.powi(decimals as i32);
+    let event = ContractEventRecord {
+        id: format!("burn-{}", chrono::Utc::now().timestamp_millis()),
+        event_type: "burn".to_string(),
+        amount: format!("{:.4}", display_amount),
+        from: Some(hex::encode(owner)),
+        to: None,
+        recipients: None,
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        tx_hash: tx_hash.clone(),
+    };
+    {
+        let mut events = state.contract_events.write().await;
+        let contract_key = hex::encode(contract_addr);
+        events.entry(contract_key).or_insert_with(Vec::new).insert(0, event);
+    }
 
     Ok(Json(ApiResponse::success(TokenOperationResponse {
         success: true,
@@ -1304,6 +1378,28 @@ pub async fn airdrop_tokens(
         chrono::Utc::now().timestamp_millis()
     );
 
+    // v1.4.10: Record airdrop event for event history
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8) as u32;
+    let display_amount = amount_per_recipient as f64 / 10f64.powi(decimals as i32);
+    let event = ContractEventRecord {
+        id: format!("airdrop-{}", chrono::Utc::now().timestamp_millis()),
+        event_type: "airdrop".to_string(),
+        amount: format!("{:.4}", display_amount),
+        from: Some(hex::encode(owner)),
+        to: None,
+        recipients: Some(recipient_addrs.len() as u32),
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        tx_hash: tx_hash.clone(),
+    };
+    {
+        let mut events = state.contract_events.write().await;
+        let contract_key = hex::encode(contract_addr);
+        events.entry(contract_key).or_insert_with(Vec::new).insert(0, event);
+    }
+
     Ok(Json(ApiResponse::success(TokenOperationResponse {
         success: true,
         transaction_hash: tx_hash,
@@ -1313,6 +1409,39 @@ pub async fn airdrop_tokens(
             amount_per_recipient,
             recipient_addrs.len()
         ),
+    })))
+}
+
+/// v1.4.10: Get contract event history
+pub async fn get_contract_events(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<ApiResponse<ContractEventsResponse>>, StatusCode> {
+    // Normalize the address (remove qnk prefix if present)
+    let contract_key = if address.starts_with("qnk") {
+        address[3..].to_string()
+    } else {
+        address.clone()
+    };
+
+    // Get events from storage
+    let events = {
+        let events_map = state.contract_events.read().await;
+        events_map.get(&contract_key).cloned().unwrap_or_default()
+    };
+
+    let total_count = events.len();
+
+    tracing::info!(
+        "📜 Fetching events for contract {}: {} events found",
+        contract_key,
+        total_count
+    );
+
+    Ok(Json(ApiResponse::success(ContractEventsResponse {
+        contract_address: address,
+        events,
+        total_count,
     })))
 }
 

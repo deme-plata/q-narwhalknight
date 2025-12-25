@@ -84,7 +84,7 @@ impl CollateralVault {
         Self {
             locked_qug: HashMap::new(),
             minted_qugusd: HashMap::new(),
-            qug_price_usd: 10.0, // Default price $10.00 (will be updated by oracle)
+            qug_price_usd: 42.50, // Default price $42.50 (will be updated by oracle)
             total_qug_locked: 0,
             total_qugusd_minted: 0,
             last_price_update: chrono::Utc::now().timestamp(),

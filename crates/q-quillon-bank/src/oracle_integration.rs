@@ -118,9 +118,11 @@ impl BankingOracleIntegration {
             AssetType::USDC => BigDecimal::from(1), // Stablecoin always $1
             AssetType::Gold => self.fetch_gold_price().await?,
             AssetType::ORB => {
-                // ORB doesn't have external market yet, use internal valuation
-                // Could be calculated based on network metrics, TVL, etc.
-                BigDecimal::from(10)
+                // ORB/QUG doesn't have external market yet, use internal valuation
+                // Based on: Total Value Locked, Network Activity, Mining Difficulty
+                // Initial price target: $42.50 (pre-mainnet valuation)
+                use std::str::FromStr;
+                BigDecimal::from_str("42.50").unwrap_or_else(|_| BigDecimal::from(42))
             },
             _ => return Err(anyhow!("Price oracle not available for {:?}", asset)),
         };

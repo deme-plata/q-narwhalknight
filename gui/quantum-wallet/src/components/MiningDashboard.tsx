@@ -8,6 +8,7 @@ interface MiningStats {
   blocksFound: number;
   currentBalance: number;
   avgHashRate: number;
+  networkHashRate: number; // v1.1.9-beta: Network-wide hashrate
 }
 
 interface RewardWithAnimation extends MiningRewardEvent {
@@ -22,6 +23,7 @@ export default function MiningDashboard() {
     blocksFound: 0,
     currentBalance: 0,
     avgHashRate: 0,
+    networkHashRate: 0,
   });
   const [showRewardPopup, setShowRewardPopup] = useState(false);
   const [latestReward, setLatestReward] = useState<MiningRewardEvent | null>(null);
@@ -70,6 +72,10 @@ export default function MiningDashboard() {
 
     fetchInitialBalance();
 
+    // v1.1.9-beta: Fetch network hashrate on load and periodically
+    fetchNetworkHashrate();
+    const networkHashrateInterval = setInterval(fetchNetworkHashrate, 30000); // Every 30s
+
     // Subscribe to mining rewards via SSE
     const eventSource = qnkAPI.subscribeToMiningRewards(
       walletAddress,
@@ -91,6 +97,7 @@ export default function MiningDashboard() {
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
+      clearInterval(networkHashrateInterval);
     };
   }, [walletAddress]);
 
@@ -155,9 +162,12 @@ export default function MiningDashboard() {
     });
 
     // Check if this is a mining reward or development fee
-    // Backend sends Debug format: "MiningReward" or "DevelopmentFee"
+    // Backend sends: "mining_reward", "mining_reward_instant", "mining_reward_batch_X", "development_fee", "p2p_mining_reward", "pending_mining_reward"
     const isMiningReward = update.change_reason === 'MiningReward' ||
                            update.change_reason === 'mining_reward' ||
+                           update.change_reason === 'mining_reward_instant' ||
+                           update.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
+                           update.change_reason === 'pending_mining_reward' ||  // v1.3.9-beta: Pending rewards via P2P gossipsub
                            (update.change_reason && update.change_reason.startsWith('mining_reward_batch_'));
     const isDevFee = update.change_reason === 'DevelopmentFee' ||
                      update.change_reason === 'development_fee';
@@ -218,13 +228,33 @@ export default function MiningDashboard() {
       hash_rate: statsUpdate.avg_hash_rate
     });
 
-    // Update all stats from backend
-    setStats({
+    // Update all stats from backend (preserve network hashrate)
+    setStats(prev => ({
       totalRewards: statsUpdate.total_rewards,
       blocksFound: statsUpdate.total_blocks_found,
       currentBalance: statsUpdate.current_balance,
       avgHashRate: statsUpdate.avg_hash_rate,
-    });
+      networkHashRate: prev.networkHashRate, // Keep network hashrate from separate fetch
+    }));
+  };
+
+  // v1.1.9-beta: Fetch network-wide hashrate from /api/v1/network/supply
+  const fetchNetworkHashrate = async () => {
+    try {
+      const response = await fetch('/api/v1/network/supply');
+      if (response.ok) {
+        const json = await response.json();
+        // API returns { success: true, data: { network_hashrate: 186539, ... } }
+        const networkHashrate = json.data?.network_hashrate || json.network_hashrate || 0;
+        console.log('🌐 Network hashrate fetched:', networkHashrate, 'H/s');
+        setStats(prev => ({
+          ...prev,
+          networkHashRate: networkHashrate,
+        }));
+      }
+    } catch (error) {
+      console.error('Failed to fetch network hashrate:', error);
+    }
   };
 
   const formatHashRate = (hashRate: number) => {
@@ -348,12 +378,49 @@ export default function MiningDashboard() {
         >
           <div className="flex items-center justify-between mb-3">
             <Zap className="w-6 h-6 text-quantum-yellow" />
-            <span className="text-sm text-gray-400">Hash Rate</span>
+            <span className="text-sm text-gray-400">Your Hash Rate</span>
           </div>
           <div className="text-3xl font-bold text-white mb-1">
             {formatHashRate(stats.avgHashRate)}
           </div>
-          <div className="text-sm text-quantum-yellow">Average</div>
+          <div className="text-sm text-quantum-yellow">Personal</div>
+        </motion.div>
+      </div>
+
+      {/* Network Stats Row */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.35 }}
+          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <TrendingUp className="w-6 h-6 text-quantum-cyan" />
+            <span className="text-sm text-gray-400">Network Hash Rate</span>
+          </div>
+          <div className="text-3xl font-bold text-white mb-1">
+            {formatHashRate(stats.networkHashRate)}
+          </div>
+          <div className="text-sm text-quantum-cyan">Total Network Power</div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-green/20 backdrop-blur-xl border border-quantum-green/40 rounded-xl p-6"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <Sparkles className="w-6 h-6 text-quantum-green" />
+            <span className="text-sm text-gray-400">Your Share</span>
+          </div>
+          <div className="text-3xl font-bold text-white mb-1">
+            {stats.networkHashRate > 0
+              ? ((stats.avgHashRate / stats.networkHashRate) * 100).toFixed(2)
+              : '0.00'}%
+          </div>
+          <div className="text-sm text-quantum-green">of Network Power</div>
         </motion.div>
       </div>
 
@@ -410,6 +477,11 @@ export default function MiningDashboard() {
                       <div className="text-sm text-gray-300">
                         Block #{reward.block_height} • Nonce: {reward.nonce}
                       </div>
+                      {reward.worker_name && (
+                        <div className="text-xs text-quantum-cyan mt-1">
+                          Worker: {reward.worker_name}
+                        </div>
+                      )}
                       <div className="text-xs text-gray-500 mt-1">
                         Difficulty: {reward.difficulty}
                       </div>
@@ -436,14 +508,14 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner
+          Download Optimized Miner v1.3.1
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          New v1.0.0: 2.5x faster with BLAKE3 SIMD acceleration + CPU affinity pinning
+          v1.3.1: Lock-free multi-threading + Hybrid CPU/GPU mining + Hashpower security integration
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a
-            href="/downloads/q-miner-v1.0.0-optimized-linux-x64"
+            href="/downloads/q-miner-v1.3.1-optimized-linux-x64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-green/20 hover:bg-quantum-green/30 border border-quantum-green/50 text-quantum-green font-bold py-3 px-4 rounded-lg transition-all"
           >

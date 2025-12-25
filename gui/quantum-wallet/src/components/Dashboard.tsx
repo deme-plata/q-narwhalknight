@@ -1,4 +1,4 @@
-import { useState, useEffect, memo } from 'react';
+import { useState, useEffect, memo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
@@ -6,12 +6,14 @@ import TransactionDetailsModal from './TransactionDetailsModal';
 import QRCodeModal from './QRCodeModal';
 import StripeCheckout from './StripeCheckout';
 import DAGKnightVisualization from './DAGKnightVisualization';
+import QNOOracleVisualization from './QNOOracleVisualization';
 import LoanApplicationModal from './LoanApplicationModal';
 import LoanApprovalModal from './LoanApprovalModal';
 import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
 import WalletCardWithGraph from './WalletCardWithGraph';
 import PhaseTransitionModal from './PhaseTransitionModal';
+import StakingModal from './StakingModal';
 import CustomTokensCard from './CustomTokensCard';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
@@ -80,7 +82,22 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
 
   // Animation state for balance updates
   const [balanceAnimations, setBalanceAnimations] = useState<Record<string, boolean>>({});
-  const [previousBalances, setPreviousBalances] = useState<Record<string, number>>({});
+
+  // CRITICAL FIX: Track highest known balance per token to prevent showing stale/lower values
+  // This prevents the bug where balance jumps from 66 to 0.71 on refresh
+  const highestKnownBalancesRef = useRef<Record<string, number>>({});
+
+  // Initialize highestKnownBalancesRef from localStorage on mount
+  useEffect(() => {
+    const cachedBalance = localStorage.getItem('cachedBalance');
+    if (cachedBalance) {
+      const value = parseFloat(cachedBalance);
+      if (value > (highestKnownBalancesRef.current['QUG'] || 0)) {
+        highestKnownBalancesRef.current['QUG'] = value;
+        console.log('🔄 Initialized highest known QUG balance from cache:', value);
+      }
+    }
+  }, []); // Run once on mount
 
   // Balance history tracking (keep last 20 data points per wallet) - load from localStorage
   const [_balanceHistory, setBalanceHistory] = useState<Record<string, BalanceHistoryPoint[]>>(() => {
@@ -126,6 +143,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
 
   // Phase transition modal state
   const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
+  const [showStakingModal, setShowStakingModal] = useState(false);
 
   // Generate AI Report
   const generateAIReport = async () => {
@@ -211,31 +229,55 @@ Provide a brief analysis (under 250 tokens) covering:
   }, [recentTransactions]);
 
   // Detect balance changes and trigger animations
+  // Use ref to track previous balances to avoid re-render loops
+  const previousBalancesRef = useRef<Record<string, number>>({});
+  const animationTimeoutsRef = useRef<Record<string, NodeJS.Timeout>>({});
+
   useEffect(() => {
     const newAnimations: Record<string, boolean> = {};
-    const newPreviousBalances: Record<string, number> = {};
 
     walletBalances.forEach(wallet => {
       const key = wallet.symbol;
-      const prevBalance = previousBalances[key] ?? wallet.balance;
-      newPreviousBalances[key] = wallet.balance;
+      const prevBalance = previousBalancesRef.current[key];
+      const currentBalance = wallet.balance;
 
-      // Trigger animation if balance changed
-      if (prevBalance !== wallet.balance && prevBalance !== undefined) {
+      // Update ref with current balance
+      previousBalancesRef.current[key] = currentBalance;
+
+      // CRITICAL FIX: Only trigger animation if balance changed by meaningful amount (> 0.0001)
+      // This prevents flickering from floating-point rounding or micro-variations
+      const balanceDiff = Math.abs((prevBalance ?? currentBalance) - currentBalance);
+      const isSignificantChange = prevBalance !== undefined && balanceDiff > 0.0001;
+
+      if (isSignificantChange) {
         newAnimations[key] = true;
-        console.log(`🎨 Balance animation triggered for ${key}: ${prevBalance} → ${wallet.balance}`);
+        console.log(`🎨 Balance animation triggered for ${key}: ${prevBalance?.toFixed(4)} → ${currentBalance.toFixed(4)} (diff: ${balanceDiff.toFixed(6)})`);
+
+        // Clear any existing timeout for this wallet
+        if (animationTimeoutsRef.current[key]) {
+          clearTimeout(animationTimeoutsRef.current[key]);
+        }
 
         // Auto-disable animation after 3 seconds
-        setTimeout(() => {
+        animationTimeoutsRef.current[key] = setTimeout(() => {
           setBalanceAnimations(prev => ({ ...prev, [key]: false }));
         }, 3000);
       } else {
-        newAnimations[key] = false;
+        // Only set to false if no animation was just triggered
+        newAnimations[key] = balanceAnimations[key] || false;
       }
     });
 
-    setBalanceAnimations(newAnimations);
-    setPreviousBalances(newPreviousBalances);
+    // Only update state if animations actually changed
+    setBalanceAnimations(prev => {
+      const hasChanges = Object.keys(newAnimations).some(key => prev[key] !== newAnimations[key]);
+      return hasChanges ? newAnimations : prev;
+    });
+
+    // Cleanup function
+    return () => {
+      Object.values(animationTimeoutsRef.current).forEach(timeout => clearTimeout(timeout));
+    };
   }, [walletBalances]);
 
   // Fetch real data from Q-NarwhalKnight API
@@ -259,32 +301,46 @@ Provide a brief analysis (under 250 tokens) covering:
           let walletBalance = 0;
 
           if (currentWalletAddress) {
+            const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
+            const cachedBalance = localStorage.getItem('cachedBalance');
+            const cachedValue = cachedBalance ? parseFloat(cachedBalance) : 0;
+
             try {
               const balanceResponse = await qnkAPI.getWalletBalance(currentWalletAddress);
               if (!mounted) return;
 
               if (balanceResponse.success && balanceResponse.data) {
-                walletBalance = balanceResponse.data.balance_qnk || 0;
-                console.log('✅ Balance fetched successfully:', walletBalance);
-                // Store balance in localStorage for fallback on refresh
-                localStorage.setItem('cachedBalance', walletBalance.toString());
-              } else {
-                // Authentication failed - use cached balance from localStorage
-                console.warn('⚠️ Balance query failed (authentication required):', balanceResponse.error);
-                const cachedBalance = localStorage.getItem('cachedBalance');
-                if (cachedBalance) {
-                  walletBalance = parseFloat(cachedBalance);
-                  console.log('💰 Using cached balance from localStorage:', walletBalance);
+                const fetchedBalance = balanceResponse.data.balance_qnk || 0;
+                console.log('✅ Balance fetched:', fetchedBalance, '(highest known:', previousHighest, ', cached:', cachedValue, ')');
+
+                // CRITICAL FIX: Validate balance before accepting
+                // Allow decreases up to 10% or 1 QUG for legitimate transactions
+                const referenceBalance = Math.max(previousHighest, cachedValue);
+                const minAcceptable = Math.max(0, referenceBalance * 0.9 - 1);
+
+                if (fetchedBalance >= minAcceptable || referenceBalance === 0) {
+                  walletBalance = fetchedBalance;
+                  // Update tracking
+                  if (fetchedBalance > previousHighest) {
+                    highestKnownBalancesRef.current['QUG'] = fetchedBalance;
+                  }
+                  localStorage.setItem('cachedBalance', fetchedBalance.toString());
+                } else {
+                  // Suspiciously low - use reference balance
+                  console.warn(`⚠️ Rejecting suspiciously low balance: ${fetchedBalance} (expected ~${referenceBalance})`);
+                  walletBalance = referenceBalance;
                 }
+              } else {
+                // Authentication failed - use highest known or cached balance
+                console.warn('⚠️ Balance query failed:', balanceResponse.error);
+                walletBalance = Math.max(previousHighest, cachedValue);
+                console.log('💰 Using best known balance:', walletBalance);
               }
             } catch (balanceErr) {
               console.warn('❌ Failed to fetch wallet balance:', balanceErr);
-              // Fallback: use cached balance from localStorage
-              const cachedBalance = localStorage.getItem('cachedBalance');
-              if (cachedBalance) {
-                walletBalance = parseFloat(cachedBalance);
-                console.log('💰 Using cached balance from localStorage (error fallback):', walletBalance);
-              }
+              // Fallback: use highest known or cached balance
+              walletBalance = Math.max(previousHighest, cachedValue);
+              console.log('💰 Using best known balance (error fallback):', walletBalance);
             }
           }
 
@@ -301,13 +357,16 @@ Provide a brief analysis (under 250 tokens) covering:
       } catch (err) {
         console.error('Error fetching node status:', err);
         if (mounted) {
-          // Even if node status fails, try to load cached balance
+          // Even if node status fails, try to load best known balance
           const cachedBalance = localStorage.getItem('cachedBalance');
-          if (cachedBalance) {
-            const balanceValue = parseFloat(cachedBalance);
-            console.log('💰 Using cached balance after node status error:', balanceValue);
+          const cachedValue = cachedBalance ? parseFloat(cachedBalance) : 0;
+          const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
+          const bestBalance = Math.max(previousHighest, cachedValue);
+
+          if (bestBalance > 0) {
+            console.log('💰 Using best known balance after node status error:', bestBalance);
             setNodeStatus({
-              balance: balanceValue,
+              balance: bestBalance,
               network_health: 'unknown',
               consensus_status: 'unknown',
               is_validator: false,
@@ -336,20 +395,37 @@ Provide a brief analysis (under 250 tokens) covering:
 
       // Fetch fresh QUG balance from API (includes mining rewards)
       let qugBalance = 0;
+      const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
+
       try {
         const balanceResponse = await qnkAPI.getWalletBalance(currentWalletAddress);
         if (balanceResponse.success && balanceResponse.data) {
-          qugBalance = balanceResponse.data.balance_qnk || 0;
-          console.log('💰 Fresh QUG balance fetched:', qugBalance);
+          const fetchedBalance = balanceResponse.data.balance_qnk || 0;
+          console.log('💰 Fresh QUG balance fetched:', fetchedBalance, '(previous highest:', previousHighest, ')');
+
+          // CRITICAL FIX: Only accept new balance if it's higher than or close to previous
+          // Allow small decreases (up to 10% or 1 QUG) for legitimate transactions
+          const minAcceptable = Math.max(0, previousHighest * 0.9 - 1);
+          if (fetchedBalance >= minAcceptable || previousHighest === 0) {
+            qugBalance = fetchedBalance;
+            // Update highest known if this is higher
+            if (fetchedBalance > previousHighest) {
+              highestKnownBalancesRef.current['QUG'] = fetchedBalance;
+            }
+          } else {
+            // Fetched balance is suspiciously low - use cached/highest
+            console.warn(`⚠️ Ignoring suspiciously low balance: ${fetchedBalance} (expected ~${previousHighest})`);
+            qugBalance = previousHighest;
+          }
         } else {
-          // Fall back to nodeStatus if API fails
-          qugBalance = nodeStatus?.balance || 0;
-          console.warn('⚠️ Using nodeStatus balance as fallback:', qugBalance);
+          // Fall back to highest known balance if API fails
+          qugBalance = previousHighest || nodeStatus?.balance || 0;
+          console.warn('⚠️ Balance query failed, using highest known:', qugBalance);
         }
       } catch (error) {
-        // Fall back to nodeStatus on error
-        qugBalance = nodeStatus?.balance || 0;
-        console.error('❌ Failed to fetch QUG balance, using nodeStatus:', error);
+        // Fall back to highest known balance on error
+        qugBalance = previousHighest || nodeStatus?.balance || 0;
+        console.error('❌ Failed to fetch QUG balance, using highest known:', qugBalance, error);
       }
 
       const now = Date.now();
@@ -1190,16 +1266,38 @@ Provide a brief analysis (under 250 tokens) covering:
   useEffect(() => {
     const handleWalletBalanceUpdate = (event: Event) => {
       const customEvent = event as CustomEvent;
-      const { symbol, balance, reason } = customEvent.detail;
+      const { symbol, balance: incomingBalance, reason } = customEvent.detail;
 
-      console.log(`💰 Dashboard: Received wallet-balance-updated event for ${symbol}:`, balance, 'Reason:', reason);
+      // CRITICAL FIX: Validate incoming balance before accepting
+      const previousHighest = highestKnownBalancesRef.current[symbol] || 0;
+      const cachedBalance = symbol === 'QUG' ? parseFloat(localStorage.getItem('cachedBalance') || '0') : 0;
+      const referenceBalance = Math.max(previousHighest, cachedBalance);
+
+      // Allow decreases up to 10% or 1 unit for legitimate transactions
+      const minAcceptable = Math.max(0, referenceBalance * 0.9 - 1);
+      let validatedBalance = incomingBalance;
+
+      if (incomingBalance < minAcceptable && referenceBalance > 0) {
+        console.warn(`⚠️ Dashboard: Rejecting suspicious balance update for ${symbol}: ${incomingBalance} (expected ~${referenceBalance})`);
+        validatedBalance = referenceBalance;
+      } else {
+        // Update highest known
+        if (incomingBalance > previousHighest) {
+          highestKnownBalancesRef.current[symbol] = incomingBalance;
+          if (symbol === 'QUG') {
+            localStorage.setItem('cachedBalance', incomingBalance.toString());
+          }
+        }
+      }
+
+      console.log(`💰 Dashboard: Received wallet-balance-updated event for ${symbol}:`, incomingBalance, '-> validated:', validatedBalance, 'Reason:', reason);
 
       // Update balance history and wallet balance atomically
       setBalanceHistory(prev => {
         const history = prev[symbol] || [];
         const newPoint: BalanceHistoryPoint = {
           timestamp: Date.now(),
-          balance
+          balance: validatedBalance
         };
         const updatedHistory = [...history, newPoint].slice(-20); // Keep last 20 points
         const newHistoryState = { ...prev, [symbol]: updatedHistory };
@@ -1217,10 +1315,10 @@ Provide a brief analysis (under 250 tokens) covering:
         setWalletBalances(wallets => {
           return wallets.map(wallet => {
             if (wallet.symbol === symbol) {
-              console.log(`✅ Dashboard: Updating ${symbol} balance from ${wallet.balance} to ${balance} with ${updatedHistory.length} history points`);
+              console.log(`✅ Dashboard: Updating ${symbol} balance from ${wallet.balance} to ${validatedBalance} with ${updatedHistory.length} history points`);
               return {
                 ...wallet,
-                balance,
+                balance: validatedBalance,
                 history: updatedHistory
               };
             }
@@ -1271,8 +1369,15 @@ Provide a brief analysis (under 250 tokens) covering:
         const currentWalletAddress = localStorage.getItem('walletAddress');
         if (!currentWalletAddress) return;
 
-        // Initialize QUG balance and history
-        const qugBalance = nodeStatus?.balance || 0;
+        // CRITICAL FIX: Use best known balance, not just nodeStatus
+        const cachedBalance = localStorage.getItem('cachedBalance');
+        const cachedValue = cachedBalance ? parseFloat(cachedBalance) : 0;
+        const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
+        const nodeBalance = nodeStatus?.balance || 0;
+        // Use the maximum of all known sources
+        const qugBalance = Math.max(previousHighest, cachedValue, nodeBalance);
+        console.log('🔄 Refresh using best balance:', qugBalance, '(highest:', previousHighest, ', cached:', cachedValue, ', node:', nodeBalance, ')');
+
         const now = Date.now();
         const qugHistory: BalanceHistoryPoint[] = [
           { timestamp: now - 60000, balance: qugBalance }, // 1 minute ago
@@ -1641,6 +1746,17 @@ Provide a brief analysis (under 250 tokens) covering:
         />
       )}
 
+      {/* QNO Staking Modal */}
+      <StakingModal
+        isOpen={showStakingModal}
+        onClose={() => setShowStakingModal(false)}
+        availableBalance={walletBalances.find(w => w.symbol === 'QUG')?.balance || 0}
+        walletAddress={walletAddress}
+        onStakeSuccess={() => {
+          setRefreshTrigger(prev => prev + 1);
+        }}
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -1870,8 +1986,42 @@ Provide a brief analysis (under 250 tokens) covering:
                       </div>
                     )}
 
-                    {/* Send Button for QUG and QUGUSD wallets */}
-                    {!wallet.comingSoon && (wallet.symbol === 'QUG' || wallet.symbol === 'QUGUSD') && (
+                    {/* Send and Stake Buttons for QUG wallet */}
+                    {!wallet.comingSoon && wallet.symbol === 'QUG' && (
+                      <div className="flex gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onNavigateToSend) {
+                              onNavigateToSend(wallet.symbol);
+                            }
+                          }}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-blue-500/20 border border-blue-500/30 text-blue-300 flex items-center justify-center gap-1"
+                          title="Send"
+                        >
+                          <Send className="w-3 h-3" />
+                          Send
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowStakingModal(true);
+                          }}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-medium bg-purple-500/20 border border-purple-500/30 text-purple-300 flex items-center justify-center gap-1"
+                          title="Stake for QNO Predictions"
+                        >
+                          <Zap className="w-3 h-3" />
+                          Stake
+                        </motion.button>
+                      </div>
+                    )}
+
+                    {/* Send Button for QUGUSD wallet */}
+                    {!wallet.comingSoon && wallet.symbol === 'QUGUSD' && (
                       <div className="flex gap-2">
                         <motion.button
                           whileHover={{ scale: 1.05 }}
@@ -1961,6 +2111,33 @@ Provide a brief analysis (under 250 tokens) covering:
         transition={{ delay: 0.4 }}
       >
         <DAGKnightVisualization currentHeight={nodeStatus?.current_height || 0} />
+      </motion.div>
+
+      {/* QNO Oracle Resolution Visualization */}
+      <motion.div
+        className="mb-8"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.5 }}
+      >
+        <div className="backdrop-blur-xl rounded-3xl overflow-hidden"
+          style={{
+            background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+            border: '2px solid rgba(139, 92, 246, 0.3)',
+            boxShadow: '0 0 30px rgba(139, 92, 246, 0.1)'
+          }}
+        >
+          <div className="p-4 border-b border-purple-500/20">
+            <h3 className="text-lg font-semibold text-purple-100 flex items-center gap-2">
+              <span className="text-xl">🔮</span>
+              QNO Oracle Resolution Monitor
+            </h3>
+            <p className="text-sm text-purple-300/60 mt-1">
+              Real-time prediction staking outcomes, oracle feeds, and resolution events
+            </p>
+          </div>
+          <QNOOracleVisualization />
+        </div>
       </motion.div>
 
       <div className="grid grid-cols-1 gap-8">

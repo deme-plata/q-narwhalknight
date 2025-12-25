@@ -26,50 +26,67 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         throw new Error('Password is required for wallet encryption');
       }
 
-      // CRITICAL SECURITY: Check if wallet already exists
-      // MUST verify password if user is trying to use the SAME mnemonic
+      // CRITICAL SECURITY FIX v1.0.68-beta: MANDATORY password verification for existing wallets
+      // Bug: Previously, correct mnemonic + wrong password would bypass verification
+      // because the private key is derived from mnemonic alone (password only encrypts storage)
+
       const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
+      const encryptedKey = localStorage.getItem('walletEncryptedKey');
+      const storedAddress = localStorage.getItem('walletAddress');
 
-      if (encryptedMnemonic) {
-        console.log('🔐 Existing wallet found - verifying password...');
+      // Derive address from provided mnemonic to check if it matches stored wallet
+      const { keypairFromMnemonic, recoverMnemonic, loadWallet } = await import('../services/walletAuth');
+      const providedKeyPair = await keypairFromMnemonic(seedPhrase);
+      const providedWalletAddress = providedKeyPair.address;
 
-        // FIRST: Check if this is the same mnemonic by comparing addresses
-        const { keypairFromMnemonic } = await import('../services/walletAuth');
-        const providedWalletAddress = (await keypairFromMnemonic(seedPhrase)).address;
-        const storedAddress = localStorage.getItem('walletAddress');
+      // Check if ANY encrypted data exists for this wallet address
+      const hasExistingEncryptedWallet = storedAddress && (encryptedMnemonic || encryptedKey);
 
-        if (storedAddress && providedWalletAddress === storedAddress) {
-          // SAME MNEMONIC - password verification is REQUIRED
-          console.log('🔐 Same wallet detected - verifying password is mandatory...');
+      if (hasExistingEncryptedWallet && providedWalletAddress === storedAddress) {
+        // SAME WALLET - password verification is ABSOLUTELY REQUIRED
+        // Without this, attacker with mnemonic can bypass password protection!
+        console.log('🔐 Existing wallet found - MANDATORY password verification...');
+        console.log('🔐 Same wallet detected (addresses match) - password verification is MANDATORY');
 
-          try {
-            const { recoverMnemonic } = await import('../services/walletAuth');
+        try {
+          // Try to decrypt using the most reliable method available
+          if (encryptedMnemonic) {
+            // Best case: We have encrypted mnemonic, verify it
             const storedMnemonic = await recoverMnemonic(password);
-
-            if (storedMnemonic.trim() === seedPhrase.trim()) {
-              console.log('✅ Password verified successfully!');
-            } else {
-              // This should never happen since addresses matched
+            if (storedMnemonic.trim() !== seedPhrase.trim()) {
               console.error('❌ CRITICAL: Address matched but mnemonic different!');
               throw new Error('Wallet data corruption detected. Please contact support.');
             }
-          } catch (decryptError) {
-            // Decryption failed with same mnemonic = WRONG PASSWORD
-            console.error('❌ WRONG PASSWORD - Authentication failed');
-            setIsAuthenticating(false);
-            setGenerationError('Incorrect password. Please enter the correct password for your existing wallet.');
-            return; // CRITICAL: Stop execution here - do not continue to createWallet
+            console.log('✅ Password verified via mnemonic decryption!');
+          } else if (encryptedKey) {
+            // Fallback: We have encrypted key but no mnemonic (legacy wallet)
+            // Try to load wallet - this will fail if password is wrong
+            await loadWallet(password);
+            console.log('✅ Password verified via key decryption (legacy wallet)!');
           }
-        } else {
-          // DIFFERENT MNEMONIC - clear old data and allow new wallet
-          console.warn('⚠️ Different wallet detected (address mismatch) - allowing new wallet creation');
-          console.log('🗑️ Clearing old wallet data');
-          localStorage.removeItem('walletEncryptedMnemonic');
-          localStorage.removeItem('walletEncryptedKey');
-          localStorage.removeItem('walletAddress');
-          localStorage.removeItem('walletPublicKey');
+        } catch (decryptError) {
+          // Decryption failed = WRONG PASSWORD - MUST STOP HERE!
+          console.error('❌ WRONG PASSWORD - Authentication BLOCKED');
+          console.error('   Error:', decryptError);
+          console.error('   This is a SECURITY feature - password protects wallet access');
+          setIsAuthenticating(false);
+          setGenerationError('Incorrect password. Please enter the correct password for your existing wallet.');
+          return; // CRITICAL: Stop execution - do NOT proceed to createWallet!
         }
+      } else if (storedAddress && providedWalletAddress !== storedAddress) {
+        // DIFFERENT MNEMONIC - warn user and clear old data
+        console.warn('⚠️ Different wallet detected (address mismatch)');
+        console.log('   Stored address: ' + storedAddress);
+        console.log('   Provided address: ' + providedWalletAddress);
+        console.log('🗑️ Clearing old wallet data to create new wallet');
+        localStorage.removeItem('walletEncryptedMnemonic');
+        localStorage.removeItem('walletEncryptedKey');
+        localStorage.removeItem('walletAddress');
+        localStorage.removeItem('walletPublicKey');
+        localStorage.removeItem('walletEncryptedAegisKey');
+        localStorage.removeItem('walletAegisPublicKey');
       }
+      // Note: If no stored address exists, this is a brand new wallet - no verification needed
 
       // Call the import wallet API with mnemonic and password
       const response = await qnkAPI.createWallet(seedPhrase, password);

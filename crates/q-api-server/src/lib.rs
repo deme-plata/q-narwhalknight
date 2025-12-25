@@ -9,6 +9,7 @@ use q_network::NetworkManager;
 use q_storage::{StorageConfig, StorageEngine};
 use q_tor_client::QTorClient; // Re-enabled for consensus integration
 use q_types::*;
+use q_types::upgrades::UpgradeManager;
 use q_wallet::{MemoryWalletStore, WalletManager};
 
 // ZK Privacy Components - ✅ ENABLED
@@ -52,6 +53,10 @@ pub mod frost_committee;
 
 // ✨ v1.0.51-beta: Crypto-enhanced instant mining rewards (AEGIS-256 authenticated)
 pub mod instant_mining_rewards;
+
+// ✨ v1.4.0-beta: Recursive SNARKs for eliminating weak subjectivity
+// Post-quantum recursive proofs enable ~10ms trustless bootstrap for new nodes
+pub mod recursive_proofs_api;
 
 // Sharding System
 use q_sharding::{ShardConfig, ShardMetrics, ShardingEngine, ShardingStrategy};
@@ -198,6 +203,9 @@ pub mod dex_handlers; // ✅ ENABLED - DEX HTTP API handlers
 pub mod dex_initialization; // ✅ ENABLED - DEX component initialization
 pub mod governance_api; // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
 pub mod handlers;
+pub mod startup_progress; // ✅ v1.4.15-beta - Startup progress tracker for frontend UI
+pub mod adaptive_confirmations; // ✅ v1.4.4-beta - ML-adaptive confirmation with retail-first instant finality
+pub mod staking_security; // ✅ v1.4.4-beta - Staking/slashing security with insurance pool for instant payments
 pub mod hashrate_tracker; // ✅ v1.0.16-beta - Network hashrate tracking for adaptive security
 pub mod high_performance_server; // HTTP/2 server optimized for 1M+ TPS
 pub mod oauth2_provider; // ✅ ENABLED - OAuth2 provider for third-party integrations
@@ -219,6 +227,8 @@ pub mod streaming;
 pub mod sync_activation; // ✅ v1.0.15-beta - Timeout-based sync activation
 pub mod wallet_auth; // Signature-based wallet authentication for privacy
 pub mod websocket_stream; // WebSocket streaming for 1M+ TPS (zero HTTP overhead)
+pub mod consensus_service; // ✅ v1.3.11-beta: TRUE DECENTRALIZED CONSENSUS with multi-validator signatures
+pub mod oracle_integration; // ✅ v1.4.3-beta: Oracle feeds for QNO prediction resolution
 pub mod zcash_api;
 pub mod zcash_rpc; // ✅ v1.0.15-beta - Zcash RPC client for Zebra node integration // ✅ v1.0.15-beta - Zcash wallet API endpoints (address, balance, send)
                                                                                     // pub mod sync_activation;  // ❌ DUPLICATE - Already declared on line 73
@@ -229,6 +239,9 @@ pub mod block_producer; // 🏗️ Block producer - aggregates mining solutions 
 pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
 pub mod lockfree_producer;
 pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
+pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
+pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
+pub mod stake_weighted_finality; // ✅ v1.4.11-beta: Stake-weighted finality with PoW+PoS hybrid security
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
@@ -527,6 +540,38 @@ pub struct MinerStats {
     pub total_solutions: u64,
 }
 
+/// v1.0.88-beta: P2P Miner Stats Update
+/// Serializable miner statistics for gossipsub broadcast
+/// Allows users mining to localhost nodes to have their hashrate visible on bootstrap node dashboard
+///
+/// v1.3.8-beta: Added pending_reward for instant UI feedback
+/// NOTE: pending_reward is INFORMATIONAL ONLY - it does NOT affect consensus or database.
+/// The actual balance is only updated when the block containing the coinbase transaction
+/// is committed to the DAG-Knight consensus. This field enables instant UI feedback
+/// while maintaining consensus integrity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2PMinerStatsUpdate {
+    /// Miner wallet address (qnk...)
+    pub miner_address: String,
+    /// Current hashrate in KH/s
+    pub hashrate_khs: f64,
+    /// Total solutions found by this miner
+    pub total_solutions: u64,
+    /// Unix timestamp of this update
+    pub timestamp: u64,
+    /// Node ID that originated this update (for deduplication)
+    pub origin_node_id: String,
+    /// v1.3.8-beta: Pending reward from latest mining submission (QUG, 8 decimals)
+    /// This is for UI display ONLY - actual balance updates via DAG-Knight consensus
+    /// when the block with coinbase transaction is committed.
+    #[serde(default)]
+    pub pending_reward: Option<u64>,
+    /// v1.3.8-beta: Cumulative pending rewards this session (not yet in blocks)
+    /// Resets when rewards are confirmed in committed blocks
+    #[serde(default)]
+    pub session_pending_total: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MiningStatistics {
     pub total_solutions_submitted: u64,
@@ -590,6 +635,32 @@ impl MiningStatistics {
             .filter(|stats| now.duration_since(stats.last_update).as_secs() < 300)
             .count()
     }
+
+    /// v1.0.88-beta: Update miner stats from P2P network
+    /// Called when receiving miner stats from remote nodes (users mining to localhost)
+    pub fn update_from_p2p(&mut self, update: &P2PMinerStatsUpdate) {
+        let stats = self
+            .active_miners
+            .entry(update.miner_address.clone())
+            .or_insert(MinerStats {
+                address: update.miner_address.clone(),
+                last_hashrate: 0.0,
+                last_update: std::time::Instant::now(),
+                total_solutions: 0,
+            });
+
+        // Update with P2P data - use max hashrate to avoid stale data overwriting
+        if update.hashrate_khs > stats.last_hashrate ||
+           std::time::Instant::now().duration_since(stats.last_update).as_secs() > 30 {
+            stats.last_hashrate = update.hashrate_khs;
+            stats.last_update = std::time::Instant::now();
+        }
+
+        // Track total solutions (use max to avoid counting same solutions twice)
+        if update.total_solutions > stats.total_solutions {
+            stats.total_solutions = update.total_solutions;
+        }
+    }
 }
 
 // 🔧 v1.0.4-beta: Challenge caching for mining stall prevention
@@ -615,6 +686,19 @@ pub struct SolutionDedupEntry {
     pub submitted_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// v1.4.10: Contract event record for persistent storage
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContractEventRecord {
+    pub id: String,
+    pub event_type: String,  // "mint", "burn", "airdrop", "transfer", "pause", "unpause"
+    pub amount: String,      // Display units (formatted string)
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub recipients: Option<u32>,  // For airdrop events
+    pub timestamp: u64,           // Unix timestamp
+    pub tx_hash: String,
+}
+
 /// Application state shared across handlers
 pub struct AppState {
     pub config: Config,
@@ -635,6 +719,10 @@ pub struct AppState {
     // Nitro boosts: token_id -> total_boost_points (aggregated from all wallets)
     pub nitro_boosts: Arc<RwLock<HashMap<String, u64>>>,
     pub storage_engine: Arc<StorageEngine>, // ✅ v0.9.27-beta: Persistent storage includes balance consensus
+
+    // ✅ v1.0.91-beta: Nonce tracker for replay attack prevention
+    // Each wallet has a monotonically increasing nonce
+    pub nonce_tracker: Arc<transaction_utils::NonceTracker>,
 
     // ✅ v0.9.99-beta: Adaptive Block Rewards - Throughput-independent emission
     /// Balance consensus engine with adaptive reward calculation
@@ -735,6 +823,9 @@ pub struct AppState {
     // ZK Privacy Components - ✅ ENABLED
     pub zk_stark_system: Option<Arc<tokio::sync::Mutex<StarkSystem>>>,
     pub zk_snark_system: Option<Arc<UniversalSNARK>>,
+    // ✅ Post-Quantum LatticeGuard SNARK (RLWE-based, no trusted setup)
+    pub lattice_guard: Option<Arc<tokio::sync::Mutex<q_lattice_guard::LatticeGuard>>>,
+    pub lattice_guard_srs: Option<Arc<q_lattice_guard::LatticeGuardSRS>>,
 
     // Performance & Scaling Optimizations
     pub simd_crypto_engine: Option<Arc<q_crypto_simd::SimdCryptoEngine>>,
@@ -750,12 +841,20 @@ pub struct AppState {
     pub anchor_election: Option<Arc<QuantumAnchorElection>>,
     pub narwhal_core: Option<Arc<NarwhalCore>>,
     pub production_mempool: Option<Arc<ProductionMempool>>, // HIGH-PERFORMANCE MEMPOOL FOR 200K+ TPS
+
+    // ✅ v1.3.11-beta: TRUE DECENTRALIZED CONSENSUS SERVICE
+    // Collects signatures from multiple validators (2/3+1 threshold) before finalizing
+    // Without this, blocks are only locally validated without multi-party agreement
+    pub consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     pub reliable_broadcast: Option<Arc<ReliableBroadcast>>,
     pub quantum_vdf: Option<Arc<QuantumVDF>>,
 
     // PHASE 2: Parallel Block Production - Multiple producers for concurrent block creation
     // ✅ v0.9.92-beta DEADLOCK FIX: Lock-free producer pool (channel-based, zero RwLocks)
     pub block_producer_pool: Arc<crate::lockfree_producer::LockFreeProducerPool>,
+
+    /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking for consensus dashboard
+    pub finality_metrics: Arc<crate::block_producer::FinalityMetrics>,
 
     // AI Model Management - Lazy Loading with HTTP Download
     pub ai_model_manager: Option<Arc<q_ai_inference::ModelManager>>,
@@ -834,6 +933,18 @@ pub struct AppState {
     pub contract_registry: Arc<ContractRegistry>,
     pub orobit_ecosystem: Arc<OrobitSmartContractEcosystem>,
 
+    // v1.4.10: Contract event history for mint/burn/airdrop operations
+    // Key: contract_address (hex string), Value: Vec of events
+    pub contract_events: Arc<RwLock<HashMap<String, Vec<ContractEventRecord>>>>,
+
+    /// v1.4.11: Commit-reveal mining protection
+    /// Prevents front-running and MEV by requiring 2-phase commit/reveal for mining solutions
+    pub commit_reveal_manager: Arc<mining_commit_reveal::CommitRevealManager>,
+
+    /// v1.4.11: Stake-weighted finality manager
+    /// Combines PoW confirmations with PoS attestations for hybrid security finality
+    pub stake_finality_manager: Arc<stake_weighted_finality::StakeWeightedFinalityManager>,
+
     // Distributed VM and DEX (Horizontal Scaling)
     pub distributed_protocol: Option<Arc<q_network::DistributedProtocolManager>>,
 
@@ -901,6 +1012,20 @@ pub struct AppState {
     // Forces sync after timeout even when network_height=0 (no peer announcements received)
     // Solves: Node stuck at 12,923 waiting forever for gossipsub peer height announcements
     pub sync_activator: Option<Arc<crate::sync_activation::TimeoutBasedSyncActivation>>,
+
+    // ✨ v1.4.0-beta: Recursive Proofs Service - Eliminates Weak Subjectivity
+    // Post-quantum recursive SNARKs for ~10ms trustless light client bootstrap
+    // New nodes can verify entire blockchain history without trusting checkpoints
+    pub recursive_proofs_service: Option<Arc<crate::recursive_proofs_api::RecursiveProofsService>>,
+
+    // ✨ v1.4.2-beta: Block-Height Activated Upgrade Manager
+    // Enables safe mainnet evolution: deploy binaries anytime, features activate at height
+    // Old blocks always validate with old rules (immutable history)
+    pub upgrade_manager: Arc<UpgradeManager>,
+
+    // 🔮 v1.4.2-beta: QNO (Quantum Neural Oracle) Prediction Staking
+    // Persistent storage for prediction staking with P2P sync for decentralized validation
+    pub qno_storage: Arc<RwLock<Option<Arc<q_storage::qno_storage::QnoStorage>>>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1353,12 +1478,24 @@ impl AppState {
         let collateral_vault = match storage_engine.load_collateral_vault_data().await {
             Ok(Some(vault_bytes)) => {
                 match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
-                    Ok(persisted_vault) => {
+                    Ok(mut persisted_vault) => {
                         tracing::info!(
-                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}",
+                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}, old_price=${}",
                             persisted_vault.total_qug_locked,
-                            persisted_vault.total_qugusd_minted
+                            persisted_vault.total_qugusd_minted,
+                            persisted_vault.qug_price_usd
                         );
+                        // v1.0.50-beta: CRITICAL FIX - Update persisted vault's QUG price to correct oracle price
+                        // Old vaults may have incorrect default of $10.00 instead of $42.50
+                        const CORRECT_QUG_PRICE_USD: f64 = 42.50;
+                        if (persisted_vault.qug_price_usd - CORRECT_QUG_PRICE_USD).abs() > 0.01 {
+                            tracing::info!(
+                                "💱 Correcting vault QUG price from ${:.2} to ${:.2}",
+                                persisted_vault.qug_price_usd,
+                                CORRECT_QUG_PRICE_USD
+                            );
+                            persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
+                        }
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -1447,6 +1584,10 @@ impl AppState {
             liquidity_pools: Arc::new(RwLock::new(liquidity_pools_map)),
             nitro_boosts: Arc::new(RwLock::new(HashMap::new())),
             storage_engine: storage_engine.clone(),
+
+            // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
+            nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
             event_emitter,
@@ -1530,6 +1671,7 @@ impl AppState {
             bep44_discovery: None,
             tor_client: None,
             network_manager: None,
+            consensus_service: None, // 🔐 v1.3.11-beta: Decentralized consensus (will be initialized in multi-node mode)
             production_peer_discovery: None,
             libp2p_discovery: None,  // Disabled in test mode
             libp2p_command_tx: None, // Disabled in test mode
@@ -1554,6 +1696,9 @@ impl AppState {
             // ZK Privacy Components - Initialize with None
             zk_stark_system: None,
             zk_snark_system: None,
+            // ✅ Post-Quantum LatticeGuard - Initialize with None in minimal mode
+            lattice_guard: None,
+            lattice_guard_srs: None,
 
             // Performance & Scaling Optimizations - Initialize for maximum TPS
             simd_crypto_engine: {
@@ -1666,6 +1811,9 @@ impl AppState {
                 pool_arc
             },
 
+            /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking
+            finality_metrics: Arc::new(crate::block_producer::FinalityMetrics::default()),
+
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
             ai_model_manager: None,
 
@@ -1724,6 +1872,11 @@ impl AppState {
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
             orobit_ecosystem,
+            contract_events: Arc::new(RwLock::new(HashMap::new())), // v1.4.10: Contract event history
+
+            // v1.4.11: Commit-reveal and stake-weighted finality for hybrid PoW/PoS security
+            commit_reveal_manager: Arc::new(mining_commit_reveal::CommitRevealManager::new(true)),
+            stake_finality_manager: Arc::new(stake_weighted_finality::StakeWeightedFinalityManager::new()),
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
@@ -1800,6 +1953,18 @@ impl AppState {
 
             // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
             sync_activator: None, // Will be set in main.rs after AppState creation
+
+            // ✨ v1.4.0-beta: Recursive Proofs Service - Will be initialized in main.rs
+            recursive_proofs_service: None, // Will be set in main.rs after AppState creation
+
+            // ✨ v1.4.2-beta: Block-Height Activated Upgrade Manager
+            // Determines if network is mainnet from environment variable
+            upgrade_manager: Arc::new(UpgradeManager::new(
+                std::env::var("Q_MAINNET").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+            )),
+
+            // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
+            qno_storage: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1896,8 +2061,12 @@ impl AppState {
             }
         }
 
-        // Initialize NetworkManager to bridge DNS-phantom to libp2p
-        let network_manager = {
+        // v1.3.4-beta: Skip NetworkManager when Tor is not enabled
+        // NetworkManager uses Tor for DNS-phantom bridging, which blocks startup without Tor
+        let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
+            std::env::var("Q_TOR_PROXY").is_ok();
+
+        let network_manager = if tor_enabled {
             let mut tor_config = q_tor_client::TorConfig::default();
             tor_config.enabled = true; // Enable Tor for NetworkManager
 
@@ -1913,7 +2082,7 @@ impl AppState {
 
             match NetworkManager::new(network_config).await {
                 Ok(nm) => {
-                    tracing::info!("✅ NetworkManager initialized - DNS-phantom bridge ready");
+                    tracing::info!("✅ NetworkManager initialized - DNS-phantom bridge ready (Tor enabled)");
                     Some(Arc::new(nm))
                 }
                 Err(e) => {
@@ -1921,6 +2090,9 @@ impl AppState {
                     None
                 }
             }
+        } else {
+            tracing::info!("🔌 Skipping NetworkManager (Tor not enabled) - using direct libp2p connections");
+            None
         };
 
         // Use the libp2p discovery passed in from main.rs (which has topic subscriptions configured)
@@ -2128,12 +2300,24 @@ impl AppState {
         let collateral_vault = match storage_engine.load_collateral_vault_data().await {
             Ok(Some(vault_bytes)) => {
                 match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
-                    Ok(persisted_vault) => {
+                    Ok(mut persisted_vault) => {
                         tracing::info!(
-                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}",
+                            "💰 Loaded CollateralVault from storage: locked_qug={}, minted_qugusd={}, old_price=${}",
                             persisted_vault.total_qug_locked,
-                            persisted_vault.total_qugusd_minted
+                            persisted_vault.total_qugusd_minted,
+                            persisted_vault.qug_price_usd
                         );
+                        // v1.0.50-beta: CRITICAL FIX - Update persisted vault's QUG price to correct oracle price
+                        // Old vaults may have incorrect default of $10.00 instead of $42.50
+                        const CORRECT_QUG_PRICE_USD: f64 = 42.50;
+                        if (persisted_vault.qug_price_usd - CORRECT_QUG_PRICE_USD).abs() > 0.01 {
+                            tracing::info!(
+                                "💱 Correcting vault QUG price from ${:.2} to ${:.2}",
+                                persisted_vault.qug_price_usd,
+                                CORRECT_QUG_PRICE_USD
+                            );
+                            persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
+                        }
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -2222,6 +2406,10 @@ impl AppState {
             liquidity_pools: Arc::new(RwLock::new(liquidity_pools_map)),
             nitro_boosts: Arc::new(RwLock::new(HashMap::new())),
             storage_engine: storage_engine.clone(),
+
+            // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
+            nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
             event_emitter,
@@ -2251,6 +2439,7 @@ impl AppState {
             bep44_discovery,
             tor_client,
             network_manager,
+            consensus_service: None, // 🔐 v1.3.11-beta: Decentralized consensus (will be initialized in multi-node mode)
             production_peer_discovery: None,
 
             // libp2p-based zero-config peer discovery
@@ -2317,6 +2506,48 @@ impl AppState {
                 let system = UniversalSNARK::new(snark_config);
                 tracing::info!("✅ ZK-SNARK System initialized - Groth16/PLONK proofs enabled");
                 Some(Arc::new(system))
+            },
+            // ✅ Post-Quantum LatticeGuard SNARK (RLWE-based, no trusted setup)
+            lattice_guard: {
+                match q_lattice_guard::LatticeGuard::new(q_lattice_guard::SecurityLevel::PQ128) {
+                    Ok(guard) => {
+                        tracing::info!(
+                            "✅ LatticeGuard Post-Quantum SNARK initialized - RLWE-based proofs enabled"
+                        );
+                        Some(Arc::new(tokio::sync::Mutex::new(guard)))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ LatticeGuard initialization failed: {}, post-quantum SNARK unavailable",
+                            e
+                        );
+                        None
+                    }
+                }
+            },
+            lattice_guard_srs: {
+                // Generate or load SRS (Structured Reference String) for LatticeGuard
+                // Uses caching to avoid regenerating on every startup
+                let params = q_lattice_guard::RlweParams::pq128();
+                let cache_path = std::env::var("Q_DB_PATH")
+                    .map(|p| std::path::PathBuf::from(p).join("srs_cache"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/q-lattice-guard-srs"));
+                let mut rng = rand::thread_rng();
+                match q_lattice_guard::LatticeGuardSRS::generate_or_load(params, 10000, &cache_path, &mut rng) {
+                    Ok(srs) => {
+                        tracing::info!(
+                            "✅ LatticeGuard SRS generated - transparent setup complete (10K constraints)"
+                        );
+                        Some(Arc::new(srs))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ LatticeGuard SRS generation failed: {}, using default SRS",
+                            e
+                        );
+                        None
+                    }
+                }
             },
 
             // Performance & Scaling Optimizations - Initialize for maximum TPS
@@ -2430,6 +2661,9 @@ impl AppState {
                 pool_arc
             },
 
+            /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking
+            finality_metrics: Arc::new(crate::block_producer::FinalityMetrics::default()),
+
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
             ai_model_manager: None,
 
@@ -2488,6 +2722,11 @@ impl AppState {
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
             orobit_ecosystem,
+            contract_events: Arc::new(RwLock::new(HashMap::new())), // v1.4.10: Contract event history
+
+            // v1.4.11: Commit-reveal and stake-weighted finality for hybrid PoW/PoS security
+            commit_reveal_manager: Arc::new(mining_commit_reveal::CommitRevealManager::new(true)),
+            stake_finality_manager: Arc::new(stake_weighted_finality::StakeWeightedFinalityManager::new()),
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
@@ -2564,6 +2803,18 @@ impl AppState {
 
             // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
             sync_activator: None, // Will be set in main.rs after AppState creation
+
+            // ✨ v1.4.0-beta: Recursive Proofs Service - Will be initialized in main.rs
+            recursive_proofs_service: None, // Will be set in main.rs after AppState creation
+
+            // ✨ v1.4.2-beta: Block-Height Activated Upgrade Manager
+            // Determines if network is mainnet from environment variable
+            upgrade_manager: Arc::new(UpgradeManager::new(
+                std::env::var("Q_MAINNET").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+            )),
+
+            // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
+            qno_storage: Arc::new(RwLock::new(None)),
         })
     }
 

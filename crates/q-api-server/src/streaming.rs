@@ -24,6 +24,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 
+/// v1.2.0-beta Phase 3: Default confirmation status for balance updates
+/// Used when deserializing older events without the confirmation_status field
+fn default_confirmation_status() -> String {
+    "instant".to_string()
+}
+
 /// Real-time events that can be streamed to clients
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -152,12 +158,42 @@ pub enum StreamEvent {
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// Wallet balance updated (for transaction processing)
+    /// v1.2.0-beta Phase 3: Enhanced with block tracking and confirmation status
     BalanceUpdated {
         wallet_address: String,
         old_balance: f64,
         new_balance: f64,
-        change_reason: String, // "transaction_sent", "transaction_received", "faucet", etc.
+        change_reason: String, // "transaction_sent", "transaction_received", "faucet", "coinbase_reward", "p2p_mining_reward"
         timestamp: chrono::DateTime<chrono::Utc>,
+        /// v1.2.0-beta Phase 3: Block hash where this update was confirmed (hex string)
+        /// None for instant updates (faucet, P2P sync) that haven't been included in a block yet
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_hash: Option<String>,
+        /// v1.2.0-beta Phase 3: Block height where this update was confirmed
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_height: Option<u64>,
+        /// v1.2.0-beta Phase 3: Confirmation status
+        /// - "pending": Update received via gossipsub, waiting for block inclusion
+        /// - "confirmed": Update included in a finalized block via DAG-Knight consensus
+        /// - "instant": Immediate local update (faucet, debugging)
+        #[serde(default = "default_confirmation_status")]
+        confirmation_status: String,
+    },
+    /// v1.4.10-beta: Custom token balance updated (for instant DEX updates)
+    TokenBalanceUpdated {
+        wallet_address: String,
+        token_address: String,
+        token_symbol: String,
+        old_balance: f64,
+        new_balance: f64,
+        change_reason: String, // "transfer_sent", "transfer_received", "swap", "mint", "burn"
+        timestamp: chrono::DateTime<chrono::Utc>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_height: Option<u64>,
+        #[serde(default = "default_confirmation_status")]
+        confirmation_status: String,
     },
     /// Privacy mixing started
     PrivacyMixingStarted {
@@ -225,6 +261,7 @@ pub enum StreamEvent {
         block_height: u64,
         difficulty: String,
         hash_rate: f64,
+        worker_name: Option<String>, // 🆕 v0.6.2-beta: Worker identification for multi-miner setups
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// Mining statistics update
@@ -236,12 +273,72 @@ pub enum StreamEvent {
         avg_hash_rate: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// v1.3.8-beta: Pending mining reward from P2P gossip
+    /// This provides instant UI feedback for users mining to localhost
+    /// while frontend is connected to bootstrap node.
+    /// NOTE: This is for UI display ONLY - not consensus-confirmed!
+    PendingMiningReward {
+        miner_address: String,
+        /// Pending reward amount in QNK (8 decimals)
+        pending_reward_qnk: f64,
+        /// Node that mined this reward (for attribution)
+        origin_node_id: String,
+        /// Block height at the mining node
+        source_height: u64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
     /// Custom event for mining rewards and other custom types
     Custom {
         event_type: String,
         data: serde_json::Value,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// v1.4.3: QNO Oracle data update
+    QnoOracleUpdate {
+        domain: String,
+        value: f64,
+        confidence: f64,
+        sources: Vec<OracleSourceInfo>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v1.4.3: QNO prediction resolution result
+    QnoResolution {
+        stake_id: String,
+        domain: String,
+        predicted_value: f64,
+        actual_value: f64,
+        accuracy_score: f64,
+        is_accurate: bool,
+        slashing_applied: f64,
+        reward_adjustment: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v1.4.3: QNO new stake placed
+    QnoStake {
+        stake_id: String,
+        domain: String,
+        amount: f64,
+        confidence: f64,
+        prediction_value: f64,
+        wallet_address: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v1.4.3: QNO slashing event
+    QnoSlashing {
+        stake_id: String,
+        domain: String,
+        amount_slashed: f64,
+        reason: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+/// v1.4.3: Oracle source information for SSE events
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OracleSourceInfo {
+    pub provider: String,
+    pub value: f64,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -468,6 +565,16 @@ pub async fn sse_events(
 
             // Mining stats - only send if it's for this wallet
             StreamEvent::MiningStats { miner_address, .. } => {
+                let normalized_event = if miner_address.starts_with("qnk") {
+                    miner_address[3..].to_string()
+                } else {
+                    miner_address.clone()
+                };
+                normalized_event == normalized_filter
+            }
+
+            // v1.3.8-beta: Pending mining reward - only send if it's for this wallet
+            StreamEvent::PendingMiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
                     miner_address[3..].to_string()
                 } else {
@@ -762,6 +869,7 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::TorCircuitEvent { .. } => "tor-circuit-event".to_string(),
         StreamEvent::FaucetDispensed { .. } => "faucet-dispensed".to_string(),
         StreamEvent::BalanceUpdated { .. } => "balance-updated".to_string(),
+        StreamEvent::TokenBalanceUpdated { .. } => "token-balance-updated".to_string(),
         StreamEvent::PrivacyMixingStarted { .. } => "privacy-mixing-started".to_string(),
         StreamEvent::PrivacyMixingCompleted { .. } => "privacy-mixing-completed".to_string(),
         StreamEvent::NitroBoost { .. } => "nitro_boost".to_string(),
@@ -771,7 +879,13 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::SwapExecuted { .. } => "swap_executed".to_string(),
         StreamEvent::MiningReward { .. } => "mining_reward".to_string(),
         StreamEvent::MiningStats { .. } => "mining_stats".to_string(),
+        StreamEvent::PendingMiningReward { .. } => "pending_mining_reward".to_string(),
         StreamEvent::Custom { event_type, .. } => event_type.clone(),
+        // v1.4.3: QNO events
+        StreamEvent::QnoOracleUpdate { .. } => "oracle-update".to_string(),
+        StreamEvent::QnoResolution { .. } => "qno-resolution".to_string(),
+        StreamEvent::QnoStake { .. } => "qno-stake".to_string(),
+        StreamEvent::QnoSlashing { .. } => "qno-slashing".to_string(),
     }
 }
 
@@ -1095,6 +1209,7 @@ impl HighPerformanceEmitter {
         block_height: u64,
         difficulty: String,
         hash_rate: f64,
+        worker_name: Option<String>, // 🆕 v0.6.2-beta: Worker name for multi-miner tracking
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let event = StreamEvent::MiningReward {
             miner_address,
@@ -1103,6 +1218,7 @@ impl HighPerformanceEmitter {
             block_height,
             difficulty,
             hash_rate,
+            worker_name,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await
@@ -1123,6 +1239,109 @@ impl HighPerformanceEmitter {
             total_blocks_found,
             current_balance,
             avg_hash_rate,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// v1.3.8-beta: Emit pending mining reward event
+    /// This provides instant UI feedback for decentralized mining
+    pub async fn emit_pending_mining_reward(
+        &self,
+        miner_address: String,
+        pending_reward_qnk: f64,
+        origin_node_id: String,
+        source_height: u64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::PendingMiningReward {
+            miner_address,
+            pending_reward_qnk,
+            origin_node_id,
+            source_height,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// v1.4.3: Emit QNO oracle update event
+    pub async fn emit_qno_oracle_update(
+        &self,
+        domain: String,
+        value: f64,
+        confidence: f64,
+        sources: Vec<OracleSourceInfo>,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::QnoOracleUpdate {
+            domain,
+            value,
+            confidence,
+            sources,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// v1.4.3: Emit QNO resolution result event
+    pub async fn emit_qno_resolution(
+        &self,
+        stake_id: String,
+        domain: String,
+        predicted_value: f64,
+        actual_value: f64,
+        accuracy_score: f64,
+        is_accurate: bool,
+        slashing_applied: f64,
+        reward_adjustment: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::QnoResolution {
+            stake_id,
+            domain,
+            predicted_value,
+            actual_value,
+            accuracy_score,
+            is_accurate,
+            slashing_applied,
+            reward_adjustment,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// v1.4.3: Emit QNO stake placed event
+    pub async fn emit_qno_stake(
+        &self,
+        stake_id: String,
+        domain: String,
+        amount: f64,
+        confidence: f64,
+        prediction_value: f64,
+        wallet_address: String,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::QnoStake {
+            stake_id,
+            domain,
+            amount,
+            confidence,
+            prediction_value,
+            wallet_address,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// v1.4.3: Emit QNO slashing event
+    pub async fn emit_qno_slashing(
+        &self,
+        stake_id: String,
+        domain: String,
+        amount_slashed: f64,
+        reason: String,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::QnoSlashing {
+            stake_id,
+            domain,
+            amount_slashed,
+            reason,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await

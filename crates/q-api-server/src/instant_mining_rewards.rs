@@ -338,12 +338,16 @@ pub async fn emit_instant_balance_update(
     use crate::streaming::StreamEvent;
 
     // Emit BalanceUpdated event
+    // v1.2.0-beta Phase 3: Enhanced with block tracking
     let balance_event = StreamEvent::BalanceUpdated {
         wallet_address: reward.miner_address.clone(),
         old_balance: reward.old_balance as f64 / 100_000_000.0,
         new_balance: reward.new_balance as f64 / 100_000_000.0,
         change_reason: "mining_reward".to_string(),
         timestamp: chrono::Utc::now(),
+        block_hash: Some(hex::encode(&reward.solution_hash)), // Use solution hash as identifier
+        block_height: Some(reward.block_height),
+        confirmation_status: "confirmed".to_string(), // Mining rewards are immediately confirmed
     };
 
     broadcaster.broadcast(balance_event).await
@@ -357,6 +361,7 @@ pub async fn emit_instant_balance_update(
         block_height: reward.block_height,
         difficulty: hex::encode(&reward.solution_hash[..8]),
         hash_rate: 0.0, // Will be updated by mining stats
+        worker_name: None, // v0.6.2-beta: No worker name in instant mining
         timestamp: chrono::Utc::now(),
     };
 

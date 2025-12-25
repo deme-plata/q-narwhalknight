@@ -147,7 +147,8 @@ impl RealDht {
         info!("Creating real DHT node with peer ID: {}", local_peer_id);
 
         // Create transport
-        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+        // v1.4.14-beta: Enable TCP_NODELAY for lower latency (disables Nagle's algorithm)
+        let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
             .upgrade(upgrade::Version::V1Lazy)
             .authenticate(noise::Config::new(&local_key)?)
             .multiplex(yamux::Config::default())
@@ -183,7 +184,8 @@ impl RealDht {
         };
 
         // Create swarm using libp2p 0.53 API
-        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+        // v1.4.14-beta: Enable TCP_NODELAY for lower latency
+        let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise::Config::new(&local_key)?)
             .multiplex(yamux::Config::default())

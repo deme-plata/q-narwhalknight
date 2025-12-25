@@ -15,6 +15,7 @@ pub mod peer_registry;
 pub mod persistent_channels;
 pub mod protocol_handshake;
 pub mod handshake_validator;  // ✅ v1.0.15.1-beta - Protocol version validation
+pub mod tor_integration;      // 🧅 v2.1.0: Tor integration with dedicated circuits
 
 // Export handshake components
 pub use handshake_validator::{
@@ -59,6 +60,11 @@ pub use resonance_protocol::{
     resonance_topic, ResonanceGossipManager, ResonanceProtocolHandler,
 };
 
+// 🧅 Export Tor integration components
+pub use tor_integration::{
+    NetworkTorConfig, TorMessageRouter, TorRouterStats, TorNetworkExt,
+};
+
 // Export transaction tunneling components
 pub use transaction_tunneling::{
     TunnelingEngine, TunnelingConfig, TunnelingProfile, TunnelingResult,
@@ -87,6 +93,7 @@ pub mod distributed_ai;
 pub mod distributed_ai_coordinator;
 pub mod distributed_ai_worker; // FLAW #1 FIX: Worker node inference handler
 pub mod distributed_protocol;
+pub mod distributed_qno; // v1.4.2-beta: QNO Prediction Staking P2P
 pub mod layer_forwarding;
 pub mod distributed_inference_bridge;
 pub mod kv_cache_manager;
@@ -97,6 +104,10 @@ pub mod public_key_dht; // v1.0.3-beta: DHT-based public key distribution (Shows
 pub mod signature_cache; // v1.0.3-beta: Signature verification cache with TOCTOU fix (Showstopper #3 fix)
 pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verification (Week 2, Day 1-2)
 pub mod circuit_breaker; // v1.0.3-beta: Circuit breaker for attack protection (Week 2, Day 3-4)
+pub mod address_filter; // v1.2.2-beta: Docker/container address filtering for P2P sync optimization
+
+// ========== v1.9.0-SLINGSHOT: Project APOLLO Phase 4 - Continuous Streaming ==========
+pub mod continuous_sync; // Continuous stream protocol (SCRAMJET FLOW) - 30-50% RTT savings
 
 // Export distributed components
 pub use distributed_vm::{

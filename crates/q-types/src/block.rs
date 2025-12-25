@@ -12,6 +12,38 @@ use std::collections::HashMap;
 fn default_phase() -> u8 { 5 }  // Phase 5 is current testnet phase
 fn default_network_id() -> String { "testnet-phase5".to_string() }
 
+/// v1.1.3-beta: Custom serde module for u128 serialization as string
+/// This is needed because MessagePack doesn't support u128 natively
+/// Using string representation ensures compatibility across all serializers
+mod u128_as_string {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Support both string and integer deserialization for backward compatibility
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            String(String),
+            Int(u128),
+        }
+
+        match StringOrInt::deserialize(deserializer)? {
+            StringOrInt::String(s) => s.parse::<u128>().map_err(serde::de::Error::custom),
+            StringOrInt::Int(i) => Ok(i),
+        }
+    }
+}
+
 /// Block hash type (blake3)
 pub type BlockHash = [u8; 32];
 
@@ -99,6 +131,39 @@ pub struct BlockHeader {
 
     /// Total difficulty accumulated to this block
     pub total_difficulty: u128,
+
+    // ============================================================================
+    // 🔐 v1.2.0-beta Phase 3: Block Producer Signature Fields
+    // ============================================================================
+
+    /// Producer public key (Ed25519 - 32 bytes)
+    /// Required for all new blocks, optional for backwards compatibility
+    #[serde(default)]
+    pub producer_public_key: Option<[u8; 32]>,
+
+    /// Producer signature over the header hash (Ed25519 - 64 bytes)
+    /// Required for all new blocks, optional for backwards compatibility
+    #[serde(default)]
+    pub producer_signature: Option<Vec<u8>>,
+
+    // ============================================================================
+    // 🔐 v1.2.0-beta Phase 3 Step 6: Coinbase Transaction Security
+    // ============================================================================
+
+    /// Merkle root of all coinbase transaction outputs in this block
+    /// This allows SPV clients to verify mining rewards without full block data
+    /// SHA3-256 of (coinbase_tx_hash_0 || coinbase_tx_hash_1 || ... || coinbase_tx_hash_n)
+    #[serde(default)]
+    pub coinbase_merkle_root: Option<[u8; 32]>,
+
+    /// Total coinbase reward in this block (sum of all coinbase outputs)
+    /// Used for quick emission schedule validation
+    #[serde(default)]
+    pub total_coinbase_reward: Option<u64>,
+
+    /// Number of coinbase transactions in this block
+    #[serde(default)]
+    pub coinbase_count: Option<u32>,
 }
 
 /// Quantum VDF (Verifiable Delay Function) proof
@@ -274,12 +339,17 @@ pub struct EnergyComponents {
 /// Cryptographic phase for signature scheme
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignaturePhase {
-    /// Phase 0: Ed25519 classical signatures
+    /// Phase 0: Ed25519 classical signatures (64 bytes)
     Phase0Ed25519,
-    /// Phase 1: Dilithium5 post-quantum signatures
+    /// Phase 1: Dilithium5 post-quantum signatures (4,627 bytes) - DEPRECATED
     Phase1Dilithium5,
     /// Hybrid: Both Ed25519 and Dilithium5 (transition mode)
     HybridEd25519Dilithium5,
+    /// Phase 2: SQIsign compact post-quantum signatures (204 bytes)
+    /// 🚀 v1.0.86-beta: 95.6% smaller than Dilithium5, equivalent security
+    Phase2SQIsign,
+    /// Hybrid: Ed25519 + SQIsign (transition from Phase 0 to Phase 2)
+    HybridEd25519SQIsign,
 }
 
 impl Default for SignaturePhase {
@@ -298,14 +368,21 @@ pub struct SpectralSignature {
     #[serde(default)]
     pub crypto_phase: SignaturePhase,
 
-    /// Classical signature (Ed25519 in Phase 0, Dilithium5 in Phase 1)
+    /// Classical signature (Ed25519 in Phase 0)
     /// For hybrid mode, this contains Ed25519 signature
     pub classical_sig: Vec<u8>,
 
-    /// ✨ v1.0.15-beta: Post-quantum signature (Dilithium5)
-    /// Only populated in Phase1 or Hybrid mode
+    /// ✨ v1.0.15-beta: Post-quantum signature (Dilithium5) - DEPRECATED
+    /// Only populated in Phase1 or HybridEd25519Dilithium5 mode
+    /// ⚠️ DEPRECATED: Use sqisign_sig for new blocks (95.6% smaller)
     #[serde(default)]
     pub pqc_sig: Option<Vec<u8>>,
+
+    /// ✨ v1.0.86-beta: SQIsign compact post-quantum signature (204 bytes)
+    /// Only populated in Phase2SQIsign or HybridEd25519SQIsign mode
+    /// 🚀 95.6% smaller than Dilithium5 (204 vs 4,627 bytes)
+    #[serde(default)]
+    pub sqisign_sig: Option<Vec<u8>>,
 
     /// Spectral decomposition coefficient (for Byzantine detection)
     pub spectral_coefficient: f64,
@@ -487,6 +564,243 @@ impl QBlock {
         bincode::serialize(self)
             .map(|bytes| bytes.len())
             .unwrap_or(0)
+    }
+
+    // ============================================================================
+    // 🔐 v1.2.0-beta Phase 3: Block Producer Signature Methods
+    // ============================================================================
+
+    /// Get the payload that the producer should sign
+    /// This is the block hash BEFORE the signature is added
+    pub fn signing_payload(&self) -> BlockHash {
+        // Create a temporary header without signature to compute the signing payload
+        let mut temp_header = self.header.clone();
+        temp_header.producer_signature = None;
+
+        let header_bytes = bincode::serialize(&temp_header).expect("Failed to serialize header");
+        blake3::hash(&header_bytes).into()
+    }
+
+    /// Sign this block with the producer's keypair
+    /// Sets both producer_public_key and producer_signature
+    pub fn sign(&mut self, signing_key: &ed25519_dalek::SigningKey) -> Result<(), String> {
+        use ed25519_dalek::Signer;
+
+        // Get the signing payload (hash without signature)
+        let payload = self.signing_payload();
+
+        // Sign the payload
+        let signature = signing_key.sign(&payload);
+
+        // Store public key and signature
+        self.header.producer_public_key = Some(signing_key.verifying_key().to_bytes());
+        self.header.producer_signature = Some(signature.to_bytes().to_vec());
+
+        Ok(())
+    }
+
+    /// Verify the producer's signature on this block
+    /// Returns Ok(()) if valid, Err with reason otherwise
+    pub fn verify_producer_signature(&self) -> Result<(), String> {
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+        // Get the public key
+        let public_key_bytes = self.header.producer_public_key
+            .ok_or("Block producer public key is missing (Phase 3 requires all blocks to be signed)")?;
+
+        // Get the signature
+        let signature_bytes = self.header.producer_signature
+            .as_ref()
+            .ok_or("Block producer signature is missing (Phase 3 requires all blocks to be signed)")?;
+
+        // Validate signature length
+        if signature_bytes.len() != 64 {
+            return Err(format!(
+                "Invalid signature length: expected 64 bytes, got {}",
+                signature_bytes.len()
+            ));
+        }
+
+        // Parse the public key
+        let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
+            .map_err(|e| format!("Invalid producer public key: {}", e))?;
+
+        // Parse the signature
+        let signature_arr: [u8; 64] = signature_bytes.clone().try_into()
+            .map_err(|_| "Failed to convert signature to fixed-size array")?;
+        let signature = Signature::from_bytes(&signature_arr);
+
+        // Verify the signature against the signing payload
+        let payload = self.signing_payload();
+        verifying_key.verify(&payload, &signature)
+            .map_err(|e| format!("Block producer signature verification failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Check if this block has a producer signature
+    pub fn is_producer_signed(&self) -> bool {
+        self.header.producer_public_key.is_some() &&
+        self.header.producer_signature.as_ref().map(|s| s.len() == 64).unwrap_or(false)
+    }
+
+    /// Check if producer signature is required for Phase 3+ blocks
+    /// Signature is required for all blocks produced after Phase 3 activation
+    pub fn requires_producer_signature(&self) -> bool {
+        // Phase 3 = v1.2.0-beta, signature required for phase >= 9
+        // For gradual rollout, we can adjust this threshold
+        self.header.phase >= 9
+    }
+
+    // =========================================================================
+    // 🔐 v1.2.0-beta Phase 3 Step 6: Coinbase Transaction Security Methods
+    // =========================================================================
+
+    /// Compute the merkle root of all coinbase transactions in this block
+    /// Uses SHA3-256 for the merkle tree
+    pub fn compute_coinbase_merkle_root(&self) -> [u8; 32] {
+        use sha3::{Sha3_256, Digest};
+
+        // Collect all coinbase transaction hashes
+        let coinbase_hashes: Vec<[u8; 32]> = self.transactions.iter()
+            .filter(|tx| tx.is_coinbase())
+            .map(|tx| tx.hash())
+            .collect();
+
+        if coinbase_hashes.is_empty() {
+            return [0u8; 32]; // Empty merkle root for blocks without coinbase
+        }
+
+        if coinbase_hashes.len() == 1 {
+            return coinbase_hashes[0]; // Single coinbase - just return its hash
+        }
+
+        // Build merkle tree (simple binary tree)
+        let mut level = coinbase_hashes;
+        while level.len() > 1 {
+            let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+
+            for chunk in level.chunks(2) {
+                let mut hasher = Sha3_256::new();
+                hasher.update(&chunk[0]);
+                if chunk.len() > 1 {
+                    hasher.update(&chunk[1]);
+                } else {
+                    // Odd number - duplicate the last hash
+                    hasher.update(&chunk[0]);
+                }
+                let hash: [u8; 32] = hasher.finalize().into();
+                next_level.push(hash);
+            }
+
+            level = next_level;
+        }
+
+        level[0]
+    }
+
+    /// Get total coinbase reward in this block
+    pub fn total_coinbase_reward(&self) -> u64 {
+        self.transactions.iter()
+            .filter(|tx| tx.is_coinbase())
+            .map(|tx| tx.amount)
+            .sum()
+    }
+
+    /// Get number of coinbase transactions in this block
+    pub fn coinbase_count(&self) -> u32 {
+        self.transactions.iter()
+            .filter(|tx| tx.is_coinbase())
+            .count() as u32
+    }
+
+    /// Populate coinbase security fields in the header
+    /// Called after coinbase transactions are finalized
+    pub fn populate_coinbase_security(&mut self) {
+        self.header.coinbase_merkle_root = Some(self.compute_coinbase_merkle_root());
+        self.header.total_coinbase_reward = Some(self.total_coinbase_reward());
+        self.header.coinbase_count = Some(self.coinbase_count());
+    }
+
+    /// Verify coinbase merkle root matches actual transactions
+    pub fn verify_coinbase_merkle_root(&self) -> Result<(), String> {
+        // If header doesn't have coinbase merkle root, skip verification (legacy blocks)
+        let expected_root = match self.header.coinbase_merkle_root {
+            Some(root) => root,
+            None => return Ok(()), // Legacy block - no verification needed
+        };
+
+        let computed_root = self.compute_coinbase_merkle_root();
+
+        if computed_root != expected_root {
+            return Err(format!(
+                "Coinbase merkle root mismatch: expected {}, computed {}",
+                hex::encode(expected_root),
+                hex::encode(computed_root)
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify all coinbase transaction signatures (Phase 3 security)
+    /// Returns the producer public key if all signatures are valid
+    pub fn verify_coinbase_signatures(&self) -> Result<Option<[u8; 32]>, String> {
+        let mut producer_key: Option<[u8; 32]> = None;
+
+        for (idx, tx) in self.transactions.iter().enumerate() {
+            if !tx.is_coinbase() {
+                continue;
+            }
+
+            // Check if this has a Phase 3 producer signature
+            if tx.has_producer_signature() {
+                match tx.verify_coinbase_signature() {
+                    Ok(key) => {
+                        // Verify all coinbase txs have same producer key
+                        if let Some(existing_key) = producer_key {
+                            if existing_key != key {
+                                return Err(format!(
+                                    "Coinbase tx {} has different producer key",
+                                    idx
+                                ));
+                            }
+                        } else {
+                            producer_key = Some(key);
+                        }
+                    }
+                    Err(e) => return Err(format!("Coinbase tx {} signature invalid: {}", idx, e)),
+                }
+            }
+            // Legacy coinbase without signature - allowed for backwards compatibility
+        }
+
+        // If block header has producer_public_key, verify it matches coinbase producer
+        if let (Some(header_key), Some(coinbase_key)) = (self.header.producer_public_key, producer_key) {
+            if header_key != coinbase_key {
+                return Err("Block producer key does not match coinbase producer key".to_string());
+            }
+        }
+
+        Ok(producer_key)
+    }
+
+    /// Validate all coinbase amounts against emission schedule
+    pub fn validate_coinbase_amounts(&self) -> Result<(), String> {
+        for (idx, tx) in self.transactions.iter().enumerate() {
+            if !tx.is_coinbase() {
+                continue;
+            }
+
+            // First coinbase is typically the dev fee
+            let is_dev_fee = idx == 0;
+
+            if let Err(e) = tx.validate_coinbase_amount(self.header.height, is_dev_fee) {
+                return Err(format!("Coinbase tx {} invalid: {}", idx, e));
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -86,10 +86,11 @@ impl Default for Genus2VDFConfig {
 
 impl Genus2VDFConfig {
     /// Create quantum-safe configuration (recommended)
+    /// v1.5.0-beta: Aligned min_iterations with anchor_election.rs Phase::Phase1 (5000)
     pub fn quantum_safe() -> Self {
         Self {
             security_level: Genus2SecurityLevel::Standard,
-            min_iterations: 10_000,
+            min_iterations: 5_000,  // Matches Phase1 anchor election
             max_iterations: 10_000_000,
             target_time_ms: 2000, // 2 seconds for security
             parallel_verification: true,
@@ -97,10 +98,11 @@ impl Genus2VDFConfig {
     }
 
     /// Create high-security configuration
+    /// v1.5.0-beta: Aligned min_iterations with anchor_election.rs Phase::Phase2 (10000)
     pub fn high_security() -> Self {
         Self {
             security_level: Genus2SecurityLevel::High,
-            min_iterations: 100_000,
+            min_iterations: 10_000,  // Matches Phase2 anchor election
             max_iterations: 100_000_000,
             target_time_ms: 5000, // 5 seconds
             parallel_verification: true,

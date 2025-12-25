@@ -245,25 +245,62 @@ impl VertexCreator {
     }
 
     /// Create VDF input from vertex components
+    ///
+    /// 🔐 v1.4.5-beta: SECURE VDF-DAG BINDING
+    /// VDF input now includes parent VDF outputs to create cryptographic chain binding.
+    /// This prevents pre-computation attacks where an attacker computes future VDFs
+    /// before seeing parent VDF outputs.
     async fn create_vdf_input(
         &self,
         vertex_id: &VertexId,
         transactions: &[TxHash],
         parents: &[VertexId],
     ) -> Result<Vec<u8>> {
-        let mut input = Vec::new();
+        use sha3::{Digest, Sha3_256};
 
-        input.extend_from_slice(vertex_id);
+        // 🔐 Secure VDF input construction:
+        // SHA3-256(vertex_id || tx_hashes || parent_ids || parent_vdf_outputs)
+        let mut hasher = Sha3_256::new();
 
+        // Vertex identity
+        hasher.update(vertex_id);
+
+        // Transaction commitment
         for tx_hash in transactions {
-            input.extend_from_slice(tx_hash);
+            hasher.update(tx_hash);
         }
 
+        // Parent vertex IDs
         for parent_id in parents {
-            input.extend_from_slice(parent_id);
+            hasher.update(parent_id);
         }
 
-        Ok(input)
+        // 🔐 CRITICAL: Include parent VDF outputs for chain binding
+        // This creates sequential dependency - can't compute this VDF until
+        // all parent VDFs are complete
+        let vertex_store = self.vertex_store.read().await;
+        for parent_id in parents {
+            if let Some(parent_vertex) = vertex_store.get(parent_id) {
+                // Include parent's VDF challenge (which contains their VDF output)
+                hasher.update(&parent_vertex.vdf_proof.challenge);
+                // Include parent's quantum seed if available
+                if let Some(ref seed) = parent_vertex.vdf_proof.quantum_seed {
+                    hasher.update(seed);
+                }
+            } else if is_genesis_vertex_id(parent_id) {
+                // Genesis has known VDF seed
+                hasher.update(&[0u8; 32]); // Genesis VDF output
+            }
+        }
+
+        // Add timestamp for freshness
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        hasher.update(now.to_le_bytes());
+
+        Ok(hasher.finalize().to_vec())
     }
 
     /// Validate a vertex according to DAG rules

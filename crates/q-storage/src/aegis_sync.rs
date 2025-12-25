@@ -107,6 +107,9 @@ pub struct PeerTrustMetrics {
     /// Number of blocks with wrong merkle roots
     pub merkle_failures: u64,
 
+    /// v1.5.2-beta: Number of data failures (decompression, deserialization, etc.)
+    pub data_failures: u64,
+
     /// Trust score (0.0 - 1.0)
     pub trust_score: f64,
 
@@ -131,6 +134,7 @@ impl PeerTrustRegistry {
                 valid_packs: 0,
                 invalid_signatures: 0,
                 merkle_failures: 0,
+                data_failures: 0,
                 trust_score: 0.5, // Start neutral
                 last_seen: chrono::Utc::now().timestamp(),
                 public_key,
@@ -160,6 +164,7 @@ impl PeerTrustRegistry {
                 valid_packs: 0,
                 invalid_signatures: 0,
                 merkle_failures: 0,
+                data_failures: 0,
                 trust_score: 0.5,
                 last_seen: chrono::Utc::now().timestamp(),
                 public_key,
@@ -188,6 +193,7 @@ impl PeerTrustRegistry {
                 valid_packs: 0,
                 invalid_signatures: 0,
                 merkle_failures: 0,
+                data_failures: 0,
                 trust_score: 0.5,
                 last_seen: chrono::Utc::now().timestamp(),
                 public_key,
@@ -197,14 +203,51 @@ impl PeerTrustRegistry {
         entry.merkle_failures += 1;
         entry.last_seen = chrono::Utc::now().timestamp();
 
-        let total_interactions = entry.valid_packs + entry.invalid_signatures + entry.merkle_failures;
-        entry.trust_score = entry.valid_packs as f64 / total_interactions as f64;
+        let total_failures = entry.invalid_signatures + entry.merkle_failures + entry.data_failures;
+        let total_interactions = entry.valid_packs + total_failures;
+        entry.trust_score = entry.valid_packs as f64 / total_interactions.max(1) as f64;
 
         tracing::warn!(
             "⚠️ [AEGIS-QL] Merkle failure from peer {}. Trust: {:.2}% ({} merkle failures)",
-            &peer_id[..8],
+            &peer_id[..8.min(peer_id.len())],
             entry.trust_score * 100.0,
             entry.merkle_failures
+        );
+    }
+
+    /// v1.5.2-beta: Record a data failure from peer (decompression, deserialization, etc.)
+    /// This reduces trust score significantly to prevent repeated requests to bad peers
+    pub fn record_data_failure(&self, peer_id: &str) {
+        let mut entry = self.peers.entry(peer_id.to_string()).or_insert_with(|| {
+            PeerTrustMetrics {
+                valid_packs: 0,
+                invalid_signatures: 0,
+                merkle_failures: 0,
+                data_failures: 0,
+                trust_score: 0.5,
+                last_seen: chrono::Utc::now().timestamp(),
+                // Default empty key for unknown peers
+                public_key: q_aegis_ql::PublicKey { a: Vec::new(), t: Vec::new() },
+            }
+        });
+
+        entry.data_failures += 1;
+        entry.last_seen = chrono::Utc::now().timestamp();
+
+        // v1.5.2-beta: Heavily penalize data failures (likely version mismatch)
+        let total_failures = entry.invalid_signatures + entry.merkle_failures + entry.data_failures;
+        let total_interactions = entry.valid_packs + total_failures;
+        // Data failures are weighted 2x to quickly identify incompatible nodes
+        let weighted_valid = entry.valid_packs as f64;
+        let weighted_failures = (entry.invalid_signatures + entry.merkle_failures + entry.data_failures * 2) as f64;
+        entry.trust_score = weighted_valid / (weighted_valid + weighted_failures).max(1.0);
+
+        tracing::warn!(
+            "🔧 [AEGIS-QL] Data failure from peer {}. Trust: {:.2}% ({} data failures, {} total)",
+            &peer_id[..8.min(peer_id.len())],
+            entry.trust_score * 100.0,
+            entry.data_failures,
+            total_interactions
         );
     }
 

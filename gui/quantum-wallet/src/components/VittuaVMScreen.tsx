@@ -53,7 +53,9 @@ interface DeployedContract {
   isPaused?: boolean;
   logoUrl?: string; // libp2p IPFS CID for logo
   logoDataUrl?: string; // Base64 data URL for display (temporary until uploaded)
-  abaBalance?: string; // Total ABA balance held by the token contract
+  abaBalance?: string; // User's balance of this token
+  totalSupply?: string; // v1.4.9: Total supply of the token (for event history)
+  decimals?: number; // v1.4.9: Token decimals for balance conversion
 }
 
 interface ContractTemplate {
@@ -208,26 +210,75 @@ export default function VittuaVMScreen() {
   };
 
   // Generate mock events for a contract (in real implementation, fetch from API)
-  const getContractEvents = (contract: DeployedContract): ContractEvent[] => {
-    if (contractEvents[contract.address]) {
-      return contractEvents[contract.address];
+  // v1.4.10: Fetch events from backend API
+  const fetchContractEvents = async (contract: DeployedContract) => {
+    try {
+      // Strip qnk prefix for API call
+      const contractAddr = contract.address.startsWith('qnk')
+        ? contract.address.slice(3)
+        : contract.address;
+
+      const response = await fetch(`/api/v1/contracts/events/${contractAddr}`);
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data?.events) {
+          // Convert backend events to frontend format
+          const apiEvents: ContractEvent[] = result.data.events.map((e: any) => ({
+            id: e.id,
+            type: e.event_type as ContractEvent['type'],
+            amount: e.amount,
+            from: e.from,
+            to: e.to,
+            recipients: e.recipients,
+            timestamp: new Date(e.timestamp * 1000),
+            txHash: e.tx_hash
+          }));
+
+          // If no events from API, add initial deployment event
+          if (apiEvents.length === 0) {
+            apiEvents.push({
+              id: '1',
+              type: 'mint',
+              amount: contract.totalSupply || contract.abaBalance || '0',
+              to: localStorage.getItem('walletAddress') || '',
+              timestamp: contract.deployedAt,
+              txHash: `0x${contract.address.slice(3, 11)}...initial`
+            });
+          }
+
+          setContractEvents(prev => ({ ...prev, [contract.address]: apiEvents }));
+          return apiEvents;
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch contract events:', error);
     }
 
-    // Generate mock events based on contract features
-    const events: ContractEvent[] = [
+    // Fallback: return initial deployment event
+    const fallbackEvents: ContractEvent[] = [
       {
         id: '1',
         type: 'mint',
-        amount: contract.abaBalance || '1,000,000',
+        amount: contract.totalSupply || contract.abaBalance || '0',
         to: localStorage.getItem('walletAddress') || '',
         timestamp: contract.deployedAt,
         txHash: `0x${contract.address.slice(3, 11)}...initial`
       }
     ];
+    setContractEvents(prev => ({ ...prev, [contract.address]: fallbackEvents }));
+    return fallbackEvents;
+  };
 
-    // Cache the events
-    setContractEvents(prev => ({ ...prev, [contract.address]: events }));
-    return events;
+  const getContractEvents = (contract: DeployedContract): ContractEvent[] => {
+    if (contractEvents[contract.address]) {
+      return contractEvents[contract.address];
+    }
+
+    // v1.4.10: Trigger async fetch and return empty for now
+    // The component will re-render when events are fetched
+    fetchContractEvents(contract);
+
+    return [];
   };
 
   // Generate mock stats for a contract (in real implementation, fetch from API)
@@ -236,14 +287,15 @@ export default function VittuaVMScreen() {
       return contractStats[contract.address];
     }
 
-    const balance = parseFloat(contract.abaBalance?.replace(/,/g, '') || '1000000');
+    // v1.4.9: Use totalSupply for stats, not abaBalance (user's balance)
+    const supplyDisplay = contract.totalSupply || contract.abaBalance || '0';
     const stats: TokenStats = {
-      totalSupply: contract.abaBalance || '1,000,000',
-      circulatingSupply: contract.abaBalance || '1,000,000',
+      totalSupply: supplyDisplay,
+      circulatingSupply: supplyDisplay,
       burnedTokens: '0',
       holders: 1,
       totalTransfers: 0,
-      totalMinted: contract.abaBalance || '1,000,000',
+      totalMinted: supplyDisplay,
       totalBurned: '0',
       totalAirdropped: '0',
       stakingAPY: contract.features.staking ? '12.5%' : undefined,
@@ -262,8 +314,14 @@ export default function VittuaVMScreen() {
     const walletAddress = localStorage.getItem('walletAddress');
     if (!walletAddress) return;
 
-    const cacheKey = `deployedContracts_${walletAddress}`;
+    // v1.4.9: Added cache version to invalidate old data missing totalSupply/decimals
+    const CACHE_VERSION = 'v3';
+    const cacheKey = `deployedContracts_${CACHE_VERSION}_${walletAddress}`;
     const cached = localStorage.getItem(cacheKey);
+
+    // Clear old cache keys without version
+    const oldCacheKey = `deployedContracts_${walletAddress}`;
+    localStorage.removeItem(oldCacheKey);
 
     if (cached) {
       try {
@@ -298,7 +356,8 @@ export default function VittuaVMScreen() {
         console.log('📡 Fetching deployed contracts for wallet:', walletAddress);
 
         // Fetch contracts from backend API
-        const response = await fetch(`/api/v1/contracts/user/${walletAddress}`);
+        // v1.4.9: Fixed path - was missing /contracts at the end
+        const response = await fetch(`/api/v1/contracts/user/${walletAddress}/contracts`);
 
         if (!response.ok) {
           console.warn('Failed to fetch contracts:', response.status);
@@ -310,15 +369,24 @@ export default function VittuaVMScreen() {
 
         if (result.success && result.data) {
           // Map backend contract data to frontend format
-          const contractsWithoutBalances: DeployedContract[] = result.data.map((c: any) => ({
-            address: c.address, // Already has qnk prefix from backend
-            name: c.name,
-            symbol: c.symbol || 'N/A',
-            type: c.contract_type,
-            deployedAt: new Date(c.deployed_at * 1000), // Convert Unix timestamp
-            features: c.features || {},
-            isPaused: false,
-          }));
+          const contractsWithoutBalances: DeployedContract[] = result.data.map((c: any) => {
+            // v1.4.9: Format total_supply with commas for display
+            const rawSupply = c.total_supply || c.initial_supply || '0';
+            const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+            const formattedSupply = BigInt(supplyStr).toLocaleString();
+
+            return {
+              address: c.address, // Already has qnk prefix from backend
+              name: c.name,
+              symbol: c.symbol || 'N/A',
+              type: c.contract_type,
+              deployedAt: new Date(c.deployed_at * 1000), // Convert Unix timestamp
+              features: c.features || {},
+              isPaused: false,
+              totalSupply: formattedSupply, // v1.4.9: Store total supply for event history
+              decimals: c.decimals || 8, // v1.4.9: Store decimals for balance conversion
+            };
+          });
 
           // Fetch token balance for each contract (user's balance OF each token)
           const contractsWithBalances = await Promise.all(
@@ -329,14 +397,23 @@ export default function VittuaVMScreen() {
                 if (balanceResponse.ok) {
                   const balanceResult = await balanceResponse.json();
                   if (balanceResult.success && balanceResult.data) {
-                    // The balance is returned as a string to preserve precision for large numbers
-                    // Display as-is without decimal conversion since contracts store as whole numbers
+                    // v1.4.9: Fix - Backend returns balance in BASE UNITS (raw * 10^decimals)
+                    // We need to divide by decimals to get display amount
                     const rawBalance = balanceResult.data.balance || '0';
-                    // Handle both string and number formats for backwards compatibility
                     const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
-                    // Format with commas for display
-                    const formattedBalance = BigInt(balanceStr).toLocaleString();
-                    console.log(`✅ Fetched balance for ${contract.symbol}:`, formattedBalance);
+
+                    // Get decimals (default to 8 like QUG/QUGUSD)
+                    const decimals = contract.decimals || 8;
+                    const divisor = Math.pow(10, decimals);
+
+                    // Convert from base units to display units
+                    const balanceNum = Number(balanceStr) / divisor;
+                    // Format with appropriate decimal places
+                    const formattedBalance = balanceNum.toLocaleString(undefined, {
+                      minimumFractionDigits: 0,
+                      maximumFractionDigits: 4
+                    });
+                    console.log(`✅ Fetched balance for ${contract.symbol}: ${rawBalance} base units → ${formattedBalance} display (decimals: ${decimals})`);
                     return { ...contract, abaBalance: formattedBalance };
                   }
                 }
@@ -352,9 +429,11 @@ export default function VittuaVMScreen() {
           setDeployedContracts(contractsWithBalances);
 
           // Cache contracts in localStorage for instant display on next mount
-          const cacheKey = `deployedContracts_${walletAddress}`;
+          // v1.4.9: Use versioned cache key
+          const CACHE_VERSION = 'v2';
+          const cacheKey = `deployedContracts_${CACHE_VERSION}_${walletAddress}`;
           localStorage.setItem(cacheKey, JSON.stringify(contractsWithBalances));
-          console.log('💾 Cached contracts to localStorage');
+          console.log('💾 Cached contracts to localStorage (v2)');
         }
       } catch (error) {
         console.error('Failed to fetch deployed contracts:', error);
@@ -656,14 +735,19 @@ export default function VittuaVMScreen() {
     }
 
     try {
-      console.log(`🪙 Minting ${mintAmount} ${contract.symbol} for contract ${contract.address}`);
+      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      const decimals = contract.decimals || 8;
+      const displayAmount = parseFloat(mintAmount);
+      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
+
+      console.log(`🪙 Minting ${mintAmount} ${contract.symbol} (${baseUnits} base units) for contract ${contract.address}`);
 
       const response = await fetch('/api/v1/contracts/mint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contract_address: contract.address,
-          amount: mintAmount,
+          amount: baseUnits.toString(), // v1.4.10: Send base units, not display units
         }),
       });
 
@@ -674,6 +758,21 @@ export default function VittuaVMScreen() {
 
       const result = await response.json();
       console.log('✅ Mint successful:', result);
+
+      // v1.4.10: Add mint event to event history
+      const newEvent: ContractEvent = {
+        id: `mint-${Date.now()}`,
+        type: 'mint',
+        amount: mintAmount, // Display units for UI
+        to: localStorage.getItem('walletAddress') || '',
+        timestamp: new Date(),
+        txHash: result.data?.transaction_hash || `0x${Date.now().toString(16)}`
+      };
+      setContractEvents(prev => ({
+        ...prev,
+        [contract.address]: [newEvent, ...(prev[contract.address] || [])]
+      }));
+
       alert(`Successfully minted ${mintAmount} ${contract.symbol}!`);
       setMintAmount('');
     } catch (error: any) {
@@ -689,14 +788,19 @@ export default function VittuaVMScreen() {
     }
 
     try {
-      console.log(`🔥 Burning ${burnAmount} ${contract.symbol} from contract ${contract.address}`);
+      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      const decimals = contract.decimals || 8;
+      const displayAmount = parseFloat(burnAmount);
+      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
+
+      console.log(`🔥 Burning ${burnAmount} ${contract.symbol} (${baseUnits} base units) from contract ${contract.address}`);
 
       const response = await fetch('/api/v1/contracts/burn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contract_address: contract.address,
-          amount: burnAmount,
+          amount: baseUnits.toString(), // v1.4.10: Send base units, not display units
         }),
       });
 
@@ -707,6 +811,21 @@ export default function VittuaVMScreen() {
 
       const result = await response.json();
       console.log('✅ Burn successful:', result);
+
+      // v1.4.10: Add burn event to event history
+      const newEvent: ContractEvent = {
+        id: `burn-${Date.now()}`,
+        type: 'burn',
+        amount: burnAmount, // Display units for UI
+        from: localStorage.getItem('walletAddress') || '',
+        timestamp: new Date(),
+        txHash: result.data?.transaction_hash || `0x${Date.now().toString(16)}`
+      };
+      setContractEvents(prev => ({
+        ...prev,
+        [contract.address]: [newEvent, ...(prev[contract.address] || [])]
+      }));
+
       alert(`Successfully burned ${burnAmount} ${contract.symbol}!`);
       setBurnAmount('');
     } catch (error: any) {
@@ -733,7 +852,12 @@ export default function VittuaVMScreen() {
     }
 
     try {
-      console.log(`✈️ Airdropping ${airdropAmount} ${contract.symbol} to ${addresses.length} addresses`);
+      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      const decimals = contract.decimals || 8;
+      const displayAmount = parseFloat(airdropAmount);
+      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
+
+      console.log(`✈️ Airdropping ${airdropAmount} ${contract.symbol} (${baseUnits} base units each) to ${addresses.length} addresses`);
 
       const response = await fetch('/api/v1/contracts/airdrop', {
         method: 'POST',
@@ -741,7 +865,7 @@ export default function VittuaVMScreen() {
         body: JSON.stringify({
           contract_address: contract.address,
           recipients: addresses,
-          amount_per_recipient: airdropAmount,
+          amount_per_recipient: baseUnits.toString(), // v1.4.10: Send base units, not display units
         }),
       });
 
@@ -752,6 +876,21 @@ export default function VittuaVMScreen() {
 
       const result = await response.json();
       console.log('✅ Airdrop successful:', result);
+
+      // v1.4.10: Add airdrop event to event history
+      const newEvent: ContractEvent = {
+        id: `airdrop-${Date.now()}`,
+        type: 'airdrop',
+        amount: airdropAmount, // Display units for UI (per recipient)
+        recipients: addresses.length,
+        timestamp: new Date(),
+        txHash: result.data?.transaction_hash || `0x${Date.now().toString(16)}`
+      };
+      setContractEvents(prev => ({
+        ...prev,
+        [contract.address]: [newEvent, ...(prev[contract.address] || [])]
+      }));
+
       alert(`Successfully airdropped ${airdropAmount} ${contract.symbol} to ${addresses.length} addresses!`);
       setAirdropAddresses('');
       setAirdropAmount('');

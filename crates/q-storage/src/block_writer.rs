@@ -215,19 +215,22 @@ impl BlockWriter {
         // This prevents height pointer drift that caused the 221→242 desync bug
         let mut batch: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
 
-        // Store by height
+        // Store block data by height (PRIMARY storage - full block)
         batch.push((
             CF_BLOCKS,
             height_key.clone().into_bytes(),
-            block_data.clone()
+            block_data  // Full block data stored ONCE
         ));
 
-        // Store by hash
+        // 🚀 v1.3.5-beta: STORAGE OPTIMIZATION - Store hash→height reference only!
+        // Previously stored full block twice (by height AND by hash) = 50% waste
+        // Now: hash key stores only 8-byte height reference
+        // Lookup: hash → height → block (two-step, but 50% less storage)
         let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
         batch.push((
             CF_BLOCKS,
             hash_key.into_bytes(),
-            block_data.clone()
+            height.to_be_bytes().to_vec()  // Only 8 bytes instead of ~2KB!
         ));
 
         // 🚨 CRITICAL: Add height pointer to SAME batch (atomic with block data!)

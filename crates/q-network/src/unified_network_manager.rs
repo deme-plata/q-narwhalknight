@@ -21,29 +21,84 @@ use futures::StreamExt;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use dashmap::{DashMap, DashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
 use crate::handshake::ServerRole;
 use crate::distributed_ai::DistributedAITopics;
+use crate::address_filter::{is_routable_peer_address, log_filter_configuration, get_external_address};
 use q_types::QBlock;
 
-/// 🔥 v1.0.17-beta: Multiple bootstrap peers for decentralization
-/// Previously: Single bootstrap node (centralization risk)
-/// Now: Multiple diverse bootstrap nodes (different operators, geos)
-/// ✅ v1.0.17-beta: Fixed bootstrap configuration (correct P2P port 9001 and PeerID)
-const BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg",  // Server Beta (EU) - P2P port, actual PeerID (updated 2025-11-18)
-    // TODO: Add Server Alpha (US) bootstrap node
-    // TODO: Add community bootstrap nodes
-];
+/// 🔥 v1.3.5-beta: DYNAMIC BOOTSTRAP DISCOVERY - NO HARDCODED PEER IDs
+///
+/// Bootstrap peer discovery order:
+/// 1. HTTP discovery from Q_BOOTSTRAP_URL (fetches /api/v1/status from masternode)
+/// 2. Q_BOOTSTRAP_PEERS environment variable (comma-separated multiaddrs)
+/// 3. Q_BOOTSTRAP_PEER environment variable (single multiaddr for backwards compat)
+///
+/// WHY NO HARDCODED PEERS:
+/// - Peer IDs change when libp2p_identity.key regenerates (e.g., fresh data dir)
+/// - Hardcoded peer IDs get stale and cause "no peers available" errors
+/// - Dynamic discovery via HTTP is always up-to-date
+///
+/// For new nodes to connect:
+/// 1. Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 (production masternode)
+/// 2. Node will auto-discover current peer ID from /api/v1/status endpoint
+///
+/// The /api/v1/status endpoint returns:
+/// {
+///   "data": {
+///     "peer_id": "12D3KooW...",
+///     "multiaddrs": ["/ip4/185.182.185.227/tcp/9001/p2p/12D3KooW..."],
+///     "network_id": "testnet-phase16"
+///   }
+/// }
 
-/// Legacy compatibility - use first bootstrap peer as default
-const DEFAULT_BOOTSTRAP_PEER: &str = BOOTSTRAP_PEERS[0];
+/// v1.3.5-beta: Get bootstrap peers from environment variables only (NO HARDCODED PEERS)
+/// Primary source: network_config.bootstrap_peers (from HTTP discovery in config.rs)
+/// Fallback: Q_BOOTSTRAP_PEERS or Q_BOOTSTRAP_PEER env vars
+fn get_bootstrap_peers() -> Vec<String> {
+    let mut peers = Vec::new();
+
+    // Check Q_BOOTSTRAP_PEERS (comma-separated list)
+    if let Ok(env_peers) = std::env::var("Q_BOOTSTRAP_PEERS") {
+        let env_list: Vec<String> = env_peers
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s.contains("/p2p/"))
+            .collect();
+
+        if !env_list.is_empty() {
+            info!("🔧 [BOOTSTRAP] Using {} peers from Q_BOOTSTRAP_PEERS environment variable", env_list.len());
+            for (i, peer) in env_list.iter().enumerate() {
+                info!("   {}. {}", i + 1, peer);
+            }
+            peers.extend(env_list);
+        }
+    }
+
+    // Check Q_BOOTSTRAP_PEER (single peer, backwards compatibility)
+    if let Ok(single_peer) = std::env::var("Q_BOOTSTRAP_PEER") {
+        let trimmed = single_peer.trim().to_string();
+        if !trimmed.is_empty() && trimmed.contains("/p2p/") && !peers.contains(&trimmed) {
+            info!("🔧 [BOOTSTRAP] Using peer from Q_BOOTSTRAP_PEER: {}", trimmed);
+            peers.push(trimmed);
+        }
+    }
+
+    if peers.is_empty() {
+        info!("🔧 [BOOTSTRAP] No bootstrap peers from environment variables");
+        info!("   → Primary discovery: HTTP from Q_BOOTSTRAP_URL (config.rs)");
+        info!("   → Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 for production");
+    }
+
+    peers
+}
 
 /// Q-NarwhalKnight network behavior combining all discovery mechanisms
 /// 🔥 v1.0.17-beta: Added NAT traversal for true decentralization (AutoNAT + Relay + DCUtR)
@@ -232,6 +287,87 @@ pub enum NetworkCommand {
         topic: String,
         announcement_bytes: Vec<u8>,
     },
+    /// v1.0.88-beta: Publish miner stats to P2P network
+    /// Allows users mining to localhost nodes to have hashrate visible on bootstrap node
+    PublishMinerStats {
+        topic: String,
+        stats_bytes: Vec<u8>,
+        miner_address: String,
+    },
+    /// v1.1.8-beta: Publish balance update to P2P network
+    /// Enables decentralized mining by syncing balance updates across all nodes
+    PublishBalanceUpdate {
+        topic: String,
+        update_bytes: Vec<u8>,
+        wallet_address: String,
+        amount: u64,
+    },
+    /// 🚀 v1.3.9-beta: Direct request-response for Turbo Sync (replaces gossipsub)
+    /// Uses libp2p request-response protocol for reliable, point-to-point block fetching.
+    /// MUCH more reliable than gossipsub for large block batches because:
+    /// - Point-to-point delivery (no broadcast flooding)
+    /// - Built-in timeout handling (60s default)
+    /// - Guaranteed response or error (no silent drops)
+    RequestBlockRangeDirect {
+        /// Optional peer ID to request from (if None, selects best peer automatically)
+        peer_id: Option<String>,
+        start_height: u64,
+        end_height: u64,
+        /// Oneshot channel to deliver the response
+        response_tx: tokio::sync::oneshot::Sender<anyhow::Result<Vec<q_types::QBlock>>>,
+    },
+
+    // ============================================================================
+    // v1.3.11-beta: DECENTRALIZED CONSENSUS P2P PROTOCOL
+    // ============================================================================
+
+    /// Request consensus signatures from validators for a vertex/block
+    /// Broadcast to all validators via gossipsub to request their signatures
+    PublishConsensusRequest {
+        topic: String,
+        vertex_id: [u8; 32],
+        round: u64,
+        block_hash: [u8; 32],
+        requester_id: [u8; 32],
+    },
+
+    /// Respond with our signature for a consensus request
+    /// Sent as a response to PublishConsensusRequest
+    PublishConsensusSignature {
+        topic: String,
+        vertex_id: [u8; 32],
+        validator_id: [u8; 32],
+        signature: [u8; 64],
+        public_key: [u8; 32],
+        timestamp: u64,
+    },
+
+    /// Announce a completed certificate with multi-validator signatures
+    /// Broadcast to network so all nodes know this block is consensus-confirmed
+    PublishConsensusCertificate {
+        topic: String,
+        vertex_id: [u8; 32],
+        round: u64,
+        signatures: Vec<([u8; 32], Vec<u8>)>, // (validator_id, signature)
+        threshold_met: bool,
+    },
+
+    /// Report equivocation (double-signing) by a validator
+    /// Triggers slashing on all honest nodes
+    ReportEquivocation {
+        topic: String,
+        validator_id: [u8; 32],
+        vertex_id: [u8; 32],
+        signature1: Vec<u8>,
+        signature2: Vec<u8>,
+    },
+
+    /// v1.4.2-beta: Publish QNO (Quantum Neural Oracle) operation
+    /// Broadcasts stake/unstake/claim operations for decentralized validation
+    PublishQnoOperation {
+        topic: String,
+        message: crate::distributed_qno::QnoGossipMessage,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -375,14 +511,144 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
 
 /// v0.9.73-beta: Peer compatibility tracking for BlockPackCodec protocol
 /// Tracks which peers successfully support the BlockPackCodec request-response protocol
+/// v1.0.83-beta: Made blacklist less aggressive - expires after 5 minutes, threshold raised to 10
+/// v1.0.86-beta: CRITICAL FIX - Much less aggressive blacklisting to prevent network death
 #[derive(Debug, Clone, Default)]
 pub struct PeerCompatibility {
     /// Peers that have successfully responded (PeerId → success count)
     pub successes: HashMap<PeerId, u32>,
     /// Peers that have failed to respond (PeerId → failure count)
     pub failures: HashMap<PeerId, u32>,
-    /// Blacklisted peers (incompatible with BlockPackCodec)
-    pub blacklist: HashSet<PeerId>,
+    /// Blacklisted peers with timestamp (PeerId → blacklist time)
+    /// v1.0.83-beta: Blacklist now expires after BLACKLIST_EXPIRY_SECS
+    pub blacklist: HashMap<PeerId, std::time::Instant>,
+    /// v1.0.86-beta: Track last failure time for decay calculation
+    pub last_failure_time: HashMap<PeerId, std::time::Instant>,
+    /// v1.0.86-beta: Track if peer is a bootstrap peer (higher failure tolerance)
+    pub is_bootstrap: HashSet<PeerId>,
+}
+
+/// v1.0.86-beta: Blacklist configuration constants - MUCH less aggressive
+/// Problem: 10 failures + 5 min blacklist = network death with single bootstrap peer
+/// Fix: Higher threshold, shorter expiry, special treatment for bootstrap peers
+
+/// Failures before blacklisting (increased from 10 to 50)
+/// Rationale: NAT traversal alone can cause 5-10 "failures" per connection attempt
+const BLACKLIST_FAILURE_THRESHOLD: u32 = 50;
+
+/// Blacklist expiry reduced from 300s to 60s (1 minute)
+/// Rationale: Network conditions change fast, retry sooner
+const BLACKLIST_EXPIRY_SECS: u64 = 60;
+
+/// v1.0.86-beta: Failure decay interval - decay 1 failure every 30 seconds
+/// Prevents failure accumulation from transient issues
+const FAILURE_DECAY_INTERVAL_SECS: u64 = 30;
+
+/// v1.0.86-beta: Bootstrap peers get 3x higher threshold (150 failures)
+/// Rationale: Losing bootstrap = network isolation, be very conservative
+const BOOTSTRAP_BLACKLIST_MULTIPLIER: u32 = 3;
+
+/// 🚀 v1.7.0-LAMINAR (VORTEX ELIMINATION): Lock-free peer compatibility tracking
+/// Uses DashMap for concurrent access without lock contention
+/// Eliminates the lock bottleneck that limited sync throughput to ~500 BPS
+#[derive(Debug)]
+pub struct PeerCompatibilityV2 {
+    /// Peers that have successfully responded (PeerId → success count)
+    pub successes: DashMap<PeerId, u32>,
+    /// Peers that have failed to respond (PeerId → failure count)
+    pub failures: DashMap<PeerId, u32>,
+    /// Blacklisted peers with timestamp (PeerId → blacklist time)
+    pub blacklist: DashMap<PeerId, std::time::Instant>,
+    /// Track last failure time for decay calculation
+    pub last_failure_time: DashMap<PeerId, std::time::Instant>,
+    /// Track if peer is a bootstrap peer (higher failure tolerance)
+    pub is_bootstrap: DashSet<PeerId>,
+}
+
+impl Default for PeerCompatibilityV2 {
+    fn default() -> Self {
+        Self {
+            successes: DashMap::new(),
+            failures: DashMap::new(),
+            blacklist: DashMap::new(),
+            last_failure_time: DashMap::new(),
+            is_bootstrap: DashSet::new(),
+        }
+    }
+}
+
+impl Clone for PeerCompatibilityV2 {
+    fn clone(&self) -> Self {
+        Self {
+            successes: self.successes.iter().map(|r| (*r.key(), *r.value())).collect(),
+            failures: self.failures.iter().map(|r| (*r.key(), *r.value())).collect(),
+            blacklist: self.blacklist.iter().map(|r| (*r.key(), *r.value())).collect(),
+            last_failure_time: self.last_failure_time.iter().map(|r| (*r.key(), *r.value())).collect(),
+            is_bootstrap: self.is_bootstrap.iter().map(|r| *r.key()).collect(),
+        }
+    }
+}
+
+impl PeerCompatibilityV2 {
+    /// Record a successful response from peer
+    pub fn record_success(&self, peer_id: &PeerId) {
+        *self.successes.entry(*peer_id).or_insert(0) += 1;
+    }
+
+    /// Record a failed response from peer with decay calculation
+    pub fn record_failure(&self, peer_id: &PeerId) {
+        let now = std::time::Instant::now();
+
+        // Apply decay before recording new failure
+        if let Some(mut entry) = self.failures.get_mut(peer_id) {
+            if let Some(last_time) = self.last_failure_time.get(peer_id) {
+                let elapsed = now.duration_since(*last_time.value()).as_secs();
+                let decay = (elapsed / FAILURE_DECAY_INTERVAL_SECS) as u32;
+                *entry.value_mut() = entry.value().saturating_sub(decay);
+            }
+        }
+
+        // Record new failure
+        *self.failures.entry(*peer_id).or_insert(0) += 1;
+        self.last_failure_time.insert(*peer_id, now);
+
+        // Check if should be blacklisted
+        let failures = self.failures.get(peer_id).map(|f| *f).unwrap_or(0);
+        let threshold = if self.is_bootstrap.contains(peer_id) {
+            BLACKLIST_FAILURE_THRESHOLD * BOOTSTRAP_BLACKLIST_MULTIPLIER
+        } else {
+            BLACKLIST_FAILURE_THRESHOLD
+        };
+
+        if failures >= threshold {
+            self.blacklist.insert(*peer_id, now);
+        }
+    }
+
+    /// Check if peer is blacklisted (with expiry check)
+    pub fn is_blacklisted(&self, peer_id: &PeerId) -> bool {
+        if let Some(entry) = self.blacklist.get(peer_id) {
+            let elapsed = entry.value().elapsed().as_secs();
+            if elapsed >= BLACKLIST_EXPIRY_SECS {
+                // Expired - remove from blacklist
+                drop(entry);
+                self.blacklist.remove(peer_id);
+                return false;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Get failure count for peer (with decay applied)
+    pub fn get_failures(&self, peer_id: &PeerId) -> u32 {
+        self.failures.get(peer_id).map(|f| *f).unwrap_or(0)
+    }
+
+    /// Get success count for peer
+    pub fn get_successes(&self, peer_id: &PeerId) -> u32 {
+        self.successes.get(peer_id).map(|s| *s).unwrap_or(0)
+    }
 }
 
 /// Simplified Network Manager - Zero-Knowledge Discovery System
@@ -416,9 +682,9 @@ pub struct UnifiedNetworkManager {
     gossipsub_stats: Arc<RwLock<HashMap<String, (usize, usize, std::time::Instant, Option<u64>, Option<u64>)>>>, // (count, total_bytes, last_log_time, min_height, max_height)
     /// Channel to forward synced blocks for consensus validation (Phase 3b)
     block_sync_tx: Option<mpsc::UnboundedSender<Vec<q_types::block::QBlock>>>,
-    /// v0.9.73-beta: Peer compatibility tracking for BlockPackCodec protocol
-    /// Tracks which peers successfully support the new request-response protocol
-    peer_compat: Arc<std::sync::RwLock<PeerCompatibility>>,
+    /// 🚀 v1.7.0-LAMINAR: Lock-free peer compatibility tracking (VORTEX ELIMINATION)
+    /// Uses DashMap for concurrent access without lock contention
+    peer_compat: Arc<PeerCompatibilityV2>,
     /// v1.0.12-beta: Pending block range requests for batch sync
     /// Maps request_id (as String) → oneshot channel for async await
     /// v1.0.15-beta: Fixed to use String instead of removed libp2p::request_response::RequestId
@@ -433,6 +699,21 @@ pub struct UnifiedNetworkManager {
     /// v1.0.45-beta: Track best known network height for progress display
     /// Updated from BlockPackResponse.peer_height on each sync response
     known_network_height: Arc<std::sync::atomic::AtomicU64>,
+    /// v1.2.7-beta: Channel for async block pack responses (non-blocking handler)
+    /// The handler spawns a task for slow DB operations, which sends the response through this channel.
+    /// The main event loop polls this and calls send_response. Prevents ResponseOmission timeouts.
+    block_pack_response_tx: mpsc::UnboundedSender<(u64, q_types::BlockPackResponse)>,
+    block_pack_response_rx: mpsc::UnboundedReceiver<(u64, q_types::BlockPackResponse)>,
+    /// v1.2.7-beta: Pending response channels indexed by request ID for async responses
+    pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
+    /// v1.2.7-beta: Counter for generating unique request IDs for async response tracking
+    next_async_request_id: Arc<std::sync::atomic::AtomicU64>,
+    /// v1.3.3-beta: Tor-enabled flag for adaptive timeouts and batch sizes
+    /// Set during initialization based on Q_TOR_ENABLED, Q_TOR_PROXY, or SOCKS5 proxy detection
+    tor_enabled: bool,
+    /// v1.3.3-beta: Retry queue for failed sync requests with exponential backoff
+    /// Stores (height, retry_count, next_retry_time) for failed heights that should be retried
+    sync_retry_queue: Arc<std::sync::Mutex<Vec<(u64, u8, std::time::Instant)>>>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -467,12 +748,30 @@ impl UnifiedNetworkManager {
         info!("🌐 Network: {}", network_config.network_id.display_name());
         info!("🆔 Local Peer ID: {}", local_peer_id);
 
+        // 🐳 v1.2.2-beta: Log Docker/container address filtering configuration
+        log_filter_configuration();
+
         // 🔥 v1.0.17-beta: SwarmBuilder replaces manual transport construction
         // Old manual TCP+Noise+Yamux transport deleted - now handled by SwarmBuilder
         // mDNS, Identify, Ping, Kademlia initialization moved into SwarmBuilder closure
 
         // Bootstrap from network configuration with automatic peer ID discovery
-        let bootstrap_peers = &network_config.bootstrap_peers;
+        // v1.0.86-beta: Merge hardcoded peers, network config peers, and env var override
+        let mut all_bootstrap_peers: Vec<String> = Vec::new();
+
+        // 1. Start with network config peers
+        all_bootstrap_peers.extend(network_config.bootstrap_peers.clone());
+
+        // 2. Add hardcoded/env var peers (get_bootstrap_peers handles env var override)
+        for peer in get_bootstrap_peers() {
+            if !all_bootstrap_peers.contains(&peer) {
+                all_bootstrap_peers.push(peer);
+            }
+        }
+
+        info!("🔧 [BOOTSTRAP] Total unique bootstrap peers: {}", all_bootstrap_peers.len());
+
+        let bootstrap_peers = &all_bootstrap_peers;
         let mut bootstrap_count = 0;
         // 🔧 v0.6.8-beta: Track bootstrap peers for automatic reconnection
         let mut bootstrap_peer_map: HashMap<PeerId, Multiaddr> = HashMap::new();
@@ -486,14 +785,93 @@ impl UnifiedNetworkManager {
                 let has_peer_id = addr.iter().any(|p| matches!(p, Protocol::P2p(_)));
 
                 if has_peer_id {
-                    // Multiaddr already has peer ID - use directly
-                    if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
-                        // kademlia.add_address(&peer_id, addr.clone());  // Moved to SwarmBuilder closure
-                        // 🔧 v0.6.8-beta: Track this bootstrap peer for automatic reconnection
-                        bootstrap_peer_map.insert(peer_id, addr.clone());
-                        info!("📍 Added {} bootstrap peer: {} at {}",
-                              network_config.network_id.as_str(), peer_id, addr);
-                        bootstrap_count += 1;
+                    // Multiaddr already has peer ID - but ALWAYS verify via HTTP first!
+                    // 🚨 v1.1.0-phase13: CRITICAL FIX - Hardcoded peer IDs become stale after phase transitions
+                    // The peer ID changes when the node restarts with a fresh database (new identity)
+                    // So we MUST fetch the current peer ID via HTTP and compare
+
+                    // Extract IP for HTTP discovery
+                    let mut bootstrap_ip: Option<String> = None;
+                    for protocol in addr.iter() {
+                        match protocol {
+                            Protocol::Ip4(addr_v4) => bootstrap_ip = Some(addr_v4.to_string()),
+                            Protocol::Ip6(addr_v6) => bootstrap_ip = Some(addr_v6.to_string()),
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(ref ip) = bootstrap_ip {
+                        // Try HTTP discovery to get CURRENT peer ID
+                        match fetch_peer_id_from_http(ip, 8080).await {
+                            Ok(current_peer_id_str) => {
+                                match current_peer_id_str.parse::<PeerId>() {
+                                    Ok(current_peer_id) => {
+                                        // 🔧 v1.0.88-beta: Skip ourselves as a bootstrap peer
+                                        if current_peer_id == local_peer_id {
+                                            info!("ℹ️  [BOOTSTRAP] Skipping self as bootstrap peer: {} (this is us!)", current_peer_id);
+                                            continue;
+                                        }
+
+                                        // Check if hardcoded peer ID matches current
+                                        if let Some(Protocol::P2p(hardcoded_peer_id)) = addr.iter().last() {
+                                            if hardcoded_peer_id != current_peer_id {
+                                                warn!("⚠️ [BOOTSTRAP] Hardcoded peer ID {} is STALE!", hardcoded_peer_id);
+                                                warn!("   Current peer ID from HTTP: {}", current_peer_id);
+                                                warn!("   Using HTTP-discovered peer ID instead");
+                                            }
+                                        }
+
+                                        // Build multiaddr with CURRENT peer ID
+                                        let mut fresh_addr = addr.clone();
+                                        // Remove old /p2p/ component
+                                        fresh_addr = fresh_addr.into_iter()
+                                            .filter(|p| !matches!(p, Protocol::P2p(_)))
+                                            .collect();
+                                        fresh_addr.push(Protocol::P2p(current_peer_id));
+
+                                        bootstrap_peer_map.insert(current_peer_id, fresh_addr.clone());
+                                        info!("📍 Added {} bootstrap peer (HTTP-verified): {} at {}",
+                                              network_config.network_id.as_str(), current_peer_id, fresh_addr);
+                                        bootstrap_count += 1;
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ Failed to parse HTTP peer ID: {}", e);
+                                        // Fallback to hardcoded peer ID
+                                        if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                                            if peer_id != local_peer_id {
+                                                bootstrap_peer_map.insert(peer_id, addr.clone());
+                                                info!("📍 Added {} bootstrap peer (hardcoded fallback): {} at {}",
+                                                      network_config.network_id.as_str(), peer_id, addr);
+                                                bootstrap_count += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ HTTP peer ID discovery failed: {}", e);
+                                warn!("   Falling back to hardcoded peer ID");
+                                // Fallback to hardcoded peer ID
+                                if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                                    if peer_id != local_peer_id {
+                                        bootstrap_peer_map.insert(peer_id, addr.clone());
+                                        info!("📍 Added {} bootstrap peer (hardcoded fallback): {} at {}",
+                                              network_config.network_id.as_str(), peer_id, addr);
+                                        bootstrap_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // No IP to fetch from - use hardcoded directly
+                        if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                            if peer_id != local_peer_id {
+                                bootstrap_peer_map.insert(peer_id, addr.clone());
+                                info!("📍 Added {} bootstrap peer: {} at {}",
+                                      network_config.network_id.as_str(), peer_id, addr);
+                                bootstrap_count += 1;
+                            }
+                        }
                     }
                 } else {
                     // Missing /p2p/ component - try automatic discovery
@@ -522,6 +900,11 @@ impl UnifiedNetworkManager {
                                 // Parse peer ID and append to multiaddr
                                 match peer_id_str.parse::<PeerId>() {
                                     Ok(peer_id) => {
+                                        // 🔧 v1.0.88-beta: Skip ourselves as a bootstrap peer
+                                        if peer_id == local_peer_id {
+                                            info!("ℹ️  [BOOTSTRAP] Skipping self as bootstrap peer (dynamic discovery): {} (this is us!)", peer_id);
+                                            continue;
+                                        }
                                         addr.push(Protocol::P2p(peer_id));
                                         // kademlia.add_address(&peer_id, addr.clone());  // Moved to SwarmBuilder closure
                                         // 🔧 v0.6.8-beta: Track this bootstrap peer for automatic reconnection
@@ -625,8 +1008,12 @@ impl UnifiedNetworkManager {
                 let kad_store = MemoryStore::new(local_peer_id_inner);
                 let mut kademlia = Kademlia::with_config(local_peer_id_inner, kad_store, kad_config);
 
-                // Add bootstrap peers to Kademlia
+                // Add bootstrap peers to Kademlia (skip self)
+                // 🔧 v1.0.88-beta: Skip adding ourselves to our own Kademlia routing table
                 for (peer_id, addr) in &bootstrap_peer_map_clone {
+                    if *peer_id == local_peer_id_inner {
+                        continue; // Skip self
+                    }
                     kademlia.add_address(peer_id, addr.clone());
                 }
 
@@ -642,18 +1029,64 @@ impl UnifiedNetworkManager {
                 // Gossipsub
                 use libp2p::gossipsub::{ValidationMode, MessageId};
 
-                // 🚀 v1.0.4-beta: CRITICAL FIX - Production-grade gossipsub mesh parameters
-                // Based on Ethereum 2.0 spec and libp2p best practices
-                // Prevents network fragmentation and Sybil attacks
+                // 🚀 v1.0.72-beta: ADAPTIVE GOSSIPSUB PARAMETERS for sub-50ms finality
+                // Dynamically configurable via environment variables for different network profiles:
+                //   Q_GOSSIPSUB_PROFILE=low-latency (default) | balanced | high-throughput
+                //   Q_GOSSIPSUB_HEARTBEAT_MS=100              (50-1000ms)
+                //   Q_GOSSIPSUB_MESH_N=12                     (6-24 target peers)
+                //   Q_GOSSIPSUB_FLOOD_PUBLISH=true            (instant propagation)
+                //
+                // Profile defaults:
+                //   low-latency:     heartbeat=100ms, mesh_n=12, flood=true  (sub-50ms finality)
+                //   balanced:        heartbeat=500ms, mesh_n=8,  flood=false (standard operation)
+                //   high-throughput: heartbeat=200ms, mesh_n=16, flood=true  (large blocks)
+
+                let gossipsub_profile = std::env::var("Q_GOSSIPSUB_PROFILE")
+                    .unwrap_or_else(|_| "low-latency".to_string());
+
+                let (default_heartbeat_ms, default_mesh_n, default_flood) = match gossipsub_profile.as_str() {
+                    "balanced" => (500, 8, false),
+                    "high-throughput" => (200, 16, true),
+                    _ => (100, 12, true),  // low-latency (default)
+                };
+
+                // Allow per-parameter overrides via environment
+                let heartbeat_ms = std::env::var("Q_GOSSIPSUB_HEARTBEAT_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(default_heartbeat_ms)
+                    .max(50).min(1000);  // Clamp to safe range
+
+                let mesh_n = std::env::var("Q_GOSSIPSUB_MESH_N")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(default_mesh_n)
+                    .max(6).min(24);  // Clamp to safe range
+
+                let flood_publish = std::env::var("Q_GOSSIPSUB_FLOOD_PUBLISH")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(default_flood);
+
+                // Derive other mesh parameters from mesh_n
+                let mesh_n_low = (mesh_n / 2).max(4);       // 50% of target, min 4
+                let mesh_n_high = (mesh_n * 4 / 3).min(32); // 133% of target, max 32
+                let mesh_outbound_min = (mesh_n / 3).max(2); // 33% of target, min 2
+
+                info!("🔧 [ADAPTIVE GOSSIPSUB] Profile: {}", gossipsub_profile);
+                info!("   heartbeat_interval: {}ms", heartbeat_ms);
+                info!("   mesh_n: {} (low: {}, high: {})", mesh_n, mesh_n_low, mesh_n_high);
+                info!("   mesh_outbound_min: {}", mesh_outbound_min);
+                info!("   flood_publish: {}", flood_publish);
+
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(1))  // Was 100ms → 1s (90% bandwidth reduction)
+                    .heartbeat_interval(Duration::from_millis(heartbeat_ms))  // ⚡ Adaptive heartbeat
                     .validation_mode(ValidationMode::Strict)
-                    .max_transmit_size(1 * 1024 * 1024)  // Was 50 MB → 1 MB (per-topic limits enforced in app layer)
-                    .flood_publish(false)  // Was true → false (use gossipsub's smart peer selection)
-                    .mesh_outbound_min(2)  // Was 1 → 2 (ensure redundancy)
-                    .mesh_n_low(4)         // Was 1 → 4 (prevent isolation)
-                    .mesh_n(8)             // Was 2 → 8 (optimal for <1000 node network)
-                    .mesh_n_high(12)       // Was 4 → 12 (cap overhead)
+                    .max_transmit_size(1 * 1024 * 1024)  // 1 MB per message
+                    .flood_publish(flood_publish)   // ⚡ Adaptive flood publish
+                    .mesh_outbound_min(mesh_outbound_min)  // ⚡ Adaptive outbound
+                    .mesh_n_low(mesh_n_low)         // ⚡ Adaptive min peers
+                    .mesh_n(mesh_n)                 // ⚡ Adaptive target peers
+                    .mesh_n_high(mesh_n_high)       // ⚡ Adaptive max peers
                     .message_id_fn(|message: &gossipsub::Message| {
                         // 🔥 v2.0.0: Use blake3 for cryptographic message deduplication
                         // This prevents hash collision attacks on gossipsub
@@ -692,8 +1125,25 @@ impl UnifiedNetworkManager {
                 let low_memory_mode = std::env::var("Q_LOW_MEMORY_MODE").is_ok();
                 let max_streams = if low_memory_mode { 10 } else { 40 };
 
+                // 🧅 v1.3.5-beta: IMPROVED TIMEOUT CONFIGURATION
+                // Problem: 30s timeout was too short for transferring 800+ blocks over network
+                // Block packs of 500-1000 blocks can take 45-60s to serialize and transmit
+                //
+                // Direct mode: 60s (was 30s) - allows time for large block pack transfers
+                // Tor mode: 120s - accounts for Tor circuit latency (3-6 hops, 200-500ms each)
+                // Users can override with Q_P2P_REQUEST_TIMEOUT env var
+                let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
+                                  std::env::var("Q_TOR_PROXY").is_ok();
+                let default_timeout = if tor_enabled { 120 } else { 60 };
+                let request_timeout_secs = std::env::var("Q_P2P_REQUEST_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(default_timeout);
+                info!("🔧 [P2P] Block sync request timeout: {}s (tor_enabled: {})",
+                      request_timeout_secs, tor_enabled);
+
                 let block_sync_config = request_response::Config::default()
-                    .with_request_timeout(Duration::from_secs(30))
+                    .with_request_timeout(Duration::from_secs(request_timeout_secs))
                     .with_max_concurrent_streams(max_streams);
                 let block_sync = request_response::Behaviour::with_codec(
                     BlockPackCodec::default(),
@@ -741,9 +1191,13 @@ impl UnifiedNetworkManager {
                 })
             })?
             .with_swarm_config(|c| {
+                // v1.4.12-beta: PERFORMANCE OPTIMIZATION - Increase buffer sizes for high-throughput sync
+                // Previous values (32/64) were bottlenecking libp2p at ~7 blocks/s
+                // New values (256/256) allow 100+ blocks/s through the event queues
+                // This matches the actual network capacity (100+ Mbit/s)
                 c.with_idle_connection_timeout(Duration::from_secs(30 * 60))
-                 .with_notify_handler_buffer_size(NonZeroUsize::new(32).unwrap())
-                 .with_per_connection_event_buffer_size(64)
+                 .with_notify_handler_buffer_size(NonZeroUsize::new(256).unwrap())  // 8x larger
+                 .with_per_connection_event_buffer_size(256)  // 4x larger
             })
             .build();
 
@@ -761,13 +1215,49 @@ impl UnifiedNetworkManager {
             IdentTopic::new(network_config.network_id.block_requests_topic()),
             IdentTopic::new(network_config.network_id.block_responses_topic()),
             IdentTopic::new(network_config.network_id.batch_block_responses_topic()),
+            // v1.0.88-beta: Miner stats topic for P2P hashrate aggregation
+            // Allows bootstrap node to see hashrates from miners on user's localhost nodes
+            IdentTopic::new(format!("{}/miner-stats", network_prefix)),
+            // v1.0.90-beta: DEX pools, contracts, and AI credits sync topics
+            // These enable full state synchronization across nodes
+            IdentTopic::new(network_config.network_id.dex_pools_topic()),
+            IdentTopic::new(network_config.network_id.contract_deployments_topic()),
+            IdentTopic::new(network_config.network_id.ai_credits_topic()),
+            // ⚠️ v1.2.0-beta Phase 3: DEPRECATED - balance_updates_topic REMOVED from default subscriptions
+            // Balance updates now go through DAG-Knight consensus (coinbase transactions in blocks)
+            // To enable legacy gossipsub balance updates: set Q_ENABLE_LEGACY_BALANCE_GOSSIP=1
+            // This will be REMOVED entirely in v1.3.0
+            // IdentTopic::new(network_config.network_id.balance_updates_topic()),
+            IdentTopic::new(network_config.network_id.miner_stats_topic()),
         ];
+
+        // ⚠️ v1.2.0-beta Phase 3: Legacy balance gossip (DEPRECATED)
+        // Only subscribe to balance-updates topic if explicitly enabled for backward compatibility
+        let legacy_balance_gossip = std::env::var("Q_ENABLE_LEGACY_BALANCE_GOSSIP")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        if legacy_balance_gossip {
+            warn!("⚠️ [DEPRECATED] Q_ENABLE_LEGACY_BALANCE_GOSSIP=1 - gossipsub balance updates enabled");
+            warn!("   This feature is DEPRECATED and will be REMOVED in v1.3.0");
+            warn!("   Balance updates should go through DAG-Knight consensus (coinbase transactions)");
+        } else {
+            info!("✅ [Phase 3] Gossipsub balance updates DISABLED (using DAG-Knight consensus)");
+        }
 
         for topic in &topics {
             swarm.behaviour_mut().gossipsub.subscribe(topic)
                 .map_err(|e| anyhow::anyhow!("Failed to subscribe to topic {}: {}", topic, e))?;
             info!("📢 Subscribed to {} Gossipsub topic: {}",
                   network_config.network_id.as_str(), topic);
+        }
+
+        // ⚠️ v1.2.0-beta Phase 3: Legacy balance gossip subscription (DEPRECATED)
+        if legacy_balance_gossip {
+            let balance_topic = IdentTopic::new(network_config.network_id.balance_updates_topic());
+            swarm.behaviour_mut().gossipsub.subscribe(&balance_topic)
+                .map_err(|e| anyhow::anyhow!("Failed to subscribe to balance-updates topic: {}", e))?;
+            warn!("⚠️ [DEPRECATED] Subscribed to balance-updates topic: {}", balance_topic);
         }
 
         // 🔄 v0.9.60-beta: BACKWARD COMPATIBILITY
@@ -835,6 +1325,14 @@ impl UnifiedNetworkManager {
                 Err(e) => {
                     warn!("⚠️  [LISTENER] TCP IPv6 listener failed (not critical): {:?}", e);
                 }
+            }
+
+            // 🐳 v1.2.2-beta: Register external address for Docker/NAT environments
+            // This ensures Identify announces ONLY the public IP, not Docker internal addresses
+            if let Some(external_addr) = get_external_address() {
+                swarm.add_external_address(external_addr.clone());
+                info!("📢 [EXTERNAL] Registered external address with swarm: {}", external_addr);
+                info!("   This address will be announced via Identify protocol");
             }
 
             // 🌐 WebSocket listeners for browser clients (same port as TCP)
@@ -919,6 +1417,14 @@ impl UnifiedNetworkManager {
             // This helps us see connection errors immediately instead of waiting for Kademlia
             info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers for immediate error visibility", bootstrap_count);
             for (peer_id, addr) in &bootstrap_peer_map {
+                // 🔧 v1.0.88-beta: FIX - Skip dialing ourselves as bootstrap peer
+                // CRITICAL: When this node IS the bootstrap peer, it was trying to dial itself
+                // and getting blacklisted after 150 failures, breaking ALL P2P connectivity
+                if *peer_id == local_peer_id {
+                    info!("ℹ️  [BOOTSTRAP] Skipping self-dial - this node IS bootstrap peer {}", peer_id);
+                    continue;
+                }
+
                 info!("📡 [BOOTSTRAP-DIAG] Manually dialing: {} at {}", peer_id, addr);
 
                 // 🚨 v1.0.20-beta: CRITICAL - Log connection state BEFORE dial
@@ -927,6 +1433,17 @@ impl UnifiedNetworkManager {
                 info!("   Total connections: {:?}", conn_info.connection_counters());
                 info!("   Pending outgoing: {}", conn_info.connection_counters().num_pending_outgoing());
                 info!("   Established: {}", conn_info.connection_counters().num_established());
+
+                // 🔧 v1.0.87-beta: FIX DialFailure - Add peer address to swarm's address book
+                // CRITICAL: Without this, request-response can't dial the peer for block sync
+                // Kademlia.add_address() only updates Kademlia's routing table, NOT the swarm's address book
+                // 🔧 v1.0.88-beta: FIX - Strip /p2p/ from address before adding to address book
+                // add_peer_address expects transport address ONLY, not the full multiaddr with peer ID
+                let addr_without_p2p: Multiaddr = addr.iter()
+                    .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                    .collect();
+                swarm.add_peer_address(*peer_id, addr_without_p2p.clone());
+                info!("📋 [BOOTSTRAP] Added peer {} address to swarm address book: {}", peer_id, addr_without_p2p);
 
                 match swarm.dial(addr.clone()) {
                     Ok(_) => {
@@ -958,14 +1475,41 @@ impl UnifiedNetworkManager {
             if let Ok(bootstrap_addr) = bootstrap_env.parse::<Multiaddr>() {
                 info!("📡 [BOOTSTRAP] Dialing bootstrap peer: {}", bootstrap_addr);
 
-                // Attempt immediate dial
-                match swarm.dial(bootstrap_addr.clone()) {
-                    Ok(_) => {
-                        info!("✅ [BOOTSTRAP] Initiated connection to bootstrap peer");
+                // 🔧 v1.0.87-beta: FIX DialFailure - Extract peer ID and add to swarm's address book
+                // CRITICAL: Without this, request-response can't dial the peer for block sync
+                if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = bootstrap_addr.iter().find(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                    // 🔧 v1.0.88-beta: FIX - Skip dialing ourselves
+                    if peer_id == local_peer_id {
+                        info!("ℹ️  [BOOTSTRAP] Skipping Q_BOOTSTRAP_PEER self-dial - this node IS bootstrap peer {}", peer_id);
+                    } else {
+                        // Strip /p2p/ from address for add_peer_address
+                        let addr_without_p2p: Multiaddr = bootstrap_addr.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        swarm.add_peer_address(peer_id, addr_without_p2p.clone());
+                        info!("📋 [BOOTSTRAP] Added peer {} to swarm address book: {}", peer_id, addr_without_p2p);
+
+                        // Attempt immediate dial
+                        match swarm.dial(bootstrap_addr.clone()) {
+                            Ok(_) => {
+                                info!("✅ [BOOTSTRAP] Initiated connection to bootstrap peer");
+                            }
+                            Err(e) => {
+                                warn!("⚠️  [BOOTSTRAP] Initial dial failed: {:?}", e);
+                                warn!("   Will retry automatically in background task");
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!("⚠️  [BOOTSTRAP] Initial dial failed: {:?}", e);
-                        warn!("   Will retry automatically in background task");
+                } else {
+                    // No peer ID in address, just try to dial
+                    match swarm.dial(bootstrap_addr.clone()) {
+                        Ok(_) => {
+                            info!("✅ [BOOTSTRAP] Initiated connection to bootstrap peer (no peer ID in addr)");
+                        }
+                        Err(e) => {
+                            warn!("⚠️  [BOOTSTRAP] Initial dial failed: {:?}", e);
+                            warn!("   Will retry automatically in background task");
+                        }
                     }
                 }
             } else {
@@ -992,6 +1536,42 @@ impl UnifiedNetworkManager {
               crate::handshake_validator::ProtocolVersion::CURRENT.minor,
               crate::handshake_validator::ProtocolVersion::CURRENT.patch);
 
+        // 🚀 v1.7.0-LAMINAR: Lock-free peer compatibility with DashMap (VORTEX ELIMINATION)
+        // Register bootstrap peers for special blacklist treatment (3x threshold)
+        let peer_compat = PeerCompatibilityV2::default();
+        for peer_id in bootstrap_peer_map.keys() {
+            if *peer_id == local_peer_id {
+                info!("ℹ️  [BOOTSTRAP] Skipping self-registration - this node IS bootstrap peer {}", peer_id);
+                continue;
+            }
+            peer_compat.is_bootstrap.insert(*peer_id);
+            info!("🛡️ [BOOTSTRAP] Registered {} as bootstrap peer (failure threshold: {})",
+                  peer_id, BLACKLIST_FAILURE_THRESHOLD * BOOTSTRAP_BLACKLIST_MULTIPLIER);
+        }
+        info!("🚀 [LAMINAR] {} bootstrap peers registered with lock-free DashMap",
+              peer_compat.is_bootstrap.len());
+
+        // v1.2.7-beta: Create channel for async block pack responses (prevents ResponseOmission)
+        let (block_pack_response_tx, block_pack_response_rx) = mpsc::unbounded_channel();
+
+        // v1.3.3-beta: Improved Tor detection for adaptive timeouts and batch sizes
+        // Detect Tor from multiple sources:
+        // 1. Q_TOR_ENABLED=1 (explicit enable)
+        // 2. Q_TOR_PROXY (socks5 proxy address)
+        // 3. ALL_PROXY/SOCKS_PROXY containing "socks5" (common proxy patterns)
+        // 4. Check if 127.0.0.1:9050 or 127.0.0.1:9150 appears in any proxy config (default Tor ports)
+        let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
+            std::env::var("Q_TOR_PROXY").is_ok() ||
+            std::env::var("ALL_PROXY").map(|v| v.contains("socks5") || v.contains("9050") || v.contains("9150")).unwrap_or(false) ||
+            std::env::var("SOCKS_PROXY").map(|v| v.contains("socks5") || v.contains("9050") || v.contains("9150")).unwrap_or(false) ||
+            std::env::var("socks_proxy").map(|v| v.contains("socks5") || v.contains("9050") || v.contains("9150")).unwrap_or(false);
+
+        if tor_enabled {
+            info!("🧅 [TOR] Tor mode ENABLED - using 120s timeouts and 1000-block batches");
+        } else {
+            info!("🔌 [DIRECT] Direct connection mode - using 30s timeouts and 5000-block batches");
+        }
+
         Ok(Self {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
@@ -1007,11 +1587,20 @@ impl UnifiedNetworkManager {
             storage: None, // Set via set_storage() after construction
             gossipsub_stats: Arc::new(RwLock::new(HashMap::new())), // v0.6.9-beta: Gossipsub aggregation
             block_sync_tx: None, // Set via set_block_sync_channel() after construction
-            peer_compat: Arc::new(std::sync::RwLock::new(PeerCompatibility::default())), // v0.9.73-beta: Peer compatibility tracking
+            peer_compat: Arc::new(peer_compat), // 🚀 v1.7.0-LAMINAR: Lock-free DashMap (no RwLock needed)
             pending_block_requests: Arc::new(std::sync::Mutex::new(HashMap::new())), // v1.0.12-beta: Batch sync request tracking
             outstanding_sync_requests: Arc::new(std::sync::Mutex::new(Vec::new())), // v1.0.44-beta: Track multiple concurrent sync requests
             known_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v1.0.45-beta: Network height for progress display
             handshake_validator, // v1.0.15.1-beta: Protocol version validation
+            // v1.2.7-beta: Async block pack response handling (prevents ResponseOmission)
+            block_pack_response_tx: block_pack_response_tx,
+            block_pack_response_rx: block_pack_response_rx,
+            pending_response_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            next_async_request_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // v1.3.3-beta: Tor-aware adaptive batch sizes and retry logic
+            tor_enabled,
+            // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
+            sync_retry_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -1074,6 +1663,28 @@ impl UnifiedNetworkManager {
                 last_heartbeat = std::time::Instant::now();
             }
             tokio::select! {
+                // v1.3.1-beta: CRITICAL FIX - Add biased selection to prioritize block pack responses
+                // Without this, the event loop may process swarm events before responding to block pack
+                // requests, causing timeouts and sync failures. Biased mode processes branches in order.
+                biased;
+
+                // v1.3.1-beta: HIGHEST PRIORITY - Block pack response channel MUST be processed first!
+                // This prevents ResponseOmission timeouts that break P2P sync completely.
+                // If responses aren't sent within 30s, the requester times out and blacklists us.
+                Some((async_req_id, response)) = self.block_pack_response_rx.recv() => {
+                    // Retrieve the stored response channel
+                    if let Some(channel) = self.pending_response_channels.lock().unwrap().remove(&async_req_id) {
+                        let block_count = response.blocks.len();
+                        if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
+                            error!("❌ [BLOCK-PACK ASYNC] Failed to send response for request {}: {:?}", async_req_id, e);
+                        } else {
+                            info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks for async request {}", block_count, async_req_id);
+                        }
+                    } else {
+                        warn!("⚠️ [BLOCK-PACK ASYNC] No pending channel for request {} (may have timed out)", async_req_id);
+                    }
+                }
+
                 // 🩺 Periodic P2P health check (every 30 seconds)
                 _ = health_check_interval.tick() => {
                     let peer_count = self.discovered_peers.read().await.len();
@@ -1096,135 +1707,9 @@ impl UnifiedNetworkManager {
                     }
                 }
                 // Process network commands from API
+                // 🚀 v1.1.1-beta: Refactored to use shared handle_command() method
                 Some(command) = self.command_rx.recv() => {
-                    match command {
-                        NetworkCommand::DialPeer { multiaddr, response_tx } => {
-                            debug!("📞 Processing dial command for {}", multiaddr);
-                            let result = self.swarm.dial(multiaddr.clone())
-                                .map_err(|e| format!("Failed to dial {}: {}", multiaddr, e));
-                            let _ = response_tx.send(result);
-                        }
-                        NetworkCommand::SetPeerChannel { tx } => {
-                            self.peer_tx = Some(tx);
-                            info!("✅ Peer channel set for libp2p → ConnectionManager bridge");
-                            info!("🌉 P2P peer discovery propagation ENABLED");
-                        }
-                        NetworkCommand::SetGossipsubChannel { tx } => {
-                            self.gossipsub_message_tx = Some(tx);
-                            info!("✅ Gossipsub channel set for message propagation");
-                            info!("🌉 P2P mining reward/transaction propagation ENABLED");
-                        }
-                        NetworkCommand::PublishBlock { topic, block_bytes, block_height } => {
-                            info!("📤 Publishing block {} ({} bytes) to gossipsub topic: {}", block_height, block_bytes.len(), topic);
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, block_bytes) {
-                                Ok(_) => {
-                                    info!("✅ Successfully published block {} to P2P network", block_height);
-                                }
-                                Err(e) => {
-                                    warn!("❌ Failed to publish block {} to topic {}: {}", block_height, topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishBlockRequest { topic, request_bytes } => {
-                            info!("📤 Publishing block request ({} bytes) to gossipsub topic: {}", request_bytes.len(), topic);
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
-                                Ok(_) => {
-                                    info!("✅ Successfully published block request to P2P network");
-                                }
-                                Err(e) => {
-                                    warn!("❌ Failed to publish block request to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishBlockResponse { topic, response_bytes, block_height } => {
-                            info!("📤 Publishing block response for block {} ({} bytes) to gossipsub topic: {}", block_height, response_bytes.len(), topic);
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, response_bytes) {
-                                Ok(_) => {
-                                    info!("✅ Successfully published block response for block {} to P2P network", block_height);
-                                }
-                                Err(e) => {
-                                    warn!("❌ Failed to publish block response to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishBlockPack { topic, pack_bytes } => {
-                            info!("🚀 [TURBO SYNC] Publishing block pack ({:.1} KB compressed) to gossipsub topic: {}",
-                                  pack_bytes.len() as f64 / 1024.0, topic);
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, pack_bytes) {
-                                Ok(_) => {
-                                    info!("✅ [TURBO SYNC] Successfully published block pack to P2P network");
-                                }
-                                Err(e) => {
-                                    warn!("❌ [TURBO SYNC] Failed to publish block pack to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::RequestBlockPack { topic, request_bytes, start_height, end_height } => {
-                            info!("🚀 [TURBO SYNC] Requesting block pack {}-{} ({} bytes) from P2P network",
-                                  start_height, end_height, request_bytes.len());
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
-                                Ok(_) => {
-                                    info!("✅ [TURBO SYNC] Successfully published block pack request to P2P network");
-                                }
-                                Err(e) => {
-                                    warn!("❌ [TURBO SYNC] Failed to publish block pack request to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishPeerHeight { topic, announcement_bytes, height } => {
-                            debug!("📡 [TURBO SYNC] Publishing peer height announcement {} ({} bytes) to topic: {}",
-                                  height, announcement_bytes.len(), topic);
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes) {
-                                Ok(_) => {
-                                    debug!("✅ [TURBO SYNC] Successfully announced height {} to P2P network", height);
-                                }
-                                Err(e) => {
-                                    warn!("❌ [TURBO SYNC] Failed to publish peer height to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishAIMessage { topic, message } => {
-                            info!("🤖 [DISTRIBUTED AI] Publishing AI message to topic: {}", topic);
-                            info!("   Message ID: {}", message.message_id);
-                            info!("   Sender: {}", message.sender_node_id);
-
-                            // Serialize AI message to bytes
-                            match postcard::to_allocvec(&message) {
-                                Ok(message_bytes) => {
-                                    let ident_topic = IdentTopic::new(topic.as_str());
-                                    match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes.clone()) {
-                                        Ok(_) => {
-                                            info!("✅ [DISTRIBUTED AI] Successfully published AI message ({} bytes) to P2P network", message_bytes.len());
-                                        }
-                                        Err(e) => {
-                                            error!("❌ [DISTRIBUTED AI] Failed to publish AI message to topic {}: {}", topic, e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("❌ [DISTRIBUTED AI] Failed to serialize AI message: {}", e);
-                                }
-                            }
-                        }
-                        NetworkCommand::PublishPoolAnnouncement { topic, announcement_bytes } => {
-                            info!("💱 [LIQUIDITY POOLS] Publishing pool announcement to topic: {} ({} bytes)", topic, announcement_bytes.len());
-                            let ident_topic = IdentTopic::new(topic.as_str());
-                            match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes.clone()) {
-                                Ok(_) => {
-                                    info!("✅ [LIQUIDITY POOLS] Successfully published pool announcement to P2P network");
-                                }
-                                Err(e) => {
-                                    error!("❌ [LIQUIDITY POOLS] Failed to publish pool announcement to topic {}: {}", topic, e);
-                                }
-                            }
-                        }
-                    }
+                    self.handle_command(command).await;
                 }
                 // Process swarm events
                 event = self.swarm.select_next_some() => {
@@ -1248,6 +1733,36 @@ impl UnifiedNetworkManager {
                     info!("✅ [CONNECTION] Successfully connected to peer: {}", peer_id);
                     info!("📍 [CONNECTION] Endpoint: {:?}", endpoint);
                     info!("🔢 [CONNECTION] Number of established connections: {}", num_established);
+
+                    // 🔧 v1.0.87-beta: FIX DialFailure - Add peer address to swarm on connection
+                    // CRITICAL: This ensures request-response can dial the peer for block sync
+                    // even if the initial bootstrap address wasn't added
+                    // 🐳 v1.2.2-beta: Filter non-routable Docker/container addresses to prevent sync failures
+                    if let libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint {
+                        // For outgoing connections, we know the address we dialed
+                        let addr_without_p2p: Multiaddr = address.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        // 🐳 v1.2.2-beta: Only add routable PEER addresses to prevent Docker network failures
+                        if is_routable_peer_address(&addr_without_p2p) {
+                            self.swarm.add_peer_address(peer_id, addr_without_p2p.clone());
+                            info!("📋 [CONNECTION] Added peer {} to swarm address book: {}", peer_id, addr_without_p2p);
+                        } else {
+                            debug!("🐳 [ADDR-FILTER] Skipping non-routable peer address: {}", addr_without_p2p);
+                        }
+                    } else if let libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } = &endpoint {
+                        // For incoming connections, save the peer's advertised address
+                        let addr_without_p2p: Multiaddr = send_back_addr.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        // 🐳 v1.2.2-beta: Only add routable PEER addresses to prevent Docker network failures
+                        if is_routable_peer_address(&addr_without_p2p) {
+                            self.swarm.add_peer_address(peer_id, addr_without_p2p.clone());
+                            info!("📋 [CONNECTION] Added incoming peer {} to swarm address book: {}", peer_id, addr_without_p2p);
+                        } else {
+                            debug!("🐳 [ADDR-FILTER] Skipping non-routable incoming peer address: {}", addr_without_p2p);
+                        }
+                    }
 
                     // 🌐 v1.0.21-browser: Check if this is a WebSocket connection (browser client)
                     let endpoint_str = format!("{:?}", endpoint);
@@ -1382,7 +1897,7 @@ impl UnifiedNetworkManager {
                             libp2p::swarm::DialError::NoAddresses => {
                                 error!("   🚨 NO ADDRESSES TO DIAL");
                                 error!("      → FIX: Multiaddr is empty or invalid");
-                                error!("      → Check: BOOTSTRAP_PEERS configuration");
+                                error!("      → Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 for auto-discovery");
                             }
 
                             // 🔥 v2.0.0: libp2p 0.56 renamed 'endpoint' to 'address'
@@ -1393,8 +1908,8 @@ impl UnifiedNetworkManager {
                                 }
                                 error!("      Obtained: {}", obtained);
                                 error!("      Address: {:?}", address);
-                                error!("      → FIX: Update BOOTSTRAP_PEERS with correct PeerID");
-                                error!("      → Get actual PeerID from peer's logs: journalctl | grep 'Local peer ID'");
+                                error!("      → FIX: Use dynamic discovery (Q_BOOTSTRAP_URL=http://185.182.185.227:8080)");
+                                error!("      → Or fetch current peer ID: curl -s http://185.182.185.227:8080/api/v1/status | jq '.data.multiaddrs[0]'");
                             }
 
                             libp2p::swarm::DialError::Aborted => {
@@ -1646,10 +2161,13 @@ impl UnifiedNetworkManager {
 
                 // Individual message details at DEBUG level only
                 // v0.9.7-beta: Enhanced logging to show block heights and sync progress
+                // v2.1.7-DELTA-V: FIX - Use MessagePack (rmp_serde) + VersionedBlock to match server
                 if topic_str.contains("/blocks") {
                     // Attempt to decode block information for better sync visibility
-                    match postcard::from_bytes::<QBlock>(&message.data) {
-                        Ok(block) => {
+                    // 🔧 v2.1.7: Server uses rmp_serde::to_vec(&VersionedBlock), so we must match
+                    match rmp_serde::from_slice::<q_types::VersionedBlock>(&message.data) {
+                        Ok(versioned_block) => {
+                            let block = &versioned_block.block;  // Access .block field, not .inner()
                             info!(
                                 "📨 Gossipsub BLOCK from {}: topic={}, height={}, txs={}, size={} bytes, hash={}",
                                 propagation_source,
@@ -1660,14 +2178,25 @@ impl UnifiedNetworkManager {
                                 hex::encode(&block.calculate_hash()[..8])
                             );
                         }
-                        Err(_) => {
-                            debug!(
-                                "📨 Gossipsub message from {}: topic={}, id={}, size={} bytes (failed to decode block)",
-                                propagation_source,
-                                message.topic,
-                                msg_id_short,
-                                msg_size
-                            );
+                        Err(e) => {
+                            // Fallback: try postcard for backward compatibility
+                            match postcard::from_bytes::<QBlock>(&message.data) {
+                                Ok(block) => {
+                                    info!(
+                                        "📨 Gossipsub BLOCK (postcard) from {}: height={}, txs={}, size={} bytes",
+                                        propagation_source,
+                                        block.header.height,
+                                        block.transactions.len(),
+                                        msg_size
+                                    );
+                                }
+                                Err(_) => {
+                                    debug!(
+                                        "📨 Gossipsub block from {}: size={} bytes (decode failed: {})",
+                                        propagation_source, msg_size, e
+                                    );
+                                }
+                            }
                         }
                     }
                 } else {
@@ -1733,50 +2262,71 @@ impl UnifiedNetworkManager {
                                 info!("   Requested: blocks {}-{} (max {})",
                                       request.start_height, request.end_height, request.max_blocks);
 
-                                // v1.0.45-beta: Get our current height for progress tracking
-                                let our_height = if let Some(ref storage) = self.storage {
-                                    storage.get_highest_contiguous_block().await.unwrap_or(0)
-                                } else {
-                                    0
-                                };
+                                // v1.2.7-beta: NON-BLOCKING HANDLER - Prevents ResponseOmission timeouts
+                                // Instead of blocking on async DB calls, we:
+                                // 1. Store the response channel in pending_response_channels
+                                // 2. Spawn a task to do the slow DB work
+                                // 3. The task sends the response through block_pack_response_tx
+                                // 4. The main event loop polls block_pack_response_rx and sends responses
 
-                                // Validate request
+                                // Validate request synchronously (fast)
                                 if let Err(e) = request.validate() {
                                     error!("❌ [BLOCK-PACK] Invalid request: {}", e);
-                                    let response = q_types::BlockPackResponse::from_blocks(vec![], request.end_height, our_height);
+                                    let response = q_types::BlockPackResponse::from_blocks(vec![], request.end_height, 0);
                                     let _ = self.swarm.behaviour_mut().block_sync.send_response(channel, response);
                                     return Ok(());
                                 }
 
-                                // Fetch blocks from storage
-                                let response = if let Some(ref storage) = self.storage {
-                                    let block_count = (request.end_height - request.start_height + 1) as usize;
-                                    let limit = block_count.min(request.max_blocks);
+                                // Generate unique async request ID
+                                let async_req_id = self.next_async_request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                                    match storage.get_qblocks_range(request.start_height, limit).await {
-                                        Ok(blocks) => {
-                                            info!("✅ [BLOCK-PACK] Fetched {} blocks from storage (heights {}-{})",
-                                                  blocks.len(),
-                                                  blocks.first().map(|b| b.header.height).unwrap_or(request.start_height),
-                                                  blocks.last().map(|b| b.header.height).unwrap_or(request.start_height));
+                                // Store the response channel for later use
+                                self.pending_response_channels.lock().unwrap().insert(async_req_id, channel);
 
-                                            q_types::BlockPackResponse::from_blocks(blocks, request.end_height, our_height)
+                                // Clone what we need for the spawned task
+                                let storage_clone = self.storage.clone();
+                                let response_tx = self.block_pack_response_tx.clone();
+                                let start_height = request.start_height;
+                                let end_height = request.end_height;
+                                let max_blocks = request.max_blocks;
+                                let peer_clone = peer;
+
+                                // Spawn task to do the slow DB work
+                                tokio::spawn(async move {
+                                    let response = if let Some(storage) = storage_clone {
+                                        // Get our height (uses cached value internally, very fast)
+                                        let our_height = storage.get_highest_contiguous_block().await.unwrap_or(0);
+
+                                        let block_count = (end_height - start_height + 1) as usize;
+                                        let limit = block_count.min(max_blocks);
+
+                                        match storage.get_qblocks_range(start_height, limit).await {
+                                            Ok(blocks) => {
+                                                info!("✅ [BLOCK-PACK] Async task fetched {} blocks (heights {}-{}) for {}",
+                                                      blocks.len(),
+                                                      blocks.first().map(|b| b.header.height).unwrap_or(start_height),
+                                                      blocks.last().map(|b| b.header.height).unwrap_or(start_height),
+                                                      peer_clone);
+                                                q_types::BlockPackResponse::from_blocks(blocks, end_height, our_height)
+                                            }
+                                            Err(e) => {
+                                                error!("❌ [BLOCK-PACK] Async task failed to fetch blocks: {}", e);
+                                                q_types::BlockPackResponse::from_blocks(vec![], end_height, our_height)
+                                            }
                                         }
-                                        Err(e) => {
-                                            error!("❌ [BLOCK-PACK] Failed to fetch blocks from storage: {}", e);
-                                            q_types::BlockPackResponse::from_blocks(vec![], request.end_height, our_height)
-                                        }
+                                    } else {
+                                        warn!("⚠️ [BLOCK-PACK] Storage not available in async task");
+                                        q_types::BlockPackResponse::from_blocks(vec![], end_height, 0)
+                                    };
+
+                                    // Send response back to main event loop for actual sending
+                                    if let Err(e) = response_tx.send((async_req_id, response)) {
+                                        error!("❌ [BLOCK-PACK] Failed to send async response to channel: {}", e);
                                     }
-                                } else {
-                                    warn!("⚠️ [BLOCK-PACK] Storage not available, sending empty response");
-                                    q_types::BlockPackResponse::from_blocks(vec![], request.end_height, 0)
-                                };
+                                });
 
-                                if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
-                                    error!("❌ [BLOCK-PACK] Failed to send response: {:?}", e);
-                                } else {
-                                    info!("✅ [BLOCK-PACK] Sent response to {}", peer);
-                                }
+                                // Handler returns immediately - response will be sent when async task completes
+                                debug!("🚀 [BLOCK-PACK] Spawned async handler task for request {}", async_req_id);
                             }
                             Message::Response { request_id, response } => {
                                 // v1.0.45-beta: Update known network height for progress display
@@ -1784,6 +2334,37 @@ impl UnifiedNetworkManager {
                                     let current = self.known_network_height.load(std::sync::atomic::Ordering::Relaxed);
                                     if response.peer_height > current {
                                         self.known_network_height.store(response.peer_height, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+
+                                // v1.0.87-beta: NETWORK PROTOCOL DEBUGGING
+                                let blocks_received = response.blocks.len();
+                                let expected_blocks = (response.end_height.saturating_sub(response.start_height) + 1) as usize;
+                                let completion_ratio = if expected_blocks > 0 {
+                                    (blocks_received as f64 / expected_blocks as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+
+                                info!("📨 [NET-PROTOCOL] Response from {} | request_id={:?} | blocks: {}/{} ({:.1}%) | range: {}-{} | peer_height: {}",
+                                      peer, request_id, blocks_received, expected_blocks, completion_ratio,
+                                      response.start_height, response.end_height, response.peer_height);
+
+                                // Detect incomplete responses
+                                if blocks_received < expected_blocks && blocks_received > 0 {
+                                    warn!("⚠️  [NET-PROTOCOL] INCOMPLETE RESPONSE: Got {} blocks, expected {} (missing {})",
+                                          blocks_received, expected_blocks, expected_blocks - blocks_received);
+                                }
+
+                                // Debug individual block details for small batches
+                                if blocks_received <= 5 && blocks_received > 0 {
+                                    for (i, block) in response.blocks.iter().enumerate() {
+                                        let block_hash = block.calculate_hash();
+                                        debug!("   [NET-PROTOCOL] Block {}: height={} hash={}.. parent={}.. txs={}",
+                                              i, block.header.height,
+                                              hex::encode(&block_hash[..8]),
+                                              hex::encode(&block.header.prev_block_hash[..8]),
+                                              block.transactions.len());
                                     }
                                 }
 
@@ -1807,15 +2388,33 @@ impl UnifiedNetworkManager {
 
                                 // v1.0.12-beta: Check if this is a pending batch sync request
                                 // v1.0.15-beta: Convert request_id to String for HashMap lookup
+                                // v1.3.10-beta: Enhanced logging for response channel delivery debugging
                                 let request_id_str = format!("{:?}", request_id);
                                 let mut pending = self.pending_block_requests.lock().unwrap();
+
+                                // v1.3.10-beta: Log pending requests for debugging channel mismatches
+                                let pending_keys: Vec<_> = pending.keys().cloned().collect();
+                                if !pending_keys.is_empty() {
+                                    info!("📋 [RESPONSE DELIVERY] Looking for request_id: {}", &request_id_str);
+                                    info!("   Pending requests ({}): {:?}",
+                                          pending_keys.len(),
+                                          pending_keys.iter().take(5).collect::<Vec<_>>());
+                                }
+
                                 if let Some(tx) = pending.remove(&request_id_str) {
                                     // Send blocks to waiting BatchSyncEngine
                                     if let Err(_) = tx.send(response.blocks.clone()) {
                                         warn!("⚠️  [BATCH SYNC] Failed to deliver blocks: receiver dropped");
                                     } else {
-                                        debug!("✅ [BATCH SYNC] Delivered {} blocks to waiting request",
-                                               response.blocks.len());
+                                        info!("✅ [BATCH SYNC] Successfully delivered {} blocks via channel (request_id: {})",
+                                               response.blocks.len(), &request_id_str[..request_id_str.len().min(30)]);
+                                    }
+                                } else {
+                                    // v1.3.10-beta: Log when no matching request found (potential channel mismatch)
+                                    if !pending_keys.is_empty() {
+                                        warn!("⚠️  [RESPONSE DELIVERY] NO MATCHING REQUEST for ID: {}", &request_id_str);
+                                        warn!("   Available pending keys: {:?}", pending_keys);
+                                        warn!("   Blocks will be forwarded to consensus but NOT to TurboSync channel");
                                     }
                                 }
                                 drop(pending); // Release lock
@@ -1842,19 +2441,83 @@ impl UnifiedNetworkManager {
                         }
                     }
                     Event::OutboundFailure { peer, request_id, error, connection_id: _ } => {
-                        warn!("⚠️ [BLOCK-PACK] Outbound failure to {}: {:?}", peer, error);
+                        // 🔧 v1.0.89-beta: Enhanced debugging for DialFailure
+                        error!("❌ [BLOCK-PACK] ================================================");
+                        error!("❌ [BLOCK-PACK] OUTBOUND FAILURE to peer: {}", peer);
+                        error!("❌ [BLOCK-PACK] Request ID: {:?}", request_id);
+                        error!("❌ [BLOCK-PACK] Error type: {:?}", error);
+
+                        // Log connection state for this peer
+                        let is_connected = self.swarm.is_connected(&peer);
+                        error!("❌ [BLOCK-PACK] Peer connected?: {}", is_connected);
+
+                        // Log all addresses we have for this peer in the address book
+                        // Note: No direct API to get addresses from swarm, so we check our own cache
+                        if let Ok(peer_addrs) = self.peer_addresses.try_read() {
+                            if let Some(addrs) = peer_addrs.get(&peer) {
+                                error!("❌ [BLOCK-PACK] Our cached addresses for peer: {:?}", addrs);
+                            } else {
+                                error!("❌ [BLOCK-PACK] NO cached addresses for peer!");
+                            }
+                        }
+
+                        // Log network state
+                        let conn_info = self.swarm.network_info();
+                        error!("❌ [BLOCK-PACK] Network state:");
+                        error!("   - Pending outgoing: {}", conn_info.connection_counters().num_pending_outgoing());
+                        error!("   - Established: {}", conn_info.connection_counters().num_established());
+                        error!("   - Total connections: {:?}", conn_info.connection_counters());
+
+                        // Log all connected peers
+                        let connected_peers: Vec<_> = self.swarm.connected_peers().collect();
+                        error!("❌ [BLOCK-PACK] Currently connected peers ({}):", connected_peers.len());
+                        for cp in &connected_peers {
+                            error!("   - {}", cp);
+                        }
+                        error!("❌ [BLOCK-PACK] ================================================");
 
                         // ✅ v0.9.73-beta: Mark peer as failed (timeout/incompatible)
                         self.mark_peer_failure(peer);
 
-                        // v1.0.44-beta: Clear ALL outstanding requests on failure (conservative)
-                        // On connection failure, all pending requests to this peer are likely lost
-                        if let Ok(mut guard) = self.outstanding_sync_requests.lock() {
-                            if !guard.is_empty() {
-                                warn!("⚠️ [BLOCK-SYNC] Cleared {} outstanding requests (outbound failure to {})",
-                                      guard.len(), peer);
+                        // v1.3.3-beta: Add failed heights to retry queue with exponential backoff
+                        // Instead of just clearing outstanding requests, schedule them for retry
+                        // Max 5 retries with exponential delays: 2s, 4s, 8s, 16s, 32s
+                        const MAX_RETRIES: u8 = 5;
+
+                        if let Ok(mut outstanding) = self.outstanding_sync_requests.lock() {
+                            if !outstanding.is_empty() {
+                                let heights_to_retry: Vec<u64> = outstanding.iter()
+                                    .map(|(_, h, _)| *h)
+                                    .collect();
+                                outstanding.clear();
+
+                                // Add to retry queue
+                                if let Ok(mut retry_queue) = self.sync_retry_queue.lock() {
+                                    for height in heights_to_retry {
+                                        // Check if already in retry queue
+                                        if let Some(entry) = retry_queue.iter_mut().find(|(h, _, _)| *h == height) {
+                                            // Already in queue - increment retry count
+                                            if entry.1 < MAX_RETRIES {
+                                                entry.1 += 1;
+                                                // Exponential backoff: 2^retry_count seconds
+                                                let delay_secs = 2u64.pow(entry.1 as u32);
+                                                entry.2 = std::time::Instant::now() + Duration::from_secs(delay_secs);
+                                                warn!("🔄 [RETRY] Height {} scheduled for retry #{} in {}s",
+                                                      height, entry.1, delay_secs);
+                                            } else {
+                                                warn!("❌ [RETRY] Height {} exceeded max retries ({}), dropping",
+                                                      height, MAX_RETRIES);
+                                                // Remove from queue - exceeded max retries
+                                                retry_queue.retain(|(h, _, _)| *h != height);
+                                            }
+                                        } else {
+                                            // New entry - first retry in 2 seconds
+                                            retry_queue.push((height, 1, std::time::Instant::now() + Duration::from_secs(2)));
+                                            warn!("🔄 [RETRY] Height {} added to retry queue (retry #1 in 2s)", height);
+                                        }
+                                    }
+                                }
                             }
-                            guard.clear();
                         }
                     }
                     Event::InboundFailure { peer, error, .. } => {
@@ -2141,9 +2804,41 @@ impl UnifiedNetworkManager {
         start_height: u64,
         limit: usize,
     ) -> anyhow::Result<()> {
+        info!("📤 [BLOCK-SYNC] ================================================");
         info!("📤 [BLOCK-SYNC] Requesting {} blocks from height {} from peer {}", limit, start_height, peer_id);
 
+        // 🔧 v1.0.89-beta: Enhanced debugging - check connection and address state BEFORE sending
+        let is_connected = self.swarm.is_connected(&peer_id);
+        info!("📤 [BLOCK-SYNC] Peer {} connected BEFORE request?: {}", peer_id, is_connected);
+
+        // Log network state
+        let conn_info = self.swarm.network_info();
+        info!("📤 [BLOCK-SYNC] Network state before request:");
+        info!("   - Pending outgoing: {}", conn_info.connection_counters().num_pending_outgoing());
+        info!("   - Established: {}", conn_info.connection_counters().num_established());
+
+        // Log all connected peers
+        let connected_peers: Vec<_> = self.swarm.connected_peers().collect();
+        info!("📤 [BLOCK-SYNC] Currently connected peers ({}):", connected_peers.len());
+        for cp in &connected_peers {
+            info!("   - {}", cp);
+        }
+        info!("📤 [BLOCK-SYNC] ================================================");
+
         let end_height = start_height + limit as u64 - 1;
+
+        // v1.0.87-beta: CRITICAL FIX - Check for duplicate requests before sending
+        // BUG: Same height was being requested multiple times due to race conditions
+        // This caused duplicate block processing and wasted bandwidth
+        if let Ok(guard) = self.outstanding_sync_requests.lock() {
+            for (_, existing_height, _) in guard.iter() {
+                if *existing_height == start_height {
+                    debug!("⏭️  [BLOCK-SYNC] Skipping duplicate request for height {} (already in flight)", start_height);
+                    return Ok(());
+                }
+            }
+        }
+
         let request = q_types::BlockPackRequest::new(start_height, end_height);
 
         // v1.0.43-beta: Track request_id for debugging - helps identify lost requests
@@ -2230,11 +2925,20 @@ impl UnifiedNetworkManager {
                   request_id_str, pending.len());
         }
 
-        info!("✅ [BATCH SYNC] libp2p request sent, waiting for response (timeout: 60s)");
+        // 🧅 v1.3.2-beta: TOR-AWARE BATCH SYNC TIMEOUT
+        // Tor networks need longer timeouts due to multi-hop latency
+        let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
+                          std::env::var("Q_TOR_PROXY").is_ok();
+        let batch_timeout_secs = std::env::var("Q_BATCH_SYNC_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(if tor_enabled { 180 } else { 60 }); // 3 min for Tor, 1 min for direct
 
-        // Wait for response with timeout (v1.0.13-beta: increased from 10s to 60s)
+        info!("✅ [BATCH SYNC] libp2p request sent, waiting for response (timeout: {}s)", batch_timeout_secs);
+
+        // Wait for response with timeout (v1.3.2-beta: Tor-aware timeout)
         let request_start = std::time::Instant::now();
-        match timeout(Duration::from_secs(60), rx).await {
+        match timeout(Duration::from_secs(batch_timeout_secs), rx).await {
             Ok(Ok(blocks)) => {
                 let elapsed = request_start.elapsed();
                 info!("📨 [BATCH SYNC] SUCCESS: Received {} blocks from peer {} in {:.2}s",
@@ -2252,8 +2956,8 @@ impl UnifiedNetworkManager {
                 ))
             }
             Err(_) => {
-                // Timeout (v1.0.13-beta: 60s timeout)
-                warn!("⏱️  [BATCH SYNC] TIMEOUT: No response after 60s from peer {}", peer_id);
+                // Timeout (v1.3.2-beta: Tor-aware timeout)
+                warn!("⏱️  [BATCH SYNC] TIMEOUT: No response after {}s from peer {}", batch_timeout_secs, peer_id);
                 self.mark_peer_failure(peer_id);
 
                 // Clean up pending request
@@ -2379,63 +3083,110 @@ impl UnifiedNetworkManager {
         Ok(headers)
     }
 
-    /// v0.9.73-beta: Mark peer as successful (responded to BlockPackCodec request)
-    /// This is called when a peer successfully responds with blocks via BlockPackCodec
+    /// 🚀 v1.7.0-LAMINAR: Lock-free peer success tracking (VORTEX ELIMINATION)
+    /// No locks needed - DashMap provides concurrent access
     pub fn mark_peer_success(&self, peer_id: PeerId) {
-        let mut compat = self.peer_compat.write().unwrap();
-
-        // Increment success counter
-        *compat.successes.entry(peer_id).or_insert(0) += 1;
-
         // Remove from failure list (peer is proven working)
-        compat.failures.remove(&peer_id);
+        self.peer_compat.failures.remove(&peer_id);
 
         // Remove from blacklist (peer is proven compatible)
-        if compat.blacklist.remove(&peer_id) {
-            info!("✅ [PEER COMPAT] Peer {} removed from blacklist (now responsive)", peer_id);
+        if self.peer_compat.blacklist.remove(&peer_id).is_some() {
+            info!("✅ [LAMINAR] Peer {} removed from blacklist (now responsive)", peer_id);
         }
 
-        let success_count = compat.successes.get(&peer_id).copied().unwrap_or(0);
-        debug!("✅ [PEER COMPAT] Peer {} marked successful ({} total successes)", peer_id, success_count);
+        // Record success (lock-free)
+        self.peer_compat.record_success(&peer_id);
+
+        let success_count = self.peer_compat.get_successes(&peer_id);
+        debug!("✅ [LAMINAR] Peer {} marked successful ({} total successes)", peer_id, success_count);
     }
 
-    /// v0.9.73-beta: Mark peer as failed (timeout/no response to BlockPackCodec request)
-    /// This is called when a peer fails to respond within timeout
-    /// After 3 failures, the peer is blacklisted as incompatible
+    /// 🚀 v1.7.0-LAMINAR: Lock-free peer failure tracking (VORTEX ELIMINATION)
+    /// No locks needed - DashMap provides concurrent access with automatic decay and blacklisting
     pub fn mark_peer_failure(&self, peer_id: PeerId) {
-        let mut compat = self.peer_compat.write().unwrap();
+        let is_bootstrap = self.peer_compat.is_bootstrap.contains(&peer_id);
+        let threshold = if is_bootstrap {
+            BLACKLIST_FAILURE_THRESHOLD * BOOTSTRAP_BLACKLIST_MULTIPLIER
+        } else {
+            BLACKLIST_FAILURE_THRESHOLD
+        };
 
-        // Increment failure counter
-        *compat.failures.entry(peer_id).or_insert(0) += 1;
-        let failure_count = compat.failures.get(&peer_id).copied().unwrap_or(0);
+        // Record failure (lock-free, includes decay calculation and blacklist logic)
+        self.peer_compat.record_failure(&peer_id);
 
-        debug!("⚠️  [PEER COMPAT] Peer {} marked failed ({} failures)", peer_id, failure_count);
+        let failure_count = self.peer_compat.get_failures(&peer_id);
+        debug!("⚠️  [LAMINAR] Peer {} marked failed ({}/{} failures before blacklist{})",
+               peer_id, failure_count, threshold,
+               if is_bootstrap { " [BOOTSTRAP]" } else { "" });
 
-        // Blacklist after 3 failures
-        if failure_count >= 3 {
-            compat.blacklist.insert(peer_id);
-            compat.successes.remove(&peer_id); // Remove from successes
-            warn!("🚫 [PEER COMPAT] Peer {} BLACKLISTED (3+ failures - incompatible with BlockPackCodec)", peer_id);
+        // Log if peer just got blacklisted
+        if self.peer_compat.is_blacklisted(&peer_id) && failure_count >= threshold {
+            if is_bootstrap {
+                error!("🚨 [LAMINAR] BOOTSTRAP peer {} BLACKLISTED for {}s ({}+ failures) - P2P sync may fail!",
+                      peer_id, BLACKLIST_EXPIRY_SECS, threshold);
+                error!("   💡 Check: network connectivity, firewall, bootstrap server status");
+            } else {
+                warn!("🚫 [LAMINAR] Peer {} BLACKLISTED for {}s ({}+ failures)",
+                      peer_id, BLACKLIST_EXPIRY_SECS, threshold);
+            }
         }
     }
 
-    /// v0.9.73-beta: Get list of compatible peers (successfully responded, not blacklisted)
-    /// Used to filter peer selection for fast sync requests
-    pub fn get_compatible_peers(&self) -> Vec<PeerId> {
-        let compat = self.peer_compat.read().unwrap();
+    /// v1.0.86-beta: Log P2P sync failure with detailed diagnostics
+    /// This makes it visible when P2P sync is broken instead of silently skipping
+    async fn log_p2p_sync_failure(&self, reason: &str) {
+        let blacklisted = self.get_blacklisted_peers();
+        let discovered = self.discovered_peers.read().await.len();
+        let compatible = self.get_compatible_peers().len();
+        let bootstrap_count = self.bootstrap_peers.read().await.len();
 
-        // Return peers that have at least one success and are not blacklisted
-        compat.successes.keys()
-            .filter(|peer_id| !compat.blacklist.contains(peer_id))
-            .cloned()
+        // Use warn! to make this visible - this is a serious problem!
+        warn!("🚨 ══════════════════════════════════════════════════════════════════");
+        warn!("🚨 [P2P SYNC FAILED] No eligible peers for P2P synchronization!");
+        warn!("🚨 ══════════════════════════════════════════════════════════════════");
+        warn!("🚨 Reason: {}", reason);
+        warn!("🚨");
+        warn!("🚨 📊 Peer Status:");
+        warn!("🚨    Compatible peers (proven working): {}", compatible);
+        warn!("🚨    Blacklisted peers: {}", blacklisted.len());
+        warn!("🚨    Discovered peers (total): {}", discovered);
+        warn!("🚨    Bootstrap peers configured: {}", bootstrap_count);
+        warn!("🚨");
+        warn!("🚨 ⚠️  IMPACT: Falling back to HTTP sync");
+        warn!("🚨    HTTP sync speed: ~1 block/sec");
+        warn!("🚨    P2P sync speed: 100-200 blocks/sec");
+        warn!("🚨    This is 100-200x SLOWER!");
+        warn!("🚨");
+        warn!("🚨 💡 Troubleshooting:");
+        warn!("🚨    1. Check firewall allows port 9001 (TCP)");
+        warn!("🚨    2. Check NAT/router port forwarding");
+        warn!("🚨    3. Verify bootstrap server is online: 185.182.185.227:9001");
+        warn!("🚨    4. Try setting Q_BOOTSTRAP_PEERS environment variable");
+        warn!("🚨    5. Check network connectivity to bootstrap peer");
+        warn!("🚨 ══════════════════════════════════════════════════════════════════");
+    }
+
+    /// 🚀 v1.7.0-LAMINAR: Lock-free compatible peer list (VORTEX ELIMINATION)
+    /// Uses DashMap iteration - no locks needed
+    pub fn get_compatible_peers(&self) -> Vec<PeerId> {
+        // Return peers that have at least one success and are not actively blacklisted
+        self.peer_compat.successes.iter()
+            .filter(|entry| !self.peer_compat.is_blacklisted(entry.key()))
+            .map(|entry| *entry.key())
             .collect()
     }
 
-    /// v0.9.75-beta: Get list of blacklisted peers (proven incompatible after 3+ failures)
-    /// Used for OPTIMISTIC peer testing - assume compatible unless blacklisted
+    /// 🚀 v1.7.0-LAMINAR: Lock-free blacklisted peer list (VORTEX ELIMINATION)
+    /// Uses DashMap iteration with automatic expiry checking
     pub fn get_blacklisted_peers(&self) -> std::collections::HashSet<PeerId> {
-        let compat = self.peer_compat.read().unwrap();
-        compat.blacklist.clone()
+        let now = std::time::Instant::now();
+        let expiry_duration = std::time::Duration::from_secs(BLACKLIST_EXPIRY_SECS);
+
+        // Only return peers that are still actively blacklisted (not expired)
+        self.peer_compat.blacklist.iter()
+            .filter(|entry| now.duration_since(*entry.value()) < expiry_duration)
+            .map(|entry| *entry.key())
+            .collect()
     }
 
     /// v1.0.45-beta: Get best known network height for progress display
@@ -2495,18 +3246,53 @@ impl UnifiedNetworkManager {
 
         // v1.0.44-beta: Concurrent sync with stall detection
         // - Support up to MAX_CONCURRENT_SYNC requests in flight
-        // - Clear stale requests older than 60 seconds
+        // - Clear stale requests older than timeout
         // - Track which heights are already requested to avoid duplicates
-        const STALL_TIMEOUT_SECS: u64 = 60;
+        // v1.0.81-beta: CRITICAL FIX - Reduce stale timeout from 60s to 35s
+        // BUG: libp2p request timeout is 30s, but we waited 60s to clear stale requests
+        // This caused P2P deadlock: 3 requests timeout at 30s but aren't cleared until 60s
+        // During those 30 extra seconds, no new sync requests possible (queue full)
+        // FIX: Clear stale requests at 35s (just after libp2p timeout + grace period)
+        // v1.3.3-beta: For Tor, use longer stall timeout (150s = 120s request timeout + 30s grace)
+        // v1.3.5-beta: Increased direct mode timeout to 65s (60s request timeout + 5s grace)
+        // This matches the new 60s request timeout for direct mode to handle large block packs
+        let stall_timeout_secs = if self.tor_enabled { 150 } else { 65 };
         const MAX_CONCURRENT_SYNC: usize = 3;  // Allow 3 parallel requests
 
-        let mut next_request_height = local_height;
+        // v1.3.3-beta: Process retry queue - retry failed heights with exponential backoff
+        if let Ok(mut retry_queue) = self.sync_retry_queue.lock() {
+            let now = std::time::Instant::now();
+            let mut heights_to_retry: Vec<u64> = Vec::new();
+
+            // Find heights that are due for retry
+            for (height, retry_count, next_retry_time) in retry_queue.iter() {
+                if now >= *next_retry_time {
+                    heights_to_retry.push(*height);
+                    info!("🔄 [RETRY] Height {} due for retry #{}", height, retry_count);
+                }
+            }
+
+            // Remove retried heights from queue (they'll be re-added on failure)
+            for height in &heights_to_retry {
+                retry_queue.retain(|(h, _, _)| h != height);
+            }
+
+            // These heights will be picked up naturally by the sync logic below
+            // since local_height will be lower than them
+        }
+
+        // 🚨 v1.3.8-beta CRITICAL FIX: Start request at local_height + 1, not local_height!
+        // BUG: If local_height=131735, we already HAVE block 131735. Requesting from 131735
+        // includes the block we have, causing "AlreadyProcessed" for first block in batch.
+        // This caused infinite sync loop where same range was requested forever.
+        // FIX: Request starting at local_height + 1 to get the NEXT block we need.
+        let mut next_request_height = local_height + 1;
         if let Ok(mut guard) = self.outstanding_sync_requests.lock() {
             // Clean up stale requests
             let before_len = guard.len();
             guard.retain(|(req_id, height, sent_at)| {
                 let elapsed = sent_at.elapsed().as_secs();
-                if elapsed > STALL_TIMEOUT_SECS {
+                if elapsed > stall_timeout_secs {
                     warn!("⚠️ [STALL-DETECT] Request {} (height {}) stale after {}s - removing",
                           req_id, height, elapsed);
                     false
@@ -2535,7 +3321,14 @@ impl UnifiedNetworkManager {
             // If there's a gap between local_height and the lowest pending request, reset to local_height.
 
             if !guard.is_empty() {
-                let batch_size = 5000u64;
+                // v1.3.3-beta: Adaptive batch size based on network type
+                // v1.3.5-beta: CRITICAL FIX - Reduced direct mode batch from 5000 to 500 blocks
+                // PROBLEM: 5000 blocks = ~5-10MB payload, takes 45-60s to serialize + transmit
+                // This caused request timeouts even with 60s timeout (serialization + network delay)
+                // FIX: 500 blocks = ~500KB-1MB payload, completes in 5-10s with headroom
+                // Tor networks: 200 blocks (small payloads for Tor circuit reliability)
+                // Direct networks: 500 blocks (balance between throughput and timeout safety)
+                let batch_size = if self.tor_enabled { 200u64 } else { 500u64 };
 
                 // Find the lowest height being requested
                 let min_pending_height = guard.iter()
@@ -2547,95 +3340,114 @@ impl UnifiedNetworkManager {
                 // there's a gap - we need to fill it first, not pipeline further ahead
                 let gap = min_pending_height.saturating_sub(local_height);
                 if gap > batch_size {
-                    // Gap detected! Request from local_height instead of continuing the pipeline
+                    // Gap detected! Request from local_height + 1 instead of continuing the pipeline
+                    // 🚨 v1.3.8-beta: Use local_height + 1 (we already HAVE local_height!)
                     warn!("🔧 [SYNC-FIX] Gap detected: local={}, lowest_pending={}, gap={}",
                           local_height, min_pending_height, gap);
-                    warn!("🔧 [SYNC-FIX] Resetting next_request_height to local_height to fill gap");
-                    next_request_height = local_height;
+                    warn!("🔧 [SYNC-FIX] Resetting next_request_height to {} to fill gap", local_height + 1);
+                    next_request_height = local_height + 1;
                 } else {
                     // No gap - safe to pipeline ahead after pending requests
+                    // v1.0.87-beta: CRITICAL FIX - Limit pipelining to prevent runaway
+                    // BUG: Without limit, pipelining could get 200k+ blocks ahead of local_height
+                    // This caused blocks to be received far ahead, never committed (pointer stuck),
+                    // then same blocks re-requested endlessly.
+                    // FIX: Cap pipelining to max 15k blocks ahead of local_height
+                    const MAX_PIPELINE_AHEAD: u64 = 15_000;
+
                     let max_pending_height = guard.iter()
                         .map(|(_, h, _)| h + batch_size)
                         .max()
                         .unwrap_or(local_height);
-                    next_request_height = max_pending_height;
+
+                    // Clamp to prevent runaway pipelining
+                    next_request_height = max_pending_height.min(local_height + MAX_PIPELINE_AHEAD);
+
+                    if max_pending_height > local_height + MAX_PIPELINE_AHEAD {
+                        debug!("🔧 [PIPELINE-CAP] Capped next_request from {} to {} (local={}, max_ahead={})",
+                               max_pending_height, next_request_height, local_height, MAX_PIPELINE_AHEAD);
+                    }
                 }
             }
         }
 
-        // Get connected peers - prioritize compatible peers (proven to support BlockPackCodec)
-        // v1.0.40-beta: CRITICAL FIX - Only request blocks from Q-NarwhalKnight nodes
-        // Previously: picked ANY mDNS discovered peer (including non-blockchain services)
-        // Now: prioritize compatible peers, then bootstrap peers, then fallback to any peer
+        // v1.2.5-beta: Removed peer-height-cap code that was causing compilation errors
+        // The turbo_sync_manager API wasn't available on QStorage.
+        // The main optimization (ResponseOmission fix) is still in place via height_cache.cached()
+
+        // v1.0.100-beta: CRITICAL FIX - Only request from ACTUALLY CONNECTED peers
+        // BUG: Previous code selected peers from discovered/bootstrap lists but didn't verify
+        // they were actually connected. This caused requests to disconnected peers which
+        // silently failed, leaving sync permanently stuck.
+        // FIX: First get the list of actually connected peers, then filter by priority.
+        let connected_peers: Vec<PeerId> = self.swarm.connected_peers().cloned().collect();
+
+        if connected_peers.is_empty() {
+            warn!("🚨 [AUTO-SYNC] No connected peers! Cannot sync.");
+            self.log_p2p_sync_failure("no connected peers").await;
+            return Ok(());
+        }
+
+        let blacklist = self.get_blacklisted_peers();
+        let available_peers: Vec<PeerId> = connected_peers.iter()
+            .filter(|p| !blacklist.contains(p))
+            .cloned()
+            .collect();
+
+        if available_peers.is_empty() {
+            warn!("🚨 [AUTO-SYNC] All {} connected peers are blacklisted!", connected_peers.len());
+            self.log_p2p_sync_failure("all connected peers blacklisted").await;
+            return Ok(());
+        }
+
+        // Prioritize connected peers: compatible > bootstrap > any
         let peer_id = {
-            // Step 1: Try compatible peers (proven to work with BlockPackCodec)
+            // Step 1: Try compatible peers that are ACTUALLY connected
             let compatible = self.get_compatible_peers();
-            if !compatible.is_empty() {
-                debug!("🔄 [AUTO-SYNC] Using compatible peer (proven BlockPackCodec support)");
-                compatible[0]
+            let compatible_connected: Vec<_> = compatible.iter()
+                .filter(|p| available_peers.contains(p))
+                .cloned()
+                .collect();
+
+            if !compatible_connected.is_empty() {
+                debug!("🔄 [AUTO-SYNC] Using connected compatible peer");
+                compatible_connected[0]
             } else {
-                // Step 2: Try bootstrap peers (known to be Q-NarwhalKnight nodes)
+                // Step 2: Try bootstrap peers that are ACTUALLY connected
                 let bootstrap = self.bootstrap_peers.read().await;
-                let bootstrap_peer = bootstrap.keys().next().cloned();
+                let bootstrap_connected: Vec<_> = bootstrap.keys()
+                    .filter(|p| available_peers.contains(p))
+                    .cloned()
+                    .collect();
                 drop(bootstrap);
 
-                if let Some(bp) = bootstrap_peer {
-                    // Check if bootstrap peer is not blacklisted
-                    let blacklist = self.get_blacklisted_peers();
-                    if !blacklist.contains(&bp) {
-                        debug!("🔄 [AUTO-SYNC] Using bootstrap peer (known Q-NarwhalKnight node)");
-                        bp
-                    } else {
-                        // Step 3: Fallback to any non-blacklisted discovered peer
-                        let peers = self.discovered_peers.read().await;
-                        let blacklist = self.get_blacklisted_peers();
-                        let fallback = peers.iter()
-                            .filter(|p| !blacklist.contains(p))
-                            .next()
-                            .cloned();
-                        drop(peers);
-
-                        match fallback {
-                            Some(p) => {
-                                debug!("🔄 [AUTO-SYNC] Using fallback peer (not blacklisted)");
-                                p
-                            }
-                            None => {
-                                debug!("🔄 [AUTO-SYNC] No compatible peers available, skipping");
-                                return Ok(());
-                            }
-                        }
-                    }
+                if !bootstrap_connected.is_empty() {
+                    debug!("🔄 [AUTO-SYNC] Using connected bootstrap peer");
+                    bootstrap_connected[0]
                 } else {
-                    // Step 3: Fallback to any non-blacklisted discovered peer
-                    let peers = self.discovered_peers.read().await;
-                    let blacklist = self.get_blacklisted_peers();
-                    let fallback = peers.iter()
-                        .filter(|p| !blacklist.contains(p))
-                        .next()
-                        .cloned();
-                    drop(peers);
-
-                    match fallback {
-                        Some(p) => {
-                            debug!("🔄 [AUTO-SYNC] Using fallback peer (not blacklisted)");
-                            p
-                        }
-                        None => {
-                            debug!("🔄 [AUTO-SYNC] No peers connected or all blacklisted, skipping auto-sync");
-                            return Ok(());
-                        }
-                    }
+                    // Step 3: Use any available connected peer
+                    debug!("🔄 [AUTO-SYNC] Using any connected peer (no compatible/bootstrap connected)");
+                    available_peers[0]
                 }
             }
         };
 
-        // 🚀 v1.0.46-beta: TurboSync EXTREME batch size optimization
-        // Previous: 2000 blocks per request (v1.0.44)
-        // New: 5000 blocks per request (matches MAX_BLOCKS_PER_REQUEST increase)
-        // At 2s intervals: 5000 / 2 = 2500 blocks/sec theoretical max
-        // Actual will be limited by network/disk, but this ensures network isn't bottleneck
-        let batch_size = 5000;
+        info!("✅ [AUTO-SYNC] Selected peer {} from {} connected peers",
+              &peer_id.to_string()[..12], connected_peers.len());
+
+        // 🚀 v1.3.3-beta: TurboSync adaptive batch size for Tor compatibility
+        // v1.0.46-beta original: 5000 blocks per request for maximum throughput
+        // v1.3.5-beta: CRITICAL FIX - Reduced batch sizes to prevent timeouts
+        // PROBLEM: Large batch sizes (5000 blocks) caused:
+        //   1. ~5-10MB payloads that take 30-60s just to serialize
+        //   2. Network transmission adds another 10-30s
+        //   3. Total time exceeds timeout, causing "Empty response buffer" errors
+        // FIX: Smaller batches complete well within timeout:
+        //   - 500 blocks = ~500KB-1MB, completes in 5-10s
+        //   - 200 blocks for Tor = ~200-400KB, handles circuit latency
+        // Effective sync rate: 500 blocks/10s = 50 blocks/sec = 3000 blocks/min
+        // This is actually FASTER than timeout-and-retry cycles!
+        let batch_size = if self.tor_enabled { 200 } else { 500 };
 
         // Use next_request_height for pipelining (calculated above to follow pending requests)
         info!("🚀 [AUTO-SYNC] Local: {}, Next request: {}, batch: {}, peer: {}",
@@ -2675,98 +3487,620 @@ impl UnifiedNetworkManager {
 
     /// Run one iteration of the network event loop
     /// Should be called in a loop from an async task
+    ///
+    /// 🚨 v1.1.1-beta CRITICAL FIX: Now processes BOTH swarm events AND command_rx
+    /// BUG: Previously run_once() only processed swarm events, completely ignoring
+    /// the command_rx channel. This meant ALL commands (PublishBlock, PublishPeerHeight,
+    /// etc.) sent via libp2p_command_tx were NEVER received by the network manager.
+    ///
+    /// IMPACT: Blocks mined locally were NEVER broadcast to P2P network, even though
+    /// logs showed "📡 Block N broadcast command sent to P2P network". The command
+    /// was sent to the channel, but run_once() never read from command_rx.
+    ///
+    /// FIX: Use tokio::select! to process either a swarm event OR a command,
+    /// whichever is ready first. This mirrors the behavior of run().
     pub async fn run_once(&mut self) -> anyhow::Result<()> {
         use futures::stream::StreamExt;
 
-        // Process one event from the swarm
-        if let Some(event) = self.swarm.next().await {
-            match event {
-                SwarmEvent::Behaviour(behaviour_event) => {
-                    self.handle_behaviour_event(behaviour_event).await?;
-                }
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    info!("📍 Listening on: {}", address);
-                }
-                SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    endpoint,
-                    num_established,
-                    ..
-                } => {
-                    // 🌐 v1.0.21-browser: Check if this is a WebSocket connection (browser client)
-                    let endpoint_str = format!("{:?}", endpoint);
-                    let is_websocket = endpoint_str.contains("/ws") || endpoint_str.contains("websocket");
+        // 🚀 v1.3.7-beta: CRITICAL FIX - Add block_pack_response_rx polling!
+        // BUG: run_once() was missing the response channel polling that run() has.
+        // This caused the bootstrap node to receive block requests, fetch blocks,
+        // but NEVER send the response back - breaking sync completely.
+        // ROOT CAUSE: Async block pack handler stores response in channel, but
+        // run_once() never polled it, so responses sat in channel forever.
+        tokio::select! {
+            // v1.3.7-beta: HIGHEST PRIORITY - Block pack response channel
+            // Must be processed first to prevent ResponseOmission timeouts!
+            biased;
 
-                    if !is_websocket {
-                        // 🤝 v1.0.15.1-beta: Initiate protocol handshake with new peer (node-to-node only)
-                        let validator = self.handshake_validator.read().await;
-                        let handshake_msg = validator.create_handshake(
-                            format!("q-api-server-v{}.{}.{}",
-                                    crate::handshake_validator::ProtocolVersion::CURRENT.major,
-                                    crate::handshake_validator::ProtocolVersion::CURRENT.minor,
-                                    crate::handshake_validator::ProtocolVersion::CURRENT.patch)
-                        );
-                        drop(validator);
-
-                        info!("🤝 [HANDSHAKE] Initiating handshake with peer {}", peer_id);
-                        debug!("   Our protocol: v{}.{}.{}",
-                              handshake_msg.protocol_version.major,
-                              handshake_msg.protocol_version.minor,
-                              handshake_msg.protocol_version.patch);
-                        debug!("   Our network: {}", handshake_msg.network_id);
-
-                        // Send handshake request to peer
-                        let request_id = self.swarm.behaviour_mut().handshake.send_request(&peer_id, handshake_msg);
-                        debug!("🤝 [HANDSHAKE] Sent handshake request {:?} to {}", request_id, peer_id);
+            Some((async_req_id, response)) = self.block_pack_response_rx.recv() => {
+                // Retrieve the stored response channel and send response
+                if let Some(channel) = self.pending_response_channels.lock().unwrap().remove(&async_req_id) {
+                    let block_count = response.blocks.len();
+                    if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
+                        error!("❌ [BLOCK-PACK ASYNC] Failed to send response for request {}: {:?}", async_req_id, e);
                     } else {
-                        info!("🌐 [BROWSER CLIENT] WebSocket connection - skipping handshake");
+                        info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks for async request {} (via run_once)", block_count, async_req_id);
                     }
-
-                    let mut peers = self.discovered_peers.write().await;
-                    let is_new = peers.insert(peer_id);
-                    let peer_count = peers.len();
-                    drop(peers); // Release lock before calling atomic operations
-
-                    // Update atomic counter (thread-safe)
-                    self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
-
-                    info!(
-                        "🔗 Connected to peer: {} (total connections: {}, new: {})",
-                        peer_id, num_established, is_new
-                    );
-                    info!("📊 Total discovered peers: {} (atomic counter updated)", peer_count);
+                } else {
+                    warn!("⚠️ [BLOCK-PACK ASYNC] No pending channel for request {} (may have timed out)", async_req_id);
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    // Remove peer from discovered set
-                    let mut peers = self.discovered_peers.write().await;
-                    peers.remove(&peer_id);
-                    let peer_count = peers.len();
-                    drop(peers);
+            }
+            // Process commands from API (PublishBlock, PublishPeerHeight, etc.)
+            Some(command) = self.command_rx.recv() => {
+                self.handle_command(command).await;
+            }
+            // Process swarm events (connections, messages, etc.)
+            Some(event) = self.swarm.next() => {
+                match event {
+                    SwarmEvent::Behaviour(behaviour_event) => {
+                        self.handle_behaviour_event(behaviour_event).await?;
+                    }
+                    SwarmEvent::NewListenAddr { address, .. } => {
+                        info!("📍 Listening on: {}", address);
+                    }
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id,
+                        endpoint,
+                        num_established,
+                        ..
+                    } => {
+                        // 🌐 v1.0.21-browser: Check if this is a WebSocket connection (browser client)
+                        let endpoint_str = format!("{:?}", endpoint);
+                        let is_websocket = endpoint_str.contains("/ws") || endpoint_str.contains("websocket");
 
-                    // Update atomic counter
-                    self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+                        if !is_websocket {
+                            // 🤝 v1.0.15.1-beta: Initiate protocol handshake with new peer (node-to-node only)
+                            let validator = self.handshake_validator.read().await;
+                            let handshake_msg = validator.create_handshake(
+                                format!("q-api-server-v{}.{}.{}",
+                                        crate::handshake_validator::ProtocolVersion::CURRENT.major,
+                                        crate::handshake_validator::ProtocolVersion::CURRENT.minor,
+                                        crate::handshake_validator::ProtocolVersion::CURRENT.patch)
+                            );
+                            drop(validator);
 
-                    info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
+                            info!("🤝 [HANDSHAKE] Initiating handshake with peer {}", peer_id);
+                            debug!("   Our protocol: v{}.{}.{}",
+                                  handshake_msg.protocol_version.major,
+                                  handshake_msg.protocol_version.minor,
+                                  handshake_msg.protocol_version.patch);
+                            debug!("   Our network: {}", handshake_msg.network_id);
 
-                    // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
-                    let bootstrap_peers = self.bootstrap_peers.read().await;
-                    if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
-                        warn!("🔄 [AUTO-RECONNECT] Bootstrap peer disconnected - reconnecting to {}", peer_id);
-                        let addr = multiaddr.clone();
-                        drop(bootstrap_peers);
-
-                        if let Err(e) = self.swarm.dial(addr.clone()) {
-                            error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
+                            // Send handshake request to peer
+                            let request_id = self.swarm.behaviour_mut().handshake.send_request(&peer_id, handshake_msg);
+                            debug!("🤝 [HANDSHAKE] Sent handshake request {:?} to {}", request_id, peer_id);
                         } else {
-                            info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                            info!("🌐 [BROWSER CLIENT] WebSocket connection - skipping handshake");
+                        }
+
+                        let mut peers = self.discovered_peers.write().await;
+                        let is_new = peers.insert(peer_id);
+                        let peer_count = peers.len();
+                        drop(peers); // Release lock before calling atomic operations
+
+                        // Update atomic counter (thread-safe)
+                        self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                        info!(
+                            "🔗 Connected to peer: {} (total connections: {}, new: {})",
+                            peer_id, num_established, is_new
+                        );
+                        info!("📊 Total discovered peers: {} (atomic counter updated)", peer_count);
+                    }
+                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        // Remove peer from discovered set
+                        let mut peers = self.discovered_peers.write().await;
+                        peers.remove(&peer_id);
+                        let peer_count = peers.len();
+                        drop(peers);
+
+                        // Update atomic counter
+                        self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                        info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
+
+                        // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
+                        let bootstrap_peers = self.bootstrap_peers.read().await;
+                        if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
+                            warn!("🔄 [AUTO-RECONNECT] Bootstrap peer disconnected - reconnecting to {}", peer_id);
+                            let addr = multiaddr.clone();
+                            drop(bootstrap_peers);
+
+                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
+                            } else {
+                                info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
         Ok(())
+    }
+
+    /// Handle a single network command
+    /// 🚀 v1.1.1-beta: Extracted from run() to share with run_once()
+    async fn handle_command(&mut self, command: NetworkCommand) {
+        match command {
+            NetworkCommand::DialPeer { multiaddr, response_tx } => {
+                debug!("📞 Processing dial command for {}", multiaddr);
+                let result = self.swarm.dial(multiaddr.clone())
+                    .map_err(|e| format!("Failed to dial {}: {}", multiaddr, e));
+                let _ = response_tx.send(result);
+            }
+            NetworkCommand::SetPeerChannel { tx } => {
+                self.peer_tx = Some(tx);
+                info!("✅ Peer channel set for libp2p → ConnectionManager bridge");
+                info!("🌉 P2P peer discovery propagation ENABLED");
+            }
+            NetworkCommand::SetGossipsubChannel { tx } => {
+                self.gossipsub_message_tx = Some(tx);
+                info!("✅ Gossipsub channel set for message propagation");
+                info!("🌉 P2P mining reward/transaction propagation ENABLED");
+            }
+            NetworkCommand::PublishBlock { topic, block_bytes, block_height } => {
+                // 🔍 v1.0.71-beta: Enhanced diagnostics for P2P broadcast issues
+                let peer_count = self.connected_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                let connected_peers: Vec<_> = self.swarm.connected_peers().collect();
+
+                info!("📤 Publishing block {} ({} bytes) to gossipsub topic: {}", block_height, block_bytes.len(), topic);
+                info!("   📊 Connected peers: {} (atomic count: {})", connected_peers.len(), peer_count);
+
+                if connected_peers.is_empty() {
+                    warn!("⚠️  [P2P BROADCAST] No connected peers - block {} will be stored locally only", block_height);
+                    warn!("   → Other nodes can fetch this block via turbo-sync once connected");
+                    warn!("   → Check bootstrap peer connectivity and port forwarding (Docker: -p 9001:9001)");
+                }
+
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, block_bytes) {
+                    Ok(message_id) => {
+                        info!("✅ Successfully published block {} to P2P network (msg_id: {:?})", block_height, message_id);
+                    }
+                    Err(e) => {
+                        // 🔍 v1.0.71-beta: More detailed error logging
+                        let error_msg = format!("{:?}", e);
+                        if error_msg.contains("InsufficientPeers") {
+                            warn!("❌ [P2P BROADCAST] Block {} failed: No peers subscribed to topic '{}'", block_height, topic);
+                            warn!("   → Block is stored locally and can be synced via turbo-sync");
+                            warn!("   → For Docker nodes, ensure: --network host OR -p 9001:9001");
+                            // v1.3.5-beta: Dynamic bootstrap discovery - no hardcoded peer IDs
+                            warn!("   → Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 for auto-discovery");
+                            warn!("   → Or fetch peer ID: curl -s http://185.182.185.227:8080/api/v1/status | jq '.data.multiaddrs[0]'");
+                        } else {
+                            warn!("❌ Failed to publish block {} to topic {}: {}", block_height, topic, e);
+                        }
+                    }
+                }
+            }
+            NetworkCommand::PublishBlockRequest { topic, request_bytes } => {
+                info!("📤 Publishing block request ({} bytes) to gossipsub topic: {}", request_bytes.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
+                    Ok(_) => {
+                        info!("✅ Successfully published block request to P2P network");
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to publish block request to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishBlockResponse { topic, response_bytes, block_height } => {
+                info!("📤 Publishing block response for block {} ({} bytes) to gossipsub topic: {}", block_height, response_bytes.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, response_bytes) {
+                    Ok(_) => {
+                        info!("✅ Successfully published block response for block {} to P2P network", block_height);
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to publish block response to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishBlockPack { topic, pack_bytes } => {
+                info!("🚀 [TURBO SYNC] Publishing block pack ({:.1} KB compressed) to gossipsub topic: {}",
+                      pack_bytes.len() as f64 / 1024.0, topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, pack_bytes) {
+                    Ok(_) => {
+                        info!("✅ [TURBO SYNC] Successfully published block pack to P2P network");
+                    }
+                    Err(e) => {
+                        warn!("❌ [TURBO SYNC] Failed to publish block pack to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::RequestBlockPack { topic, request_bytes, start_height, end_height } => {
+                info!("🚀 [TURBO SYNC] Requesting block pack {}-{} ({} bytes) from P2P network",
+                      start_height, end_height, request_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
+                    Ok(_) => {
+                        info!("✅ [TURBO SYNC] Successfully published block pack request to P2P network");
+                    }
+                    Err(e) => {
+                        warn!("❌ [TURBO SYNC] Failed to publish block pack request to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishPeerHeight { topic, announcement_bytes, height } => {
+                debug!("📡 [TURBO SYNC] Publishing peer height announcement {} ({} bytes) to topic: {}",
+                      height, announcement_bytes.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes) {
+                    Ok(_) => {
+                        debug!("✅ [TURBO SYNC] Successfully announced height {} to P2P network", height);
+                    }
+                    Err(e) => {
+                        warn!("❌ [TURBO SYNC] Failed to publish peer height to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishAIMessage { topic, message } => {
+                info!("🤖 [DISTRIBUTED AI] Publishing AI message to topic: {}", topic);
+                info!("   Message ID: {}", message.message_id);
+                info!("   Sender: {}", message.sender_node_id);
+
+                // Serialize AI message to bytes
+                match postcard::to_allocvec(&message) {
+                    Ok(message_bytes) => {
+                        let ident_topic = IdentTopic::new(topic.as_str());
+                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes.clone()) {
+                            Ok(_) => {
+                                info!("✅ [DISTRIBUTED AI] Successfully published AI message ({} bytes) to P2P network", message_bytes.len());
+                            }
+                            Err(e) => {
+                                error!("❌ [DISTRIBUTED AI] Failed to publish AI message to topic {}: {}", topic, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ [DISTRIBUTED AI] Failed to serialize AI message: {}", e);
+                    }
+                }
+            }
+            NetworkCommand::PublishPoolAnnouncement { topic, announcement_bytes } => {
+                info!("💱 [LIQUIDITY POOLS] Publishing pool announcement to topic: {} ({} bytes)", topic, announcement_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes.clone()) {
+                    Ok(_) => {
+                        info!("✅ [LIQUIDITY POOLS] Successfully published pool announcement to P2P network");
+                    }
+                    Err(e) => {
+                        error!("❌ [LIQUIDITY POOLS] Failed to publish pool announcement to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishMinerStats { topic, stats_bytes, miner_address } => {
+                // v1.0.88-beta: Publish miner stats for P2P hashrate aggregation
+                debug!("⛏️ [MINER STATS] Publishing stats for {} to topic: {} ({} bytes)",
+                       &miner_address[..16.min(miner_address.len())], topic, stats_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, stats_bytes.clone()) {
+                    Ok(_) => {
+                        debug!("✅ [MINER STATS] Successfully published miner stats to P2P network");
+                    }
+                    Err(e) => {
+                        // Only log at warn level since miner stats are non-critical
+                        warn!("⚠️ [MINER STATS] Failed to publish miner stats to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishBalanceUpdate { topic, update_bytes, wallet_address, amount } => {
+                // v1.1.26-beta: Balance update log reduced to debug to avoid spam
+                debug!("💰 [BALANCE UPDATE] Publishing update for {} (+{} units) to topic: {} ({} bytes)",
+                       &wallet_address[..16.min(wallet_address.len())], amount, topic, update_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, update_bytes.clone()) {
+                    Ok(_) => {
+                        // Success log reduced to trace to avoid spam
+                        trace!("✅ [BALANCE UPDATE] Successfully broadcast balance update to P2P network");
+                    }
+                    Err(e) => {
+                        // v1.1.26-beta: Reduced to debug - common when no peers subscribed
+                        debug!("❌ [BALANCE UPDATE] Failed to publish balance update to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishQnoOperation { topic, message } => {
+                // v1.4.2-beta: Publish QNO operation for decentralized stake validation
+                debug!("🔮 [QNO P2P] Publishing {:?} operation to topic: {}", message.message_type, topic);
+                match message.to_bytes() {
+                    Ok(msg_bytes) => {
+                        let ident_topic = IdentTopic::new(topic.as_str());
+                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, msg_bytes) {
+                            Ok(_) => {
+                                debug!("✅ [QNO P2P] Successfully broadcast QNO operation to P2P network");
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [QNO P2P] Failed to publish QNO operation to topic {}: {}", topic, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ [QNO P2P] Failed to serialize QNO message: {}", e);
+                    }
+                }
+            }
+            NetworkCommand::RequestBlockRangeDirect { peer_id, start_height, end_height, response_tx } => {
+                // 🚀 v1.3.10-beta: Direct request-response for Turbo Sync
+                // Uses libp2p request-response protocol instead of gossipsub for reliability
+                // ENHANCED: Added peer connection verification and better peer selection
+                info!("🚀 [TURBO SYNC DIRECT] Requesting blocks {}-{} via request-response",
+                      start_height, end_height);
+
+                // v1.3.10-beta: Get all connected peers for better selection
+                let connected_peers: Vec<_> = self.swarm.connected_peers().cloned().collect();
+                info!("📊 [PEER STATE] {} connected peers available", connected_peers.len());
+
+                // Select target peer - either specified or best available
+                let target_peer = if let Some(pid_str) = peer_id {
+                    match pid_str.parse::<PeerId>() {
+                        Ok(pid) => {
+                            // v2.1.7-DELTA-V: VERIFY peer is actually connected
+                            // CRITICAL FIX: Don't try unconnected peers - libp2p can't auto-dial
+                            // without a known address! This was causing 75% chunk failures.
+                            if self.swarm.is_connected(&pid) {
+                                info!("✅ [PEER CHECK] Specified peer {} is connected", pid);
+                                Some(pid)
+                            } else {
+                                // v2.1.7: Check if we have an address cached for this peer
+                                // Use try_read() (non-blocking) since we're in sync context
+                                let has_address = match self.peer_addresses.try_read() {
+                                    Ok(addrs) => addrs.get(&pid).map(|a| !a.is_empty()).unwrap_or(false),
+                                    Err(_) => false, // Lock contention, assume no address
+                                };
+
+                                if has_address {
+                                    info!("🔗 [PEER CHECK] Peer {} not connected but has cached address, attempting dial", pid);
+                                    Some(pid)
+                                } else {
+                                    // 🚨 v2.1.7: FAIL FAST - no point trying to dial without address
+                                    error!("❌ [PEER CHECK] Peer {} is NOT connected and has NO cached address!", pid);
+                                    error!("   Cannot dial peer without knowing its address.");
+                                    error!("   This peer was likely discovered via gossipsub height announcement");
+                                    error!("   but we don't know how to reach it.");
+                                    None  // Return None to trigger fallback to connected peers
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("❌ [TURBO SYNC DIRECT] Invalid peer ID {}: {}", pid_str, e);
+                            None
+                        }
+                    }
+                } else {
+                    None  // No peer specified, will use fallback
+                };
+
+                // v2.1.7-DELTA-V: FALLBACK - If specified peer is unreachable, use ANY connected peer
+                let final_target = if target_peer.is_some() {
+                    target_peer
+                } else if !connected_peers.is_empty() {
+                    warn!("🔄 [v2.1.7 FALLBACK] Specified peer unreachable, using connected peer instead");
+                    for (i, peer) in connected_peers.iter().take(5).enumerate() {
+                        info!("   Available peer #{}: {}", i + 1, peer);
+                    }
+                    Some(connected_peers[0])
+                } else {
+                    error!("❌ [TURBO SYNC DIRECT] No connected peers available!");
+                    error!("   Ensure bootstrap node is reachable: 185.182.185.227:9001");
+                    let _ = response_tx.send(Err(anyhow::anyhow!("No connected peers - check P2P connectivity")));
+                    return;
+                };
+
+                let target_peer = final_target;
+
+                if let Some(peer) = target_peer {
+                    info!("📤 [TURBO SYNC DIRECT] Sending request-response to peer {}", peer);
+                    info!("   Request: blocks {}-{} ({} blocks)", start_height, end_height, end_height - start_height + 1);
+
+                    // Create and send the request
+                    let request = q_types::BlockPackRequest::new(start_height, end_height);
+                    let request_id = self.swarm.behaviour_mut().block_sync.send_request(&peer, request);
+
+                    // Store the response channel for when we get the response
+                    // Convert request_id to string for HashMap key
+                    let request_id_str = format!("{:?}", request_id);
+
+                    // Create a channel to convert QBlock vector response to the expected format
+                    let (internal_tx, internal_rx) = tokio::sync::oneshot::channel::<Vec<q_types::QBlock>>();
+
+                    // Store in pending requests map
+                    if let Ok(mut pending) = self.pending_block_requests.lock() {
+                        pending.insert(request_id_str.clone(), internal_tx);
+                    }
+
+                    // Spawn task to wait for response and forward it
+                    let response_tx_clone = response_tx;
+                    tokio::spawn(async move {
+                        match internal_rx.await {
+                            Ok(blocks) => {
+                                info!("✅ [TURBO SYNC DIRECT] Received {} blocks via request-response", blocks.len());
+                                let _ = response_tx_clone.send(Ok(blocks));
+                            }
+                            Err(_) => {
+                                warn!("❌ [TURBO SYNC DIRECT] Response channel dropped (timeout or error)");
+                                let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response timeout or channel closed")));
+                            }
+                        }
+                    });
+
+                    info!("✅ [TURBO SYNC DIRECT] Request sent, waiting for response (request_id: {})",
+                          &request_id_str[..20.min(request_id_str.len())]);
+                } else {
+                    let _ = response_tx.send(Err(anyhow::anyhow!("No valid peer available for direct request")));
+                }
+            }
+
+            // ============================================================================
+            // v1.3.11-beta: DECENTRALIZED CONSENSUS P2P HANDLERS
+            // ============================================================================
+
+            NetworkCommand::PublishConsensusRequest { topic, vertex_id, round, block_hash, requester_id } => {
+                info!("🔐 [CONSENSUS P2P] Broadcasting signature request for vertex {}.. (round {})",
+                      hex::encode(&vertex_id[..8]), round);
+
+                // Create consensus request message
+                #[derive(serde::Serialize)]
+                struct ConsensusRequest {
+                    msg_type: &'static str,
+                    vertex_id: String,
+                    round: u64,
+                    block_hash: String,
+                    requester_id: String,
+                    timestamp: u64,
+                }
+
+                let request = ConsensusRequest {
+                    msg_type: "consensus_signature_request",
+                    vertex_id: hex::encode(vertex_id),
+                    round,
+                    block_hash: hex::encode(block_hash),
+                    requester_id: hex::encode(requester_id),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+
+                let request_bytes = serde_json::to_vec(&request).unwrap_or_default();
+                let ident_topic = IdentTopic::new(topic.as_str());
+
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
+                    Ok(_) => {
+                        info!("✅ [CONSENSUS P2P] Signature request broadcast successfully");
+                    }
+                    Err(e) => {
+                        warn!("❌ [CONSENSUS P2P] Failed to broadcast signature request: {}", e);
+                    }
+                }
+            }
+
+            NetworkCommand::PublishConsensusSignature { topic, vertex_id, validator_id, signature, public_key, timestamp } => {
+                info!("🔐 [CONSENSUS P2P] Publishing signature for vertex {}.. from validator {}",
+                      hex::encode(&vertex_id[..8]), hex::encode(&validator_id[..8]));
+
+                // Create consensus signature message
+                #[derive(serde::Serialize)]
+                struct ConsensusSignature {
+                    msg_type: &'static str,
+                    vertex_id: String,
+                    validator_id: String,
+                    signature: String,
+                    public_key: String,
+                    timestamp: u64,
+                }
+
+                let sig_msg = ConsensusSignature {
+                    msg_type: "consensus_signature_response",
+                    vertex_id: hex::encode(vertex_id),
+                    validator_id: hex::encode(validator_id),
+                    signature: hex::encode(signature),
+                    public_key: hex::encode(public_key),
+                    timestamp,
+                };
+
+                let sig_bytes = serde_json::to_vec(&sig_msg).unwrap_or_default();
+                let ident_topic = IdentTopic::new(topic.as_str());
+
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, sig_bytes) {
+                    Ok(_) => {
+                        debug!("✅ [CONSENSUS P2P] Signature published successfully");
+                    }
+                    Err(e) => {
+                        warn!("❌ [CONSENSUS P2P] Failed to publish signature: {}", e);
+                    }
+                }
+            }
+
+            NetworkCommand::PublishConsensusCertificate { topic, vertex_id, round, signatures, threshold_met } => {
+                info!("🎖️ [CONSENSUS P2P] Broadcasting certificate for vertex {}.. ({} signatures, threshold_met: {})",
+                      hex::encode(&vertex_id[..8]), signatures.len(), threshold_met);
+
+                // Create consensus certificate message
+                #[derive(serde::Serialize)]
+                struct ConsensusCertificate {
+                    msg_type: &'static str,
+                    vertex_id: String,
+                    round: u64,
+                    signatures: Vec<(String, String)>,
+                    threshold_met: bool,
+                    timestamp: u64,
+                }
+
+                let cert_msg = ConsensusCertificate {
+                    msg_type: "consensus_certificate",
+                    vertex_id: hex::encode(vertex_id),
+                    round,
+                    signatures: signatures.iter()
+                        .map(|(id, sig)| (hex::encode(id), hex::encode(sig)))
+                        .collect(),
+                    threshold_met,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+
+                let cert_bytes = serde_json::to_vec(&cert_msg).unwrap_or_default();
+                let ident_topic = IdentTopic::new(topic.as_str());
+
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, cert_bytes) {
+                    Ok(_) => {
+                        info!("✅ [CONSENSUS P2P] Certificate broadcast successfully");
+                    }
+                    Err(e) => {
+                        warn!("❌ [CONSENSUS P2P] Failed to broadcast certificate: {}", e);
+                    }
+                }
+            }
+
+            NetworkCommand::ReportEquivocation { topic, validator_id, vertex_id, signature1, signature2 } => {
+                error!("🚨 [CONSENSUS P2P] EQUIVOCATION DETECTED! Validator {} double-signed vertex {}",
+                       hex::encode(&validator_id[..8]), hex::encode(&vertex_id[..8]));
+
+                // Create equivocation proof message
+                #[derive(serde::Serialize)]
+                struct EquivocationReport {
+                    msg_type: &'static str,
+                    validator_id: String,
+                    vertex_id: String,
+                    signature1: String,
+                    signature2: String,
+                    timestamp: u64,
+                }
+
+                let report = EquivocationReport {
+                    msg_type: "equivocation_proof",
+                    validator_id: hex::encode(validator_id),
+                    vertex_id: hex::encode(vertex_id),
+                    signature1: hex::encode(&signature1),
+                    signature2: hex::encode(&signature2),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+
+                let report_bytes = serde_json::to_vec(&report).unwrap_or_default();
+                let ident_topic = IdentTopic::new(topic.as_str());
+
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, report_bytes) {
+                    Ok(_) => {
+                        error!("📢 [CONSENSUS P2P] Equivocation proof broadcast - validator {} will be slashed",
+                               hex::encode(&validator_id[..8]));
+                    }
+                    Err(e) => {
+                        error!("❌ [CONSENSUS P2P] Failed to broadcast equivocation proof: {}", e);
+                    }
+                }
+            }
+        }
     }
 }
 

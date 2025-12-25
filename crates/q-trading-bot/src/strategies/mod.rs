@@ -13,3 +13,12 @@ pub trait Strategy: Send + Sync {
 pub mod grid;
 pub mod market_maker;
 pub mod dca;
+pub mod dex_activity;
+
+// Re-export DEX activity components for easy access
+pub use dex_activity::{
+    DexActivityStrategy,
+    DexActivityConfig,
+    DexActivityWallet,
+    calculate_dex_activity_split,
+};
