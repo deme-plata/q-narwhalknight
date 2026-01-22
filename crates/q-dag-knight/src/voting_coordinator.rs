@@ -12,6 +12,7 @@ use q_types::equivocation::{
     SlashingTransaction, SlashingSeverity as CryptoSlashingSeverity,
 };
 use anyhow::Result;
+use ed25519_dalek::{SigningKey, Signer};
 use q_narwhal_core::{ConsensusVoting, ByzantineDetector, ProductionTorClient, ValidatorInfo};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::sync::Arc;
@@ -29,25 +30,28 @@ fn format_vertex_id(id: &[u8; 32]) -> String {
 pub struct VotingCoordinator {
     /// Node identity
     node_id: ValidatorId,
-    
+
+    /// v2.4.8-beta: Ed25519 signing key for vote signatures
+    signing_key: Arc<SigningKey>,
+
     /// Server Beta's Phase 2C consensus voting system
     consensus_voting: Arc<ConsensusVoting>,
-    
+
     /// Server Beta's Phase 2C Byzantine detection
     byzantine_detector: Arc<ByzantineDetector>,
-    
+
     /// Finalization engine for commit decisions
     finalization_engine: Arc<FinalizationEngine>,
-    
+
     /// Advanced Byzantine handler for slashing
     byzantine_handler: Arc<AdvancedByzantineHandler>,
-    
+
     /// Voting coordinator state
     state: Arc<RwLock<VotingState>>,
-    
+
     /// Configuration
     config: VotingCoordinatorConfig,
-    
+
     /// Performance metrics
     metrics: Arc<RwLock<VotingMetrics>>,
 }
@@ -195,6 +199,8 @@ pub struct VotingMetrics {
 
 impl VotingCoordinator {
     /// Create new voting coordinator
+    ///
+    /// v2.4.8-beta: Now generates Ed25519 signing key from node_id for vote signatures
     pub async fn new(
         node_id: ValidatorId,
         consensus_voting: Arc<ConsensusVoting>,
@@ -204,11 +210,21 @@ impl VotingCoordinator {
         let finalization_engine = Arc::new(
             FinalizationEngine::new(config.byzantine_threshold, config.finalization_timeout).await?
         );
-        
+
         let byzantine_handler = Arc::new(
             AdvancedByzantineHandler::new(byzantine_detector.clone(), config.enable_slashing).await?
         );
-        
+
+        // v2.4.8-beta: Derive signing key from node_id (deterministic for now)
+        // In production, this should be loaded from secure storage
+        let signing_key = {
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"vote-signing-key-v2.4.8");
+            hasher.update(&node_id);
+            let key_bytes: [u8; 32] = hasher.finalize().into();
+            Arc::new(SigningKey::from_bytes(&key_bytes))
+        };
+
         let state = Arc::new(RwLock::new(VotingState {
             current_round: 0,
             pending_vertices: HashMap::new(),
@@ -224,9 +240,13 @@ impl VotingCoordinator {
             view_change_votes: HashMap::new(),
             view_change_in_progress: false,
         }));
-        
+
+        info!("🔐 VotingCoordinator initialized with Ed25519 signing key for validator {}",
+              hex::encode(&node_id[..8]));
+
         Ok(Self {
             node_id,
+            signing_key,
             consensus_voting,
             byzantine_detector,
             finalization_engine,
@@ -371,7 +391,8 @@ impl VotingCoordinator {
         
         // 2. Validate vertex structure and VDF proof
         // (This uses Server Alpha Phase 2B vertex validation)
-        let vertex_creator = VertexCreator::new(self.node_id, Arc::new(
+        // 🔐 v2.4.7-beta: Use new_with_random_key for validation-only usage
+        let vertex_creator = VertexCreator::new_with_random_key(self.node_id, Arc::new(
             crate::QuantumVDF::new(crate::QuantumVDFConfig::default()).await?
         ));
         
@@ -398,17 +419,39 @@ impl VotingCoordinator {
     }
     
     /// Cast a vote for a vertex
+    ///
+    /// v2.4.8-beta: Now signs votes with Ed25519 for cryptographic proof
     pub async fn cast_vote(&self, vertex_id: VertexId, round: Round, vote: VoteType) -> Result<()> {
         debug!("Casting {:?} vote for vertex {} in round {}", vote, hex::encode(&vertex_id[..8]), round);
-        
-        // 1. Create vote details
+
+        // 1. Create vote details with cryptographic signature
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+        // v2.4.8-beta: Create vote data to sign (vertex_id + round + timestamp + vote_type)
+        let vote_data = {
+            let mut data = Vec::with_capacity(32 + 8 + 8 + 1);
+            data.extend_from_slice(&vertex_id);
+            data.extend_from_slice(&round.to_le_bytes());
+            data.extend_from_slice(&timestamp.to_le_bytes());
+            data.push(match vote {
+                VoteType::Accept => 0u8,
+                VoteType::Reject => 1u8,
+                VoteType::Abstain => 2u8,
+            });
+            data
+        };
+
+        // v2.4.8-beta: Sign the vote data with Ed25519
+        let signature = self.signing_key.sign(&vote_data);
+        debug!("🔐 Signed vote for vertex {} with Ed25519 ({} bytes)",
+               hex::encode(&vertex_id[..8]), signature.to_bytes().len());
+
         let vote_details = VoteDetails {
             voter: self.node_id,
             vote_type: vote,
             timestamp,
-            justification: vec![], // TODO: Add justification logic
-            signature: vec![], // TODO: Sign vote
+            justification: vec![], // Justification populated by finalization engine
+            signature: signature.to_bytes().to_vec(),
         };
         
         // 2. Record vote locally

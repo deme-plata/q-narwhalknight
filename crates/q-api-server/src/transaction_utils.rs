@@ -147,6 +147,9 @@ impl TransactionBuilder {
             token_type: self.token_type,
             fee_token_type: self.fee_token_type,
             tx_type: self.tx_type,
+            pqc_signature: None,
+            signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
         };
 
         // Compute cryptographic transaction ID (SHA3-256 of canonical content)
@@ -168,9 +171,12 @@ pub fn compute_transaction_id(tx: &Transaction) -> TxHash {
     hasher.update(&tx.nonce.to_le_bytes());
     hasher.update(&(tx.timestamp.timestamp() as u64).to_le_bytes());
     hasher.update(&tx.data);
-    hasher.update(&[tx.token_type as u8]);
-    hasher.update(&[tx.fee_token_type as u8]);
-    hasher.update(&[tx.tx_type as u8]);
+    // v2.4.0-beta: Use discriminant() for TokenType (supports Custom variant with address)
+    hasher.update(&[tx.token_type.discriminant()]);
+    hasher.update(&tx.token_type.address());
+    hasher.update(&[tx.fee_token_type.discriminant()]);
+    hasher.update(&tx.fee_token_type.address());
+    hasher.update(&[tx.tx_type.as_byte()]);
 
     let result = hasher.finalize();
     let mut hash = [0u8; 32];
@@ -330,23 +336,79 @@ pub async fn submit_transaction(
 }
 
 /// Create a swap transaction with proper ID and structure
+///
+/// v2.4.0-beta: Uses proper binary format for StateProcessor:
+/// tx.data = [pool_id:32][direction:1][min_amount_out:8]
+///
+/// Arguments:
+/// - `from`: Wallet address performing the swap
+/// - `pool_id`: The 32-byte pool identifier
+/// - `amount_in`: Amount of input token (in base units)
+/// - `min_amount_out`: Minimum output amount (slippage protection)
+/// - `direction`: 0 = token_a -> token_b, 1 = token_b -> token_a
+/// - `token_type`: The input token type (QUG or QUGUSD)
+/// - `nonce`: Transaction nonce for replay protection
 pub fn create_swap_transaction(
     from: Address,
-    token_in: &str,
-    token_out: &str,
+    pool_id: [u8; 32],
     amount_in: Amount,
+    min_amount_out: Amount,
+    direction: u8,
+    token_type: TokenType,
     nonce: u64,
 ) -> Transaction {
+    // Build tx.data in the format expected by StateProcessor.process_swap():
+    // [0..32]   pool_id (32 bytes)
+    // [32]      direction (1 byte: 0 = a->b, 1 = b->a)
+    // [33..49]  min_amount_out (16 bytes BE for slippage protection)
+    let mut data = Vec::with_capacity(49);
+    data.extend_from_slice(&pool_id);
+    data.push(direction);
+    data.extend_from_slice(&min_amount_out.to_be_bytes());
+
     TransactionBuilder::new()
         .from(from)
-        .to([0u8; 32]) // DEX contract address
+        .to(pool_id) // Pool ID as destination
         .amount(amount_in)
         .fee(1_000_000) // 0.01 QUG standard fee
-        .data(format!("swap:{}:{}", token_in, token_out).into_bytes())
-        .token_type(TokenType::QUG)
+        .data(data)
+        .token_type(token_type)
         .fee_token_type(TokenType::QUGUSD)
         .tx_type(TransactionType::Swap)
         .build_with_nonce(nonce, Utc::now())
+}
+
+/// Helper to derive pool_id from two token addresses
+/// Pool ID = SHA3-256(sort(token_a, token_b))
+pub fn derive_pool_id(token_a: &[u8; 32], token_b: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest, Sha3_256};
+    let mut hasher = Sha3_256::new();
+
+    // Sort tokens to ensure consistent pool_id regardless of order
+    if token_a < token_b {
+        hasher.update(token_a);
+        hasher.update(token_b);
+    } else {
+        hasher.update(token_b);
+        hasher.update(token_a);
+    }
+
+    let result = hasher.finalize();
+    let mut pool_id = [0u8; 32];
+    pool_id.copy_from_slice(&result);
+    pool_id
+}
+
+/// Determine swap direction based on input token and pool token order
+/// Returns: 0 if token_in is token_a, 1 if token_in is token_b
+pub fn determine_swap_direction(token_in: &[u8; 32], token_a: &[u8; 32], token_b: &[u8; 32]) -> u8 {
+    if token_in == token_a {
+        0 // a -> b
+    } else if token_in == token_b {
+        1 // b -> a
+    } else {
+        panic!("token_in must be either token_a or token_b")
+    }
 }
 
 /// Create a pool liquidity transaction with proper ID and structure

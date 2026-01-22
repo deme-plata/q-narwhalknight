@@ -548,6 +548,7 @@ impl ConsensusIntegration {
             RobotConsensusNetworkBehaviourEvent::Identify(libp2p::identify::Event::Received {
                 peer_id,
                 info,
+                connection_id: _,
             }) => {
                 debug!("Received identify info from peer: {}", peer_id);
                 

@@ -38,6 +38,12 @@ rand_core = { workspace = true }
 zeroize = { workspace = true }
 getrandom = "0.2"
 
+# Real elliptic curve cryptography for ring signatures (v2.5.1-beta: Production ZK Privacy)
+curve25519-dalek = { version = "4.1", features = ["serde", "rand_core"] }
+x25519-dalek = { version = "2.0", features = ["serde", "static_secrets"] }
+# For CtOption handling in curve25519-dalek 4.x
+subtle = "2.5"
+
 # Post-quantum cryptography
 pqcrypto-dilithium = { workspace = true, optional = true }
 pqcrypto-kyber = { workspace = true, optional = true }

@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use q_storage::QStorage;
-use q_types::SignedBlock;
+use q_types::QBlock;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -22,48 +22,35 @@ use futures::stream::{self, StreamExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Bootstrap genesis block from HTTP endpoint if database is empty
+/// v2.9.0-beta: Uses multi-bootstrap with automatic failover
 pub async fn bootstrap_genesis_if_needed(storage: Arc<QStorage>) -> Result<()> {
     let current_height = storage.get_latest_height().await.unwrap_or(0);
 
     if current_height == 0 {
         info!("🌱 Fresh database detected (height 0) - bootstrapping genesis block");
+        info!("🌐 Using multi-bootstrap with failover...");
 
-        let bootstrap_url = std::env::var("Q_BOOTSTRAP_URL")
-            .unwrap_or_else(|_| "http://185.182.185.227:8080".to_string());
+        let bootstrap_config = crate::bootstrap_config::get_bootstrap_config();
 
-        let url = format!("{}/api/v1/blocks/1", bootstrap_url);
-
-        info!("📥 Fetching genesis block from {}", url);
-
-        match reqwest::get(&url).await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    match resp.json::<crate::handlers::ApiResponse<SignedBlock>>().await {
-                        Ok(api_resp) => {
-                            if let Some(genesis) = api_resp.data {
-                                storage.insert_block(&genesis).await?;
-                                info!("✅ Genesis block bootstrapped successfully (height 1)");
-                                info!("   Block hash: {}", hex::encode(&genesis.header.hash));
-                            } else {
-                                error!("❌ Genesis block fetch returned empty data");
-                            }
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to parse genesis block response: {}", e);
-                        }
-                    }
-                } else {
-                    error!("❌ Bootstrap server returned error: {}", resp.status());
-                }
+        // Try to fetch genesis with automatic failover across all bootstrap servers
+        match bootstrap_config.fetch_genesis_with_failover().await {
+            Some(genesis) => {
+                storage.insert_block(&genesis).await?;
+                info!("✅ Genesis block bootstrapped successfully (height 1)");
+                info!("   Block hash: {}", hex::encode(&genesis.header.hash));
             }
-            Err(e) => {
-                error!("❌ Failed to fetch genesis block: {}", e);
-                error!("   Bootstrap URL: {}", url);
+            None => {
+                let urls = bootstrap_config.get_all_urls().await;
+                error!("❌ Failed to fetch genesis block from any bootstrap server!");
+                error!("   Tried {} servers:", urls.len());
+                for url in &urls {
+                    error!("   - {}", url);
+                }
                 error!("   This node cannot start without genesis block!");
                 error!("   Solutions:");
-                error!("   1. Ensure {} is accessible", bootstrap_url);
-                error!("   2. Set Q_BOOTSTRAP_URL environment variable to a working node");
-                error!("   3. Manually download genesis block and place in database");
+                error!("   1. Set Q_BOOTSTRAP_URLS env with working servers (comma-separated)");
+                error!("   2. Set Q_BOOTSTRAP_URL env to a single working node");
+                error!("   3. Check network connectivity to bootstrap servers");
             }
         }
     } else {
@@ -92,11 +79,12 @@ pub async fn http_gap_fill(
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("   Range: {} → {} ({} blocks)", start_height, end_height, gap_size);
 
-    // Determine bootstrap URL
-    let bootstrap_url = std::env::var("Q_BOOTSTRAP_URL")
-        .unwrap_or_else(|_| "http://185.182.185.227:8080".to_string());
+    // v2.9.0-beta: Use multi-bootstrap with failover
+    let bootstrap_config = crate::bootstrap_config::get_bootstrap_config();
+    let bootstrap_url = crate::bootstrap_config::get_bootstrap_url().await;
 
-    info!("📡 Using bootstrap node: {}", bootstrap_url);
+    info!("📡 Using bootstrap node: {} (with failover to {} servers)",
+          bootstrap_url, bootstrap_config.get_all_urls().await.len());
 
     // v1.3.9-beta: TURBO SETTINGS
     // - Batch size: 500 blocks per HTTP request (safe for most networks)
@@ -245,7 +233,7 @@ struct SyncBlocksResponse {
 
 #[derive(Debug, serde::Deserialize)]
 struct SyncBlocksData {
-    blocks: Vec<SignedBlock>,
+    blocks: Vec<QBlock>,
     #[allow(dead_code)]
     from_height: u64,
     #[allow(dead_code)]
@@ -260,7 +248,7 @@ async fn fetch_batch_with_retry(
     url: &str,
     from_height: u64,
     max_retries: u32,
-) -> Result<Vec<SignedBlock>> {
+) -> Result<Vec<QBlock>> {
     let mut attempt = 0;
 
     loop {
@@ -286,7 +274,8 @@ async fn fetch_batch_with_retry(
                                 return Err(anyhow::anyhow!("Parse error after {} retries: {}", max_retries, e));
                             }
                             debug!("⚠️ Parse error for batch from {}, retry {}/{}", from_height, attempt, max_retries);
-                            tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+                            // 🚀 v2.3.12-beta: Reduced from 500ms to 100ms base for faster retries
+                            tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
                         }
                     }
                 } else {
@@ -294,7 +283,8 @@ async fn fetch_batch_with_retry(
                         return Err(anyhow::anyhow!("HTTP error {} after {} retries", resp.status(), max_retries));
                     }
                     debug!("⚠️ HTTP {} for batch from {}, retry {}/{}", resp.status(), from_height, attempt, max_retries);
-                    tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+                    // 🚀 v2.3.12-beta: Reduced from 500ms to 100ms base for faster retries
+                    tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
                 }
             }
             Err(e) => {
@@ -302,14 +292,15 @@ async fn fetch_batch_with_retry(
                     return Err(anyhow::anyhow!("Network error after {} retries: {}", max_retries, e));
                 }
                 debug!("⚠️ Network error for batch from {}, retry {}/{}: {}", from_height, attempt, max_retries, e);
-                tokio::time::sleep(Duration::from_millis(1000 * attempt as u64)).await;
+                // 🚀 v2.3.12-beta: Reduced from 1000ms to 200ms base for faster retries
+                tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
             }
         }
     }
 }
 
 /// Fetch a single block with retry logic
-async fn fetch_block_with_retry(url: &str, height: u64, max_retries: u32) -> Result<SignedBlock> {
+async fn fetch_block_with_retry(url: &str, height: u64, max_retries: u32) -> Result<QBlock> {
     let mut attempt = 0;
 
     loop {
@@ -318,7 +309,7 @@ async fn fetch_block_with_retry(url: &str, height: u64, max_retries: u32) -> Res
         match reqwest::get(url).await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    match resp.json::<crate::handlers::ApiResponse<SignedBlock>>().await {
+                    match resp.json::<crate::handlers::ApiResponse<QBlock>>().await {
                         Ok(api_resp) => {
                             if let Some(block) = api_resp.data {
                                 return Ok(block);

@@ -23,10 +23,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+// v3.2.2: Import u128_serde for MessagePack P2P compatibility
+use q_types::u128_serde;
+
 /// A single checkpoint (GRAVITY WELL)
 ///
 /// Each checkpoint represents a known-good state at a specific height.
 /// New nodes can sync to this height without validating all previous blocks.
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GravityWell {
     /// Block height of checkpoint

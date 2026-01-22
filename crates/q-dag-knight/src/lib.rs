@@ -99,7 +99,8 @@ impl DAGKnightConsensus {
         };
 
         let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config).await?);
-        let vertex_creator = VertexCreator::new(node_id, quantum_vdf.clone());
+        // 🔐 v2.4.7-beta: Use random key for vertex signing
+        let vertex_creator = VertexCreator::new_with_random_key(node_id, quantum_vdf.clone());
 
         Ok(Self {
             node_id,

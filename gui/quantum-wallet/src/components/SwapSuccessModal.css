@@ -622,3 +622,140 @@
     font-size: 24px;
   }
 }
+
+/* ============================================
+   PERFORMANCE MODE EXEMPTION v2.4.2
+   Keep SwapSuccessModal animations beautiful
+   even when performance mode is enabled
+   ============================================ */
+
+/* Re-enable animations for SwapSuccessModal components */
+.performance-mode .swap-success-overlay,
+.performance-mode .swap-success-overlay *,
+.performance-mode .swap-success-overlay *::before,
+.performance-mode .swap-success-overlay *::after {
+  animation-duration: inherit !important;
+  animation-name: inherit !important;
+}
+
+/* Overlay fade in */
+.performance-mode .swap-success-overlay {
+  animation: fadeInScale 0.3s ease-out !important;
+}
+
+/* Modal entrance animation */
+.performance-mode .swap-success-modal {
+  animation: fadeInScale 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+/* Holographic border shift */
+.performance-mode .swap-success-modal::before {
+  animation: holographicShift 3s ease-in-out infinite !important;
+}
+
+/* Quantum particle effects */
+.performance-mode .quantum-particle {
+  animation: particleFloat 2s ease-out infinite !important;
+  display: block !important;
+}
+
+/* Quantum rings - expanding circles */
+.performance-mode .quantum-ring {
+  animation: quantumRing 2s ease-out infinite !important;
+  display: block !important;
+}
+
+.performance-mode .quantum-ring.ring-1 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0s !important;
+}
+
+.performance-mode .quantum-ring.ring-2 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0.4s !important;
+}
+
+.performance-mode .quantum-ring.ring-3 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0.8s !important;
+}
+
+/* Success icon background pulse */
+.performance-mode .success-icon-bg {
+  animation: pulseGlow 2s ease-in-out infinite !important;
+}
+
+/* Checkmark SVG animations */
+.performance-mode .checkmark-circle {
+  animation: circleGrow 0.6s cubic-bezier(0.65, 0, 0.45, 1) 0.2s forwards !important;
+}
+
+.performance-mode .checkmark-check {
+  animation: checkmarkDraw 0.4s cubic-bezier(0.65, 0, 0.45, 1) 0.8s forwards !important;
+}
+
+/* Title glow animation */
+.performance-mode .title-glow {
+  animation: titleGlow 2s ease-in-out infinite !important;
+}
+
+/* Token glow pulses */
+.performance-mode .token-glow {
+  animation: pulseGlow 2s ease-in-out infinite !important;
+}
+
+/* Swap arrow motion */
+.performance-mode .swap-arrow {
+  animation: swapArrow 1.5s ease-in-out infinite !important;
+}
+
+/* Arrow trail flow effect */
+.performance-mode .arrow-trail {
+  animation: trailFlow 1.5s ease-in-out infinite !important;
+}
+
+.performance-mode .arrow-trail.trail-1 {
+  animation-delay: 0s !important;
+}
+
+.performance-mode .arrow-trail.trail-2 {
+  animation-delay: 0.3s !important;
+}
+
+.performance-mode .arrow-trail.trail-3 {
+  animation-delay: 0.6s !important;
+}
+
+/* Security badge shimmer */
+.performance-mode .badge-shimmer {
+  animation: shimmer 3s ease-in-out infinite !important;
+  display: block !important;
+}
+
+/* Holographic overlay effect */
+.performance-mode .swap-success-overlay .holographic-overlay {
+  animation: holographicShift 4s ease-in-out infinite !important;
+  display: block !important;
+}
+
+/* Particle container - ensure visible */
+.performance-mode .swap-success-overlay .particle-container {
+  display: block !important;
+}
+
+/* Keep transitions for interactive elements */
+.performance-mode .action-button {
+  transition: all 0.3s !important;
+}
+
+.performance-mode .close-button {
+  transition: all 0.3s !important;
+}
+
+.performance-mode .token-display::before {
+  transition: opacity 0.3s !important;
+}
+
+.performance-mode .button-glow {
+  transition: opacity 0.3s !important;
+}

@@ -83,7 +83,15 @@ impl DistributedMistralEngine {
               layer_range.0, layer_range.1, layer_range.1 - layer_range.0 + 1);
         info!("💾 Device: {:?}", capability);
 
-        let config = MistralConfig::mistral_7b_v0_3();
+        // v2.5.0-beta: Auto-detect model config from path (Mistral-7B or Ministral-3B)
+        let config = MistralConfig::from_model_path(model_path);
+        let model_name = if config.num_hidden_layers == 24 {
+            "Ministral-3B"
+        } else {
+            "Mistral-7B"
+        };
+        info!("🤖 Detected model: {} ({} layers, {} hidden)",
+              model_name, config.num_hidden_layers, config.hidden_size);
 
         // Validate layer range
         if layer_range.1 >= config.num_hidden_layers {
@@ -556,6 +564,35 @@ impl DistributedMistralEngine {
         debug!("✅ Sampled token ID: {}", token_id);
 
         Ok(token_id)
+    }
+
+    /// Decode a single token ID to text using the tokenizer
+    /// 🚀 v2.3.16-beta: GOLDEN STANDARD - Real token decoding for distributed AI
+    pub fn decode_token(&self, token_id: u32) -> Result<String> {
+        self.tokenizer
+            .decode(&[token_id], true) // skip_special_tokens=true
+            .map_err(|e| anyhow!("Failed to decode token {}: {}", token_id, e))
+    }
+
+    /// Decode multiple token IDs to text
+    /// 🚀 v2.3.16-beta: Batch token decoding for efficiency
+    pub fn decode_tokens(&self, token_ids: &[u32]) -> Result<String> {
+        self.tokenizer
+            .decode(token_ids, true) // skip_special_tokens=true
+            .map_err(|e| anyhow!("Failed to decode {} tokens: {}", token_ids.len(), e))
+    }
+
+    /// Sample and decode a token from logits in one step
+    /// 🚀 v2.3.16-beta: Combined sampling + decoding for distributed inference
+    pub async fn sample_and_decode(
+        &self,
+        logits: Vec<f32>,
+        logits_shape: Vec<usize>,
+        temperature: f64,
+    ) -> Result<(u32, String)> {
+        let token_id = self.decode_logits(logits, logits_shape, temperature).await?;
+        let text = self.decode_token(token_id)?;
+        Ok((token_id, text))
     }
 
     /// Get number of layers in this shard

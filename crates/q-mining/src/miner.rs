@@ -1,7 +1,9 @@
 /// Quantum-Enhanced Mining Algorithm
-/// 
+///
 /// This module implements the core quantum-enhanced mining algorithm that combines
 /// SHA-3 hashing with quantum VDF proofs and entropy injection for superior security.
+///
+/// v2.5.0-beta: Added proper Dilithium5 keypair support for block signing
 
 use crate::block::{QuantumPoWBlock, MiningTemplate, DifficultyTarget, MiningAlgorithm};
 use q_dag_knight::{QuantumVDF, QuantumVDFConfig, VDFSecurityLevel, VDFComputationResult};
@@ -12,30 +14,64 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use anyhow::Result;
 use tracing::{debug, info, warn};
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{SecretKey, PublicKey};
 
 /// Configuration for quantum-enhanced mining
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MiningConfig {
     /// Miner identity
     pub miner_id: [u8; 20],
-    
+
     /// Mining algorithm to use
     pub algorithm: MiningAlgorithm,
-    
+
     /// Quantum enhancement level (0.0-1.0)
     pub quantum_enhancement: f64,
-    
+
     /// Enable VDF integration
     pub vdf_enabled: bool,
-    
+
     /// Enable GPU acceleration
     pub gpu_enabled: bool,
-    
+
     /// Number of CPU threads for mining
     pub cpu_threads: usize,
-    
+
     /// Quantum seed refresh interval
     pub seed_refresh_interval: Duration,
+
+    /// v2.5.0-beta: Dilithium5 secret key for block signing (4,864 bytes)
+    pub dilithium_secret_key: Option<Vec<u8>>,
+
+    /// v2.5.0-beta: Dilithium5 public key for block verification (2,592 bytes)
+    pub dilithium_public_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for MiningConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiningConfig")
+            .field("miner_id", &hex::encode(self.miner_id))
+            .field("algorithm", &self.algorithm)
+            .field("quantum_enhancement", &self.quantum_enhancement)
+            .field("vdf_enabled", &self.vdf_enabled)
+            .field("gpu_enabled", &self.gpu_enabled)
+            .field("cpu_threads", &self.cpu_threads)
+            .field("seed_refresh_interval", &self.seed_refresh_interval)
+            .field("has_dilithium_keypair", &self.dilithium_secret_key.is_some())
+            .finish()
+    }
+}
+
+impl MiningConfig {
+    /// v2.5.0-beta: Generate a new Dilithium5 keypair for this miner
+    pub fn generate_dilithium_keypair(&mut self) {
+        let (pk, sk) = dilithium5::keypair();
+        self.dilithium_public_key = Some(pk.as_bytes().to_vec());
+        self.dilithium_secret_key = Some(sk.as_bytes().to_vec());
+        info!("🔐 Generated new Dilithium5 keypair for miner (pk: {} bytes, sk: {} bytes)",
+              pk.as_bytes().len(), sk.as_bytes().len());
+    }
 }
 
 /// Main quantum-enhanced miner
@@ -142,6 +178,9 @@ pub struct MiningResult {
 
 impl Default for MiningConfig {
     fn default() -> Self {
+        // v2.5.0-beta: Generate Dilithium5 keypair by default for production security
+        let (pk, sk) = dilithium5::keypair();
+
         Self {
             miner_id: [0u8; 20],
             algorithm: MiningAlgorithm::QuantumSHA3 { enhancement_level: 0.7 },
@@ -150,6 +189,8 @@ impl Default for MiningConfig {
             gpu_enabled: true,
             cpu_threads: num_cpus::get(),
             seed_refresh_interval: Duration::from_secs(30),
+            dilithium_secret_key: Some(sk.as_bytes().to_vec()),
+            dilithium_public_key: Some(pk.as_bytes().to_vec()),
         }
     }
 }
@@ -265,10 +306,18 @@ impl QuantumMiner {
         // Update statistics
         self.update_mining_stats(&mining_result, total_mining_time).await;
         
-        // Sign block
-        // TODO: Implement proper Dilithium5 signing
-        let placeholder_key = self.config.miner_id.to_vec();
-        block.sign(&placeholder_key)?;
+        // v2.5.0-beta: Sign block with Dilithium5 post-quantum signature
+        if let Some(ref secret_key) = self.config.dilithium_secret_key {
+            block.sign(secret_key)?;
+            info!("✅ Block {} signed with Dilithium5 post-quantum signature",
+                  hex::encode(&block.hash()[..8]));
+        } else {
+            warn!("⚠️ No Dilithium5 secret key configured - block will be unsigned!");
+            // Generate a keypair on-the-fly for backwards compatibility
+            let (_, sk) = dilithium5::keypair();
+            block.sign(sk.as_bytes())?;
+            warn!("⚠️ Used ephemeral Dilithium5 keypair - configure a persistent keypair for production");
+        }
         
         Ok(MiningResult {
             block,

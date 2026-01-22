@@ -733,6 +733,34 @@ impl AdaptiveTimeout {
         Duration::from_millis(self.current_timeout_ms)
     }
 
+    /// 🎯 v3.2.11-beta: Enable ATOMIC SYNC ENDGAME mode with faster timeout
+    /// When near the network tip, use aggressive timeout settings for streamlined sync
+    pub fn set_endgame_mode(&mut self, endgame_timeout: Duration) {
+        let endgame_ms = endgame_timeout.as_millis() as u64;
+        info!("🎯 [ATOMIC SYNC ENDGAME] Setting fast timeout: {}ms (was min: {}ms, current: {}ms)",
+              endgame_ms, self.min_timeout_ms, self.current_timeout_ms);
+
+        // Store original min for potential restoration
+        let original_min = self.min_timeout_ms;
+
+        // Set endgame timeout as the new minimum and current
+        self.min_timeout_ms = endgame_ms;
+        self.current_timeout_ms = endgame_ms;
+
+        info!("🎯 [ATOMIC SYNC ENDGAME] Timeout now: {}ms → {}ms ({}x faster)",
+              original_min, endgame_ms,
+              if endgame_ms > 0 { original_min / endgame_ms } else { 0 });
+    }
+
+    /// 🎯 v3.2.11-beta: Exit endgame mode and restore normal timeout settings
+    pub fn clear_endgame_mode(&mut self, normal_min_timeout: Duration) {
+        let normal_ms = normal_min_timeout.as_millis() as u64;
+        self.min_timeout_ms = normal_ms;
+        // Recalculate current timeout based on RTT samples
+        self.recalculate();
+        info!("🔄 [SYNC] Exited endgame mode, restored normal timeout min: {}ms", normal_ms);
+    }
+
     /// Get statistics about outlier rejection
     pub fn get_outliers_rejected(&self) -> u64 {
         self.outliers_rejected

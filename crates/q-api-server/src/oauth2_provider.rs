@@ -615,7 +615,7 @@ pub async fn userinfo(
                 address.copy_from_slice(&address_bytes);
                 if let Some(balance) = state.wallet_balances.read().await.get(&address).copied() {
                     user_info["balance"] = serde_json::json!(balance);
-                    user_info["balance_qug"] = serde_json::json!(balance as f64 / 100_000_000.0);
+                    user_info["balance_qug"] = serde_json::json!(balance as f64 / 1e24);
                 }
             }
         }

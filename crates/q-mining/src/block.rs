@@ -287,40 +287,81 @@ impl QuantumPoWBlock {
         self.mining_data.hash_rate = hash_rate;
     }
     
-    /// Sign block with miner's private key (Dilithium5)
+    /// Sign block with miner's private key (Dilithium5 post-quantum)
+    ///
+    /// # v2.4.7-beta: NIST PQC standard Dilithium5
+    /// - Secret key: 4,864 bytes
+    /// - Signed message: 4,627 bytes + message length
     pub fn sign(&mut self, private_key: &[u8]) -> Result<()> {
+        use pqcrypto_dilithium::dilithium5;
+        use pqcrypto_traits::sign::{SecretKey, SignedMessage};
+
         let block_hash = self.hash();
-        
-        // TODO: Implement Dilithium5 signature
-        // For now, use placeholder signature
-        let signature = {
-            let mut sig_data = Vec::new();
-            sig_data.extend_from_slice(&block_hash);
-            sig_data.extend_from_slice(private_key);
-            
-            let sig_hash = Sha3_256::digest(&sig_data);
-            sig_hash.to_vec()
-        };
-        
-        self.signature = signature;
+
+        // Parse Dilithium5 secret key
+        let sk = dilithium5::SecretKey::from_bytes(private_key)
+            .map_err(|_| anyhow::anyhow!("Invalid Dilithium5 secret key (expected 4,864 bytes)"))?;
+
+        // Sign the block hash with Dilithium5
+        let signed_message = dilithium5::sign(&block_hash, &sk);
+        self.signature = signed_message.as_bytes().to_vec();
+
+        tracing::debug!(
+            "🔐 Block {} signed with Dilithium5 ({} bytes)",
+            hex::encode(&block_hash[..8]),
+            self.signature.len()
+        );
         Ok(())
     }
-    
-    /// Verify block signature
+
+    /// Verify block signature using Dilithium5 post-quantum verification
+    ///
+    /// # v2.4.7-beta: Proper cryptographic verification
+    /// - Public key: 2,592 bytes
+    /// - Verifies both signature validity and message integrity
     pub fn verify_signature(&self, public_key: &[u8]) -> bool {
+        use pqcrypto_dilithium::dilithium5;
+        use pqcrypto_traits::sign::{PublicKey, SignedMessage};
+
         if self.signature.is_empty() {
             return false;
         }
-        
-        // TODO: Implement Dilithium5 verification
-        // For now, use placeholder verification
-        let block_hash = self.hash();
-        let mut sig_data = Vec::new();
-        sig_data.extend_from_slice(&block_hash);
-        sig_data.extend_from_slice(public_key);
-        
-        let expected_sig = Sha3_256::digest(&sig_data);
-        expected_sig.as_slice() == self.signature
+
+        // Parse Dilithium5 public key
+        let pk = match dilithium5::PublicKey::from_bytes(public_key) {
+            Ok(pk) => pk,
+            Err(_) => {
+                tracing::warn!("Invalid Dilithium5 public key");
+                return false;
+            }
+        };
+
+        // Parse signed message
+        let signed_msg = match dilithium5::SignedMessage::from_bytes(&self.signature) {
+            Ok(sm) => sm,
+            Err(_) => {
+                tracing::warn!("Invalid Dilithium5 signed message format");
+                return false;
+            }
+        };
+
+        // Verify signature and get original message
+        let expected_hash = self.hash();
+        match dilithium5::open(&signed_msg, &pk) {
+            Ok(verified_message) => {
+                if verified_message == expected_hash {
+                    tracing::debug!("✅ Block signature verified (Dilithium5)");
+                    true
+                } else {
+                    tracing::warn!("❌ Block hash mismatch after signature verification");
+                    false
+                }
+            }
+            Err(_) => {
+                tracing::warn!("❌ Dilithium5 signature verification failed");
+                false
+            }
+        }
     }
     
     /// Get block size in bytes

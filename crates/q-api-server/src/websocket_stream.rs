@@ -333,6 +333,12 @@ mod tests {
                 signature: vec![0; 64],
                 timestamp: Utc::now(),
                 data: vec![],
+                token_type: q_types::TokenType::QUG,
+                fee_token_type: q_types::TokenType::QUGUSD,
+                tx_type: q_types::TransactionType::Transfer,
+                pqc_signature: None,
+                signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+                pqc_public_key: None,
             });
         }
 

@@ -306,7 +306,7 @@ pub async fn mint_qnkusd(
 
     // NOTE: Frontend sends `amount` in base units (e.g., 2656000000 for 26.56 QUGUSD)
     // We need to convert back to human-readable for collateral ratio calculation
-    let amount_usd = (request.amount as f64) / 100_000_000.0; // Convert base units to USD
+    let amount_usd = (request.amount as f64) / 1e24; // Convert base units to USD
 
     // Calculate actual collateral ratio before the mint call
     let collateral_value_usd = match &collateral_type {
@@ -350,7 +350,7 @@ pub async fn mint_qnkusd(
         id: tx_id.0,            // Use the transaction ID from Quillon Bank
         from: zero_address,     // System/CDP mint (from zero address)
         to: borrower_bytes,     // User receiving QUGUSD
-        amount: request.amount, // QUGUSD amount already in frontend base units
+        amount: request.amount as u128, // QUGUSD amount already in frontend base units
         fee: 0,                 // No fee for CDP minting
         nonce: 0,               // CDP operations don't use nonces
         signature: vec![],      // System operation, no signature needed
@@ -363,6 +363,9 @@ pub async fn mint_qnkusd(
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
         tx_type: q_types::TransactionType::StableMint,
+        pqc_signature: None,
+        signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+        pqc_public_key: None,
     };
 
     // Store transaction for Recent Activity display
@@ -380,7 +383,7 @@ pub async fn mint_qnkusd(
         let mut token_balances = state.token_balances.write().await;
         let balance_key = (borrower_bytes, q_types::QUGUSD_TOKEN_ADDRESS);
         let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
-        let new_balance = current_balance + request.amount;
+        let new_balance = current_balance + request.amount as u128;
         token_balances.insert(balance_key, new_balance);
 
         info!(
@@ -405,7 +408,7 @@ pub async fn mint_qnkusd(
     {
         let mut wallet_balances = state.wallet_balances.write().await;
         let current_qug = wallet_balances.get(&borrower_bytes).copied().unwrap_or(0);
-        let collateral_base_units = (request.collateral_amount * 1e8) as u64;
+        let collateral_base_units = (request.collateral_amount * 1e8) as u128;
 
         if current_qug >= collateral_base_units {
             let new_qug_balance = current_qug - collateral_base_units;
@@ -683,6 +686,7 @@ fn parse_address(address_str: &str) -> Result<[u8; 32], StatusCode> {
 pub struct LoanApplication {
     pub loan_id: String,
     pub borrower_address: String,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
     pub loan_amount: u128,      // QUGUSD in base units
     pub collateral_amount: f64, // QUG amount
     pub collateral_type: String,
@@ -696,6 +700,7 @@ pub struct LoanApplication {
 #[derive(Debug, serde::Deserialize)]
 pub struct ApplyLoanRequest {
     pub wallet_address: String,
+    #[serde(deserialize_with = "q_types::u128_serde::deserialize")]
     pub loan_amount: u128,
     pub collateral_amount: f64,
     pub collateral_type: String,
@@ -767,7 +772,7 @@ pub async fn approve_loan(
             StatusCode::NOT_FOUND
         })?;
 
-        let collateral_base_units = (loan.collateral_amount * 1e8) as u64;
+        let collateral_base_units = (loan.collateral_amount * 1e8) as u128;
 
         if *qug_balance < collateral_base_units {
             error!(
@@ -800,7 +805,7 @@ pub async fn approve_loan(
         let mut token_balances = state.token_balances.write().await;
         let balance_key = (borrower_addr, q_types::QUGUSD_TOKEN_ADDRESS);
         let current_qugusd = token_balances.get(&balance_key).copied().unwrap_or(0);
-        let loan_amount_base_units = loan.loan_amount as u64; // Already in base units
+        let loan_amount_base_units = loan.loan_amount as u128; // Already in base units
         let new_qugusd = current_qugusd + loan_amount_base_units;
 
         token_balances.insert(balance_key, new_qugusd);
@@ -831,7 +836,7 @@ pub async fn approve_loan(
             .unwrap_or([0u8; 32]),
         from: zero_address,         // System/Loan mint (from zero address)
         to: borrower_addr,           // Borrower receiving QUGUSD
-        amount: loan.loan_amount as u64, // QUGUSD amount in base units
+        amount: loan.loan_amount as u128, // QUGUSD amount in base units
         fee: 0,                      // No fee for loan disbursement
         nonce: 0,                    // Loan operations don't use nonces
         signature: vec![],           // System operation, no signature needed
@@ -847,6 +852,9 @@ pub async fn approve_loan(
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
         tx_type: q_types::TransactionType::StableMint,
+        pqc_signature: None,
+        signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+        pqc_public_key: None,
     };
 
     // Store transaction for Recent Activity display
@@ -1023,6 +1031,7 @@ pub async fn apply_loan(
 pub struct PaybackLoanRequest {
     pub wallet_address: String,
     pub loan_id: String,
+    #[serde(deserialize_with = "q_types::u128_serde::deserialize")]
     pub payment_amount: u128, // QUGUSD amount in base units
 }
 
@@ -1093,7 +1102,7 @@ pub async fn payback_loan(
         let balance_key = (borrower_address, q_types::QUGUSD_TOKEN_ADDRESS);
         let current_qugusd = token_balances.get(&balance_key).copied().unwrap_or(0);
 
-        if current_qugusd < payment_amount {
+        if current_qugusd < payment_amount as u128 {
             error!(
                 "Insufficient QUGUSD balance: have {}, need {}",
                 current_qugusd as f64 / 1e8,
@@ -1102,7 +1111,7 @@ pub async fn payback_loan(
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        let new_qugusd = current_qugusd - payment_amount;
+        let new_qugusd = current_qugusd - payment_amount as u128;
         token_balances.insert(balance_key, new_qugusd);
 
         info!(
@@ -1125,7 +1134,7 @@ pub async fn payback_loan(
     // 7. Calculate collateral to return (proportional to payment)
     let payment_ratio = (payment_amount as f64) / (total_owed as f64);
     let collateral_to_return = loan.collateral_amount * payment_ratio;
-    let collateral_to_return_base = (collateral_to_return * 1e8) as u64;
+    let collateral_to_return_base = (collateral_to_return * 1e8) as u128;
 
     // 8. Return collateral to borrower
     {
@@ -1171,7 +1180,7 @@ pub async fn payback_loan(
             .unwrap_or([0u8; 32]),
         from: borrower_address,
         to: [0u8; 32], // System address (loan burning)
-        amount: payment_amount,
+        amount: payment_amount as u128,
         fee: 0,
         nonce: 0,
         signature: vec![],
@@ -1181,6 +1190,9 @@ pub async fn payback_loan(
         token_type: q_types::TokenType::QUGUSD,
         fee_token_type: q_types::TokenType::QUGUSD,
         tx_type: q_types::TransactionType::StableBurn,
+        pqc_signature: None,
+        signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+        pqc_public_key: None,
     };
 
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
@@ -1390,8 +1402,8 @@ async fn get_dev_fee_stats(
     let block_height = state.node_status.read().await.current_height;
 
     let stats = DevFeeStats {
-        total_collected_qnk: founder_balance as f64 / 100_000_000.0,
-        total_mining_rewards_qnk: estimated_total_rewards as f64 / 100_000_000.0,
+        total_collected_qnk: founder_balance as f64 / 1e24,
+        total_mining_rewards_qnk: estimated_total_rewards as f64 / 1e24,
         fee_percentage_actual: actual_fee_percent,
         blocks_processed: block_height,
         last_updated: Utc::now(),
@@ -1405,7 +1417,7 @@ async fn get_dev_fee_stats(
 struct FounderWalletInfo {
     wallet_address: String,
     balance_qnk: f64,
-    balance_qug: u64,
+    balance_qug: u128,
     role: String,
     description: String,
     last_updated: chrono::DateTime<chrono::Utc>,
@@ -1443,7 +1455,7 @@ async fn get_founder_wallet_info(
 
     let info = FounderWalletInfo {
         wallet_address: format!("qnk{}", FOUNDER_WALLET_HEX),
-        balance_qnk: balance as f64 / 100_000_000.0,
+        balance_qnk: balance as f64 / 1e24,
         balance_qug: balance,
         role: "Founder & CEO - Development Fund".to_string(),
         description: "Receives 1% of all mining rewards to fund ongoing development, research, infrastructure, and community support".to_string(),

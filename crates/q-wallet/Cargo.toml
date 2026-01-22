@@ -38,6 +38,18 @@ pqcrypto-traits = "0.3"
 
 # Encryption
 aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+
+# Automatic key management (v2.3.5-beta)
+argon2 = "0.5"
+rand_chacha = "0.3"
+bincode = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+# Classical key exchange for true hybrid encryption
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+hkdf = "0.12"
 
 [features]
 default = []

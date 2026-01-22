@@ -1,8 +1,32 @@
 import { motion } from 'framer-motion';
-import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter } from 'lucide-react';
+import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter, Twitter, MessageCircle, Globe, Github, FileText } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { qnkAPI } from '../services/api';
+
+// v3.1.1: Helper to safely parse u128 values that may come as strings from the API
+const parseU128 = (value: string | number | undefined): number => {
+  if (value === undefined || value === null) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
+
+// v2.7.7-beta: Social links interface for token metadata
+interface SocialLinks {
+  twitter?: string;       // Twitter/X handle or URL
+  discord?: string;       // Discord server invite link
+  telegram?: string;      // Telegram group/channel link
+  website?: string;       // Official website URL
+  github?: string;        // GitHub repository URL
+  medium?: string;        // Medium blog URL
+  reddit?: string;        // Reddit community URL
+  coinmarketcap?: string; // CoinMarketCap listing URL
+  coingecko?: string;     // CoinGecko listing URL
+}
 
 interface TokenDetails {
   id: string;
@@ -12,6 +36,7 @@ interface TokenDetails {
   price: number;
   change24h: number;
   marketCap: number;
+  fullyDilutedMarketCap?: number;  // FDV = totalSupply * price
   totalSupply: number;
   circulatingSupply: number;
   volume24h: number;
@@ -32,6 +57,8 @@ interface TokenDetails {
   description: string;
   website?: string;
   whitepaper?: string;
+  // v2.7.7-beta: Social media links
+  socialLinks?: SocialLinks;
 }
 
 interface TokenDetailsModalProps {
@@ -73,6 +100,119 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
   const [sortField, setSortField] = useState<SortField>('timestamp');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [filterType, setFilterType] = useState<TransactionFilter>('all');
+
+  // v2.3.6-beta: Real market stats from AMM oracle
+  const [realMarketStats, setRealMarketStats] = useState<{
+    marketCap: number;
+    liquidity: number;
+    totalSupply: number;
+    holders: number;
+    price: number;
+  } | null>(null);
+
+  // v2.3.6-beta: Fetch real market stats from AMM oracle
+  useEffect(() => {
+    if (!token) return;
+    let mounted = true;
+
+    const fetchRealMarketStats = async () => {
+      try {
+        // Try both symbol and full token ID for lookup
+        // Token ID might be the full contract address like "qnk1964527556e0d0970dc31d94a64ae44407c7a1522663993c3b01acdb1576a5ed"
+        const tokenIdToFetch = token.id?.startsWith('qnk') ? token.id : token.symbol;
+
+        // v2.3.8-beta: Fetch QUG price from oracle for proper liquidity calculation
+        let qugPriceUsd = token.price; // Fallback to token price
+        try {
+          const qugResponse = await fetch('/api/v1/oracle/price/QUG');
+          const qugData = await qugResponse.json();
+          if (qugData.success && qugData.data?.price_usd) {
+            qugPriceUsd = qugData.data.price_usd;
+          }
+        } catch {
+          console.warn('Failed to fetch QUG price, using token price as fallback');
+        }
+
+        // Fetch from AMM price oracle
+        const response = await fetch(`/api/v1/oracle/price/${encodeURIComponent(tokenIdToFetch)}`);
+        const data = await response.json();
+
+        if (data.success && data.data && mounted) {
+          const priceData = data.data;
+          const poolReserves = priceData.pool_reserves;
+
+          // Calculate real liquidity from pool reserves
+          let realLiquidity = 0;
+          if (poolReserves) {
+            // Liquidity = reserve0 (in USD value) + reserve1 (in USD value)
+            // reserve0 is token amount, reserve1 is typically QUG
+            // v3.1.1: Parse u128 values that may come as strings
+            const reserve0Parsed = parseU128(poolReserves.reserve0);
+            const reserve1Parsed = parseU128(poolReserves.reserve1);
+            const reserve0Value = reserve0Parsed * priceData.price_usd;
+            // v2.3.8-beta: Use real QUG price instead of hardcoded value
+            const reserve1Value = reserve1Parsed * qugPriceUsd;
+            realLiquidity = reserve0Value + reserve1Value;
+
+            console.log('📊 Pool reserves:', {
+              token0: poolReserves.token0,
+              reserve0: reserve0Parsed,
+              token1: poolReserves.token1,
+              reserve1: reserve1Parsed,
+              qugPrice: qugPriceUsd,
+              calculatedLiquidity: realLiquidity,
+            });
+          }
+
+          // Calculate market cap from total supply and price
+          // v2.3.8-beta: Use token's actual supply, default to 0 if not available
+          const actualSupply = token.totalSupply > 0 ? token.totalSupply : 0;
+          const realMarketCap = actualSupply * priceData.price_usd;
+
+          setRealMarketStats({
+            price: priceData.price_usd,
+            marketCap: realMarketCap,
+            liquidity: realLiquidity,
+            totalSupply: actualSupply,
+            holders: token.holders, // v2.3.8-beta: Use real holder count from token data
+          });
+
+          console.log('📊 Real market stats loaded:', {
+            price: priceData.price_usd,
+            marketCap: realMarketCap,
+            liquidity: realLiquidity,
+            source: priceData.source,
+          });
+        } else if (!data.success) {
+          // No pool data available - set reasonable defaults instead of mock billions
+          console.log('📊 No pool data for token, using defaults');
+          setRealMarketStats({
+            price: 0,
+            marketCap: 0,
+            liquidity: 0,
+            totalSupply: token.totalSupply > 0 ? token.totalSupply : 0,
+            holders: token.holders > 0 ? token.holders : 0,
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to fetch real market stats, using token data:', error);
+        // v2.3.8-beta: Use token data (which now comes from real APIs) instead of zeros
+        setRealMarketStats({
+          price: token.price || 0,
+          marketCap: token.marketCap || 0,
+          liquidity: token.liquidity || 0,
+          totalSupply: token.totalSupply || 0,
+          holders: token.holders || 0,
+        });
+      }
+    };
+
+    fetchRealMarketStats();
+
+    return () => {
+      mounted = false;
+    };
+  }, [token]);
 
   // Fetch real price history from backend with SSE real-time updates
   useEffect(() => {
@@ -414,12 +554,13 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
       : <ArrowDown className="w-4 h-4 text-quantum-cyan" />;
   };
 
-  const formatLargeNumber = (num: number) => {
-    if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
-    if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
-    if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
-    if (num >= 1e3) return `$${(num / 1e3).toFixed(2)}K`;
-    return `$${num.toFixed(2)}`;
+  const formatLargeNumber = (num: number, addDollarSign: boolean = true) => {
+    const prefix = addDollarSign ? '$' : '';
+    if (num >= 1e12) return `${prefix}${(num / 1e12).toFixed(2)}T`;
+    if (num >= 1e9) return `${prefix}${(num / 1e9).toFixed(2)}B`;
+    if (num >= 1e6) return `${prefix}${(num / 1e6).toFixed(2)}M`;
+    if (num >= 1e3) return `${prefix}${(num / 1e3).toFixed(2)}K`;
+    return `${prefix}${num.toFixed(2)}`;
   };
 
   // Early return if no token - this prevents the modal from rendering at all
@@ -549,33 +690,50 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
 
             {/* RIGHT COLUMN: All Info */}
             <div className="flex flex-col gap-6 overflow-y-auto max-h-[700px]">
-              {/* Stats Grid */}
+              {/* Stats Grid - v2.3.6-beta: Uses real market stats from AMM when available */}
               <div>
-                <h3 className="text-xl font-bold text-white mb-4">Market Stats</h3>
+                <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  Market Stats
+                  {realMarketStats && (
+                    <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">LIVE</span>
+                  )}
+                </h3>
                 <div className="grid grid-cols-2 gap-3">
                   <StatCard
                     icon={<Activity className="w-5 h-5" />}
                     label="Market Cap"
-                    value={formatLargeNumber(token.marketCap)}
+                    value={formatLargeNumber(realMarketStats?.marketCap ?? token.marketCap)}
                     color="from-cyan-500 to-blue-500"
+                  />
+                  <StatCard
+                    icon={<TrendingUp className="w-5 h-5" />}
+                    label="FDV (Fully Diluted)"
+                    value={formatLargeNumber(token.fullyDilutedMarketCap ?? (token.totalSupply * token.price))}
+                    color="from-indigo-500 to-purple-500"
                   />
                   <StatCard
                     icon={<Coins className="w-5 h-5" />}
                     label="Total Supply"
-                    value={formatLargeNumber(token.totalSupply)}
+                    value={formatLargeNumber(realMarketStats?.totalSupply ?? token.totalSupply, false)}
                     color="from-purple-500 to-pink-500"
                   />
                   <StatCard
                     icon={<Droplet className="w-5 h-5" />}
                     label="Liquidity"
-                    value={formatLargeNumber(token.liquidity)}
+                    value={formatLargeNumber(realMarketStats?.liquidity ?? token.liquidity)}
                     color="from-green-500 to-teal-500"
                   />
                   <StatCard
                     icon={<Users className="w-5 h-5" />}
                     label="Holders"
-                    value={token.holders.toLocaleString()}
+                    value={(realMarketStats?.holders ?? token.holders).toLocaleString()}
                     color="from-orange-500 to-red-500"
+                  />
+                  <StatCard
+                    icon={<ArrowUpDown className="w-5 h-5" />}
+                    label="24h Volume"
+                    value={formatLargeNumber(token.volume24h)}
+                    color="from-yellow-500 to-orange-500"
                   />
                 </div>
               </div>
@@ -632,6 +790,87 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                 <h3 className="text-xl font-bold text-white mb-4">About {token.name}</h3>
                 <p className="text-gray-300 leading-relaxed text-sm">{token.description}</p>
               </div>
+
+              {/* v2.7.7-beta: Social Media & Links */}
+              {token.socialLinks && Object.values(token.socialLinks).some(v => v) && (
+                <div>
+                  <h3 className="text-xl font-bold text-white mb-4">Social Media & Links</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    {token.socialLinks.twitter && (
+                      <SocialLinkCard
+                        icon={<Twitter className="w-5 h-5" />}
+                        label="Twitter / X"
+                        url={token.socialLinks.twitter.startsWith('http') ? token.socialLinks.twitter : `https://x.com/${token.socialLinks.twitter.replace('@', '')}`}
+                        color="from-blue-400 to-blue-600"
+                      />
+                    )}
+                    {token.socialLinks.discord && (
+                      <SocialLinkCard
+                        icon={<MessageCircle className="w-5 h-5" />}
+                        label="Discord"
+                        url={token.socialLinks.discord.startsWith('http') ? token.socialLinks.discord : `https://discord.gg/${token.socialLinks.discord}`}
+                        color="from-indigo-400 to-purple-600"
+                      />
+                    )}
+                    {token.socialLinks.telegram && (
+                      <SocialLinkCard
+                        icon={<MessageCircle className="w-5 h-5" />}
+                        label="Telegram"
+                        url={token.socialLinks.telegram.startsWith('http') ? token.socialLinks.telegram : `https://t.me/${token.socialLinks.telegram}`}
+                        color="from-cyan-400 to-blue-500"
+                      />
+                    )}
+                    {token.socialLinks.website && (
+                      <SocialLinkCard
+                        icon={<Globe className="w-5 h-5" />}
+                        label="Website"
+                        url={token.socialLinks.website.startsWith('http') ? token.socialLinks.website : `https://${token.socialLinks.website}`}
+                        color="from-green-400 to-emerald-600"
+                      />
+                    )}
+                    {token.socialLinks.github && (
+                      <SocialLinkCard
+                        icon={<Github className="w-5 h-5" />}
+                        label="GitHub"
+                        url={token.socialLinks.github.startsWith('http') ? token.socialLinks.github : `https://github.com/${token.socialLinks.github}`}
+                        color="from-gray-400 to-gray-600"
+                      />
+                    )}
+                    {token.socialLinks.medium && (
+                      <SocialLinkCard
+                        icon={<FileText className="w-5 h-5" />}
+                        label="Medium"
+                        url={token.socialLinks.medium.startsWith('http') ? token.socialLinks.medium : `https://medium.com/${token.socialLinks.medium}`}
+                        color="from-green-500 to-teal-600"
+                      />
+                    )}
+                    {token.socialLinks.reddit && (
+                      <SocialLinkCard
+                        icon={<MessageCircle className="w-5 h-5" />}
+                        label="Reddit"
+                        url={token.socialLinks.reddit.startsWith('http') ? token.socialLinks.reddit : `https://reddit.com/r/${token.socialLinks.reddit}`}
+                        color="from-orange-400 to-red-500"
+                      />
+                    )}
+                    {token.socialLinks.coinmarketcap && (
+                      <SocialLinkCard
+                        icon={<Coins className="w-5 h-5" />}
+                        label="CoinMarketCap"
+                        url={token.socialLinks.coinmarketcap}
+                        color="from-blue-500 to-cyan-500"
+                      />
+                    )}
+                    {token.socialLinks.coingecko && (
+                      <SocialLinkCard
+                        icon={<Coins className="w-5 h-5" />}
+                        label="CoinGecko"
+                        url={token.socialLinks.coingecko}
+                        color="from-green-400 to-lime-500"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -785,28 +1024,32 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                           {/* From */}
                           <td className="px-4 py-3">
                             <span className="text-xs font-mono text-gray-400">
-                              {tx.from.slice(0, 6)}...{tx.from.slice(-4)}
+                              {tx.from ? `${tx.from.slice(0, 6)}...${tx.from.slice(-4)}` : 'N/A'}
                             </span>
                           </td>
 
                           {/* To */}
                           <td className="px-4 py-3">
                             <span className="text-xs font-mono text-gray-400">
-                              {tx.to.slice(0, 6)}...{tx.to.slice(-4)}
+                              {tx.to ? `${tx.to.slice(0, 6)}...${tx.to.slice(-4)}` : 'N/A'}
                             </span>
                           </td>
 
                           {/* Tx Hash */}
                           <td className="px-4 py-3 text-center">
-                            <a
-                              href={`https://explorer.quillon.xyz/tx/${tx.txHash}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs font-mono text-quantum-cyan hover:text-quantum-purple transition-colors inline-flex items-center gap-1"
-                            >
-                              {tx.txHash.slice(0, 6)}...
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
+                            {tx.txHash ? (
+                              <a
+                                href={`https://explorer.quillon.xyz/tx/${tx.txHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs font-mono text-quantum-cyan hover:text-quantum-purple transition-colors inline-flex items-center gap-1"
+                              >
+                                {tx.txHash.slice(0, 6)}...
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            ) : (
+                              <span className="text-xs text-gray-500">N/A</span>
+                            )}
                           </td>
                         </motion.tr>
                       ))
@@ -904,5 +1147,35 @@ function FeeCard({ label, percentage }: { label: string; percentage: number }) {
         {percentage}%
       </div>
     </div>
+  );
+}
+
+// v2.7.7-beta: Social link card component
+function SocialLinkCard({ icon, label, url, color }: { icon: React.ReactNode; label: string; url: string; color: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group relative block"
+    >
+      <div className={`absolute -inset-0.5 bg-gradient-to-r ${color} rounded-xl blur opacity-20 group-hover:opacity-50 transition-opacity`} />
+      <div className="relative bg-black/60 backdrop-blur-xl rounded-xl p-3 border border-white/10 hover:border-white/30 transition-all">
+        <div className="flex items-center gap-3">
+          <div className={`p-2 rounded-lg bg-gradient-to-r ${color} text-white`}>
+            {icon}
+          </div>
+          <div className="flex-1">
+            <div className="text-sm font-medium text-white group-hover:text-quantum-cyan transition-colors">
+              {label}
+            </div>
+            <div className="text-xs text-gray-500 truncate max-w-[150px]">
+              {url.replace('https://', '').replace('http://', '')}
+            </div>
+          </div>
+          <ExternalLink className="w-4 h-4 text-gray-500 group-hover:text-quantum-cyan transition-colors" />
+        </div>
+      </div>
+    </a>
   );
 }

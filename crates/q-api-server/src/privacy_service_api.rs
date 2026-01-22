@@ -210,7 +210,7 @@ pub async fn tor_relay_service(
         Ok(_) => {
             info!(
                 "💰 PaaS Revenue: {} QUG to Quillon Bank (Tor relay)",
-                cost_qug as f64 / 100_000_000.0
+                cost_qug as f64 / 1e24
             );
         }
         Err(e) => {
@@ -251,7 +251,7 @@ pub async fn tor_relay_service(
         latency_ms,
         exit_node_country: exit_info.0,
         exit_node_fingerprint: exit_info.1,
-        relay_cost_qug: format!("{:.8}", cost_qug as f64 / 100_000_000.0),
+        relay_cost_qug: format!("{:.8}", cost_qug as f64 / 1e24),
         estimated_bandwidth_mb: data_size_mb,
         billing_transaction_id: billing_tx_id,
     };
@@ -377,7 +377,7 @@ pub async fn mixing_service(
         Ok(_) => {
             info!(
                 "💰 PaaS Revenue: {} QUG to Quillon Bank (mixing)",
-                mixing_fee as f64 / 100_000_000.0
+                mixing_fee as f64 / 1e24
             );
         }
         Err(e) => {
@@ -455,7 +455,7 @@ pub async fn mixing_service(
         mixing_pool_id: pool_id,
         participant_count: 16, // TODO: Get actual pool size
         stealth_addresses,
-        mixing_fee_qug: format!("{:.8}", mixing_fee as f64 / 100_000_000.0),
+        mixing_fee_qug: format!("{:.8}", mixing_fee as f64 / 1e24),
         zk_proof,
         broadcast_via_tor: true,
         billing_transaction_id: billing_tx_id,
@@ -547,7 +547,7 @@ pub async fn ring_signature_service(
 
     info!(
         "💰 PaaS Revenue: {} QUG to Quillon Bank (ring signature)",
-        signature_fee as f64 / 100_000_000.0
+        signature_fee as f64 / 1e24
     );
 
     // TODO: Implement actual Dilithium5 ring signature generation
@@ -573,7 +573,7 @@ pub async fn ring_signature_service(
         success: true,
         ring_signature,
         verification_data,
-        signature_fee_qug: format!("{:.8}", signature_fee as f64 / 100_000_000.0),
+        signature_fee_qug: format!("{:.8}", signature_fee as f64 / 1e24),
         quantum_resistant: request.signature_scheme == "dilithium5",
         billing_transaction_id: billing_tx_id,
     };
@@ -635,7 +635,7 @@ pub async fn stealth_address_service(
 
     info!(
         "💰 PaaS Revenue: {} QUG to Quillon Bank (stealth addresses)",
-        generation_fee as f64 / 100_000_000.0
+        generation_fee as f64 / 1e24
     );
 
     // TODO: Implement actual stealth address generation
@@ -654,7 +654,7 @@ pub async fn stealth_address_service(
         stealth_addresses,
         view_key: "master_view_key_encrypted".to_string(),
         spend_key: "master_spend_key_encrypted".to_string(),
-        generation_fee_qug: format!("{:.8}", generation_fee as f64 / 100_000_000.0),
+        generation_fee_qug: format!("{:.8}", generation_fee as f64 / 1e24),
         billing_transaction_id: billing_tx_id,
     };
 
@@ -712,7 +712,7 @@ pub async fn zk_stark_proof_service(
 
     info!(
         "💰 PaaS Revenue: {} QUG to Quillon Bank (ZK-STARK proof)",
-        proof_fee as f64 / 100_000_000.0
+        proof_fee as f64 / 1e24
     );
 
     // TODO: Implement actual ZK-STARK proof generation using q-zk-stark
@@ -727,7 +727,7 @@ pub async fn zk_stark_proof_service(
         verification_key: "base64_encoded_vk_placeholder".to_string(),
         proof_size_bytes: 45000, // Typical STARK proof size
         generation_time_ms: 250, // Simulated
-        proof_fee_qug: format!("{:.8}", proof_fee as f64 / 100_000_000.0),
+        proof_fee_qug: format!("{:.8}", proof_fee as f64 / 1e24),
         verifiable_on_chain: true,
         billing_transaction_id: billing_tx_id,
     };
@@ -893,14 +893,14 @@ pub async fn credit_quillon_bank(
 
     info!(
         "💰 PaaS Billing: {} QUG from customer {} to Quillon Bank master account (service: {:?})",
-        amount_qug as f64 / 100_000_000.0,
+        amount_qug as f64 / 1e24,
         hex::encode(&customer_wallet[..8]),
         service
     );
 
     info!(
         "🏦 Quillon Bank Master Balance: {} QUG",
-        orb_balance.available as f64 / 100_000_000.0
+        orb_balance.available as f64 / 1e24
     );
 
     // TODO: Debit customer wallet when authentication is implemented

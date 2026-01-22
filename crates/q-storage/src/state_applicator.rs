@@ -29,8 +29,10 @@ use crate::{
     CF_CONTRACTS, CF_CONTRACT_STORAGE, CF_VAULTS, CF_ORACLE_PRICES,
     CF_AI_CREDITS_V2, CF_AI_PROVIDERS, CF_PROPOSALS, CF_DELEGATIONS,
     CF_STAKES, CF_VALIDATORS, CF_SYSTEM_PARAMS, CF_NONCES, CF_STATE_ROOTS,
+    CF_PROTOCOL_FEES,
     state_processor::{TokenMetadata, PoolState, VaultState},
 };
+use q_types::{FOUNDER_WALLET, DEX_PROTOCOL_FEE_BPS, BPS_DIVISOR};
 
 /// StateApplicator applies state changes to RocksDB column families
 pub struct StateApplicator {
@@ -362,19 +364,44 @@ impl StateApplicator {
             } => {
                 self.apply_state_root_checkpoint(batch, *height, state_root, tx_root)?;
             }
+
+            // ========== v2.9.2-beta: Protocol Fee Verification ==========
+            StateChange::ProtocolFeeCollected {
+                fee_id,
+                trade_tx_hash,
+                fee_amount,
+                fee_token,
+                recipient,
+                trade_amount,
+                fee_rate_bps,
+                verification_hash,
+            } => {
+                self.apply_protocol_fee_collected(
+                    batch,
+                    fee_id,
+                    trade_tx_hash,
+                    *fee_amount,
+                    fee_token,
+                    recipient,
+                    *trade_amount,
+                    *fee_rate_bps,
+                    verification_hash,
+                )?;
+            }
         }
 
         Ok(())
     }
 
     // ========== Balance Operations ==========
+    // v2.10.0: Updated to u128 for 24 decimal precision
 
     fn apply_balance_credit(
         &self,
         batch: &mut WriteBatch,
         account: &[u8; 32],
         token: &[u8; 32],
-        amount: u64,
+        amount: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_TOKEN_BALANCES)
             .ok_or_else(|| anyhow::anyhow!("CF_TOKEN_BALANCES not found"))?;
@@ -384,13 +411,22 @@ impl StateApplicator {
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
-        // Read current balance
+        // Read current balance with backward compatibility
         let current = self.db.get_cf(&cf, &key)?
-            .map(|v| u64::from_be_bytes(v.try_into().unwrap_or([0u8; 8])))
+            .map(|v| {
+                if v.len() >= 16 {
+                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+                } else if v.len() >= 8 {
+                    // Legacy u64 format - upgrade with 10^16 multiplier
+                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                }
+            })
             .unwrap_or(0);
 
         let new_balance = current.saturating_add(amount);
-        batch.put_cf(&cf, &key, &new_balance.to_be_bytes());
+        batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
     }
@@ -400,7 +436,7 @@ impl StateApplicator {
         batch: &mut WriteBatch,
         account: &[u8; 32],
         token: &[u8; 32],
-        amount: u64,
+        amount: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_TOKEN_BALANCES)
             .ok_or_else(|| anyhow::anyhow!("CF_TOKEN_BALANCES not found"))?;
@@ -410,9 +446,18 @@ impl StateApplicator {
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
-        // Read current balance
+        // Read current balance with backward compatibility
         let current = self.db.get_cf(&cf, &key)?
-            .map(|v| u64::from_be_bytes(v.try_into().unwrap_or([0u8; 8])))
+            .map(|v| {
+                if v.len() >= 16 {
+                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+                } else if v.len() >= 8 {
+                    // Legacy u64 format - upgrade with 10^16 multiplier
+                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                }
+            })
             .unwrap_or(0);
 
         if current < amount {
@@ -420,12 +465,13 @@ impl StateApplicator {
         }
 
         let new_balance = current - amount;
-        batch.put_cf(&cf, &key, &new_balance.to_be_bytes());
+        batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
     }
 
     // ========== Token Operations ==========
+    // v2.10.0: Updated to u128 for high precision tokens
 
     fn apply_token_create(
         &self,
@@ -434,8 +480,8 @@ impl StateApplicator {
         name: &[u8; 32],
         symbol: &[u8; 8],
         decimals: u8,
-        initial_supply: u64,
-        max_supply: u64,
+        initial_supply: u128,
+        max_supply: u128,
         mint_authority: &[u8; 32],
         freeze_authority: Option<&[u8; 32]>,
         is_mintable: bool,
@@ -464,6 +510,7 @@ impl StateApplicator {
     }
 
     // ========== DEX Operations ==========
+    // v2.10.0: Updated to u128 for high precision
 
     fn apply_pool_create(
         &self,
@@ -472,10 +519,10 @@ impl StateApplicator {
         token_a: &[u8; 32],
         token_b: &[u8; 32],
         fee_bps: u16,
-        initial_a: u64,
-        initial_b: u64,
+        initial_a: u128,
+        initial_b: u128,
         _creator: &[u8; 32],
-        lp_supply: u64,
+        lp_supply: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_DEX_POOLS)
             .ok_or_else(|| anyhow::anyhow!("CF_DEX_POOLS not found"))?;
@@ -501,9 +548,9 @@ impl StateApplicator {
         &self,
         batch: &mut WriteBatch,
         pool_id: &[u8; 32],
-        reserve_a: u64,
-        reserve_b: u64,
-        lp_supply: u64,
+        reserve_a: u128,
+        reserve_b: u128,
+        lp_supply: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_DEX_POOLS)
             .ok_or_else(|| anyhow::anyhow!("CF_DEX_POOLS not found"))?;
@@ -532,7 +579,7 @@ impl StateApplicator {
         batch: &mut WriteBatch,
         pool_id: &[u8; 32],
         account: &[u8; 32],
-        amount: u64,
+        amount: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_LP_BALANCES)
             .ok_or_else(|| anyhow::anyhow!("CF_LP_BALANCES not found"))?;
@@ -542,12 +589,21 @@ impl StateApplicator {
         key.extend_from_slice(pool_id);
         key.extend_from_slice(account);
 
+        // Read with backward compatibility
         let current = self.db.get_cf(&cf, &key)?
-            .map(|v| u64::from_be_bytes(v.try_into().unwrap_or([0u8; 8])))
+            .map(|v| {
+                if v.len() >= 16 {
+                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+                } else if v.len() >= 8 {
+                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                }
+            })
             .unwrap_or(0);
 
         let new_balance = current.saturating_add(amount);
-        batch.put_cf(&cf, &key, &new_balance.to_be_bytes());
+        batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
     }
@@ -557,7 +613,7 @@ impl StateApplicator {
         batch: &mut WriteBatch,
         pool_id: &[u8; 32],
         account: &[u8; 32],
-        amount: u64,
+        amount: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_LP_BALANCES)
             .ok_or_else(|| anyhow::anyhow!("CF_LP_BALANCES not found"))?;
@@ -566,8 +622,17 @@ impl StateApplicator {
         key.extend_from_slice(pool_id);
         key.extend_from_slice(account);
 
+        // Read with backward compatibility
         let current = self.db.get_cf(&cf, &key)?
-            .map(|v| u64::from_be_bytes(v.try_into().unwrap_or([0u8; 8])))
+            .map(|v| {
+                if v.len() >= 16 {
+                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+                } else if v.len() >= 8 {
+                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                }
+            })
             .unwrap_or(0);
 
         if current < amount {
@@ -575,7 +640,7 @@ impl StateApplicator {
         }
 
         let new_balance = current - amount;
-        batch.put_cf(&cf, &key, &new_balance.to_be_bytes());
+        batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
     }
@@ -640,24 +705,25 @@ impl StateApplicator {
     }
 
     // ========== Vault Operations ==========
+    // v2.10.0: Updated to u128 for 24 decimal precision
 
     fn apply_vault_update(
         &self,
         batch: &mut WriteBatch,
         vault_id: &[u8; 32],
         owner: &[u8; 32],
-        collateral_amount: u64,
-        debt_amount: u64,
+        collateral_amount: u128,
+        debt_amount: u128,
         collateral_ratio_bps: u32,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_VAULTS)
             .ok_or_else(|| anyhow::anyhow!("CF_VAULTS not found"))?;
 
-        // Serialize: owner (32) | collateral (8) | debt (8) | ratio (4) | created_at (8)
-        let mut value = Vec::with_capacity(60);
+        // Serialize: owner (32) | collateral (16) | debt (16) | ratio (4) | created_at (8)
+        let mut value = Vec::with_capacity(76);
         value.extend_from_slice(owner);
-        value.extend_from_slice(&collateral_amount.to_be_bytes());
-        value.extend_from_slice(&debt_amount.to_be_bytes());
+        value.extend_from_slice(&collateral_amount.to_le_bytes());
+        value.extend_from_slice(&debt_amount.to_le_bytes());
         value.extend_from_slice(&collateral_ratio_bps.to_be_bytes());
         value.extend_from_slice(&chrono::Utc::now().timestamp().to_be_bytes());
 
@@ -670,16 +736,16 @@ impl StateApplicator {
         &self,
         batch: &mut WriteBatch,
         feed_id: &[u8; 32],
-        price: u64,
+        price: u128,
         timestamp: i64,
         num_signatures: u8,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_ORACLE_PRICES)
             .ok_or_else(|| anyhow::anyhow!("CF_ORACLE_PRICES not found"))?;
 
-        // Serialize: price (8) | timestamp (8) | num_signatures (1)
-        let mut value = Vec::with_capacity(17);
-        value.extend_from_slice(&price.to_be_bytes());
+        // Serialize: price (16) | timestamp (8) | num_signatures (1)
+        let mut value = Vec::with_capacity(25);
+        value.extend_from_slice(&price.to_le_bytes());
         value.extend_from_slice(&timestamp.to_be_bytes());
         value.push(num_signatures);
 
@@ -689,23 +755,24 @@ impl StateApplicator {
     }
 
     // ========== AI Credits Operations ==========
+    // v2.10.0: Updated to u128 for precision
 
     fn apply_ai_credits_update(
         &self,
         batch: &mut WriteBatch,
         account: &[u8; 32],
-        balance: u64,
-        earned: u64,
-        spent: u64,
+        balance: u128,
+        earned: u128,
+        spent: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_AI_CREDITS_V2)
             .ok_or_else(|| anyhow::anyhow!("CF_AI_CREDITS_V2 not found"))?;
 
-        // Serialize: balance (8) | earned (8) | spent (8)
-        let mut value = Vec::with_capacity(24);
-        value.extend_from_slice(&balance.to_be_bytes());
-        value.extend_from_slice(&earned.to_be_bytes());
-        value.extend_from_slice(&spent.to_be_bytes());
+        // Serialize: balance (16) | earned (16) | spent (16)
+        let mut value = Vec::with_capacity(48);
+        value.extend_from_slice(&balance.to_le_bytes());
+        value.extend_from_slice(&earned.to_le_bytes());
+        value.extend_from_slice(&spent.to_le_bytes());
 
         batch.put_cf(&cf, account, &value);
 
@@ -718,17 +785,17 @@ impl StateApplicator {
         provider_id: &[u8; 32],
         wallet: &[u8; 32],
         capacity: u64,
-        price_per_credit: u64,
+        price_per_credit: u128,
         is_active: bool,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_AI_PROVIDERS)
             .ok_or_else(|| anyhow::anyhow!("CF_AI_PROVIDERS not found"))?;
 
-        // Serialize: wallet (32) | capacity (8) | price (8) | active (1)
-        let mut value = Vec::with_capacity(49);
+        // Serialize: wallet (32) | capacity (8) | price (16) | active (1)
+        let mut value = Vec::with_capacity(57);
         value.extend_from_slice(wallet);
         value.extend_from_slice(&capacity.to_be_bytes());
-        value.extend_from_slice(&price_per_credit.to_be_bytes());
+        value.extend_from_slice(&price_per_credit.to_le_bytes());
         value.push(if is_active { 1 } else { 0 });
 
         batch.put_cf(&cf, provider_id, &value);
@@ -737,6 +804,7 @@ impl StateApplicator {
     }
 
     // ========== Governance Operations ==========
+    // v2.10.0: Updated votes to u128 for token-weighted voting
 
     fn apply_proposal_create(
         &self,
@@ -751,17 +819,17 @@ impl StateApplicator {
         let cf = self.db.cf_handle(CF_PROPOSALS)
             .ok_or_else(|| anyhow::anyhow!("CF_PROPOSALS not found"))?;
 
-        // Serialize: proposer (32) | start (8) | end (8) | quorum (4) | exec_hash (32) | status (1) | votes (24)
-        let mut value = Vec::with_capacity(109);
+        // Serialize: proposer (32) | start (8) | end (8) | quorum (4) | exec_hash (32) | status (1) | votes (48)
+        let mut value = Vec::with_capacity(133);
         value.extend_from_slice(proposer);
         value.extend_from_slice(&start_height.to_be_bytes());
         value.extend_from_slice(&end_height.to_be_bytes());
         value.extend_from_slice(&quorum_bps.to_be_bytes());
         value.extend_from_slice(execution_hash);
         value.push(0); // status = pending
-        value.extend_from_slice(&0u64.to_be_bytes()); // votes_for
-        value.extend_from_slice(&0u64.to_be_bytes()); // votes_against
-        value.extend_from_slice(&0u64.to_be_bytes()); // votes_abstain
+        value.extend_from_slice(&0u128.to_le_bytes()); // votes_for
+        value.extend_from_slice(&0u128.to_le_bytes()); // votes_against
+        value.extend_from_slice(&0u128.to_le_bytes()); // votes_abstain
 
         batch.put_cf(&cf, proposal_id, &value);
 
@@ -772,9 +840,9 @@ impl StateApplicator {
         &self,
         batch: &mut WriteBatch,
         proposal_id: &[u8; 32],
-        votes_for: u64,
-        votes_against: u64,
-        votes_abstain: u64,
+        votes_for: u128,
+        votes_against: u128,
+        votes_abstain: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_PROPOSALS)
             .ok_or_else(|| anyhow::anyhow!("CF_PROPOSALS not found"))?;
@@ -787,11 +855,15 @@ impl StateApplicator {
             bail!("Invalid proposal data");
         }
 
-        // Update vote counts (bytes 85-108)
+        // Update vote counts (bytes 85-132 for u128 format)
         let mut value = existing.to_vec();
-        value[85..93].copy_from_slice(&votes_for.to_be_bytes());
-        value[93..101].copy_from_slice(&votes_against.to_be_bytes());
-        value[101..109].copy_from_slice(&votes_abstain.to_be_bytes());
+        // Resize if needed for u128 format
+        if value.len() < 133 {
+            value.resize(133, 0);
+        }
+        value[85..101].copy_from_slice(&votes_for.to_le_bytes());
+        value[101..117].copy_from_slice(&votes_against.to_le_bytes());
+        value[117..133].copy_from_slice(&votes_abstain.to_le_bytes());
 
         batch.put_cf(&cf, proposal_id, &value);
 
@@ -827,13 +899,13 @@ impl StateApplicator {
         batch: &mut WriteBatch,
         delegator: &[u8; 32],
         delegate: Option<&[u8; 32]>,
-        voting_power: u64,
+        voting_power: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_DELEGATIONS)
             .ok_or_else(|| anyhow::anyhow!("CF_DELEGATIONS not found"))?;
 
-        // Serialize: has_delegate (1) | delegate (32) | voting_power (8)
-        let mut value = Vec::with_capacity(41);
+        // Serialize: has_delegate (1) | delegate (32) | voting_power (16)
+        let mut value = Vec::with_capacity(49);
         if let Some(d) = delegate {
             value.push(1);
             value.extend_from_slice(d);
@@ -841,7 +913,7 @@ impl StateApplicator {
             value.push(0);
             value.extend_from_slice(&[0u8; 32]);
         }
-        value.extend_from_slice(&voting_power.to_be_bytes());
+        value.extend_from_slice(&voting_power.to_le_bytes());
 
         batch.put_cf(&cf, delegator, &value);
 
@@ -849,15 +921,16 @@ impl StateApplicator {
     }
 
     // ========== Staking Operations ==========
+    // v2.10.0: Updated to u128 for precision
 
     fn apply_stake_update(
         &self,
         batch: &mut WriteBatch,
         staker: &[u8; 32],
         validator: &[u8; 32],
-        staked_amount: u64,
+        staked_amount: u128,
         unbonding_end: i64,
-        pending_rewards: u64,
+        pending_rewards: u128,
     ) -> Result<()> {
         let cf = self.db.cf_handle(CF_STAKES)
             .ok_or_else(|| anyhow::anyhow!("CF_STAKES not found"))?;
@@ -867,11 +940,11 @@ impl StateApplicator {
         key.extend_from_slice(staker);
         key.extend_from_slice(validator);
 
-        // Serialize: staked (8) | unbonding_end (8) | rewards (8)
-        let mut value = Vec::with_capacity(24);
-        value.extend_from_slice(&staked_amount.to_be_bytes());
+        // Serialize: staked (16) | unbonding_end (8) | rewards (16)
+        let mut value = Vec::with_capacity(40);
+        value.extend_from_slice(&staked_amount.to_le_bytes());
         value.extend_from_slice(&unbonding_end.to_be_bytes());
-        value.extend_from_slice(&pending_rewards.to_be_bytes());
+        value.extend_from_slice(&pending_rewards.to_le_bytes());
 
         batch.put_cf(&cf, &key, &value);
 
@@ -882,7 +955,7 @@ impl StateApplicator {
         &self,
         batch: &mut WriteBatch,
         validator_id: &[u8; 32],
-        total_stake: u64,
+        total_stake: u128,
         commission_bps: u16,
         is_active: bool,
         slash_count: u32,
@@ -890,9 +963,9 @@ impl StateApplicator {
         let cf = self.db.cf_handle(CF_VALIDATORS)
             .ok_or_else(|| anyhow::anyhow!("CF_VALIDATORS not found"))?;
 
-        // Serialize: total_stake (8) | commission (2) | active (1) | slash_count (4)
-        let mut value = Vec::with_capacity(15);
-        value.extend_from_slice(&total_stake.to_be_bytes());
+        // Serialize: total_stake (16) | commission (2) | active (1) | slash_count (4)
+        let mut value = Vec::with_capacity(23);
+        value.extend_from_slice(&total_stake.to_le_bytes());
         value.extend_from_slice(&commission_bps.to_be_bytes());
         value.push(if is_active { 1 } else { 0 });
         value.extend_from_slice(&slash_count.to_be_bytes());
@@ -955,10 +1028,103 @@ impl StateApplicator {
         Ok(())
     }
 
+    // ========== v2.9.2-beta: Protocol Fee Operations ==========
+
+    /// Apply protocol fee collection with consensus verification
+    ///
+    /// All nodes MUST verify:
+    /// 1. Recipient is FOUNDER_WALLET
+    /// 2. Fee rate matches DEX_PROTOCOL_FEE_BPS
+    /// 3. Fee amount matches expected calculation
+    /// v2.10.0: Updated to u128 for precision
+    fn apply_protocol_fee_collected(
+        &self,
+        batch: &mut WriteBatch,
+        fee_id: &[u8; 32],
+        trade_tx_hash: &[u8; 32],
+        fee_amount: u128,
+        fee_token: &[u8; 32],
+        recipient: &[u8; 32],
+        trade_amount: u128,
+        fee_rate_bps: u16,
+        verification_hash: &[u8; 32],
+    ) -> Result<()> {
+        // =========================================================================
+        // CONSENSUS CRITICAL: All nodes MUST verify these conditions
+        // If any check fails, the block containing this change is INVALID
+        // =========================================================================
+
+        // 1. Verify recipient is FOUNDER_WALLET
+        if *recipient != FOUNDER_WALLET {
+            bail!(
+                "🚨 CONSENSUS VIOLATION: Protocol fee recipient is not FOUNDER_WALLET! \
+                 Expected {}, got {}. Block is INVALID!",
+                hex::encode(&FOUNDER_WALLET[..8]),
+                hex::encode(&recipient[..8])
+            );
+        }
+
+        // 2. Verify fee rate matches protocol constant
+        if fee_rate_bps != DEX_PROTOCOL_FEE_BPS {
+            bail!(
+                "🚨 CONSENSUS VIOLATION: Fee rate mismatch! \
+                 Expected {} bps, got {} bps. Block is INVALID!",
+                DEX_PROTOCOL_FEE_BPS, fee_rate_bps
+            );
+        }
+
+        // 3. Verify fee amount calculation (u128 precision)
+        let expected_fee = trade_amount * DEX_PROTOCOL_FEE_BPS as u128 / BPS_DIVISOR as u128;
+        if fee_amount != expected_fee {
+            bail!(
+                "🚨 CONSENSUS VIOLATION: Fee amount mismatch! \
+                 Expected {} for trade amount {}, got {}. Block is INVALID!",
+                expected_fee, trade_amount, fee_amount
+            );
+        }
+
+        // Store the fee record for auditing and P2P verification
+        if let Some(cf) = self.db.cf_handle(CF_PROTOCOL_FEES) {
+            // Serialize fee record as compact JSON for storage (u128 as strings)
+            let fee_record = serde_json::json!({
+                "fee_id": hex::encode(fee_id),
+                "trade_tx_hash": hex::encode(trade_tx_hash),
+                "fee_amount": fee_amount.to_string(),
+                "fee_token": hex::encode(fee_token),
+                "recipient": hex::encode(recipient),
+                "trade_amount": trade_amount.to_string(),
+                "fee_rate_bps": fee_rate_bps,
+                "verification_hash": hex::encode(verification_hash),
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+
+            batch.put_cf(&cf, fee_id, fee_record.to_string().as_bytes());
+        } else {
+            // Column family might not exist in older databases - just log warning
+            warn!(
+                "⚠️ CF_PROTOCOL_FEES not available, fee record {} not persisted (auditing only)",
+                hex::encode(&fee_id[..8])
+            );
+        }
+
+        info!(
+            "✅ Protocol fee verified: {} units of token {} → FOUNDER_WALLET [fee_id: {}]",
+            fee_amount,
+            hex::encode(&fee_token[..4]),
+            hex::encode(&fee_id[..8])
+        );
+
+        Ok(())
+    }
+
     // ========== Query Methods ==========
 
     /// Get token balance for an account
-    pub fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u64> {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u128> {
         let cf = self.db.cf_handle(CF_TOKEN_BALANCES)
             .ok_or_else(|| anyhow::anyhow!("CF_TOKEN_BALANCES not found"))?;
 
@@ -966,8 +1132,18 @@ impl StateApplicator {
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
+        // Read with backward compatibility
         Ok(self.db.get_cf(&cf, &key)?
-            .map(|v| u64::from_be_bytes(v.try_into().unwrap_or([0u8; 8])))
+            .map(|v| {
+                if v.len() >= 16 {
+                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+                } else if v.len() >= 8 {
+                    // Legacy u64 format - upgrade with 10^16 multiplier
+                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                }
+            })
             .unwrap_or(0))
     }
 

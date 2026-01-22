@@ -72,7 +72,7 @@ pub struct TradeMessage {
     pub buy_order_id: String,
     pub sell_order_id: String,
     pub price: u64,
-    pub amount: u64,
+    pub amount: u128,
     pub buyer: [u8; 32],
     pub seller: [u8; 32],
     pub timestamp: u64,
@@ -85,9 +85,9 @@ pub struct LiquidityPoolMessage {
     pub pool_address: [u8; 32],
     pub token_a: String,
     pub token_b: String,
-    pub reserve_a: u64,
-    pub reserve_b: u64,
-    pub total_liquidity: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
+    pub total_liquidity: u128,
     pub fee_rate: u32, // In basis points (100 = 1%)
     pub last_update: u64,
 }
@@ -133,9 +133,9 @@ pub struct LiquidityPool {
     pub address: [u8; 32],
     pub token_a: String,
     pub token_b: String,
-    pub reserve_a: u64,
-    pub reserve_b: u64,
-    pub total_liquidity: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
+    pub total_liquidity: u128,
     pub fee_rate: u32,
 }
 
@@ -144,7 +144,7 @@ pub struct LiquidityPool {
 pub struct DEXStats {
     pub total_orders: u64,
     pub total_trades: u64,
-    pub total_volume_24h: u64,
+    pub total_volume_24h: u128,
     pub active_pairs: u64,
     pub active_pools: u64,
 }

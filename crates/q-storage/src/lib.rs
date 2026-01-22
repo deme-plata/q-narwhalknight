@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use q_dag_knight::BullsharkCert;
 use q_dag_knight::NarwhalPayload;
 use q_narwhal_core::Certificate;
-use q_types::{Block, NodeId, Vertex};
+use q_types::{Block, NodeId, Vertex, u128_serde};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -22,6 +22,114 @@ extern crate blake3;
 
 // 🚀 v1.0.93-beta: Parallel sync optimization
 use rayon::prelude::*;
+
+// ============ v2.4.2: TOKEN STAKING TYPES ============
+// Defined here to avoid circular dependency with q-api-server
+
+/// Token fee configuration stored per contract
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenFeeConfig {
+    pub enabled: bool,
+    pub reflection_fee_bps: u64,
+    pub burn_fee_bps: u64,
+    pub liquidity_fee_bps: u64,
+    pub dev_fee_bps: u64,
+    pub dev_wallet: Option<String>,
+    pub excluded_addresses: Vec<String>,
+}
+
+/// Staking tier with lock periods and APY
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum StakingTier {
+    Bronze,
+    Silver,
+    Gold,
+    Diamond,
+}
+
+/// Token stake position
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenStakePosition {
+    pub wallet_address: String,
+    pub contract_address: String,
+    pub amount: u64,
+    pub tier: StakingTier,
+    pub start_time: u64,
+    pub unlock_time: u64,
+    pub last_reward_claim: u64,
+    pub total_rewards_claimed: u64,
+}
+
+impl TokenFeeConfig {
+    /// Calculate total fee percentage
+    pub fn total_fee_bps(&self) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
+        self.reflection_fee_bps + self.burn_fee_bps + self.liquidity_fee_bps + self.dev_fee_bps
+    }
+
+    /// Calculate fee breakdown for a transfer amount
+    /// Returns (transfer_amount, reflection, burn, liquidity, dev)
+    pub fn calculate_fees(&self, amount: u64) -> (u64, u64, u64, u64, u64) {
+        if !self.enabled || amount == 0 {
+            return (amount, 0, 0, 0, 0);
+        }
+
+        let reflection = (amount * self.reflection_fee_bps) / 10000;
+        let burn = (amount * self.burn_fee_bps) / 10000;
+        let liquidity = (amount * self.liquidity_fee_bps) / 10000;
+        let dev = (amount * self.dev_fee_bps) / 10000;
+
+        let total_fee = reflection + burn + liquidity + dev;
+        let transfer_amount = amount.saturating_sub(total_fee);
+
+        (transfer_amount, reflection, burn, liquidity, dev)
+    }
+
+    /// Check if an address is excluded from fees
+    pub fn is_excluded(&self, address: &str) -> bool {
+        self.excluded_addresses.iter().any(|a| a.eq_ignore_ascii_case(address))
+    }
+}
+
+impl StakingTier {
+    pub fn from_days(days: u64) -> Self {
+        match days {
+            0..=7 => StakingTier::Bronze,
+            8..=30 => StakingTier::Silver,
+            31..=90 => StakingTier::Gold,
+            _ => StakingTier::Diamond,
+        }
+    }
+
+    pub fn lock_period_seconds(&self) -> u64 {
+        match self {
+            StakingTier::Bronze => 7 * 24 * 3600,
+            StakingTier::Silver => 30 * 24 * 3600,
+            StakingTier::Gold => 90 * 24 * 3600,
+            StakingTier::Diamond => 180 * 24 * 3600,
+        }
+    }
+
+    pub fn apy_bps(&self) -> u64 {
+        match self {
+            StakingTier::Bronze => 500,   // 5%
+            StakingTier::Silver => 1000,  // 10%
+            StakingTier::Gold => 1500,    // 15%
+            StakingTier::Diamond => 2500, // 25%
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            StakingTier::Bronze => "Bronze",
+            StakingTier::Silver => "Silver",
+            StakingTier::Gold => "Gold",
+            StakingTier::Diamond => "Diamond",
+        }
+    }
+}
 
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
@@ -40,12 +148,14 @@ pub mod manifest;
 pub mod metrics;
 pub mod ordered_block_buffer; // ✅ v1.0.2-beta: Height-ordered reorder buffer for consensus safety
 pub mod pointer_integrity; // ✅ v1.0.14-beta: Database pointer corruption detection & auto-repair
+pub mod preflight_check;  // ✅ v3.3.7-beta: Mainnet-safe pre-flight verification before serving requests
 pub mod pruning;
 pub mod safe_batched_writer; // ✅ v1.0.2-beta: WAL-based batched writes for 150-250 BPS (Phase 1A)
 pub mod snapshot;
 pub mod sync;
 pub mod token_registry;
 pub mod price_history;
+pub mod contract_events;  // v2.9.2-beta: Contract event persistence for VM decentralization
 pub mod transaction;
 pub mod turbo_sync;
 // TEMPORARILY DISABLED: Circular dependency with q-api-server (sync_activation module)
@@ -124,6 +234,9 @@ pub mod precompressed_storage;  // Pre-compressed block storage (FUEL TANK) - Ze
 pub mod uring_writer;           // io_uring async I/O (WARP DRIVE) - Near-zero kernel overhead
 pub mod zerocopy_blocks;        // Zero-copy block access (MASS REDUCTION) - Memory-mapped blocks
 
+// ========== v2.3.9-beta: WARP SYNC v1.0 - Ultra-High-Performance Synchronization ==========
+pub mod warp_sync;              // Batch signature verification + epoch-parallel validation (1,200x target)
+
 // Windows uses sled implementation
 #[cfg(target_os = "windows")]
 pub mod kv_sled;
@@ -180,6 +293,11 @@ pub use encryption_stream::{
 };
 pub use encryption_migration::{
     TransitionalEncryptionProvider, FileEncryptionStatus, MigrationProgress, FileFormatDetector,
+};
+
+// ========== v2.9.2-beta: Contract Event Persistence Exports ==========
+pub use contract_events::{
+    ContractEvent, ContractEventStorage, ContractEventStats, IndexedParam,
 };
 
 // ========== v1.0.4-beta: Phase 2 DAG-Aware Sync Exports ==========
@@ -279,6 +397,8 @@ pub const CF_AI_PROVIDERS: &str = "cf_ai_providers";
 pub const CF_PROPOSALS: &str = "cf_proposals";
 /// Vote delegations: key = delegator:32, value = (delegate, voting_power)
 pub const CF_DELEGATIONS: &str = "cf_delegations";
+/// v2.4.0-beta: Governance votes: key = proposal_id:vote_id, value = WeightedVote JSON
+pub const CF_GOVERNANCE_VOTES: &str = "cf_governance_votes";
 /// Staking positions: key = [staker:32 | validator:32], value = StakeState
 pub const CF_STAKES: &str = "cf_stakes";
 /// Validator info: key = validator_id:32, value = ValidatorState
@@ -297,6 +417,38 @@ pub const CF_SYSTEM_PARAMS: &str = "cf_system_params";
 pub const CF_NONCES: &str = "cf_nonces";
 /// State root checkpoints: key = height:u64, value = (state_root, tx_root)
 pub const CF_STATE_ROOTS: &str = "cf_state_roots";
+/// v2.3.6-beta: Swap history for Token Details Modal
+/// key = "swap:{token}:{timestamp}", value = JSON swap record
+pub const CF_SWAP_HISTORY: &str = "cf_swap_history";
+/// v2.4.9-beta: DCA (Dollar Cost Averaging) orders
+/// key = order_id, value = DcaOrder JSON
+pub const CF_DCA_ORDERS: &str = "cf_dca_orders";
+/// v2.4.9-beta: DCA execution history
+/// key = order_id:timestamp, value = DcaExecution JSON
+pub const CF_DCA_EXECUTIONS: &str = "cf_dca_executions";
+/// v2.9.2-beta: Protocol fees collected (for consensus verification)
+/// key = fee_id:32, value = ProtocolFeeRecord JSON
+pub const CF_PROTOCOL_FEES: &str = "cf_protocol_fees";
+
+/// v2.5.0-beta: Perpetual futures positions
+/// key = position_id, value = PerpPosition JSON
+pub const CF_PERP_POSITIONS: &str = "cf_perp_positions";
+/// v2.5.0-beta: Perpetual futures orders
+/// key = order_id, value = PerpOrder JSON
+pub const CF_PERP_ORDERS: &str = "cf_perp_orders";
+/// v2.5.0-beta: Perpetual futures trades
+/// key = trade_id:timestamp, value = PerpTrade JSON
+pub const CF_PERP_TRADES: &str = "cf_perp_trades";
+/// v2.5.0-beta: Perpetual futures funding history
+/// key = market:timestamp, value = FundingPayment JSON
+pub const CF_PERP_FUNDING: &str = "cf_perp_funding";
+/// v2.5.0-beta: Perpetual futures liquidations
+/// key = liquidation_id, value = Liquidation JSON
+pub const CF_PERP_LIQUIDATIONS: &str = "cf_perp_liquidations";
+
+/// v2.9.2-beta: Contract events for VM persistence
+/// key = contract_address:block_height:event_index, value = ContractEvent JSON
+pub const CF_CONTRACT_EVENTS: &str = "cf_contract_events";
 
 /// All column families for state sync (for database initialization)
 pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
@@ -312,6 +464,7 @@ pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_AI_PROVIDERS,
     CF_PROPOSALS,
     CF_DELEGATIONS,
+    CF_GOVERNANCE_VOTES,
     CF_STAKES,
     CF_VALIDATORS,
     CF_SYSTEM_PARAMS,
@@ -320,6 +473,15 @@ pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_QNO_STAKES,
     CF_QNO_DOMAINS,
     CF_QNO_STATS,
+    CF_SWAP_HISTORY,
+    CF_DCA_ORDERS,
+    CF_DCA_EXECUTIONS,
+    CF_PERP_POSITIONS,
+    CF_PERP_ORDERS,
+    CF_PERP_TRADES,
+    CF_PERP_FUNDING,
+    CF_PERP_LIQUIDATIONS,
+    CF_CONTRACT_EVENTS,
 ];
 
 /// Storage configuration
@@ -752,6 +914,81 @@ impl QStorage {
 
         debug!("🔓 [v1.1.9] Releasing global write lock after single block {}", block_height);
         Ok(())
+    }
+
+    /// 🌐 v2.7.2-beta: DAG LAYER BLOCK STORAGE - Enables parallel block production
+    ///
+    /// DAG-Knight allows multiple blocks at the same height from different proposers.
+    /// This method stores blocks in the "DAG layer" using a composite key:
+    ///   `qblock:dag:{height}:{proposer_hex}`
+    ///
+    /// This enables:
+    /// - Multiple blocks per height (true DAG structure)
+    /// - All valid blocks from all nodes are stored
+    /// - Balance updates processed for ALL blocks (parallel mining rewards)
+    /// - No block rejection due to fork-choice (DAG accepts all)
+    ///
+    /// The canonical chain pointer (`qblock:height:{height}`) is NOT modified.
+    /// DAG ordering is used for transaction sequencing, not fork-choice.
+    pub async fn save_dag_layer_block(&self, block: &q_types::block::QBlock) -> Result<()> {
+        let _global_guard = self.global_write_lock.lock().await;
+
+        let block_height = block.header.height;
+        let proposer_hex = hex::encode(&block.header.proposer[..8]);
+        let block_hash = block.calculate_hash();
+
+        // Serialize block
+        let block_data = bincode::serialize(block)
+            .context("Failed to serialize DAG layer block")?;
+
+        // Composite key for DAG layer: allows multiple blocks per height
+        let dag_key = format!("qblock:dag:{}:{}", block_height, proposer_hex);
+
+        // Also store hash index for reverse lookup
+        let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
+
+        // Write both entries atomically using the KvStore trait method
+        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (CF_BLOCKS, dag_key.clone().into_bytes(), block_data),
+            (CF_BLOCKS, hash_key.into_bytes(), block_height.to_be_bytes().to_vec()),
+        ];
+
+        self.hot_db.write_batch_turbo(batch).await
+            .context("Failed to write DAG layer block to database")?;
+
+        info!("🌐 [DAG LAYER] Stored block at height {} from proposer {} (hash: {}...)",
+              block_height, proposer_hex, hex::encode(&block_hash[..8]));
+
+        Ok(())
+    }
+
+    /// 🌐 v2.7.2-beta: Check if a DAG layer block exists for a specific proposer at height
+    pub async fn has_dag_layer_block(&self, height: u64, proposer: &[u8; 32]) -> Result<bool> {
+        let proposer_hex = hex::encode(&proposer[..8]);
+        let dag_key = format!("qblock:dag:{}:{}", height, proposer_hex);
+
+        match self.hot_db.get(CF_BLOCKS, dag_key.as_bytes()).await? {
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
+    }
+
+    /// 🌐 v2.7.2-beta: Get all DAG layer blocks at a specific height
+    /// Returns blocks from all proposers that have blocks at this height
+    pub async fn get_dag_layer_blocks(&self, height: u64) -> Result<Vec<q_types::block::QBlock>> {
+        let prefix = format!("qblock:dag:{}:", height);
+        let mut blocks = Vec::new();
+
+        // Scan all keys with this prefix using the KvStore trait method
+        let entries = self.hot_db.scan_prefix(CF_BLOCKS, prefix.as_bytes()).await?;
+
+        for (_key, value) in entries {
+            if let Ok(block) = bincode::deserialize::<q_types::block::QBlock>(&value) {
+                blocks.push(block);
+            }
+        }
+
+        Ok(blocks)
     }
 
     /// 🚀 BATCH SAVE BLOCKS - High-performance bulk block storage
@@ -1784,44 +2021,36 @@ impl QStorage {
             info!("✅ [GENESIS FIX] Block 0 missing but block 1 exists - blockchain starts at height 1");
             1
         } else {
-            // v1.1.23-beta: Neither block 0 nor 1 exists - find the LOWEST existing block
-            // This handles nodes that synced from a checkpoint (e.g., starting at block 1000)
-            warn!("⚠️ [v1.1.23-beta] Blocks 0 and 1 missing - scanning for lowest existing block...");
+            // 🔧 v3.1.4-beta: CRITICAL FIX - ALWAYS treat missing genesis as stale data
+            //
+            // ROOT CAUSE: After u128 changes, fresh nodes with stale DB files were treating
+            // orphaned blocks as "legitimate checkpoint data", causing sync to start from
+            // the wrong height (320001, 345001, etc.) instead of genesis.
+            //
+            // KEY INSIGHT: A legitimate Q-NarwhalKnight blockchain MUST have either:
+            //   - Block 0 (genesis), OR
+            //   - Block 1 (if genesis is pruned/optional)
+            //
+            // If BOTH blocks 0 and 1 are missing, ANY existing blocks are STALE DATA
+            // from a previous incomplete sync. There is NO legitimate scenario where
+            // a chain has blocks at height N but not blocks 0 or 1.
+            //
+            // PREVIOUS BUG: v3.1.2-v3.1.3 only detected stale data if lowest_found >= 1000
+            // This missed stale blocks at lower heights (2-999), causing the sync failure.
+            //
+            // FIX: ALWAYS return 0 when blocks 0 and 1 are missing, forcing sync from genesis.
 
-            // Binary search for the first existing block
-            let mut low = 2u64;
-            let mut high = highest_existing;
-            let mut lowest_found = highest_existing; // Start with highest as fallback
-
-            while low <= high {
-                let mid = (low + high) / 2;
-                if self.get_qblock_by_height(mid).await?.is_some() {
-                    lowest_found = mid;
-                    if mid == 0 {
-                        break;
-                    }
-                    high = mid - 1;
-                } else {
-                    low = mid + 1;
-                }
-            }
-
-            if lowest_found == highest_existing && highest_existing > 0 {
-                // Verify we actually found something
-                if self.get_qblock_by_height(highest_existing).await?.is_some() {
-                    info!("✅ [v1.1.23-beta] Found blocks starting at height {} (checkpoint sync)", lowest_found);
-                    lowest_found
-                } else {
-                    warn!("🚨 [v1.1.23-beta] No blocks found - truly empty database");
-                    return Ok(0);
-                }
-            } else if lowest_found > 0 {
-                info!("✅ [v1.1.23-beta] Found blocks starting at height {} (checkpoint sync)", lowest_found);
-                lowest_found
-            } else {
-                warn!("🚨 [v1.1.23-beta] No blocks found - truly empty database");
-                return Ok(0);
-            }
+            warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            warn!("🚨 [v3.1.4] STALE DATA DETECTED - GENESIS BLOCKS MISSING!");
+            warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            warn!("   Blocks 0 and 1 are BOTH missing from the database.");
+            warn!("   Any existing blocks are orphaned data from a previous incomplete sync.");
+            warn!("   A legitimate chain MUST have block 0 or 1.");
+            warn!("   ");
+            warn!("   Returning height=0 to force full sync from genesis (block 1).");
+            warn!("   The orphaned blocks will be overwritten during sync.");
+            warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            return Ok(0);
         };
 
         // Efficient gap detection: sample at intervals, then linear scan when gap suspected
@@ -2498,9 +2727,10 @@ impl QStorage {
     }
 
     /// Save wallet balance to persistent storage with SYNC to guarantee disk write
-    pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u64) -> Result<()> {
+    /// v2.5.0: Updated to u128 (16 bytes) for extreme precision
+    pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u128) -> Result<()> {
         let key = format!("wallet_balance_{}", hex::encode(address));
-        let value = amount.to_le_bytes();
+        let value = amount.to_le_bytes(); // 16 bytes for u128
 
         // CRITICAL: Use synced write to guarantee data reaches disk (survives pkill -9)
         // This overrides the default set_sync(false) in write_options()
@@ -2517,20 +2747,25 @@ impl QStorage {
     }
 
     /// Load wallet balance from persistent storage
-    pub async fn load_wallet_balance(&self, address: &[u8; 32]) -> Result<Option<u64>> {
+    /// v2.5.0: Returns u128, with backward compatibility for legacy u64 (8-byte) storage
+    pub async fn load_wallet_balance(&self, address: &[u8; 32]) -> Result<Option<u128>> {
         let key = format!("wallet_balance_{}", hex::encode(address));
         match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
             Some(bytes) => {
-                if bytes.len() == 8 {
-                    let amount = u64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ]);
-                    // 🔒 PRIVACY: No logging of sensitive balance data
+                if bytes.len() == 16 {
+                    // New u128 format (16 bytes)
+                    let amount = u128::from_le_bytes(bytes[..16].try_into().unwrap());
                     Ok(Some(amount))
+                } else if bytes.len() == 8 {
+                    // Legacy u64 format (8 bytes) - convert to u128
+                    // Note: Legacy values had 8 decimals, new values have 24 decimals
+                    // Multiply by 10^16 to convert (24 - 8 = 16 decimal places)
+                    let legacy_amount = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                    let upgraded_amount = (legacy_amount as u128) * 10u128.pow(16);
+                    Ok(Some(upgraded_amount))
                 } else {
                     // 🔒 PRIVACY: Don't log address, only data length issue
-                    warn!("Invalid wallet balance data length: expected 8 bytes, got {}", bytes.len());
+                    warn!("Invalid wallet balance data length: expected 8 or 16 bytes, got {}", bytes.len());
                     Ok(None)
                 }
             }
@@ -2540,14 +2775,17 @@ impl QStorage {
 
     /// ✅ v0.9.27-beta: Get balance from balance consensus column family
     /// This reads directly from the "balances" CF written by BalanceConsensusEngine
-    pub async fn get_consensus_balance(&self, address_hex: &str) -> Result<u64> {
+    /// v2.5.0: Returns u128 with backward compatibility for u64 storage
+    pub async fn get_consensus_balance(&self, address_hex: &str) -> Result<u128> {
         match self.hot_db.get("balances", address_hex.as_bytes()).await? {
             Some(bytes) => {
-                if bytes.len() == 8 {
-                    Ok(u64::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                    ]))
+                if bytes.len() == 16 {
+                    // New u128 format (big-endian)
+                    Ok(u128::from_be_bytes(bytes[..16].try_into().unwrap()))
+                } else if bytes.len() == 8 {
+                    // Legacy u64 format - convert to u128 with decimal upgrade
+                    let legacy = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+                    Ok((legacy as u128) * 10u128.pow(16))
                 } else {
                     Ok(0)
                 }
@@ -2572,7 +2810,8 @@ impl QStorage {
     }
 
     /// Load all wallet balances from persistent storage
-    pub async fn load_wallet_balances(&self) -> Result<HashMap<[u8; 32], u64>> {
+    /// v2.5.0: Returns u128 with backward compatibility for u64 storage
+    pub async fn load_wallet_balances(&self) -> Result<HashMap<[u8; 32], u128>> {
         let mut balances = HashMap::new();
         let prefix = "wallet_balance_".as_bytes();
 
@@ -2583,13 +2822,21 @@ impl QStorage {
                     if let Ok(key_str) = String::from_utf8(key) {
                         if let Some(hex_addr) = key_str.strip_prefix("wallet_balance_") {
                             if let Ok(addr_bytes) = hex::decode(hex_addr) {
-                                if addr_bytes.len() == 32 && value.len() == 8 {
+                                if addr_bytes.len() == 32 {
                                     let mut address = [0u8; 32];
                                     address.copy_from_slice(&addr_bytes);
-                                    let amount = u64::from_le_bytes([
-                                        value[0], value[1], value[2], value[3], value[4], value[5],
-                                        value[6], value[7],
-                                    ]);
+
+                                    let amount = if value.len() == 16 {
+                                        // New u128 format
+                                        u128::from_le_bytes(value[..16].try_into().unwrap())
+                                    } else if value.len() == 8 {
+                                        // Legacy u64 format - convert with decimal upgrade
+                                        let legacy = u64::from_le_bytes(value[..8].try_into().unwrap());
+                                        (legacy as u128) * 10u128.pow(16)
+                                    } else {
+                                        continue; // Skip invalid entries
+                                    };
+
                                     balances.insert(address, amount);
                                 }
                             }
@@ -2610,12 +2857,13 @@ impl QStorage {
     }
 
     /// Save multiple wallet balances atomically with SYNC to guarantee disk write
-    pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u64>) -> Result<()> {
+    /// v2.5.0: Accepts u128 balances (16 bytes each)
+    pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u128>) -> Result<()> {
         let mut batch_ops = Vec::new();
 
         for (address, amount) in balances {
             let key = format!("wallet_balance_{}", hex::encode(address));
-            let value = amount.to_le_bytes().to_vec();
+            let value = amount.to_le_bytes().to_vec(); // 16 bytes for u128
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
         }
 
@@ -2623,20 +2871,21 @@ impl QStorage {
         self.hot_db.write_batch(batch_ops).await?;
 
         // 🔒 PRIVACY-PRESERVING: Log only aggregate count, not individual balances
-        let total_balance: u64 = balances.values().sum();
+        // v2.10.0: Updated to u128 for 24 decimal precision
+        let total_balance: u128 = balances.values().sum();
         info!(
             "💰 SYNCED {} wallet balances (total supply: {} QUG) (survives hard kill)",
             balances.len(),
-            total_balance / 100_000_000
+            total_balance / 1_000_000_000_000_000_000_000_000
         );
         Ok(())
     }
 
     /// Save total minted supply to persistent storage (enforces 21M QUG hard cap)
     /// CRITICAL: Must be called atomically with balance updates to prevent supply violations
-    pub async fn save_total_supply(&self, total_supply: u64) -> Result<()> {
+    pub async fn save_total_supply(&self, total_supply: u128) -> Result<()> {
         let key = b"total_minted_supply";
-        let value = total_supply.to_le_bytes();
+        let value = total_supply.to_le_bytes(); // Now 16 bytes for u128
 
         // CRITICAL: Use synced write to guarantee data reaches disk (same pattern as save_wallet_balance)
         self.hot_db.put_sync(CF_MANIFEST, key, &value).await?;
@@ -2647,22 +2896,32 @@ impl QStorage {
 
     /// Load total minted supply from persistent storage
     /// Returns 0 if no supply data exists (fresh blockchain)
-    pub async fn load_total_supply(&self) -> Result<u64> {
+    /// Supports both old u64 format (8 bytes) and new u128 format (16 bytes)
+    pub async fn load_total_supply(&self) -> Result<u128> {
         let key = b"total_minted_supply";
         match self.hot_db.get(CF_MANIFEST, key).await? {
             Some(bytes) => {
-                if bytes.len() == 8 {
-                    let supply = u64::from_le_bytes([
+                let supply = if bytes.len() == 16 {
+                    // New u128 format
+                    u128::from_le_bytes([
                         bytes[0], bytes[1], bytes[2], bytes[3],
                         bytes[4], bytes[5], bytes[6], bytes[7],
-                    ]);
-                    info!("💎 Loaded total supply from storage: {} QUG ({} base units)",
-                        supply / 100_000_000, supply);
-                    Ok(supply)
+                        bytes[8], bytes[9], bytes[10], bytes[11],
+                        bytes[12], bytes[13], bytes[14], bytes[15],
+                    ])
+                } else if bytes.len() == 8 {
+                    // Legacy u64 format - convert to u128
+                    u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]) as u128
                 } else {
                     warn!("Invalid total supply data in storage, starting from 0");
-                    Ok(0)
-                }
+                    return Ok(0);
+                };
+                info!("💎 Loaded total supply from storage: {} QUG ({} base units)",
+                    supply / 100_000_000, supply);
+                Ok(supply)
             }
             None => {
                 info!("No total supply data found, starting fresh blockchain from 0");
@@ -2673,9 +2932,10 @@ impl QStorage {
 
     /// Save token balance to persistent storage
     /// Key format: token_balance_{wallet_hex}_{token_hex}
-    pub async fn save_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32], amount: u64) -> Result<()> {
+    /// v2.7.9-beta: Changed from u64 to u128 for larger token supplies (up to 10^38)
+    pub async fn save_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32], amount: u128) -> Result<()> {
         let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
-        let value = amount.to_le_bytes();
+        let value = amount.to_le_bytes(); // Now 16 bytes instead of 8
         self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
         debug!(
             "🪙 Saved token balance: wallet={}, token={}, amount={}",
@@ -2688,17 +2948,32 @@ impl QStorage {
 
     /// Get a single token balance from persistent storage
     /// v1.4.8-beta: Also checks CF_TOKEN_BALANCES (state sync storage) if legacy storage returns 0
-    pub async fn get_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> Result<u64> {
-        // First check legacy CF_MANIFEST storage (for backwards compatibility)
+    /// v2.7.9-beta: Returns u128 for larger token supplies, backward compatible with 8-byte u64 values
+    pub async fn get_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> Result<u128> {
+        // First check CF_MANIFEST storage (supports both old 8-byte and new 16-byte format)
         let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
-        let legacy_balance = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+        let manifest_balance = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
             Some(bytes) => {
-                if bytes.len() == 8 {
-                    let amount = u64::from_le_bytes([
+                if bytes.len() == 16 {
+                    // v2.7.9-beta: New 16-byte u128 format
+                    let amount = u128::from_le_bytes([
                         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
                     ]);
                     debug!(
-                        "🪙 Loaded token balance (legacy): wallet={}, token={}, amount={}",
+                        "🪙 Loaded token balance (u128): wallet={}, token={}, amount={}",
+                        hex::encode(wallet_address),
+                        hex::encode(token_address),
+                        amount
+                    );
+                    amount
+                } else if bytes.len() == 8 {
+                    // Legacy 8-byte u64 format (backward compatibility)
+                    let amount = u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]) as u128;
+                    debug!(
+                        "🪙 Loaded token balance (legacy u64): wallet={}, token={}, amount={}",
                         hex::encode(wallet_address),
                         hex::encode(token_address),
                         amount
@@ -2706,7 +2981,8 @@ impl QStorage {
                     amount
                 } else {
                     warn!(
-                        "Invalid token balance data length for wallet {} token {}",
+                        "Invalid token balance data length ({} bytes) for wallet {} token {}",
+                        bytes.len(),
                         hex::encode(wallet_address),
                         hex::encode(token_address)
                     );
@@ -2716,9 +2992,9 @@ impl QStorage {
             None => 0,
         };
 
-        // If legacy storage has balance, return it
-        if legacy_balance > 0 {
-            return Ok(legacy_balance);
+        // If manifest storage has balance, return it
+        if manifest_balance > 0 {
+            return Ok(manifest_balance);
         }
 
         // v1.4.8-beta: Check CF_TOKEN_BALANCES (state sync storage) for synced transfers
@@ -2731,12 +3007,25 @@ impl QStorage {
                 cf_key.extend_from_slice(token_address);
 
                 if let Ok(Some(value)) = db.get_cf(&cf, &cf_key) {
-                    if value.len() >= 8 {
-                        // State sync stores as big-endian
-                        let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                    // State sync storage: check for 16-byte u128 first, then 8-byte u64
+                    if value.len() >= 16 {
+                        // New u128 format (big-endian for state sync consistency)
+                        let amount = u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
                         if amount > 0 {
                             info!(
-                                "🪙 Found token balance in state sync storage: wallet={}, token={}, amount={}",
+                                "🪙 Found token balance in state sync storage (u128): wallet={}, token={}, amount={}",
+                                hex::encode(&wallet_address[..8]),
+                                hex::encode(&token_address[..8]),
+                                amount
+                            );
+                            return Ok(amount);
+                        }
+                    } else if value.len() >= 8 {
+                        // Legacy u64 format (big-endian)
+                        let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
+                        if amount > 0 {
+                            info!(
+                                "🪙 Found token balance in state sync storage (legacy u64): wallet={}, token={}, amount={}",
                                 hex::encode(&wallet_address[..8]),
                                 hex::encode(&token_address[..8]),
                                 amount
@@ -2758,12 +3047,13 @@ impl QStorage {
 
     /// Load all token balances from persistent storage
     /// v1.4.8-beta: Also loads from CF_TOKEN_BALANCES (state sync storage) for synced transfers
-    pub async fn load_token_balances(&self) -> Result<HashMap<([u8; 32], [u8; 32]), u64>> {
+    /// v2.7.9-beta: Returns u128 for larger token supplies, backward compatible with 8-byte u64 values
+    pub async fn load_token_balances(&self) -> Result<HashMap<([u8; 32], [u8; 32]), u128>> {
         let mut balances = HashMap::new();
-        let mut legacy_count = 0;
+        let mut manifest_count = 0;
         let mut state_sync_count = 0;
 
-        // First load from legacy CF_MANIFEST storage (backwards compatibility)
+        // Load from CF_MANIFEST storage (supports both 8-byte u64 and 16-byte u128)
         let prefix = "token_balance_".as_bytes();
         match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
             Ok(entries) => {
@@ -2774,17 +3064,31 @@ impl QStorage {
                             let parts: Vec<&str> = addresses.split('_').collect();
                             if parts.len() == 2 {
                                 if let (Ok(wallet_bytes), Ok(token_bytes)) = (hex::decode(parts[0]), hex::decode(parts[1])) {
-                                    if wallet_bytes.len() == 32 && token_bytes.len() == 32 && value.len() == 8 {
+                                    if wallet_bytes.len() == 32 && token_bytes.len() == 32 {
                                         let mut wallet_address = [0u8; 32];
                                         let mut token_address = [0u8; 32];
                                         wallet_address.copy_from_slice(&wallet_bytes);
                                         token_address.copy_from_slice(&token_bytes);
-                                        let amount = u64::from_le_bytes([
-                                            value[0], value[1], value[2], value[3], value[4], value[5],
-                                            value[6], value[7],
-                                        ]);
+
+                                        let amount = if value.len() == 16 {
+                                            // v2.7.9-beta: New 16-byte u128 format
+                                            u128::from_le_bytes([
+                                                value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                                                value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15],
+                                            ])
+                                        } else if value.len() == 8 {
+                                            // Legacy 8-byte u64 format
+                                            u64::from_le_bytes([
+                                                value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                                            ]) as u128
+                                        } else {
+                                            warn!("Invalid token balance data length ({} bytes) for wallet {}",
+                                                value.len(), hex::encode(&wallet_address));
+                                            continue;
+                                        };
+
                                         balances.insert((wallet_address, token_address), amount);
-                                        legacy_count += 1;
+                                        manifest_count += 1;
                                     }
                                 }
                             }
@@ -2793,7 +3097,7 @@ impl QStorage {
                 }
             }
             Err(e) => {
-                warn!("Failed to scan legacy token balances: {}", e);
+                warn!("Failed to scan token balances: {}", e);
             }
         }
 
@@ -2811,11 +3115,14 @@ impl QStorage {
                             wallet_address.copy_from_slice(&key[0..32]);
                             token_address.copy_from_slice(&key[32..64]);
 
-                            // State sync stores as big-endian
-                            let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                            // State sync stores as big-endian: check 16-byte u128 first, then 8-byte u64
+                            let amount = if value.len() >= 16 {
+                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                            } else {
+                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                            };
 
-                            // Only insert if not already in legacy storage (legacy takes precedence)
-                            // OR if state sync has higher balance (in case of conflicts)
+                            // Only insert if not already in manifest storage OR if state sync has higher balance
                             let balance_key = (wallet_address, token_address);
                             if let Some(&existing) = balances.get(&balance_key) {
                                 if amount > existing {
@@ -2833,9 +3140,9 @@ impl QStorage {
         }
 
         info!(
-            "🪙 Loaded {} token balances ({} legacy + {} state sync)",
+            "🪙 Loaded {} token balances ({} manifest + {} state sync)",
             balances.len(),
-            legacy_count,
+            manifest_count,
             state_sync_count
         );
 
@@ -2843,12 +3150,13 @@ impl QStorage {
     }
 
     /// Save multiple token balances atomically with SYNC to guarantee disk write
-    pub async fn save_token_balances(&self, balances: &HashMap<([u8; 32], [u8; 32]), u64>) -> Result<()> {
+    /// v2.7.9-beta: Changed from u64 to u128 for larger token supplies
+    pub async fn save_token_balances(&self, balances: &HashMap<([u8; 32], [u8; 32]), u128>) -> Result<()> {
         let mut batch_ops = Vec::new();
 
         for ((wallet_address, token_address), amount) in balances {
             let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
-            let value = amount.to_le_bytes().to_vec();
+            let value = amount.to_le_bytes().to_vec(); // Now 16 bytes
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
         }
 
@@ -2859,6 +3167,150 @@ impl QStorage {
             balances.len()
         );
         Ok(())
+    }
+
+    // ============ v2.4.2: TOKEN STAKING STORAGE ============
+
+    /// Save a token stake position to persistent storage
+    /// Key format: stake_position_{stake_key}
+    pub async fn save_stake_position(&self, stake_key: &str, position: &crate::TokenStakePosition) -> Result<()> {
+        let key = format!("stake_position_{}", stake_key);
+        let value = serde_json::to_vec(position)?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!(
+            "🔒 Saved stake position: {} ({} tokens, tier: {:?})",
+            stake_key,
+            position.amount as f64 / 100_000_000.0,
+            position.tier
+        );
+        Ok(())
+    }
+
+    /// Delete a stake position from storage
+    pub async fn delete_stake_position(&self, stake_key: &str) -> Result<()> {
+        let key = format!("stake_position_{}", stake_key);
+        self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
+        debug!("🔓 Deleted stake position: {}", stake_key);
+        Ok(())
+    }
+
+    /// Load all stake positions from storage
+    pub async fn load_stake_positions(&self) -> Result<HashMap<String, crate::TokenStakePosition>> {
+        let mut positions = HashMap::new();
+        let prefix = b"stake_position_";
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key_bytes, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key_bytes) {
+                        let stake_key = key_str.trim_start_matches("stake_position_");
+                        if let Ok(position) = serde_json::from_slice::<crate::TokenStakePosition>(&value) {
+                            positions.insert(stake_key.to_string(), position);
+                        }
+                    }
+                }
+                info!("🔒 Loaded {} stake positions from storage", positions.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan stake positions: {}", e);
+            }
+        }
+        Ok(positions)
+    }
+
+    /// Save token fee configuration
+    /// Key format: fee_config_{contract_address}
+    pub async fn save_fee_config(&self, contract_address: &str, config: &crate::TokenFeeConfig) -> Result<()> {
+        let key = format!("fee_config_{}", contract_address);
+        let value = serde_json::to_vec(config)?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!(
+            "⚙️ Saved fee config for {}: enabled={}, reflection={}bps, burn={}bps",
+            contract_address, config.enabled, config.reflection_fee_bps, config.burn_fee_bps
+        );
+        Ok(())
+    }
+
+    /// Load all fee configurations from storage
+    pub async fn load_fee_configs(&self) -> Result<HashMap<String, crate::TokenFeeConfig>> {
+        let mut configs = HashMap::new();
+        let prefix = b"fee_config_";
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key_bytes, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key_bytes) {
+                        let contract_addr = key_str.trim_start_matches("fee_config_");
+                        if let Ok(config) = serde_json::from_slice::<crate::TokenFeeConfig>(&value) {
+                            configs.insert(contract_addr.to_string(), config);
+                        }
+                    }
+                }
+                info!("⚙️ Loaded {} fee configs from storage", configs.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan fee configs: {}", e);
+            }
+        }
+        Ok(configs)
+    }
+
+    /// Save burn/reflection totals
+    pub async fn save_token_totals(&self, key: &str, amount: u64) -> Result<()> {
+        let value = amount.to_le_bytes();
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        Ok(())
+    }
+
+    /// Load burn/reflection totals
+    pub async fn load_token_total(&self, key: &str) -> Result<u64> {
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) if data.len() == 8 => {
+                let bytes: [u8; 8] = data.try_into().unwrap();
+                Ok(u64::from_le_bytes(bytes))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// v2.4.8-beta: Save token social profile to storage
+    pub async fn save_social_profile(&self, contract_address: &str, data: &[u8]) -> Result<()> {
+        let key = format!("token_social:{}", contract_address.to_lowercase());
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), data).await?;
+        info!("📱 Saved social profile for {} ({} bytes)", contract_address, data.len());
+        Ok(())
+    }
+
+    /// v2.4.8-beta: Load token social profile from storage
+    pub async fn load_social_profile(&self, contract_address: &str) -> Result<Option<Vec<u8>>> {
+        let key = format!("token_social:{}", contract_address.to_lowercase());
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) => Ok(Some(data)),
+            None => Ok(None),
+        }
+    }
+
+    /// v2.4.8-beta: Load all social profiles (for startup sync)
+    pub async fn load_all_social_profiles(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let prefix = b"token_social:";
+        let mut profiles = Vec::new();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key_bytes, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key_bytes) {
+                        let contract_addr = key_str.trim_start_matches("token_social:");
+                        profiles.push((contract_addr.to_string(), value));
+                    }
+                }
+                info!("📱 Loaded {} social profiles from storage", profiles.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan social profiles: {}", e);
+            }
+        }
+
+        Ok(profiles)
     }
 
     /// Save transaction to persistent storage
@@ -3485,6 +3937,48 @@ impl QStorage {
         Ok(())
     }
 
+    /// v2.7.0-beta: Save a TemporalShield-protected chat message
+    ///
+    /// Stores messages with encrypted content and reasoning in the same CF
+    /// but with a different key format for protected messages.
+    pub async fn save_protected_chat_message(&self, chat_id: &str, message: &ProtectedChatMessage) -> Result<()> {
+        let msg_key = format!("chat:{}:protected_msg:{}", chat_id, message.index);
+        let value = bincode::serialize(message)?;
+
+        self.hot_db.put(CF_AI_CHATS, msg_key.as_bytes(), &value).await?;
+
+        // Update chat metadata's message count and updated_at
+        let metadata_key = format!("chat:{}", chat_id);
+        if let Some(metadata_data) = self.hot_db.get(CF_AI_CHATS, metadata_key.as_bytes()).await? {
+            let mut metadata: ChatMetadata = bincode::deserialize(&metadata_data)?;
+            metadata.message_count = message.index + 1;
+            metadata.updated_at = message.timestamp;
+
+            let updated_value = bincode::serialize(&metadata)?;
+            self.hot_db.put(CF_AI_CHATS, metadata_key.as_bytes(), &updated_value).await?;
+        }
+
+        debug!("🛡️ Saved protected message {} in chat {} (TemporalShield)", message.index, chat_id);
+        Ok(())
+    }
+
+    /// v2.7.0-beta: Load protected chat messages
+    pub async fn load_protected_chat_messages(&self, chat_id: &str) -> Result<Vec<ProtectedChatMessage>> {
+        let prefix = format!("chat:{}:protected_msg:", chat_id);
+        let messages_data = self.hot_db.scan_prefix(CF_AI_CHATS, prefix.as_bytes()).await?;
+
+        let mut messages = Vec::new();
+        for (_, msg_data) in messages_data {
+            if let Ok(message) = bincode::deserialize::<ProtectedChatMessage>(&msg_data) {
+                messages.push(message);
+            }
+        }
+
+        // Sort by index
+        messages.sort_by_key(|m| m.index);
+        Ok(messages)
+    }
+
     /// Load chat messages
     /// Returns messages in order
     pub async fn load_chat_messages(&self, chat_id: &str) -> Result<Vec<ChatMessage>> {
@@ -3690,25 +4184,26 @@ impl QStorage {
         };
 
         // Update balances (handle underflow)
-        if delta_qnk < 0 && credits.balance_qnk < delta_qnk.abs() as u64 {
+        // v3.0.4: Cast to u128 for 24-decimal precision
+        if delta_qnk < 0 && credits.balance_qnk < delta_qnk.abs() as u128 {
             return Err(anyhow::anyhow!("Insufficient QNK balance"));
         }
-        if delta_qugusd < 0 && credits.balance_qugusd < delta_qugusd.abs() as u64 {
+        if delta_qugusd < 0 && credits.balance_qugusd < delta_qugusd.abs() as u128 {
             return Err(anyhow::anyhow!("Insufficient QUGUSD balance"));
         }
 
         if delta_qnk >= 0 {
-            credits.balance_qnk += delta_qnk as u64;
+            credits.balance_qnk += delta_qnk as u128;
         } else {
-            credits.balance_qnk -= delta_qnk.abs() as u64;
-            credits.total_spent_qnk += delta_qnk.abs() as u64;
+            credits.balance_qnk -= delta_qnk.abs() as u128;
+            credits.total_spent_qnk += delta_qnk.abs() as u128;
         }
 
         if delta_qugusd >= 0 {
-            credits.balance_qugusd += delta_qugusd as u64;
+            credits.balance_qugusd += delta_qugusd as u128;
         } else {
-            credits.balance_qugusd -= delta_qugusd.abs() as u64;
-            credits.total_spent_qugusd += delta_qugusd.abs() as u64;
+            credits.balance_qugusd -= delta_qugusd.abs() as u128;
+            credits.total_spent_qugusd += delta_qugusd.abs() as u128;
         }
 
         credits.updated_at = SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
@@ -3876,10 +4371,11 @@ impl QStorage {
     }
 
     /// Credit treasury with AI payment (100% of profits)
+    /// v3.0.4: Migrated amount parameters to u128 for 24-decimal precision
     pub async fn credit_treasury(
         &self,
-        amount_qnk: u64,
-        amount_qugusd: u64,
+        amount_qnk: u128,
+        amount_qugusd: u128,
         tokens_generated: u32,
     ) -> Result<()> {
         let mut treasury = self.get_treasury_balance().await?;
@@ -3942,7 +4438,7 @@ impl QStorage {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("User credits not found"))?;
 
-            user_credits.balance_qnk += settlement.refund_amount_qnk;
+            user_credits.balance_qnk += settlement.refund_amount_qnk;  // Already u128 (v3.0.4)
             user_credits.updated_at =
                 SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
 
@@ -4113,10 +4609,12 @@ impl QStorage {
 }
 
 /// Implementation of BalanceStorage trait for consensus engine
+/// v2.5.0: Updated to u128 for extreme precision (24 decimals)
 #[async_trait::async_trait]
 impl BalanceStorage for QStorage {
     /// Add amount to wallet balance (atomic operation)
-    async fn add_balance(&self, address: &str, amount: u64) -> Result<()> {
+    /// v2.5.0: amount is now u128
+    async fn add_balance(&self, address: &str, amount: u128) -> Result<()> {
         // Convert hex string address to [u8; 32]
         let address_bytes = hex::decode(address)
             .context("Invalid hex address format")?;
@@ -4149,7 +4647,8 @@ impl BalanceStorage for QStorage {
     }
 
     /// Get wallet balance
-    async fn get_balance(&self, address: &str) -> Result<u64> {
+    /// v2.5.0: returns u128
+    async fn get_balance(&self, address: &str) -> Result<u128> {
         // Convert hex string address to [u8; 32]
         let address_bytes = hex::decode(address)
             .context("Invalid hex address format")?;
@@ -4168,7 +4667,8 @@ impl BalanceStorage for QStorage {
     }
 
     /// Set wallet balance directly
-    async fn set_balance(&self, address: &str, balance: u64) -> Result<()> {
+    /// v2.5.0: balance is now u128
+    async fn set_balance(&self, address: &str, balance: u128) -> Result<()> {
         // Convert hex string address to [u8; 32]
         let address_bytes = hex::decode(address)
             .context("Invalid hex address format")?;
@@ -4191,6 +4691,360 @@ impl BalanceStorage for QStorage {
         );
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// v2.3.6-beta: Swap History Persistence (Token Details Modal)
+// ============================================================================
+impl QStorage {
+    /// Save a swap transaction to history
+    /// Key format: "swap:{token}:{timestamp}:{tx_id}"
+    pub async fn save_swap_history(&self, token: &str, swap_record: &serde_json::Value) -> Result<()> {
+        let timestamp = swap_record.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let tx_id = swap_record.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        // Create composite key for time-ordered retrieval
+        let key = format!("swap:{}:{}:{}", token.to_uppercase(), timestamp, tx_id);
+
+        let value = serde_json::to_vec(swap_record)?;
+        self.hot_db.put(CF_SWAP_HISTORY, key.as_bytes(), &value).await?;
+
+        debug!("💾 Saved swap history for {} (tx: {})", token, tx_id);
+        Ok(())
+    }
+
+    /// Load swap history for a token (most recent first)
+    pub async fn load_swap_history(&self, token: &str) -> Result<Vec<serde_json::Value>> {
+        let prefix = format!("swap:{}:", token.to_uppercase());
+        let records = self.hot_db.scan_prefix(CF_SWAP_HISTORY, prefix.as_bytes()).await?;
+
+        let mut history: Vec<serde_json::Value> = Vec::new();
+        for (_, value) in records {
+            if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&value) {
+                history.push(record);
+            }
+        }
+
+        // Sort by timestamp descending (most recent first)
+        history.sort_by(|a, b| {
+            let ts_a = a.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+            let ts_b = b.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+            ts_b.cmp(&ts_a)
+        });
+
+        debug!("📜 Loaded {} swap records for {}", history.len(), token);
+        Ok(history)
+    }
+
+    /// Load all swap history (for initial cache population on startup)
+    pub async fn load_all_swap_history(&self) -> Result<HashMap<String, Vec<serde_json::Value>>> {
+        let prefix = "swap:";
+        let records = self.hot_db.scan_prefix(CF_SWAP_HISTORY, prefix.as_bytes()).await?;
+
+        let mut history: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+        for (key, value) in records {
+            // Key format: "swap:{token}:{timestamp}:{tx_id}"
+            if let Ok(key_str) = String::from_utf8(key) {
+                let parts: Vec<&str> = key_str.split(':').collect();
+                if parts.len() >= 2 {
+                    let token = parts[1].to_string();
+                    if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&value) {
+                        history.entry(token).or_insert_with(Vec::new).push(record);
+                    }
+                }
+            }
+        }
+
+        // Sort each token's history by timestamp descending
+        for (_, records) in history.iter_mut() {
+            records.sort_by(|a, b| {
+                let ts_a = a.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+                let ts_b = b.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+                ts_b.cmp(&ts_a)
+            });
+        }
+
+        info!("📜 Loaded swap history for {} tokens from RocksDB", history.len());
+        Ok(history)
+    }
+
+    // ========================================================================
+    // v2.4.0-beta: Consensus-Verified Swap History (Binary Keys)
+    // These methods support the SwapIndexer for DAGKnight-verified swaps
+    // ========================================================================
+
+    /// Save a consensus-verified swap record using binary key
+    /// Key format: [token:32][inverted_timestamp:8][tx_id:8]
+    pub async fn save_consensus_swap(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_SWAP_HISTORY, key, value).await?;
+        Ok(())
+    }
+
+    /// Load swap history for a token address (binary format)
+    /// Returns deserialized ConsensusSwapRecord items
+    pub async fn load_swap_history_for_token<T: serde::de::DeserializeOwned>(
+        &self,
+        token_address: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<T>> {
+        // Scan with token address as prefix
+        let records = self.hot_db.scan_prefix(CF_SWAP_HISTORY, token_address).await?;
+
+        let mut history: Vec<T> = Vec::new();
+        for (_, value) in records.into_iter().take(limit) {
+            if let Ok(record) = bincode::deserialize::<T>(&value) {
+                history.push(record);
+            }
+        }
+
+        debug!("📜 Loaded {} consensus swap records for token", history.len());
+        Ok(history)
+    }
+
+    // ========================================================================
+    // v2.4.9-beta: DCA (Dollar Cost Averaging) Persistence
+    // Store DCA orders and execution history in RocksDB
+    // ========================================================================
+
+    /// Save a DCA order to RocksDB
+    /// Key format: order_id (UUID string)
+    pub async fn save_dca_order(&self, order_id: &str, order_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_DCA_ORDERS, order_id.as_bytes(), order_bytes).await?;
+        debug!("💰 Saved DCA order: {}", order_id);
+        Ok(())
+    }
+
+    /// Load a DCA order from RocksDB
+    pub async fn load_dca_order(&self, order_id: &str) -> Result<Option<Vec<u8>>> {
+        self.hot_db.get(CF_DCA_ORDERS, order_id.as_bytes()).await
+    }
+
+    /// Delete a DCA order from RocksDB
+    pub async fn delete_dca_order(&self, order_id: &str) -> Result<()> {
+        self.hot_db.delete(CF_DCA_ORDERS, order_id.as_bytes()).await?;
+        debug!("🗑️ Deleted DCA order: {}", order_id);
+        Ok(())
+    }
+
+    /// Load all DCA orders from RocksDB
+    pub async fn load_all_dca_orders(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let all_pairs = self.hot_db.scan_all(CF_DCA_ORDERS).await?;
+        let mut orders = Vec::new();
+        for (key, value) in all_pairs {
+            if let Ok(key_str) = String::from_utf8(key) {
+                orders.push((key_str, value));
+            }
+        }
+        debug!("💰 Loaded {} DCA orders from RocksDB", orders.len());
+        Ok(orders)
+    }
+
+    /// Load DCA orders for a specific wallet address
+    /// Scans all orders and filters by wallet (orders should include wallet_address field)
+    pub async fn load_dca_orders_by_wallet(&self, wallet_address: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        let all_pairs = self.hot_db.scan_all(CF_DCA_ORDERS).await?;
+        let mut orders = Vec::new();
+        for (key, value) in all_pairs {
+            // Try to deserialize and check wallet_address field
+            if let Ok(order_json) = serde_json::from_slice::<serde_json::Value>(&value) {
+                if let Some(addr) = order_json.get("wallet_address").and_then(|v| v.as_str()) {
+                    if addr == wallet_address {
+                        if let Ok(key_str) = String::from_utf8(key) {
+                            orders.push((key_str, value));
+                        }
+                    }
+                }
+            }
+        }
+        debug!("💰 Loaded {} DCA orders for wallet {}", orders.len(), wallet_address);
+        Ok(orders)
+    }
+
+    /// Save a DCA execution record to RocksDB
+    /// Key format: order_id:timestamp
+    pub async fn save_dca_execution(&self, order_id: &str, timestamp: i64, execution_bytes: &[u8]) -> Result<()> {
+        let key = format!("{}:{}", order_id, timestamp);
+        self.hot_db.put(CF_DCA_EXECUTIONS, key.as_bytes(), execution_bytes).await?;
+        debug!("📊 Saved DCA execution for order {} at {}", order_id, timestamp);
+        Ok(())
+    }
+
+    /// Load all executions for a DCA order
+    pub async fn load_dca_executions(&self, order_id: &str) -> Result<Vec<(i64, Vec<u8>)>> {
+        let prefix = format!("{}:", order_id);
+        let records = self.hot_db.scan_prefix(CF_DCA_EXECUTIONS, prefix.as_bytes()).await?;
+
+        let mut executions = Vec::new();
+        for (key, value) in records {
+            if let Ok(key_str) = String::from_utf8(key) {
+                // Extract timestamp from key (format: order_id:timestamp)
+                if let Some(ts_str) = key_str.strip_prefix(&prefix) {
+                    if let Ok(timestamp) = ts_str.parse::<i64>() {
+                        executions.push((timestamp, value));
+                    }
+                }
+            }
+        }
+        // Sort by timestamp ascending
+        executions.sort_by_key(|(ts, _)| *ts);
+        debug!("📊 Loaded {} executions for DCA order {}", executions.len(), order_id);
+        Ok(executions)
+    }
+
+    /// Delete all executions for a DCA order (when order is cancelled)
+    pub async fn delete_dca_executions(&self, order_id: &str) -> Result<usize> {
+        let prefix = format!("{}:", order_id);
+        let records = self.hot_db.scan_prefix(CF_DCA_EXECUTIONS, prefix.as_bytes()).await?;
+
+        let mut deleted = 0;
+        for (key, _) in records {
+            self.hot_db.delete(CF_DCA_EXECUTIONS, &key).await?;
+            deleted += 1;
+        }
+        debug!("🗑️ Deleted {} executions for DCA order {}", deleted, order_id);
+        Ok(deleted)
+    }
+
+    // ========================================================================
+    // v2.5.0-beta: Perpetual Futures Persistence
+    // Store positions, orders, trades, funding, and liquidations in RocksDB
+    // ========================================================================
+
+    /// Save a perpetual position to RocksDB
+    pub async fn save_perp_position(&self, position_id: &str, position_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_PERP_POSITIONS, position_id.as_bytes(), position_bytes).await?;
+        debug!("📈 Saved perp position: {}", position_id);
+        Ok(())
+    }
+
+    /// Load a perpetual position from RocksDB
+    pub async fn load_perp_position(&self, position_id: &str) -> Result<Option<Vec<u8>>> {
+        self.hot_db.get(CF_PERP_POSITIONS, position_id.as_bytes()).await
+    }
+
+    /// Load all perpetual positions from RocksDB
+    pub async fn load_all_perp_positions(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let all_pairs = self.hot_db.scan_all(CF_PERP_POSITIONS).await?;
+        let mut positions = Vec::new();
+        for (key, value) in all_pairs {
+            if let Ok(key_str) = String::from_utf8(key) {
+                positions.push((key_str, value));
+            }
+        }
+        debug!("📈 Loaded {} perp positions from RocksDB", positions.len());
+        Ok(positions)
+    }
+
+    /// Save a perpetual order to RocksDB
+    pub async fn save_perp_order(&self, order_id: &str, order_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_PERP_ORDERS, order_id.as_bytes(), order_bytes).await?;
+        debug!("📝 Saved perp order: {}", order_id);
+        Ok(())
+    }
+
+    /// Load all perpetual orders from RocksDB
+    pub async fn load_all_perp_orders(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let all_pairs = self.hot_db.scan_all(CF_PERP_ORDERS).await?;
+        let mut orders = Vec::new();
+        for (key, value) in all_pairs {
+            if let Ok(key_str) = String::from_utf8(key) {
+                orders.push((key_str, value));
+            }
+        }
+        debug!("📝 Loaded {} perp orders from RocksDB", orders.len());
+        Ok(orders)
+    }
+
+    /// Save a perpetual trade to RocksDB
+    pub async fn save_perp_trade(&self, trade_id: &str, timestamp: i64, trade_bytes: &[u8]) -> Result<()> {
+        let key = format!("{}:{}", trade_id, timestamp);
+        self.hot_db.put(CF_PERP_TRADES, key.as_bytes(), trade_bytes).await?;
+        debug!("💹 Saved perp trade: {}", trade_id);
+        Ok(())
+    }
+
+    /// Load perpetual trades for a wallet
+    pub async fn load_perp_trades(&self, wallet_address: &str) -> Result<Vec<Vec<u8>>> {
+        let all_pairs = self.hot_db.scan_all(CF_PERP_TRADES).await?;
+        let mut trades = Vec::new();
+        for (_, value) in all_pairs {
+            // Filter by wallet_address in the JSON
+            if let Ok(trade_json) = serde_json::from_slice::<serde_json::Value>(&value) {
+                if let Some(addr) = trade_json.get("wallet_address").and_then(|v| v.as_str()) {
+                    if addr == wallet_address {
+                        trades.push(value);
+                    }
+                }
+            }
+        }
+        debug!("💹 Loaded {} perp trades for wallet {}", trades.len(), wallet_address);
+        Ok(trades)
+    }
+
+    /// Save a funding payment to RocksDB
+    pub async fn save_perp_funding(&self, market: &str, timestamp: i64, funding_bytes: &[u8]) -> Result<()> {
+        let key = format!("{}:{}", market, timestamp);
+        self.hot_db.put(CF_PERP_FUNDING, key.as_bytes(), funding_bytes).await?;
+        debug!("💰 Saved perp funding for {} at {}", market, timestamp);
+        Ok(())
+    }
+
+    /// Save a liquidation record to RocksDB
+    pub async fn save_perp_liquidation(&self, liquidation_id: &str, liquidation_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_PERP_LIQUIDATIONS, liquidation_id.as_bytes(), liquidation_bytes).await?;
+        debug!("🔥 Saved perp liquidation: {}", liquidation_id);
+        Ok(())
+    }
+
+    // ========================================================================
+    // v2.4.0-beta: Governance Persistence (Proposals & Votes)
+    // These methods persist governance data across node restarts
+    // ========================================================================
+
+    /// Save a governance proposal to RocksDB
+    /// Key format: proposal_id (string)
+    pub async fn save_governance_proposal(&self, proposal_id: &str, proposal_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_PROPOSALS, proposal_id.as_bytes(), proposal_bytes).await?;
+        debug!("📜 Saved governance proposal: {}", proposal_id);
+        Ok(())
+    }
+
+    /// Load a governance proposal from RocksDB
+    pub async fn load_governance_proposal(&self, proposal_id: &str) -> Result<Option<Vec<u8>>> {
+        self.hot_db.get(CF_PROPOSALS, proposal_id.as_bytes()).await
+    }
+
+    /// Load all governance proposals from RocksDB
+    pub async fn load_all_governance_proposals(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let all_pairs = self.hot_db.scan_all(CF_PROPOSALS).await?;
+        let mut proposals = Vec::new();
+        for (key, value) in all_pairs {
+            if let Ok(key_str) = String::from_utf8(key) {
+                proposals.push((key_str, value));
+            }
+        }
+        debug!("📜 Loaded {} governance proposals from RocksDB", proposals.len());
+        Ok(proposals)
+    }
+
+    /// Save a governance vote to RocksDB
+    /// Key format: proposal_id:voter_hex
+    pub async fn save_governance_vote(&self, proposal_id: &str, voter_hex: &str, vote_bytes: &[u8]) -> Result<()> {
+        let key = format!("{}:{}", proposal_id, voter_hex);
+        self.hot_db.put(CF_GOVERNANCE_VOTES, key.as_bytes(), vote_bytes).await?;
+        debug!("📜 Saved governance vote: {} from {}", proposal_id, voter_hex);
+        Ok(())
+    }
+
+    /// Load all votes for a proposal from RocksDB
+    pub async fn load_governance_votes_for_proposal(&self, proposal_id: &str) -> Result<Vec<Vec<u8>>> {
+        let prefix = format!("{}:", proposal_id);
+        let all_pairs = self.hot_db.scan_prefix(CF_GOVERNANCE_VOTES, prefix.as_bytes()).await?;
+        let votes: Vec<Vec<u8>> = all_pairs.into_iter().map(|(_, v)| v).collect();
+        debug!("📜 Loaded {} votes for proposal {}", votes.len(), proposal_id);
+        Ok(votes)
     }
 }
 
@@ -4469,6 +5323,76 @@ pub struct ChatMessage {
     pub generation_stats: Option<GenerationStats>,
 }
 
+/// v2.4.1-beta: Protected AI Chat message with TemporalShield
+///
+/// Wraps sensitive content (user prompts, AI reasoning) in TemporalEnvelope
+/// for HNDL attack resistance. Uses (3,5) threshold sharing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedChatMessage {
+    /// Message index in chat
+    pub index: u64,
+    /// Role (user/assistant/system) - NOT protected
+    pub role: String,
+    /// Timestamp - NOT protected (for timeline auditing)
+    pub timestamp: u64,
+    /// Protected user prompt (TemporalEnvelope bytes)
+    pub protected_content: Vec<u8>,
+    /// Protected AI reasoning (TemporalEnvelope bytes, optional)
+    pub protected_reasoning: Option<Vec<u8>>,
+    /// Generation stats - NOT protected (not sensitive)
+    pub generation_stats: Option<GenerationStats>,
+    /// Blake3 hash of content for search indexing without decryption
+    pub content_hash: [u8; 32],
+    /// Flag indicating if message is protected
+    pub is_protected: bool,
+}
+
+impl ProtectedChatMessage {
+    /// Create a protected message from envelope bytes
+    pub fn new(
+        index: u64,
+        role: String,
+        protected_content: Vec<u8>,
+        protected_reasoning: Option<Vec<u8>>,
+        generation_stats: Option<GenerationStats>,
+        content_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            index,
+            role,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            protected_content,
+            protected_reasoning,
+            generation_stats,
+            content_hash,
+            is_protected: true,
+        }
+    }
+
+    /// Create an unprotected message (fallback when TemporalShield unavailable)
+    pub fn unprotected(message: &ChatMessage) -> Self {
+        let content_hash = *blake3::hash(message.content.as_bytes()).as_bytes();
+        Self {
+            index: message.index,
+            role: message.role.clone(),
+            timestamp: message.timestamp,
+            protected_content: message.content.as_bytes().to_vec(),
+            protected_reasoning: message.reasoning.as_ref().map(|r| r.as_bytes().to_vec()),
+            generation_stats: message.generation_stats.clone(),
+            content_hash,
+            is_protected: false,
+        }
+    }
+
+    /// Check if message matches a search hash (for searching without decryption)
+    pub fn matches_hash(&self, search_hash: &[u8; 32]) -> bool {
+        &self.content_hash == search_hash
+    }
+}
+
 /// AI generation statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationStats {
@@ -4496,19 +5420,23 @@ pub struct ChatSettings {
 // ============================================================================
 
 /// AI Credits for wallet
+/// v3.0.4: Migrated monetary fields to u128 for 24-decimal precision
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AICredits {
     pub wallet_address: String,
-    pub balance_qnk: u64,
-    pub balance_qugusd: u64,
-    pub total_spent_qnk: u64,
-    pub total_spent_qugusd: u64,
+    pub balance_qnk: u128,
+    pub balance_qugusd: u128,
+    pub total_spent_qnk: u128,
+    pub total_spent_qugusd: u128,
     pub total_tokens_generated: u64,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
 /// AI Transaction record
+/// v3.0.4: Migrated cost_qnk to u128 for 24-decimal precision
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AITransaction {
     pub tx_id: String,
@@ -4517,7 +5445,7 @@ pub struct AITransaction {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd_cents: u64,
-    pub cost_qnk: u64,
+    pub cost_qnk: u128,  // v3.0.4: u64 -> u128
     pub payment_token: PaymentToken,
     pub oracle_price_usd_cents: u64,
     pub timestamp: u64,
@@ -4581,11 +5509,13 @@ pub struct ValidatorSignature {
 }
 
 /// AI Treasury (Master Wallet)
+/// v3.0.4: Migrated monetary fields to u128 for 24-decimal precision
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AITreasury {
     pub wallet_address: String,
-    pub total_revenue_qnk: u64,
-    pub total_revenue_qugusd: u64,
+    pub total_revenue_qnk: u128,      // v3.0.4: u64 -> u128
+    pub total_revenue_qugusd: u128,   // v3.0.4: u64 -> u128
     pub total_requests_served: u64,
     pub total_tokens_generated: u64,
     pub created_at: u64,
@@ -4593,15 +5523,17 @@ pub struct AITreasury {
 }
 
 /// Payment Settlement (100% profits to treasury)
+/// v3.0.4: Migrated monetary fields to u128 for 24-decimal precision
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentSettlement {
     pub request_id: String,
     pub wallet_address: String,  // User wallet
     pub actual_tokens_generated: u32,
-    pub actual_cost_qnk: u64,
-    pub refund_amount_qnk: u64,
-    pub treasury_payment_qnk: u64,  // = actual_cost_qnk (100% to treasury)
-    pub treasury_wallet: String,  // MASTER_AI_TREASURY_WALLET
+    pub actual_cost_qnk: u128,       // v3.0.4: u64 -> u128
+    pub refund_amount_qnk: u128,     // v3.0.4: u64 -> u128
+    pub treasury_payment_qnk: u128,  // v3.0.4: u64 -> u128, = actual_cost_qnk (100% to treasury)
+    pub treasury_wallet: String,     // MASTER_AI_TREASURY_WALLET
     pub generation_node_id: String,
     pub validator_signatures: Vec<ValidatorSignature>,
     pub timestamp: u64,

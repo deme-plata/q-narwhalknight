@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
@@ -21,17 +21,137 @@ interface TopBarProps {
   qci: number; // Quantum Coherence Index
 }
 
-export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isOnline, qci }: TopBarProps) {
+// v2.4.0: Memoized for performance
+const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers, isOnline, qci }: TopBarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showResults, setShowResults] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Debug: Log whenever currentBalance prop changes
+  // v2.9.0-beta: STABLE balance display - prevent bouncing between multiple sources
+  const [stableBalance, setStableBalance] = useState<number>(() => {
+    // Initialize from localStorage cache to prevent flash
+    const cached = localStorage.getItem('cachedBalance');
+    const cachedValue = cached ? parseFloat(cached) : 0;
+    return !isNaN(cachedValue) && isFinite(cachedValue) ? cachedValue : currentBalance;
+  });
+  const lastBalanceUpdateRef = useRef<number>(Date.now());
+  const balanceStabilityWindowMs = 2000; // Don't change balance more than once per 2 seconds
+
+  // v2.9.0-beta: Stabilized balance getter - prevents rapid flickering
+  const getDisplayBalance = (): number => {
+    // Check if we have a locked balance from DEX (SOURCE OF TRUTH during cooldown)
+    const lockedBalance = localStorage.getItem('dexLockedBalance');
+    const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+
+    if (lockedBalance && Date.now() < cooldownUntil) {
+      const locked = parseFloat(lockedBalance);
+      if (!isNaN(locked) && isFinite(locked)) {
+        return locked;
+      }
+    }
+
+    // Return the stable balance (updated only when stability window allows)
+    return stableBalance;
+  };
+
+  // v2.9.0-beta: Update stable balance with debouncing to prevent flickering
   useEffect(() => {
-    console.log('💰 TopBar: currentBalance prop changed to:', currentBalance);
-  }, [currentBalance]);
+    const cached = localStorage.getItem('cachedBalance');
+    const cachedValue = cached ? parseFloat(cached) : currentBalance;
+    const newBalance = !isNaN(cachedValue) && isFinite(cachedValue) ? cachedValue : currentBalance;
+
+    // Only update if enough time has passed (prevents rapid flickering)
+    const timeSinceLastUpdate = Date.now() - lastBalanceUpdateRef.current;
+    const balanceDifference = Math.abs(newBalance - stableBalance);
+
+    // Update if: significant change (>1 QUG) OR stability window passed
+    if (balanceDifference > 1 || timeSinceLastUpdate > balanceStabilityWindowMs) {
+      // Use the HIGHER of the two values to prevent showing decreased balance from race conditions
+      const bestBalance = Math.max(newBalance, stableBalance, currentBalance);
+
+      if (Math.abs(bestBalance - stableBalance) > 0.0001) {
+        console.log('💰 TopBar: Stable balance update:', stableBalance.toFixed(4), '→', bestBalance.toFixed(4));
+        setStableBalance(bestBalance);
+        lastBalanceUpdateRef.current = Date.now();
+      }
+    }
+  }, [currentBalance, stableBalance]);
+
+  // v2.9.0-beta: Listen for balance change events and update stable balance
+  useEffect(() => {
+    const handleBalanceChanged = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const newBalance = customEvent.detail?.balance;
+      if (typeof newBalance === 'number' && !isNaN(newBalance) && isFinite(newBalance)) {
+        console.log('🔥 TopBar: qug-balance-changed received:', newBalance);
+        // v2.9.3-beta: DEX swaps are AUTHORITATIVE - allow both increases AND decreases
+        // The qug-balance-changed event is ONLY dispatched by DexScreen after successful swaps
+        // so we MUST trust the value even if it's lower (e.g., QUG -> QUGUSD swap)
+        setStableBalance(newBalance);
+        lastBalanceUpdateRef.current = Date.now();
+      }
+    };
+
+    const handleDexCooldownExpired = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { qugBalance } = customEvent.detail || {};
+      console.log('🔄 TopBar: DEX cooldown expired, balance:', qugBalance);
+      if (typeof qugBalance === 'number' && !isNaN(qugBalance) && isFinite(qugBalance)) {
+        setStableBalance(qugBalance);
+        lastBalanceUpdateRef.current = Date.now();
+      }
+    };
+
+    const handleWalletBalanceUpdated = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { symbol, balance, reason } = customEvent.detail || {};
+      if (symbol !== 'QUG') return;
+      if (typeof balance === 'number' && !isNaN(balance) && isFinite(balance)) {
+        console.log('💰 TopBar: wallet-balance-updated:', balance, 'reason:', reason);
+
+        // v2.9.1-beta: Mining updates are authoritative - use directly
+        // DEX updates use Math.max() to prevent race condition drops
+        const isMiningUpdate = reason && (
+          reason === 'mining_reward' ||
+          reason === 'p2p_mining_reward' ||
+          reason === 'mining_stats_update' ||
+          reason.startsWith('mining_reward')
+        );
+
+        // v2.9.3-beta: Check if this is a DEX swap deduction
+        const isDexSwapDeduct = reason && (
+          reason === 'dex-swap-deduct' ||
+          reason === 'DexScreen.swap.deduct'
+        );
+
+        if (isMiningUpdate || isDexSwapDeduct) {
+          // Mining updates and DEX swap deductions: use value directly
+          // DEX swaps are authoritative - the user just spent QUG, balance MUST decrease
+          console.log(isDexSwapDeduct ? '💸 TopBar: DEX deduct - setting balance to:' : '⛏️ TopBar: Mining update - setting balance to:', balance);
+          setStableBalance(balance);
+        } else {
+          // Other updates: use max to prevent race condition drops (but allow higher)
+          setStableBalance(prev => Math.max(prev, balance));
+        }
+        lastBalanceUpdateRef.current = Date.now();
+      }
+    };
+
+    window.addEventListener('qug-balance-changed', handleBalanceChanged);
+    window.addEventListener('dex-cooldown-expired', handleDexCooldownExpired);
+    window.addEventListener('wallet-balance-updated', handleWalletBalanceUpdated);
+
+    return () => {
+      window.removeEventListener('qug-balance-changed', handleBalanceChanged);
+      window.removeEventListener('dex-cooldown-expired', handleDexCooldownExpired);
+      window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdated);
+    };
+  }, []);
+
+  // Get the display balance (always from localStorage)
+  const displayBalance = getDisplayBalance();
 
   // Mock search function - replace with real API calls
   const performSearch = async (query: string) => {
@@ -265,19 +385,24 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
 
         {/* Center: Network Status */}
         <div className="flex items-center gap-6">
-          <div className="text-center relative">
+          <div className="text-center relative group">
             <motion.div
-              className="font-bold text-lg bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent"
-              key={Math.floor(currentBalance * 100)}
-              initial={{ scale: 1.05, opacity: 1 }}
+              className="font-bold text-lg bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent cursor-help"
+              key="stable-balance-display"
               animate={{ scale: 1, opacity: 1 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              title={`Full precision: ${displayBalance.toFixed(24)} ${TICKER_SYMBOL}\n(24 decimal places)`}
             >
-              {currentBalance.toLocaleString('en-US', {
+              {displayBalance.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
-                maximumFractionDigits: 8
+                maximumFractionDigits: 12
               })} {TICKER_SYMBOL}
             </motion.div>
+            {/* v3.2.18-beta: Hover tooltip showing full 24-decimal precision */}
+            <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 bg-quantum-dark/95 border border-amber-500/30 rounded-lg px-4 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 whitespace-nowrap">
+              <div className="text-xs text-gray-400 mb-1">Full 24-decimal precision:</div>
+              <div className="font-mono text-amber-400 text-sm">{displayBalance.toFixed(24)} {TICKER_SYMBOL}</div>
+            </div>
             <div className="text-amber-300/60 text-sm font-medium flex items-center gap-2 justify-center">
               <span>Total Balance</span>
               <motion.div
@@ -399,4 +524,6 @@ export default function TopBar({ currentBalance, nodeId, blockHeight, peers, isO
       </div>
     </div>
   );
-}
+});
+
+export default TopBar;

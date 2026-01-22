@@ -58,15 +58,18 @@ pub enum StakingTier {
     Diamond,
 }
 
+/// Base units constant for 24-decimal precision
+const ONE_QUG: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
+
 impl StakingTier {
-    /// Minimum stake required for this tier (in base units, 8 decimals)
-    pub fn min_stake(&self) -> u64 {
+    /// Minimum stake required for this tier (in base units, 24 decimals)
+    pub fn min_stake(&self) -> u128 {
         match self {
             StakingTier::Unstaked => 0,
-            StakingTier::Bronze => 1_000 * 100_000_000,      // 1,000 QUG
-            StakingTier::Silver => 10_000 * 100_000_000,     // 10,000 QUG
-            StakingTier::Gold => 100_000 * 100_000_000,      // 100,000 QUG
-            StakingTier::Diamond => 1_000_000 * 100_000_000, // 1,000,000 QUG
+            StakingTier::Bronze => 1_000 * ONE_QUG,      // 1,000 QUG
+            StakingTier::Silver => 10_000 * ONE_QUG,     // 10,000 QUG
+            StakingTier::Gold => 100_000 * ONE_QUG,      // 100,000 QUG
+            StakingTier::Diamond => 1_000_000 * ONE_QUG, // 1,000,000 QUG
         }
     }
 
@@ -93,7 +96,7 @@ impl StakingTier {
     }
 
     /// Determine tier from stake amount
-    pub fn from_stake(stake: u64) -> Self {
+    pub fn from_stake(stake: u128) -> Self {
         if stake >= StakingTier::Diamond.min_stake() {
             StakingTier::Diamond
         } else if stake >= StakingTier::Gold.min_stake() {
@@ -148,7 +151,7 @@ pub enum SlashableOffense {
     InstantPaymentDoubleSpend {
         tx_hash: String,
         merchant_address: String,
-        amount: u64,
+        amount: u128,
     },
 }
 
@@ -172,18 +175,21 @@ impl SlashableOffense {
 pub struct MinerStake {
     /// Miner's wallet address
     pub address: String,
-    /// Staked amount in base units
-    pub staked_amount: u64,
+    /// Staked amount in base units (24 decimals)
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub staked_amount: u128,
     /// Current tier
     pub tier: StakingTier,
     /// When stake was locked
     pub stake_timestamp: u64,
     /// Minimum unlock time (stake must be locked for 30 days)
     pub unlock_timestamp: u64,
-    /// Total rewards earned while staking
-    pub rewards_earned: u64,
-    /// Any pending slashing
-    pub pending_slash: u64,
+    /// Total rewards earned while staking (24 decimals)
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub rewards_earned: u128,
+    /// Any pending slashing (24 decimals)
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub pending_slash: u128,
     /// Offense history
     pub offense_history: Vec<SlashRecord>,
 }
@@ -193,19 +199,24 @@ pub struct MinerStake {
 pub struct SlashRecord {
     pub timestamp: u64,
     pub offense: SlashableOffense,
-    pub slashed_amount: u64,
-    pub remaining_stake: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub slashed_amount: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub remaining_stake: u128,
 }
 
 /// Insurance pool for instant payments
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InsurancePool {
-    /// Total pool balance in base units
-    pub balance: u64,
+    /// Total pool balance in base units (24 decimals)
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub balance: u128,
     /// Target balance (1% of circulating supply)
-    pub target_balance: u64,
-    /// Claims paid out
-    pub total_claims_paid: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub target_balance: u128,
+    /// Claims paid out (24 decimals)
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub total_claims_paid: u128,
     /// Number of claims
     pub claim_count: u64,
     /// Pending claims
@@ -218,7 +229,8 @@ pub struct InsuranceClaim {
     pub claim_id: String,
     pub merchant_address: String,
     pub tx_hash: String,
-    pub amount: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub amount: u128,
     pub timestamp: u64,
     pub status: ClaimStatus,
 }
@@ -256,7 +268,7 @@ impl StakingSecurityManager {
             stakes: Arc::new(RwLock::new(HashMap::new())),
             insurance_pool: Arc::new(RwLock::new(InsurancePool {
                 balance: 0,
-                target_balance: 21_000_000 * 100_000_000 / 100, // 1% of max supply
+                target_balance: 21_000_000 * ONE_QUG / 100, // 1% of max supply (24 decimals)
                 total_claims_paid: 0,
                 claim_count: 0,
                 pending_claims: Vec::new(),
@@ -267,7 +279,7 @@ impl StakingSecurityManager {
     }
 
     /// Stake QUG for a miner
-    pub async fn stake(&self, address: &str, amount: u64) -> Result<StakingTier> {
+    pub async fn stake(&self, address: &str, amount: u128) -> Result<StakingTier> {
         let mut stakes = self.stakes.write().await;
 
         let now = std::time::SystemTime::now()
@@ -293,7 +305,7 @@ impl StakingSecurityManager {
         info!(
             "💰 Miner {} staked {} QUG, now at {} tier",
             address,
-            amount / 100_000_000,
+            amount as f64 / ONE_QUG as f64,
             stake.tier.emoji()
         );
 
@@ -301,7 +313,7 @@ impl StakingSecurityManager {
     }
 
     /// Unstake QUG (if lock period has passed)
-    pub async fn unstake(&self, address: &str, amount: u64) -> Result<u64> {
+    pub async fn unstake(&self, address: &str, amount: u128) -> Result<u128> {
         let mut stakes = self.stakes.write().await;
 
         let stake = stakes
@@ -334,7 +346,7 @@ impl StakingSecurityManager {
         info!(
             "💸 Miner {} unstaked {} QUG, now at {} tier",
             address,
-            unstake_amount / 100_000_000,
+            unstake_amount as f64 / ONE_QUG as f64,
             stake.tier.emoji()
         );
 
@@ -342,7 +354,7 @@ impl StakingSecurityManager {
     }
 
     /// Process a slashing offense
-    pub async fn slash(&self, address: &str, offense: SlashableOffense) -> Result<u64> {
+    pub async fn slash(&self, address: &str, offense: SlashableOffense) -> Result<u128> {
         let mut stakes = self.stakes.write().await;
 
         let stake = stakes
@@ -350,8 +362,8 @@ impl StakingSecurityManager {
             .ok_or_else(|| anyhow!("No stake found for address"))?;
 
         // Calculate slash amount
-        let base_slash = (stake.staked_amount as f64 * stake.tier.slashing_percentage()) as u64;
-        let severity_adjusted = (base_slash as f64 * offense.severity_multiplier()) as u64;
+        let base_slash = (stake.staked_amount as f64 * stake.tier.slashing_percentage()) as u128;
+        let severity_adjusted = (base_slash as f64 * offense.severity_multiplier()) as u128;
         let slash_amount = severity_adjusted.min(stake.staked_amount);
 
         stake.staked_amount -= slash_amount;
@@ -370,7 +382,7 @@ impl StakingSecurityManager {
         error!(
             "⚔️ SLASHED: Miner {} lost {} QUG for {:?}",
             address,
-            slash_amount / 100_000_000,
+            slash_amount as f64 / ONE_QUG as f64,
             offense
         );
 
@@ -380,7 +392,7 @@ impl StakingSecurityManager {
             pool.balance += slash_amount;
             info!(
                 "🛡️ Insurance pool increased by {} QUG from slashing",
-                slash_amount / 100_000_000
+                slash_amount as f64 / ONE_QUG as f64
             );
         }
 
@@ -388,7 +400,7 @@ impl StakingSecurityManager {
     }
 
     /// Calculate adjusted mining reward based on stake tier
-    pub async fn calculate_reward(&self, address: &str, base_reward: u64) -> Result<(u64, u64)> {
+    pub async fn calculate_reward(&self, address: &str, base_reward: u128) -> Result<(u128, u128)> {
         let stakes = self.stakes.read().await;
 
         let (multiplier, tier) = if let Some(stake) = stakes.get(address) {
@@ -397,18 +409,18 @@ impl StakingSecurityManager {
             (StakingTier::Unstaked.reward_multiplier(), StakingTier::Unstaked)
         };
 
-        let adjusted_reward = (base_reward as f64 * multiplier) as u64;
-        let insurance_contribution = (adjusted_reward as f64 * self.insurance_contribution_rate) as u64;
+        let adjusted_reward = (base_reward as f64 * multiplier) as u128;
+        let insurance_contribution = (adjusted_reward as f64 * self.insurance_contribution_rate) as u128;
         let final_reward = adjusted_reward - insurance_contribution;
 
         debug!(
             "💎 {} tier miner {} gets {} QUG ({:.0}% of {}), {} to insurance",
             tier.emoji(),
             address,
-            final_reward / 100_000_000,
+            final_reward as f64 / ONE_QUG as f64,
             multiplier * 100.0,
-            base_reward / 100_000_000,
-            insurance_contribution / 100_000_000
+            base_reward as f64 / ONE_QUG as f64,
+            insurance_contribution as f64 / ONE_QUG as f64
         );
 
         // Add to insurance pool
@@ -425,7 +437,7 @@ impl StakingSecurityManager {
         &self,
         merchant_address: &str,
         tx_hash: &str,
-        amount: u64,
+        amount: u128,
     ) -> Result<String> {
         let mut pool = self.insurance_pool.write().await;
 
@@ -445,7 +457,7 @@ impl StakingSecurityManager {
         warn!(
             "🆘 Insurance claim filed: {} for {} QUG by merchant {}",
             claim_id,
-            amount / 100_000_000,
+            amount as f64 / ONE_QUG as f64,
             merchant_address
         );
 
@@ -453,7 +465,8 @@ impl StakingSecurityManager {
     }
 
     /// Process approved insurance claim
-    pub async fn pay_claim(&self, claim_id: &str) -> Result<u64> {
+    /// v3.0.4: Returns u128 for 24-decimal precision
+    pub async fn pay_claim(&self, claim_id: &str) -> Result<u128> {
         let mut pool = self.insurance_pool.write().await;
 
         let claim_idx = pool
@@ -483,7 +496,7 @@ impl StakingSecurityManager {
         info!(
             "✅ Insurance claim {} paid: {} QUG to merchant",
             claim_id,
-            claim_amount / 100_000_000
+            claim_amount / 1_000_000_000_000_000_000_000_000u128
         );
 
         Ok(claim_amount)
@@ -494,7 +507,8 @@ impl StakingSecurityManager {
         let stakes = self.stakes.read().await;
         let pool = self.insurance_pool.read().await;
 
-        let total_staked: u64 = stakes.values().map(|s| s.staked_amount).sum();
+        // v3.0.4: staked_amount is now u128
+        let total_staked: u128 = stakes.values().map(|s| s.staked_amount).sum();
         let tier_counts: HashMap<String, usize> = stakes
             .values()
             .fold(HashMap::new(), |mut acc, s| {
@@ -504,7 +518,7 @@ impl StakingSecurityManager {
 
         serde_json::json!({
             "staking": {
-                "total_staked_qug": total_staked / 100_000_000,
+                "total_staked_qug": total_staked / 1_000_000_000_000_000_000_000_000u128,
                 "total_stakers": stakes.len(),
                 "tier_distribution": tier_counts,
                 "tiers": {
@@ -515,10 +529,10 @@ impl StakingSecurityManager {
                 }
             },
             "insurance_pool": {
-                "balance_qug": pool.balance / 100_000_000,
-                "target_balance_qug": pool.target_balance / 100_000_000,
+                "balance_qug": pool.balance / 1_000_000_000_000_000_000_000_000u128,
+                "target_balance_qug": pool.target_balance / 1_000_000_000_000_000_000_000_000u128,
                 "fill_percentage": (pool.balance as f64 / pool.target_balance as f64 * 100.0),
-                "total_claims_paid_qug": pool.total_claims_paid / 100_000_000,
+                "total_claims_paid_qug": pool.total_claims_paid / 1_000_000_000_000_000_000_000_000u128,
                 "claim_count": pool.claim_count,
                 "pending_claims": pool.pending_claims.len(),
                 "contribution_rate": "5% of mining rewards"
@@ -546,11 +560,11 @@ mod tests {
         let manager = StakingSecurityManager::new();
 
         // Stake bronze tier
-        let tier = manager.stake("miner1", 1_000 * 100_000_000).await.unwrap();
+        let tier = manager.stake("miner1", 1_000 * 1_000_000_000_000_000_000_000_000u128).await.unwrap();
         assert_eq!(tier, StakingTier::Bronze);
 
         // Stake more to reach silver
-        let tier = manager.stake("miner1", 9_000 * 100_000_000).await.unwrap();
+        let tier = manager.stake("miner1", 9_000 * 1_000_000_000_000_000_000_000_000u128).await.unwrap();
         assert_eq!(tier, StakingTier::Silver);
     }
 
@@ -560,22 +574,22 @@ mod tests {
 
         // Unstaked miner gets 80% * 95% (after insurance)
         let (reward, insurance) = manager
-            .calculate_reward("unstaked_miner", 100 * 100_000_000)
+            .calculate_reward("unstaked_miner", 100 * 1_000_000_000_000_000_000_000_000u128)
             .await
             .unwrap();
-        assert_eq!(insurance, 4 * 100_000_000); // 5% of 80 = 4
-        assert_eq!(reward, 76 * 100_000_000);   // 80 - 4 = 76
+        assert_eq!(insurance, 4 * 1_000_000_000_000_000_000_000_000u128); // 5% of 80 = 4
+        assert_eq!(reward, 76 * 1_000_000_000_000_000_000_000_000u128);   // 80 - 4 = 76
 
         // Stake diamond tier
-        manager.stake("diamond_miner", 1_000_000 * 100_000_000).await.unwrap();
+        manager.stake("diamond_miner", 1_000_000 * 1_000_000_000_000_000_000_000_000u128).await.unwrap();
 
         // Diamond miner gets 200% * 95% (after insurance)
         let (reward, insurance) = manager
-            .calculate_reward("diamond_miner", 100 * 100_000_000)
+            .calculate_reward("diamond_miner", 100 * 1_000_000_000_000_000_000_000_000u128)
             .await
             .unwrap();
-        assert_eq!(insurance, 10 * 100_000_000); // 5% of 200 = 10
-        assert_eq!(reward, 190 * 100_000_000);   // 200 - 10 = 190
+        assert_eq!(insurance, 10 * 1_000_000_000_000_000_000_000_000u128); // 5% of 200 = 10
+        assert_eq!(reward, 190 * 1_000_000_000_000_000_000_000_000u128);   // 200 - 10 = 190
     }
 
     #[tokio::test]
@@ -583,7 +597,7 @@ mod tests {
         let manager = StakingSecurityManager::new();
 
         // Stake gold tier
-        manager.stake("miner1", 100_000 * 100_000_000).await.unwrap();
+        manager.stake("miner1", 100_000 * 1_000_000_000_000_000_000_000_000u128).await.unwrap();
 
         // Slash for equivocation (50% of stake)
         let slashed = manager
@@ -598,6 +612,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(slashed, 50_000 * 100_000_000); // 50% of 100k
+        assert_eq!(slashed, 50_000 * 1_000_000_000_000_000_000_000_000u128); // 50% of 100k
     }
 }

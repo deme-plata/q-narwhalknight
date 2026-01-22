@@ -15,7 +15,9 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
+pub mod byzantine_detector;
 pub mod certificate;
+pub mod consensus_voting;
 pub mod decentralized_consensus;
 pub mod production_mempool;
 pub mod reliable_broadcast;
@@ -24,7 +26,9 @@ pub mod tor_client_impl;
 pub mod validator_set;
 pub mod vertex_store;
 
+pub use byzantine_detector::{ByzantineDetector, ByzantineAnalysisResult, ByzantineConfig, SuspicionLevel};
 pub use certificate::CertificateStore;
+pub use consensus_voting::{ConsensusVoting, ConsensusVotingConfig};
 pub use decentralized_consensus::{
     CertificateBroadcast, PendingSignatures, SignatureRequest, SignatureResponse,
     ValidatorAnnouncement, ValidatorRegistry, verify_sqisign_signature,

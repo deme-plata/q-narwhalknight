@@ -103,7 +103,7 @@ const SwapSuccessModal: React.FC<SwapSuccessModalProps> = ({
           {/* Swap details with animated arrow */}
           <div className="swap-details">
             <div className="token-display from-token">
-              <div className="token-amount">{fromAmount.toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+              <div className="token-amount">{(isFinite(fromAmount) && !isNaN(fromAmount) ? fromAmount : 0).toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
               <div className="token-symbol">{fromToken}</div>
               <div className="token-glow"></div>
             </div>
@@ -120,7 +120,7 @@ const SwapSuccessModal: React.FC<SwapSuccessModalProps> = ({
             </div>
 
             <div className="token-display to-token">
-              <div className="token-amount">{toAmount.toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+              <div className="token-amount">{(isFinite(toAmount) && !isNaN(toAmount) ? toAmount : 0).toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
               <div className="token-symbol">{toToken}</div>
               <div className="token-glow"></div>
             </div>

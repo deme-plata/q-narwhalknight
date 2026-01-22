@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub mod orobit_smart_contracts;
 pub mod security;
 pub mod collateral_vault;
+pub mod bio_contracts;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{
@@ -25,6 +26,22 @@ pub use security::{
 pub use collateral_vault::{
     CollateralVault, LiquidationResult, MintResult, PositionHealth, RedeemResult, VaultStats,
     LIQUIDATION_BONUS, LIQUIDATION_RATIO, MIN_COLLATERAL_RATIO, WARNING_RATIO,
+};
+
+// Re-export bio contract types
+pub use bio_contracts::{
+    // License system
+    BioLicense, BioLicenseContract, DEASchedule, LicenseType,
+    // Synthesis proof
+    SynthesisProof, SynthesisProofContract, VerificationMethod,
+    // BioToken
+    BioTokenContract, StakeInfo, StakingTier,
+    // Safety oracle
+    BioSafetyOracleContract, OracleInfo, SafetyClassification, SafetyVote,
+    // Marketplace
+    SynthesisMarketplaceContract, SynthesisListing, SynthesisOrder, OrderStatus,
+    // Errors
+    BioContractError,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

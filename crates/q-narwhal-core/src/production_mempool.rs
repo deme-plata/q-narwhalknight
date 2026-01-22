@@ -50,7 +50,8 @@ pub struct MempoolTransaction {
     pub received_at: SystemTime,
 
     /// Fee paid by transaction (for ordering)
-    pub fee: u64,
+    /// v2.5.0: Updated to u128 for consistency with Amount type
+    pub fee: u128,
 
     /// Size in bytes
     pub size: usize,
@@ -167,7 +168,8 @@ pub enum MempoolMessage {
     TransactionAnnounce {
         tx_hash: TxHash,
         size: usize,
-        fee: u64,
+        /// v2.5.0: Updated to u128 for consistency with Amount type
+        fee: u128,
         priority: u8,
         validator_id: ValidatorId,
         timestamp: u64,
@@ -301,7 +303,8 @@ impl ProductionMempool {
         let tx_size = bincode::serialized_size(&transaction).unwrap_or(256) as usize;
 
         // v1.4.5-beta: Enforce min_fee_per_byte from config
-        let min_required_fee = (tx_size as u64).saturating_mul(self.config.min_fee_per_byte);
+        // v2.5.0: Updated to u128 for consistency
+        let min_required_fee = (tx_size as u128).saturating_mul(self.config.min_fee_per_byte as u128);
         if tx_fee < min_required_fee {
             warn!(
                 "💸 Transaction fee {} below minimum {} ({} bytes × {} per byte)",
@@ -560,13 +563,14 @@ impl ProductionMempool {
         let metrics = self.metrics.read().await;
 
         // v1.4.5-beta: Use saturating fold to prevent overflow
-        let total_fees: u64 = pending
+        // v2.5.0: Updated to u128 for consistency
+        let total_fees: u128 = pending
             .values()
-            .fold(0u64, |acc, tx| acc.saturating_add(tx.fee));
+            .fold(0u128, |acc, tx| acc.saturating_add(tx.fee));
         let average_fee = if pending.is_empty() {
             0
         } else {
-            total_fees / pending.len() as u64
+            total_fees / pending.len() as u128
         };
 
         MempoolStats {
@@ -619,18 +623,58 @@ impl ProductionMempool {
         self.pending_transactions.read().await.len()
     }
 
-    /// Broadcast message to all peers
+    /// Broadcast message to all peers via TorBroadcastManager
+    ///
+    /// 🔐 v2.4.7-beta: Properly delegate to TorBroadcastManager for real P2P broadcast
     pub async fn broadcast_to_all_peers(&self, message: BroadcastMessage) -> Result<()> {
-        // TODO: Implement actual broadcasting via TorBroadcastManager
-        info!("Broadcasting message to all peers: {:?}", message);
-        Ok(())
+        info!("📡 Broadcasting message to all peers via Tor");
+
+        match self.broadcast_manager.broadcast_to_all(message).await {
+            Ok(result) => {
+                info!(
+                    "✅ Broadcast complete: {} successful, {} failed in {:?}",
+                    result.successful_sends,
+                    result.failed_sends,
+                    result.broadcast_time
+                );
+
+                // Update metrics
+                let mut metrics = self.metrics.write().await;
+                metrics.broadcast_count += 1;
+
+                if result.failed_sends > 0 && result.successful_sends == 0 {
+                    warn!("⚠️ Broadcast failed - no peers received the message");
+                    return Err(anyhow::anyhow!("Broadcast failed - no successful sends"));
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                warn!("❌ Broadcast failed: {}", e);
+                Err(e)
+            }
+        }
     }
 
-    /// Send message to specific peer
+    /// Send message to specific peer via TorBroadcastManager
+    ///
+    /// 🔐 v2.4.7-beta: Properly delegate to TorBroadcastManager for real P2P messaging
     pub async fn send_to_peer(&self, peer: ValidatorId, message: BroadcastMessage) -> Result<()> {
-        // TODO: Implement actual peer messaging via TorBroadcastManager
-        info!("Sending message to peer {:?}: {:?}", peer, message);
-        Ok(())
+        debug!("📤 Sending message to peer {:?}", peer);
+
+        match self.broadcast_manager
+            .send_message_to_peer(peer, &message, crate::tor_broadcast::MessagePriority::Normal)
+            .await
+        {
+            Ok(_) => {
+                debug!("✅ Message sent to peer {:?}", peer);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("❌ Failed to send message to peer {:?}: {}", peer, e);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -638,8 +682,10 @@ impl ProductionMempool {
 #[derive(Debug, Clone)]
 pub struct MempoolStats {
     pub transaction_count: usize,
-    pub total_fees: u64,
-    pub average_fee: u64,
+    /// v2.5.0: Updated to u128 for consistency with Amount type
+    pub total_fees: u128,
+    /// v2.5.0: Updated to u128 for consistency with Amount type
+    pub average_fee: u128,
     pub total_size_bytes: usize,
     pub oldest_transaction_age: Duration,
     pub metrics: MempoolMetrics,

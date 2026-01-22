@@ -14,20 +14,172 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::sync::Arc;
+use q_vm::contracts::orobit_smart_contracts::ContractAddress; // v3.2.17-beta: For contract lookup
+
+/// v3.2.20-beta: Improved deserializer for u128 that preserves precision
+/// Handles:
+/// - Plain integers (u64, u128)
+/// - String numbers ("1000000000000000" or "99999999999999900000000000000000000")
+/// - Scientific notation ("1e15") - parsed WITHOUT going through f64 for large numbers
+/// - WARNING: f64 inputs have already lost precision by the time they reach us!
+fn deserialize_u128_from_any<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct U128FromAnyVisitor;
+
+    /// Parse scientific notation string to u128 WITHOUT using f64
+    /// This preserves full precision for numbers like "1e30"
+    fn parse_scientific_to_u128(s: &str) -> Option<u128> {
+        // Match patterns like "1e15", "1.5e10", "1E+30"
+        let s_lower = s.to_lowercase();
+        let parts: Vec<&str> = s_lower.split('e').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let mantissa_str = parts[0];
+        let exp_str = parts[1].trim_start_matches('+');
+        let exponent: i32 = exp_str.parse().ok()?;
+
+        if exponent < 0 {
+            // Negative exponent would result in a fractional number
+            // For u128, we'd lose the fraction anyway, so just return 0 for small values
+            return Some(0);
+        }
+
+        // Parse mantissa, handling decimal point
+        let mantissa_parts: Vec<&str> = mantissa_str.split('.').collect();
+        let whole_part = mantissa_parts[0];
+        let frac_part = if mantissa_parts.len() > 1 { mantissa_parts[1] } else { "" };
+
+        // Combine whole and fractional parts, then adjust exponent
+        let combined = format!("{}{}", whole_part, frac_part);
+        let adjusted_exp = exponent as usize - frac_part.len();
+
+        // Build the final number string
+        let mut result_str = combined.trim_start_matches('0').to_string();
+        if result_str.is_empty() {
+            result_str = "0".to_string();
+        }
+
+        // Add zeros for the exponent
+        result_str.push_str(&"0".repeat(adjusted_exp));
+
+        result_str.parse::<u128>().ok()
+    }
+
+    impl<'de> Visitor<'de> for U128FromAnyVisitor {
+        type Value = u128;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a number (integer, float, or string)")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            tracing::debug!("📊 deserialize_u128: received u64 = {}", value);
+            Ok(value as u128)
+        }
+
+        fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            tracing::debug!("📊 deserialize_u128: received u128 = {}", value);
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value >= 0 {
+                tracing::debug!("📊 deserialize_u128: received i64 = {}", value);
+                Ok(value as u128)
+            } else {
+                Err(de::Error::custom("negative values not allowed"))
+            }
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            // WARNING: f64 has already lost precision for large numbers!
+            // f64 only has ~15-17 significant decimal digits
+            if value >= 0.0 {
+                let result = value as u128;
+                tracing::warn!(
+                    "⚠️ deserialize_u128: received f64 = {} -> u128 = {} (PRECISION MAY BE LOST!)",
+                    value, result
+                );
+                Ok(result)
+            } else {
+                Err(de::Error::custom("negative values not allowed"))
+            }
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            tracing::debug!("📊 deserialize_u128: received string = '{}'", value);
+
+            // Try parsing as u128 first (handles pure integer strings)
+            if let Ok(n) = value.parse::<u128>() {
+                tracing::debug!("📊 deserialize_u128: parsed as u128 = {}", n);
+                return Ok(n);
+            }
+
+            // Try parsing scientific notation WITHOUT f64 to preserve precision
+            if value.to_lowercase().contains('e') {
+                if let Some(n) = parse_scientific_to_u128(value) {
+                    tracing::debug!("📊 deserialize_u128: parsed scientific '{}' as u128 = {}", value, n);
+                    return Ok(n);
+                }
+            }
+
+            // Last resort: try f64 for other formats (will lose precision for large numbers!)
+            if let Ok(f) = value.parse::<f64>() {
+                if f >= 0.0 {
+                    let result = f as u128;
+                    tracing::warn!(
+                        "⚠️ deserialize_u128: f64 fallback for '{}' = {} (PRECISION LOST!)",
+                        value, result
+                    );
+                    return Ok(result);
+                }
+            }
+
+            Err(de::Error::custom(format!("cannot parse '{}' as a number", value)))
+        }
+    }
+
+    deserializer.deserialize_any(U128FromAnyVisitor)
+}
 
 use crate::{AppState, LiquidityPool};
-use q_types::{Transaction, TxStatus};
+use q_types::{
+    Transaction, TxStatus,
+    DEX_TOTAL_FEE_BPS, DEX_PROTOCOL_FEE_BPS, DEX_LP_FEE_BPS, BPS_DIVISOR,
+};
 
-/// Standard decimal places for all tokens (like Bitcoin satoshis)
-pub const TOKEN_DECIMALS: u32 = 8;
-pub const DECIMAL_MULTIPLIER: u64 = 100_000_000; // 10^8
+/// Standard decimal places for all tokens
+/// v3.0.6-beta: Updated to 24 decimals for u128 migration
+pub const TOKEN_DECIMALS: u32 = 24;
+pub const DECIMAL_MULTIPLIER: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
 
 /// Integer square root using Newton's method (no floating point precision loss)
 /// This is critical for LP token calculations with large numbers
-fn integer_sqrt(n: u128) -> u64 {
+fn integer_sqrt(n: u128) -> u128 {
     if n == 0 {
         return 0;
     }
@@ -40,12 +192,7 @@ fn integer_sqrt(n: u128) -> u64 {
         y = (x + n / x) / 2;
     }
 
-    // Ensure result fits in u64
-    if x > u64::MAX as u128 {
-        u64::MAX
-    } else {
-        x as u64
-    }
+    x
 }
 
 /// Generate deterministic pool ID from token pair
@@ -68,7 +215,7 @@ fn generate_pool_id(token0_addr: &[u8; 32], token1_addr: &[u8; 32]) -> String {
 }
 
 /// Normalize token identifier to address format
-/// Handles: "QUG", "native-qug", symbols like "MEME", addresses like "qnk1234..."
+/// Handles: "QUG", "native-qug", "QUGUSD", symbols like "MEME", addresses like "qnk1234..."
 async fn normalize_token_to_address(
     state: &Arc<AppState>,
     token: &str,
@@ -78,6 +225,11 @@ async fn normalize_token_to_address(
     // Native QUG uses zero address
     if token_upper == "QUG" || token.to_lowercase() == "native-qug" {
         return Ok([0u8; 32]);
+    }
+
+    // v2.6.1-beta: Native QUGUSD stablecoin uses special address pattern ("QUGUSD" padded with zeros)
+    if token_upper == "QUGUSD" || token.to_lowercase() == "qugusd-stable" {
+        return Ok([0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // "QUGUSD" in ASCII
     }
 
     // Already an address format
@@ -119,12 +271,15 @@ impl<T> ApiResponse<T> {
 }
 
 /// Add liquidity request
+/// v2.8.2: Flexible deserializer handles scientific notation & string numbers
 #[derive(Debug, Deserialize)]
 pub struct AddLiquidityRequest {
     pub token0: String, // "QUG" for native or token contract address
     pub token1: String, // Token contract address
-    pub amount0: u64,
-    pub amount1: u64,
+    #[serde(deserialize_with = "deserialize_u128_from_any")]
+    pub amount0: u128,
+    #[serde(deserialize_with = "deserialize_u128_from_any")]
+    pub amount1: u128,
     pub provider: String, // Wallet address
 }
 
@@ -134,8 +289,10 @@ pub struct AddLiquidityResponse {
     pub pool_id: String,
     pub token0: String,
     pub token1: String,
-    pub amount0: u64,
-    pub amount1: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount0: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount1: u128,
     pub transaction_id: String,
 }
 
@@ -151,8 +308,10 @@ pub struct RemoveLiquidityRequest {
 #[derive(Debug, Serialize)]
 pub struct RemoveLiquidityResponse {
     pub pool_id: String,
-    pub amount0_returned: u64,
-    pub amount1_returned: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount0_returned: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount1_returned: u128,
     pub transaction_id: String,
 }
 
@@ -161,6 +320,83 @@ const GOLDEN_RATIO: f64 = 1.618033988749895;
 
 /// Quantum slippage reduction factor (uses golden ratio)
 const QUANTUM_SLIPPAGE_REDUCTION: f64 = 0.618;
+
+/// v3.2.16-beta: Native token decimals (QUG, QUGUSD)
+const NATIVE_TOKEN_DECIMALS: u8 = 24;
+
+/// v3.2.16-beta: Default decimals for custom tokens (when contract metadata unavailable)
+const DEFAULT_CUSTOM_TOKEN_DECIMALS: u8 = 8;
+
+/// v3.2.16-beta: Get token decimals based on token type
+/// QUG and QUGUSD use 24 decimals, custom tokens use their deployed decimals (default 8)
+fn get_token_decimals(token_canonical: &str, is_native_qug: bool, is_qugusd: bool) -> u8 {
+    if is_native_qug || is_qugusd {
+        NATIVE_TOKEN_DECIMALS // 24 decimals for QUG/QUGUSD
+    } else if token_canonical.to_uppercase() == "QUG" || token_canonical.to_uppercase() == "QUGUSD" {
+        NATIVE_TOKEN_DECIMALS // 24 decimals
+    } else {
+        DEFAULT_CUSTOM_TOKEN_DECIMALS // Default 8 decimals, but should use async version when possible
+    }
+}
+
+/// v3.2.17-beta: Async version that looks up actual decimals from contract deployment
+/// This is the preferred method when you have access to AppState
+async fn get_token_decimals_from_contract(
+    state: &std::sync::Arc<crate::AppState>,
+    token_canonical: &str,
+    token_addr: &[u8; 32],
+    is_native_qug: bool,
+    is_qugusd: bool,
+) -> u8 {
+    // Native tokens have fixed decimals
+    if is_native_qug || is_qugusd {
+        return NATIVE_TOKEN_DECIMALS; // 24 decimals for QUG/QUGUSD
+    }
+    if token_canonical.to_uppercase() == "QUG" || token_canonical.to_uppercase() == "QUGUSD" {
+        return NATIVE_TOKEN_DECIMALS;
+    }
+
+    // Look up contract metadata for custom tokens
+    if let Some(contract) = state.orobit_ecosystem.get_contract_by_address(ContractAddress(*token_addr)).await {
+        if let Some(decimals_val) = contract.deployment_params.get("decimals") {
+            if let Some(decimals) = decimals_val.as_u64() {
+                tracing::debug!(
+                    "📊 Found decimals={} for token {} from contract metadata",
+                    decimals, token_canonical
+                );
+                return decimals as u8;
+            }
+        }
+    }
+
+    // Fallback to default
+    tracing::debug!(
+        "📊 Using default decimals={} for token {} (no contract metadata found)",
+        DEFAULT_CUSTOM_TOKEN_DECIMALS, token_canonical
+    );
+    DEFAULT_CUSTOM_TOKEN_DECIMALS
+}
+
+/// v3.2.16-beta: Normalize a reserve value to a common decimal base for AMM calculations
+/// This is critical for swaps between tokens with different decimal places (e.g., QUG=24, custom=8)
+fn normalize_reserve_to_24_decimals(reserve: u128, decimals: u8) -> u128 {
+    if decimals >= 24 {
+        reserve / 10u128.pow((decimals - 24) as u32)
+    } else {
+        // Scale up to 24 decimals
+        reserve * 10u128.pow((24 - decimals) as u32)
+    }
+}
+
+/// v3.2.16-beta: De-normalize amount from 24-decimal base back to token's native decimals
+fn denormalize_from_24_decimals(amount_24: u128, decimals: u8) -> u128 {
+    if decimals >= 24 {
+        amount_24 * 10u128.pow((decimals - 24) as u32)
+    } else {
+        // Scale down from 24 decimals to token's native decimals
+        amount_24 / 10u128.pow((24 - decimals) as u32)
+    }
+}
 
 /// Calculate LP tokens using Uniswap V2 formula with optional quantum enhancement
 /// v1.0.49-beta: FIXED - Uses integer square root for precision
@@ -186,22 +422,22 @@ const QUANTUM_SLIPPAGE_REDUCTION: f64 = 0.618;
 /// # Returns
 /// Number of LP tokens to mint
 fn calculate_lp_tokens(
-    amount0: u64,
-    amount1: u64,
-    existing_reserve0: Option<u64>,
-    existing_reserve1: Option<u64>,
-    existing_lp_supply: Option<u64>,
-) -> u64 {
+    amount0: u128,
+    amount1: u128,
+    existing_reserve0: Option<u128>,
+    existing_reserve1: Option<u128>,
+    existing_lp_supply: Option<u128>,
+) -> u128 {
     match (existing_reserve0, existing_reserve1, existing_lp_supply) {
         (Some(r0), Some(r1), Some(supply)) if r0 > 0 && r1 > 0 && supply > 0 => {
             // Existing pool - proportional minting
             // Calculate how many LP tokens user should get based on each reserve
-            let liquidity0 = (amount0 as u128 * supply as u128) / r0 as u128;
-            let liquidity1 = (amount1 as u128 * supply as u128) / r1 as u128;
+            let liquidity0 = (amount0 * supply) / r0;
+            let liquidity1 = (amount1 * supply) / r1;
 
             // Use minimum to ensure user doesn't get more LP tokens than they should
             // This enforces the constant product invariant
-            let minted = std::cmp::min(liquidity0, liquidity1) as u64;
+            let minted = std::cmp::min(liquidity0, liquidity1);
 
             tracing::info!(
                 "📊 LP Token Calculation (Existing Pool): amount0={}, amount1={}, reserve0={}, reserve1={}, existing_supply={}, liquidity0={}, liquidity1={}, minted={}",
@@ -213,9 +449,9 @@ fn calculate_lp_tokens(
         _ => {
             // New pool - geometric mean (Uniswap V2 formula)
             // MINIMUM_LIQUIDITY is permanently locked to prevent attacks on tiny pools
-            const MINIMUM_LIQUIDITY: u64 = 1000;
+            const MINIMUM_LIQUIDITY: u128 = 1000;
 
-            let product = (amount0 as u128) * (amount1 as u128);
+            let product = amount0 * amount1;
             // FIXED: Use integer sqrt instead of f64 to avoid precision loss
             let sqrt_product = integer_sqrt(product);
             let lp_tokens = sqrt_product.saturating_sub(MINIMUM_LIQUIDITY);
@@ -242,11 +478,11 @@ fn calculate_lp_tokens(
 /// # Returns
 /// (amount_out, price_impact, effective_price)
 pub fn calculate_quantum_swap(
-    amount_in: u64,
-    reserve_in: u64,
-    reserve_out: u64,
+    amount_in: u128,
+    reserve_in: u128,
+    reserve_out: u128,
     fee_rate: f64,
-) -> (u64, f64, f64) {
+) -> (u128, f64, f64) {
     if reserve_in == 0 || reserve_out == 0 {
         return (0, 1.0, 0.0);
     }
@@ -270,7 +506,7 @@ pub fn calculate_quantum_swap(
     let price_impact = 1.0 - (effective_price / spot_price);
 
     // Final amount (capped at raw amount to prevent exploitation)
-    let amount_out = (quantum_adjusted_out.min(raw_amount_out)) as u64;
+    let amount_out = (quantum_adjusted_out.min(raw_amount_out)) as u128;
 
     tracing::debug!(
         "⚛️ Quantum swap calculation: in={}, reserve_in={}, reserve_out={}, out={}, impact={:.4}%",
@@ -281,23 +517,35 @@ pub fn calculate_quantum_swap(
 }
 
 /// Swap quote request
+/// v2.8.2: Flexible deserializer handles scientific notation & string numbers
 #[derive(Debug, Deserialize)]
 pub struct SwapQuoteRequest {
     pub from_token: String,
     pub to_token: String,
-    pub amount_in: u64,
+    #[serde(deserialize_with = "deserialize_u128_from_any")]
+    pub amount_in: u128,
 }
 
-/// Swap quote response
+/// Swap quote response (v2.4.5-beta: includes fee breakdown)
 #[derive(Debug, Serialize)]
 pub struct SwapQuoteResponse {
     pub from_token: String,
     pub to_token: String,
-    pub amount_in: u64,
-    pub amount_out: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount_in: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub amount_out: u128,
     pub price_impact: f64,
     pub effective_price: f64,
-    pub fee: u64,
+    /// Total fee paid by trader (0.30%)
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub fee: u128,
+    /// Protocol fee portion (0.05%) - goes to master wallet
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub protocol_fee: u128,
+    /// LP fee portion (0.25%) - stays in pool for liquidity providers
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub lp_fee: u128,
     pub pool_id: Option<String>,
     pub quantum_enhanced: bool,
 }
@@ -356,6 +604,12 @@ pub async fn add_liquidity(
     let is_native_token1 =
         request.token1.to_uppercase() == "QUG" || request.token1.to_lowercase() == "native-qug";
 
+    // v2.6.1-beta: Check if token0/token1 is native QUGUSD stablecoin
+    let is_qugusd_token0 =
+        request.token0.to_uppercase() == "QUGUSD" || request.token0.to_lowercase() == "qugusd-stable";
+    let is_qugusd_token1 =
+        request.token1.to_uppercase() == "QUGUSD" || request.token1.to_lowercase() == "qugusd-stable";
+
     // CRITICAL: Normalize token0 to address format
     let token0_addr = match normalize_token_to_address(&state, &request.token0).await {
         Ok(addr) => addr,
@@ -381,12 +635,16 @@ pub async fn add_liquidity(
     // Convert addresses to canonical string format for storage
     let token0_canonical = if is_native_token0 {
         "QUG".to_string()
+    } else if is_qugusd_token0 {
+        "QUGUSD".to_string()
     } else {
         format!("qnk{}", hex::encode(token0_addr))
     };
 
     let token1_canonical = if is_native_token1 {
         "QUG".to_string()
+    } else if is_qugusd_token1 {
+        "QUGUSD".to_string()
     } else {
         format!("qnk{}", hex::encode(token1_addr))
     };
@@ -398,14 +656,14 @@ pub async fn add_liquidity(
     );
 
     // Track which token balances changed for persistence
-    let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u64)> = Vec::new(); // (wallet, token, new_balance)
+    let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new(); // (wallet, token, new_balance)
 
     // Deduct balances
     {
         let mut wallet_balances = state.wallet_balances.write().await;
         let mut token_balances = state.token_balances.write().await;
 
-        // Deduct token0 (native QUG or token)
+        // Deduct token0 (native QUG, native QUGUSD, or token)
         if is_native_token0 {
             // Deduct native QUG - initialize if needed
             let balance = wallet_balances.entry(provider).or_insert(0);
@@ -418,10 +676,62 @@ pub async fn add_liquidity(
             *balance -= request.amount0;
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
-                request.amount0 as f64 / 100_000_000.0,
+                request.amount0 as f64 / 1e24,
                 hex::encode(provider),
-                *balance as f64 / 100_000_000.0
+                *balance as f64 / 1e24
             );
+        } else if is_qugusd_token0 {
+            // v2.6.1-beta: Deduct QUGUSD stablecoin for token0
+            // QUGUSD balance = minted (from vault) + received (from swaps/transfers)
+            let minted_qugusd = {
+                let vault = state.collateral_vault.read().await;
+                vault.minted_qugusd.get(&provider).copied().unwrap_or(0)
+            };
+            let swapped_qugusd = {
+                let token_balances_read = state.token_balances.read().await;
+                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // "QUGUSD" padded
+                token_balances_read.get(&(provider, qugusd_addr)).copied().unwrap_or(0)
+            };
+            // v2.7.9-beta: Cast to u128 for larger token supplies
+            let total_qugusd = minted_qugusd as u128 + swapped_qugusd;
+
+            if total_qugusd < request.amount0 as u128 {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Insufficient QUGUSD balance for token0. Required: {:.4}, Available: {:.4} (minted: {:.4}, swapped: {:.4})",
+                    request.amount0 as f64 / 1e24,
+                    total_qugusd as f64 / 1e24,
+                    minted_qugusd as f64 / 1e24,
+                    swapped_qugusd as f64 / 1e24
+                ))));
+            }
+
+            // Deduct from minted first, then from swapped
+            // v3.0.4: minted_qugusd is now u128
+            let mut remaining = request.amount0;
+            if minted_qugusd > 0 {
+                let deduct_from_minted = remaining.min(minted_qugusd);
+                let mut vault = state.collateral_vault.write().await;
+                if let Some(bal) = vault.minted_qugusd.get_mut(&provider) {
+                    *bal = bal.saturating_sub(deduct_from_minted);
+                }
+                remaining -= deduct_from_minted;
+                tracing::info!(
+                    "💸 Deducted {} QUGUSD (minted) from {} for token0 liquidity",
+                    deduct_from_minted as f64 / 1e24,
+                    hex::encode(&provider[..8])
+                );
+            }
+            if remaining > 0 {
+                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                if let Some(bal) = token_balances.get_mut(&(provider, qugusd_addr)) {
+                    *bal = bal.saturating_sub(remaining as u128);
+                }
+                tracing::info!(
+                    "💸 Deducted {} QUGUSD (swapped) from {} for token0 liquidity",
+                    remaining as f64 / 1e24,
+                    hex::encode(&provider[..8])
+                );
+            }
         } else {
             // Deduct token0 (token contract) - resolve symbol if needed
             let token0_addr =
@@ -453,7 +763,7 @@ pub async fn add_liquidity(
                     hex::encode(&provider[..8]),
                     request.token0,
                     current_balance,
-                    *current_balance as f64 / 100_000_000.0
+                    *current_balance as f64 / 1e24
                 );
             } else {
                 tracing::warn!(
@@ -520,25 +830,16 @@ pub async fn add_liquidity(
                                     // If user deployed with "1000000", we need to restore 1000000 * 10^8
                                     let base_units = (display_supply as u128) * (decimal_multiplier as u128);
 
-                                    if base_units <= u64::MAX as u128 {
-                                        let supply = base_units as u64;
-                                        token_balances.insert(balance_key, supply);
-                                        tracing::info!(
-                                            "✅ Auto-restored token0 balance for {} (contract {}): {} display tokens × 10^{} = {} base units",
-                                            hex::encode(&provider[..8]),
-                                            hex::encode(&token0_addr[..8]),
-                                            display_supply,
-                                            decimals,
-                                            supply
-                                        );
-                                        break;
-                                    } else {
-                                        tracing::error!(
-                                            "❌ Converted supply {} × 10^{} exceeds u64::MAX",
-                                            display_supply,
-                                            decimals
-                                        );
-                                    }
+                                    token_balances.insert(balance_key, base_units);
+                                    tracing::info!(
+                                        "✅ Auto-restored token0 balance for {} (contract {}): {} display tokens × 10^{} = {} base units",
+                                        hex::encode(&provider[..8]),
+                                        hex::encode(&token0_addr[..8]),
+                                        display_supply,
+                                        decimals,
+                                        base_units
+                                    );
+                                    break;
                                 } else {
                                     tracing::error!(
                                         "❌ Failed to parse initial supply from contract: {:?}",
@@ -567,7 +868,7 @@ pub async fn add_liquidity(
             }
 
             if let Some(balance) = token_balances.get_mut(&balance_key) {
-                if *balance < request.amount0 {
+                if *balance < request.amount0 as u128 {
                     // 🔍 Enhanced error message with context
                     tracing::error!(
                         "💸 Insufficient token0 balance for {}. Token: {}, Required: {}, Available: {}",
@@ -578,19 +879,19 @@ pub async fn add_liquidity(
                     );
 
                     // Calculate how many tokens with 8 decimals for user-friendly error
-                    let required_display = request.amount0 as f64 / 100_000_000.0;
-                    let available_display = *balance as f64 / 100_000_000.0;
+                    let required_display = request.amount0 as f64 / 1e24;
+                    let available_display = *balance as f64 / 1e24;
 
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient {} balance. Required: {} ({} raw units), Available: {} ({} raw units). Please check your token balance or reduce the liquidity amount.",
                         request.token0, required_display, request.amount0, available_display, *balance
                     ))));
                 }
-                *balance -= request.amount0;
+                *balance -= request.amount0 as u128;
                 token_balance_changes.push((provider, token0_addr, *balance)); // Track for persistence
                 tracing::info!(
                     "💸 Deducted {} token0 ({} raw units) from {} for liquidity. Remaining: {}",
-                    request.amount0 as f64 / 100_000_000.0,
+                    request.amount0 as f64 / 1e24,
                     request.amount0,
                     hex::encode(provider),
                     *balance
@@ -608,7 +909,7 @@ pub async fn add_liquidity(
             }
         }
 
-        // Deduct token1 (native QUG or token)
+        // Deduct token1 (native QUG, native QUGUSD, or token)
         if is_native_token1 {
             // Deduct native QUG - initialize if needed
             let balance = wallet_balances.entry(provider).or_insert(0);
@@ -621,10 +922,62 @@ pub async fn add_liquidity(
             *balance -= request.amount1;
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
-                request.amount1 as f64 / 100_000_000.0,
+                request.amount1 as f64 / 1e24,
                 hex::encode(provider),
-                *balance as f64 / 100_000_000.0
+                *balance as f64 / 1e24
             );
+        } else if is_qugusd_token1 {
+            // v2.6.1-beta: Deduct QUGUSD stablecoin
+            // QUGUSD balance = minted (from vault) + received (from swaps/transfers)
+            let minted_qugusd = {
+                let vault = state.collateral_vault.read().await;
+                vault.minted_qugusd.get(&provider).copied().unwrap_or(0) as u128
+            };
+            let swapped_qugusd = {
+                let token_balances = state.token_balances.read().await;
+                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // "QUGUSD" padded
+                token_balances.get(&(provider, qugusd_addr)).copied().unwrap_or(0)
+            };
+            let total_qugusd = minted_qugusd + swapped_qugusd;
+
+            if total_qugusd < request.amount1 as u128 {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Insufficient QUGUSD balance. Required: {:.4}, Available: {:.4} (minted: {:.4}, swapped: {:.4})",
+                    request.amount1 as f64 / 1e24,
+                    total_qugusd as f64 / 1e24,
+                    minted_qugusd as f64 / 1e24,
+                    swapped_qugusd as f64 / 1e24
+                ))));
+            }
+
+            // Deduct from minted first, then from swapped
+            // v3.0.4: minted_qugusd is now u128
+            let mut remaining = request.amount1 as u128;
+            if minted_qugusd > 0 {
+                let deduct_from_minted = remaining.min(minted_qugusd);
+                let mut vault = state.collateral_vault.write().await;
+                if let Some(bal) = vault.minted_qugusd.get_mut(&provider) {
+                    *bal = bal.saturating_sub(deduct_from_minted);
+                }
+                remaining -= deduct_from_minted;
+                tracing::info!(
+                    "💸 Deducted {} QUGUSD (minted) from {} for liquidity",
+                    deduct_from_minted as f64 / 1e24,
+                    hex::encode(&provider[..8])
+                );
+            }
+            if remaining > 0 {
+                let mut token_balances = state.token_balances.write().await;
+                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                if let Some(bal) = token_balances.get_mut(&(provider, qugusd_addr)) {
+                    *bal = bal.saturating_sub(remaining);
+                }
+                tracing::info!(
+                    "💸 Deducted {} QUGUSD (swapped) from {} for liquidity",
+                    remaining as f64 / 1e24,
+                    hex::encode(&provider[..8])
+                );
+            }
         } else {
             // Deduct token1 (token contract)
             let balance_key = (provider, token1_addr);
@@ -655,19 +1008,16 @@ pub async fn add_liquidity(
                             if let Some(display_supply) = raw_supply {
                                 // Convert display tokens to base units
                                 let base_units = (display_supply as u128) * (decimal_multiplier as u128);
-                                if base_units <= u64::MAX as u128 {
-                                    let supply = base_units as u64;
-                                    token_balances.insert(balance_key, supply);
-                                    tracing::info!(
-                                        "💰 Auto-restored token1 balance for {} (contract {}): {} display × 10^{} = {} base units",
-                                        hex::encode(&provider[..8]),
-                                        hex::encode(&token1_addr[..8]),
-                                        display_supply,
-                                        decimals,
-                                        supply
-                                    );
-                                    break;
-                                }
+                                token_balances.insert(balance_key, base_units);
+                                tracing::info!(
+                                    "💰 Auto-restored token1 balance for {} (contract {}): {} display × 10^{} = {} base units",
+                                    hex::encode(&provider[..8]),
+                                    hex::encode(&token1_addr[..8]),
+                                    display_supply,
+                                    decimals,
+                                    base_units
+                                );
+                                break;
                             }
                         }
                     }
@@ -676,13 +1026,13 @@ pub async fn add_liquidity(
             }
 
             if let Some(balance) = token_balances.get_mut(&balance_key) {
-                if *balance < request.amount1 {
+                if *balance < request.amount1 as u128 {
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient token1 balance. Required: {}, Available: {}",
                         request.amount1, *balance
                     ))));
                 }
-                *balance -= request.amount1;
+                *balance -= request.amount1 as u128;
                 token_balance_changes.push((provider, token1_addr, *balance)); // Track for persistence
                 tracing::info!(
                     "💸 Deducted {} token1 from {} for liquidity",
@@ -830,6 +1180,14 @@ pub async fn add_liquidity(
             );
 
             // FIXED: Store with canonical addresses, not raw request strings
+            // v3.2.17-beta: Look up actual token decimals from contract metadata
+            let token0_decimals = get_token_decimals_from_contract(
+                &state, &token0_canonical, &token0_addr, is_native_token0, is_qugusd_token0
+            ).await;
+            let token1_decimals = get_token_decimals_from_contract(
+                &state, &token1_canonical, &token1_addr, is_native_token1, is_qugusd_token1
+            ).await;
+
             let pool = LiquidityPool {
                 pool_id: new_pool_id.clone(),
                 token0: token0_canonical.clone(),
@@ -839,14 +1197,18 @@ pub async fn add_liquidity(
                 provider,
                 created_at: chrono::Utc::now(),
                 lp_token_supply: lp_tokens,
+                token0_decimals,
+                token1_decimals,
             };
             let pool_clone = pool.clone();
             pools.insert(new_pool_id.clone(), pool);
             tracing::info!(
-                "💰 Created liquidity pool {} (deterministic) with tokens {} / {} and reserves: {} / {}",
+                "💰 Created liquidity pool {} (deterministic) with tokens {} ({} dec) / {} ({} dec) and reserves: {} / {}",
                 new_pool_id,
                 token0_canonical,
+                token0_decimals,
                 token1_canonical,
+                token1_decimals,
                 request.amount0,
                 request.amount1
             );
@@ -881,6 +1243,14 @@ pub async fn add_liquidity(
         );
 
         // FIXED: Store with canonical addresses, not raw request strings
+        // v3.2.17-beta: Look up actual token decimals from contract metadata
+        let token0_decimals = get_token_decimals_from_contract(
+            &state, &token0_canonical, &token0_addr, is_native_token0, is_qugusd_token0
+        ).await;
+        let token1_decimals = get_token_decimals_from_contract(
+            &state, &token1_canonical, &token1_addr, is_native_token1, is_qugusd_token1
+        ).await;
+
         let pool = LiquidityPool {
             pool_id: new_pool_id.clone(),
             token0: token0_canonical.clone(),
@@ -890,16 +1260,20 @@ pub async fn add_liquidity(
             provider,
             created_at: chrono::Utc::now(),
             lp_token_supply: lp_tokens,
+            token0_decimals,
+            token1_decimals,
         };
 
         let pool_clone = pool.clone();
         let mut pools = state.liquidity_pools.write().await;
         pools.insert(new_pool_id.clone(), pool);
         tracing::info!(
-            "💰 Created liquidity pool {} (deterministic) with tokens {} / {} and reserves: {} / {}",
+            "💰 Created liquidity pool {} (deterministic) with tokens {} ({} dec) / {} ({} dec) and reserves: {} / {}",
             new_pool_id,
             token0_canonical,
+            token0_decimals,
             token1_canonical,
+            token1_decimals,
             request.amount0,
             request.amount1
         );
@@ -1153,8 +1527,8 @@ pub async fn remove_liquidity(
     }
 
     // Calculate amounts to return
-    let amount0_to_return = (pool.reserve0 * request.percentage) / 100;
-    let amount1_to_return = (pool.reserve1 * request.percentage) / 100;
+    let amount0_to_return = (pool.reserve0 * request.percentage as u128) / 100;
+    let amount1_to_return = (pool.reserve1 * request.percentage as u128) / 100;
 
     // Check if tokens are native QUG or custom tokens
     let is_native_token0 =
@@ -1195,7 +1569,7 @@ pub async fn remove_liquidity(
         [0u8; 32]
     };
 
-    let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u64)> = Vec::new();
+    let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new();
 
     // Return balances to provider
     {
@@ -1212,7 +1586,7 @@ pub async fn remove_liquidity(
             );
         } else {
             let balance_key = (provider, token0_addr);
-            *token_balances.entry(balance_key).or_insert(0) += amount0_to_return;
+            *token_balances.entry(balance_key).or_insert(0) += amount0_to_return as u128;
             token_balance_changes.push((
                 provider,
                 token0_addr,
@@ -1235,7 +1609,7 @@ pub async fn remove_liquidity(
             );
         } else {
             let balance_key = (provider, token1_addr);
-            *token_balances.entry(balance_key).or_insert(0) += amount1_to_return;
+            *token_balances.entry(balance_key).or_insert(0) += amount1_to_return as u128;
             token_balance_changes.push((
                 provider,
                 token1_addr,
@@ -1342,8 +1716,10 @@ pub struct PoolInfo {
     pub pool_id: String,
     pub token0: String,
     pub token1: String,
-    pub reserve0: u64,
-    pub reserve1: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub reserve0: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub reserve1: u128,
     pub provider: String,
     pub created_at: u64,
 }
@@ -1407,6 +1783,36 @@ fn current_timestamp() -> u64 {
 
 /// Resolve a token symbol to its contract address by searching deployed contracts
 async fn resolve_token_symbol(state: &Arc<AppState>, symbol: &str) -> Result<[u8; 32], String> {
+    // 🆕 v2.2.1: Special handling for Index Fund tokens (QNK10, DEFI5, etc.)
+    let symbol_upper = symbol.to_uppercase();
+    if symbol_upper.starts_with("INDEX-FUND-") || symbol_upper == "QNK10" || symbol_upper == "DEFI5" {
+        // Generate deterministic address for index fund tokens
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"QNK-INDEX-FUND:");
+        // Normalize: extract the fund name (e.g., "QNK10" from "INDEX-FUND-QNK10")
+        let fund_name = if symbol_upper.starts_with("INDEX-FUND-") {
+            symbol_upper.strip_prefix("INDEX-FUND-").unwrap_or(&symbol_upper)
+        } else {
+            &symbol_upper
+        };
+        hasher.update(fund_name.as_bytes());
+        let hash = hasher.finalize();
+        let mut addr = [0u8; 32];
+        addr.copy_from_slice(hash.as_bytes());
+        // Mark as index fund: set first byte to 0x1F (Index Fund marker)
+        addr[0] = 0x1F;
+        tracing::debug!("📊 Resolved index fund token '{}' -> qnk{}", symbol, hex::encode(&addr[..8]));
+        return Ok(addr);
+    }
+
+    // Special handling for QUGUSD stablecoin
+    if symbol.eq_ignore_ascii_case("QUGUSD") || symbol.eq_ignore_ascii_case("QUGUSD-STABLE") {
+        let mut addr = [0u8; 32];
+        addr[0] = 0xCD; // CDP marker
+        addr[1] = 0x01; // QUGUSD identifier
+        return Ok(addr);
+    }
+
     // Search through all deployed contracts to find one with matching symbol
     let ecosystem = &state.orobit_ecosystem;
 
@@ -1441,7 +1847,8 @@ pub struct RefreshBalancesResponse {
 pub struct TokenBalanceInfo {
     pub symbol: String,
     pub address: String,
-    pub balance: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize")]
+    pub balance: u128,
     pub balance_display: f64,
 }
 
@@ -1478,24 +1885,25 @@ pub async fn refresh_token_balances(
 
                 if let Some(supply) = initial_supply {
                     let token_addr = contract.address.0;
+                    let supply_u128 = supply as u128;
 
                     // Calculate amount locked in liquidity pools
                     let pools = state.liquidity_pools.read().await;
-                    let mut locked_amount = 0u64;
+                    let mut locked_amount = 0u128;
 
                     for pool in pools.values() {
                         if pool.provider == wallet_addr {
                             // Check if token0 matches
                             if let Ok(pool_token0_addr) = resolve_token_address(&state, &pool.token0).await {
                                 if pool_token0_addr == token_addr {
-                                    locked_amount += pool.reserve0;
+                                    locked_amount += pool.reserve0 as u128;
                                 }
                             }
 
                             // Check if token1 matches
                             if let Ok(pool_token1_addr) = resolve_token_address(&state, &pool.token1).await {
                                 if pool_token1_addr == token_addr {
-                                    locked_amount += pool.reserve1;
+                                    locked_amount += pool.reserve1 as u128;
                                 }
                             }
                         }
@@ -1503,7 +1911,7 @@ pub async fn refresh_token_balances(
                     drop(pools);
 
                     // Calculate available balance (initial supply - locked in pools)
-                    let available_balance = supply.saturating_sub(locked_amount);
+                    let available_balance = supply_u128.saturating_sub(locked_amount);
 
                     // Update in-memory and persistent storage
                     let balance_key = (wallet_addr, token_addr);
@@ -1526,7 +1934,7 @@ pub async fn refresh_token_balances(
                         symbol: symbol.clone(),
                         address: format!("qnk{}", hex::encode(token_addr)),
                         balance: available_balance,
-                        balance_display: available_balance as f64 / 100_000_000.0,
+                        balance_display: available_balance as f64 / 1e24,
                     });
 
                     tracing::info!(
@@ -1534,7 +1942,7 @@ pub async fn refresh_token_balances(
                         symbol,
                         hex::encode(&token_addr[..8]),
                         available_balance,
-                        available_balance as f64 / 100_000_000.0,
+                        available_balance as f64 / 1e24,
                         supply,
                         locked_amount
                     );
@@ -1606,28 +2014,72 @@ pub async fn get_swap_quote(
 
     match matching_pool {
         Some(pool) => {
-            // Determine reserve order
-            let (reserve_in, reserve_out) = if pool.token0 == from_canonical || pool.token0 == request.from_token {
-                (pool.reserve0, pool.reserve1)
-            } else {
-                (pool.reserve1, pool.reserve0)
-            };
+            // Determine reserve order and decimals based on token direction
+            // v3.2.16-beta: CRITICAL FIX for cross-decimal swaps
+            let (reserve_in, reserve_out, decimals_in, decimals_out) =
+                if pool.token0 == from_canonical || pool.token0 == request.from_token {
+                    (pool.reserve0, pool.reserve1, pool.token0_decimals, pool.token1_decimals)
+                } else {
+                    (pool.reserve1, pool.reserve0, pool.token1_decimals, pool.token0_decimals)
+                };
 
-            // Calculate swap using quantum-enhanced AMM
-            let fee_rate = 0.003; // 0.3% fee
-            let (amount_out, price_impact, effective_price) =
-                calculate_quantum_swap(request.amount_in, reserve_in, reserve_out, fee_rate);
+            // v3.2.16-beta: CROSS-DECIMAL NORMALIZATION
+            // When swapping between tokens with different decimal places (e.g., QUG=24, custom=8),
+            // we must normalize all values to a common scale (24 decimals) before AMM calculation,
+            // then de-normalize the output back to the target token's native decimals.
+            //
+            // Example: Swapping 1 QUG (10^24 base units) for DERP (8 decimals)
+            // - Without normalization: AMM sees 10^24 vs 10^38 reserves = wrong ratio
+            // - With normalization: AMM sees equal-scale values = correct ratio
 
-            let fee = (request.amount_in as f64 * fee_rate) as u64;
+            let reserve_in_normalized = normalize_reserve_to_24_decimals(reserve_in, decimals_in);
+            let reserve_out_normalized = normalize_reserve_to_24_decimals(reserve_out, decimals_out);
+            let amount_in_normalized = normalize_reserve_to_24_decimals(request.amount_in, decimals_in);
+
+            tracing::debug!(
+                "📊 Cross-decimal swap normalization: in_dec={}, out_dec={}, reserve_in={} -> {}, reserve_out={} -> {}, amount_in={} -> {}",
+                decimals_in, decimals_out,
+                reserve_in, reserve_in_normalized,
+                reserve_out, reserve_out_normalized,
+                request.amount_in, amount_in_normalized
+            );
+
+            // Calculate swap using quantum-enhanced AMM with normalized reserves (v3.2.16-beta)
+            // Total fee: 0.30% - Protocol fee: 0.05% (master wallet) - LP fee: 0.25% (pool)
+            let fee_rate = DEX_TOTAL_FEE_BPS as f64 / BPS_DIVISOR as f64; // 0.003 (0.30%)
+            let (amount_out_normalized, price_impact, effective_price) =
+                calculate_quantum_swap(amount_in_normalized, reserve_in_normalized, reserve_out_normalized, fee_rate);
+
+            // v3.2.16-beta: De-normalize output to target token's native decimals
+            let amount_out = denormalize_from_24_decimals(amount_out_normalized, decimals_out);
+
+            tracing::debug!(
+                "📊 De-normalized output: {} (24 dec) -> {} ({} dec)",
+                amount_out_normalized, amount_out, decimals_out
+            );
+
+            // Calculate fee breakdown in the INPUT token's units
+            let total_fee = request.amount_in * DEX_TOTAL_FEE_BPS as u128 / BPS_DIVISOR;
+            let protocol_fee = request.amount_in * DEX_PROTOCOL_FEE_BPS as u128 / BPS_DIVISOR;
+            let lp_fee = request.amount_in * DEX_LP_FEE_BPS as u128 / BPS_DIVISOR;
+
+            // Calculate display divisor based on input token decimals
+            let display_divisor_in = 10f64.powi(decimals_in as i32);
+            let display_divisor_out = 10f64.powi(decimals_out as i32);
 
             tracing::info!(
-                "⚛️ Quantum swap quote: {} {} => {} {} (impact: {:.4}%, pool: {})",
-                request.amount_in as f64 / 100_000_000.0,
+                "⚛️ Quantum swap quote (v3.2.16): {} {} ({} dec) => {} {} ({} dec) (impact: {:.4}%, pool: {}) | Fees: total={} protocol={} lp={}",
+                request.amount_in as f64 / display_divisor_in,
                 request.from_token,
-                amount_out as f64 / 100_000_000.0,
+                decimals_in,
+                amount_out as f64 / display_divisor_out,
                 request.to_token,
+                decimals_out,
                 price_impact * 100.0,
-                pool.pool_id
+                pool.pool_id,
+                total_fee,
+                protocol_fee,
+                lp_fee
             );
 
             Ok(Json(ApiResponse::success(SwapQuoteResponse {
@@ -1637,7 +2089,9 @@ pub async fn get_swap_quote(
                 amount_out,
                 price_impact,
                 effective_price,
-                fee,
+                fee: total_fee,
+                protocol_fee,
+                lp_fee,
                 pool_id: Some(pool.pool_id.clone()),
                 quantum_enhanced: true,
             })))

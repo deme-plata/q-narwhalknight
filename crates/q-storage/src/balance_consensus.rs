@@ -42,8 +42,8 @@ pub const GENESIS_TIMESTAMP: u64 = 1761436800;
 
 // v1.4.5-beta: Use integer basis points instead of floating-point for cross-platform determinism
 // 100 basis points = 1% (10_000 bps = 100%)
-pub const DEV_FEE_BPS: u64 = 100; // 1% = 100 basis points
-pub const BPS_DIVISOR: u64 = 10_000; // Basis points divisor for percentage calculation
+pub const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+pub const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
 
 /// Development fee percentage (1%) - DEPRECATED, use DEV_FEE_BPS for calculations
 #[deprecated(since = "1.4.5", note = "Use DEV_FEE_BPS/BPS_DIVISOR for integer math")]
@@ -57,8 +57,8 @@ pub const FOUNDER_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537
 pub struct BalanceUpdate {
     /// Wallet address that received update
     pub address: String,
-    /// Amount added to balance (in base units)
-    pub amount: u64,
+    /// Amount added to balance (in base units, u128 for 24 decimal precision)
+    pub amount: u128,
     /// Reason for balance change
     pub reason: ChangeReason,
     /// Block height where this update occurred
@@ -130,8 +130,8 @@ pub struct BalanceConsensusEngine {
 
     /// ✅ v0.9.99-beta: Cached total supply for 10,000 bps performance
     /// Reduces I/O from 10,000 queries/sec to 1 query/sec
-    /// Format: (supply, last_updated)
-    cached_total_supply: std::sync::Arc<RwLock<(u64, std::time::Instant)>>,
+    /// Format: (supply, last_updated) - v2.10.0: u128 for 24 decimal precision
+    cached_total_supply: std::sync::Arc<RwLock<(u128, std::time::Instant)>>,
 }
 
 /// Consensus statistics for monitoring
@@ -141,10 +141,10 @@ pub struct ConsensusStats {
     pub blocks_processed: u64,
     /// Total balance updates applied
     pub updates_applied: u64,
-    /// Total mining rewards distributed
-    pub total_rewards: u64,
-    /// Total dev fees collected
-    pub total_dev_fees: u64,
+    /// Total mining rewards distributed (u128 for 24 decimal precision)
+    pub total_rewards: u128,
+    /// Total dev fees collected (u128 for 24 decimal precision)
+    pub total_dev_fees: u128,
     /// Blocks rejected (already processed)
     pub blocks_rejected: u64,
 }
@@ -285,7 +285,7 @@ impl BalanceConsensusEngine {
             stats.blocks_processed = stats.blocks_processed.saturating_add(1);
             stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
             stats.total_rewards = stats.total_rewards.saturating_add(
-                updates.iter().map(|u| u.amount).sum::<u64>()
+                updates.iter().map(|u| u.amount).sum::<u128>()
             );
         }
 
@@ -500,7 +500,7 @@ impl BalanceConsensusEngine {
             stats.blocks_processed = stats.blocks_processed.saturating_add(1);
             stats.updates_applied = stats.updates_applied.saturating_add(updates.len() as u64);
             stats.total_rewards = stats.total_rewards.saturating_add(
-                updates.iter().map(|u| u.amount).sum::<u64>()
+                updates.iter().map(|u| u.amount).sum::<u128>()
             );
         }
 
@@ -627,22 +627,35 @@ impl BalanceConsensusEngine {
     /// Add balance within a transaction
     ///
     /// **SECURITY FIX (v0.8.1-beta)**: Helper method for transaction-aware balance updates
+    /// v2.10.0: Updated to u128 for 24 decimal precision
     async fn add_balance_tx(
         &self,
         tx: &crate::transaction::QTransaction,
         address: &str,
-        amount: u64,
+        amount: u128,
     ) -> Result<()> {
         // Get current balance from hot database via transaction
+        // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
         let current_balance = tx
             .get("balances", address.as_bytes())
             .await?
             .and_then(|bytes| {
-                if bytes.len() == 8 {
-                    Some(u64::from_be_bytes([
+                if bytes.len() == 16 {
+                    // New u128 format
+                    Some(u128::from_be_bytes([
                         bytes[0], bytes[1], bytes[2], bytes[3],
                         bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8], bytes[9], bytes[10], bytes[11],
+                        bytes[12], bytes[13], bytes[14], bytes[15],
                     ]))
+                } else if bytes.len() == 8 {
+                    // Legacy u64 format - convert to u128 with decimal upgrade
+                    let legacy = u64::from_be_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]);
+                    // Upgrade from 8 to 24 decimals: multiply by 10^16
+                    Some((legacy as u128) * 10u128.pow(16))
                 } else {
                     None
                 }
@@ -652,7 +665,7 @@ impl BalanceConsensusEngine {
         // Calculate new balance with overflow protection
         let new_balance = current_balance.saturating_add(amount);
 
-        // Write new balance to transaction
+        // Write new balance to transaction (always u128 format)
         tx.put("balances", address.as_bytes(), &new_balance.to_be_bytes()).await?;
 
         Ok(())
@@ -687,11 +700,12 @@ impl BalanceConsensusEngine {
     /// # Note
     /// The emission controller tracks block rate internally using add_block() calls.
     /// Make sure to call track_block_for_emission() after adding each block.
+    /// v2.10.0: Returns u128 for 24 decimal precision
     pub async fn calculate_block_reward(
         &self,
         current_timestamp: u64,
-        total_supply: u64,
-    ) -> Result<u64, BalanceConsensusError> {
+        total_supply: u128,
+    ) -> Result<u128, BalanceConsensusError> {
         let mut controller = self.emission_controller.write().await;
 
         controller
@@ -806,7 +820,8 @@ impl BalanceConsensusEngine {
     ///
     /// For now, we return an empty map as placeholder.
     /// Real implementation should query the CF_BALANCES column family.
-    pub async fn get_all_balances(&self) -> anyhow::Result<std::collections::HashMap<String, u64>> {
+    /// v2.10.0: Returns u128 for 24 decimal precision
+    pub async fn get_all_balances(&self) -> anyhow::Result<std::collections::HashMap<String, u128>> {
         // TODO: This should query the database's CF_BALANCES column family
         // For now, return empty map
         warn!("get_all_balances() called on BalanceConsensusEngine - requires storage access");
@@ -860,21 +875,22 @@ impl BalanceConsensusEngine {
     /// * `storage` - Storage trait to query if cache is stale
     ///
     /// # Returns
-    /// Current total supply in atomic units (100,000,000 = 1 QUG)
+    /// Current total supply in atomic units (10^24 = 1 QUG with 24 decimals)
+    /// v2.10.0: Returns u128 for 24 decimal precision
     ///
     /// # Errors
     /// Returns error if storage query fails (fail-fast pattern)
     pub async fn get_total_supply_cached(
         &self,
         storage: &dyn BalanceStorage,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<u128> {
         use std::time::Duration;
 
         // Check cache first (read lock)
         {
             let cache = self.cached_total_supply.read().await;
             if cache.1.elapsed() < Duration::from_secs(1) {
-                debug!("📊 Total supply cache hit: {} QUG", cache.0 as f64 / 100_000_000.0);
+                debug!("📊 Total supply cache hit: {} QUG", cache.0 as f64 / 1e24);
                 return Ok(cache.0);
             }
         } // Release read lock
@@ -889,7 +905,7 @@ impl BalanceConsensusEngine {
         // For now, approximate from emission controller
         let controller = self.emission_controller.read().await;
         let stats = controller.get_stats();
-        let supply = stats.total_emitted_this_era; // Approximation
+        let supply = stats.total_emitted_this_era as u128; // Approximation
 
         // Update cache
         {
@@ -905,29 +921,34 @@ impl BalanceConsensusEngine {
     /// This is a fast approximation that doesn't require storage access.
     /// Uses the emission controller's tracking to estimate total supply.
     /// Accurate for reward calculations but may not reflect burned tokens.
-    pub async fn get_total_supply_approx(&self) -> anyhow::Result<u64> {
+    /// v2.10.0: Returns u128 for 24 decimal precision
+    pub async fn get_total_supply_approx(&self) -> anyhow::Result<u128> {
         let controller = self.emission_controller.read().await;
         let stats = controller.get_stats();
 
         // Return total emitted this era as approximation
         // This is sufficient for adaptive reward calculations
-        Ok(stats.total_emitted_this_era)
+        Ok(stats.total_emitted_this_era as u128)
     }
 }
 
 /// Storage trait for balance updates
 ///
 /// This abstracts the actual storage implementation (RocksDB, etc.)
+/// v2.5.0: Updated to u128 for extreme precision (24 decimals)
 #[async_trait::async_trait]
 pub trait BalanceStorage: Send + Sync {
     /// Add amount to wallet balance (atomic operation)
-    async fn add_balance(&self, address: &str, amount: u64) -> Result<()>;
+    /// v2.5.0: amount is now u128
+    async fn add_balance(&self, address: &str, amount: u128) -> Result<()>;
 
     /// Get current balance for wallet
-    async fn get_balance(&self, address: &str) -> Result<u64>;
+    /// v2.5.0: returns u128
+    async fn get_balance(&self, address: &str) -> Result<u128>;
 
     /// Set balance for wallet (used in tests)
-    async fn set_balance(&self, address: &str, balance: u64) -> Result<()>;
+    /// v2.5.0: balance is now u128
+    async fn set_balance(&self, address: &str, balance: u128) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -936,9 +957,9 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    /// Mock storage for testing
+    /// Mock storage for testing (v2.10.0: u128 for 24 decimal precision)
     struct MockStorage {
-        balances: Arc<RwLock<HashMap<String, u64>>>,
+        balances: Arc<RwLock<HashMap<String, u128>>>,
     }
 
     impl MockStorage {
@@ -948,25 +969,25 @@ mod tests {
             }
         }
 
-        async fn get_all_balances(&self) -> HashMap<String, u64> {
+        async fn get_all_balances(&self) -> HashMap<String, u128> {
             self.balances.read().await.clone()
         }
     }
 
     #[async_trait::async_trait]
     impl BalanceStorage for MockStorage {
-        async fn add_balance(&self, address: &str, amount: u64) -> Result<()> {
+        async fn add_balance(&self, address: &str, amount: u128) -> Result<()> {
             let mut balances = self.balances.write().await;
             *balances.entry(address.to_string()).or_insert(0) += amount;
             Ok(())
         }
 
-        async fn get_balance(&self, address: &str) -> Result<u64> {
+        async fn get_balance(&self, address: &str) -> Result<u128> {
             let balances = self.balances.read().await;
             Ok(*balances.get(address).unwrap_or(&0))
         }
 
-        async fn set_balance(&self, address: &str, balance: u64) -> Result<()> {
+        async fn set_balance(&self, address: &str, balance: u128) -> Result<()> {
             let mut balances = self.balances.write().await;
             balances.insert(address.to_string(), balance);
             Ok(())

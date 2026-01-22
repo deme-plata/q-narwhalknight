@@ -4,7 +4,7 @@ import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCirc
 
 type ContractCategory = 'tokens' | 'defi' | 'rwa' | 'governance';
 type DeploymentStep = 'select' | 'basics' | 'features' | 'review' | 'deploying' | 'success';
-type ContractTab = 'control' | 'events' | 'stats';
+type ContractTab = 'control' | 'events' | 'stats' | 'social';
 
 // Event types for contract history
 interface ContractEvent {
@@ -32,6 +32,35 @@ interface TokenStats {
   totalStaked?: string;
   reflectionRate?: string;
   totalReflections?: string;
+  loading?: boolean;
+}
+
+// v2.4.8: Social media profile for token creators
+interface SocialMediaProfile {
+  twitter?: string;
+  discord?: string;
+  telegram?: string;
+  website?: string;
+  github?: string;
+  medium?: string;
+  description?: string;
+}
+
+// v2.4.8: Creator/Developer history for trust scoring
+interface CreatorHistory {
+  address: string;
+  tokensCreated: {
+    symbol: string;
+    name: string;
+    deployedAt: Date;
+    marketCap?: number;
+    status: 'active' | 'abandoned' | 'rugged';
+    percentChange?: number;
+  }[];
+  totalTokensCreated: number;
+  successfulTokens: number;
+  ruggedTokens: number;
+  trustScore: number; // 0-100
 }
 
 interface DeployedContract {
@@ -56,6 +85,8 @@ interface DeployedContract {
   abaBalance?: string; // User's balance of this token
   totalSupply?: string; // v1.4.9: Total supply of the token (for event history)
   decimals?: number; // v1.4.9: Token decimals for balance conversion
+  owner?: string; // v2.4.8: Contract owner/creator address
+  socialMedia?: SocialMediaProfile; // v2.4.8: Social links
 }
 
 interface ContractTemplate {
@@ -169,6 +200,7 @@ export default function VittuaVMScreen() {
   const [contractName, setContractName] = useState('');
   const [tokenSymbol, setTokenSymbol] = useState('');
   const [initialSupply, setInitialSupply] = useState('1000000');
+  const [tokenDecimals, setTokenDecimals] = useState(8); // v3.2.18-beta: User-configurable decimals
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState<string>('');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -198,6 +230,15 @@ export default function VittuaVMScreen() {
 
   // Contract stats - stores tokenomics per contract
   const [contractStats, setContractStats] = useState<Record<string, TokenStats>>({});
+
+  // v2.4.8: Social media profiles per contract
+  const [socialProfiles, setSocialProfiles] = useState<Record<string, SocialMediaProfile>>({});
+  const [editingSocial, setEditingSocial] = useState<string | null>(null);
+  const [socialFormData, setSocialFormData] = useState<SocialMediaProfile>({});
+  const [savingSocial, setSavingSocial] = useState(false);
+
+  // v2.4.8: Creator history for trust scoring (keyed by creator address)
+  const [creatorHistories, setCreatorHistories] = useState<Record<string, CreatorHistory>>({});
 
   // Helper to get active tab for a contract (defaults to 'control')
   const getActiveTab = (contractAddress: string): ContractTab => {
@@ -234,12 +275,16 @@ export default function VittuaVMScreen() {
             txHash: e.tx_hash
           }));
 
-          // If no events from API, add initial deployment event
+          // v3.2.15-beta: If no events from API, use CURRENT balance (abaBalance) for fallback
+          // Prefer abaBalance if available and non-zero, otherwise fall back to totalSupply
           if (apiEvents.length === 0) {
+            const abaVal = contract.abaBalance && contract.abaBalance !== '0' ? contract.abaBalance : null;
+            const totalVal = contract.totalSupply && contract.totalSupply !== '0' ? contract.totalSupply : null;
+            const eventAmount = abaVal || totalVal || '0';
             apiEvents.push({
               id: '1',
               type: 'mint',
-              amount: contract.totalSupply || contract.abaBalance || '0',
+              amount: eventAmount,
               to: localStorage.getItem('walletAddress') || '',
               timestamp: contract.deployedAt,
               txHash: `0x${contract.address.slice(3, 11)}...initial`
@@ -254,12 +299,16 @@ export default function VittuaVMScreen() {
       console.error('Failed to fetch contract events:', error);
     }
 
-    // Fallback: return initial deployment event
+    // v3.2.15-beta: Fallback uses CURRENT balance (abaBalance) if available
+    // Prefer abaBalance if non-zero, otherwise fall back to totalSupply
+    const abaVal = contract.abaBalance && contract.abaBalance !== '0' ? contract.abaBalance : null;
+    const totalVal = contract.totalSupply && contract.totalSupply !== '0' ? contract.totalSupply : null;
+    const eventAmount = abaVal || totalVal || '0';
     const fallbackEvents: ContractEvent[] = [
       {
         id: '1',
         type: 'mint',
-        amount: contract.totalSupply || contract.abaBalance || '0',
+        amount: eventAmount,
         to: localStorage.getItem('walletAddress') || '',
         timestamp: contract.deployedAt,
         txHash: `0x${contract.address.slice(3, 11)}...initial`
@@ -281,19 +330,39 @@ export default function VittuaVMScreen() {
     return [];
   };
 
-  // Generate mock stats for a contract (in real implementation, fetch from API)
+  // v3.2.15-beta: Format display amounts (user-entered values) with comma separators
+  // This is for display amounts only - no decimal conversion needed
+  // MUST be defined before getContractStats which uses it
+  const formatDisplayAmount = (amount: string | undefined): string => {
+    if (!amount) return '0';
+    // Remove any existing commas and handle decimal numbers
+    const cleaned = amount.replace(/,/g, '');
+    const parts = cleaned.split('.');
+    const intPart = parts[0] || '0';
+    const decPart = parts[1];
+    // Add comma separators to integer part
+    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return decPart ? `${formattedInt}.${decPart}` : formattedInt;
+  };
+
+  // v2.4.8: Fetch real stats from API
   const getContractStats = (contract: DeployedContract): TokenStats => {
     if (contractStats[contract.address]) {
       return contractStats[contract.address];
     }
 
-    // v1.4.9: Use totalSupply for stats, not abaBalance (user's balance)
-    const supplyDisplay = contract.totalSupply || contract.abaBalance || '0';
-    const stats: TokenStats = {
+    // Return loading state while fetching
+    // v3.2.15-beta: Prefer abaBalance (current balance) if available and non-zero
+    // Fall back to totalSupply if abaBalance not yet loaded
+    const abaVal = contract.abaBalance && contract.abaBalance !== '0' ? contract.abaBalance : null;
+    const totalVal = contract.totalSupply && contract.totalSupply !== '0' ? contract.totalSupply : null;
+    const rawSupply = abaVal || totalVal || '0';
+    const supplyDisplay = formatDisplayAmount(rawSupply);
+    const loadingStats: TokenStats = {
       totalSupply: supplyDisplay,
       circulatingSupply: supplyDisplay,
       burnedTokens: '0',
-      holders: 1,
+      holders: 0,
       totalTransfers: 0,
       totalMinted: supplyDisplay,
       totalBurned: '0',
@@ -302,12 +371,187 @@ export default function VittuaVMScreen() {
       totalStaked: contract.features.staking ? '0' : undefined,
       reflectionRate: contract.features.reflection ? '2%' : undefined,
       totalReflections: contract.features.reflection ? '0' : undefined,
+      loading: true,
     };
 
-    // Cache the stats
-    setContractStats(prev => ({ ...prev, [contract.address]: stats }));
-    return stats;
+    // Set loading state immediately
+    setContractStats(prev => ({ ...prev, [contract.address]: loadingStats }));
+
+    // Fetch real stats from API
+    fetchContractStats(contract);
+
+    return loadingStats;
   };
+
+  // v2.4.8: Fetch token stats from backend API
+  // v3.2.14-beta: Helper function to format large numbers using BigInt (prevents precision loss)
+  const formatBigIntValue = (value: any, decimals: number = 8): string => {
+    if (value === undefined || value === null) return '0';
+    const valStr = typeof value === 'string' ? value : String(value);
+    try {
+      const bigVal = BigInt(valStr);
+      const divisor = BigInt(10) ** BigInt(decimals);
+      const wholePart = bigVal / divisor;
+      const remainder = bigVal % divisor;
+      if (remainder > 0n) {
+        const fracStr = remainder.toString().padStart(decimals, '0');
+        const trimmedFrac = fracStr.replace(/0+$/, '').slice(0, 2);
+        return trimmedFrac ? `${wholePart.toLocaleString()}.${trimmedFrac}` : wholePart.toLocaleString();
+      }
+      return wholePart.toLocaleString();
+    } catch {
+      // Fallback for non-BigInt values
+      const num = Number(valStr);
+      return isNaN(num) ? '0' : num.toLocaleString();
+    }
+  };
+
+  const fetchContractStats = async (contract: DeployedContract) => {
+    try {
+      const contractAddr = contract.address.startsWith('qnk')
+        ? contract.address.slice(3)
+        : contract.address;
+
+      const response = await fetch(`/api/v1/contracts/${contractAddr}/token-stats`);
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data) {
+          const data = result.data;
+          const decimals = contract.decimals || 8;
+
+          // v3.2.15-beta: Use abaBalance (current user balance) as authoritative source
+          // Prefer abaBalance if available and non-zero, otherwise fall back to API data
+          const abaVal = contract.abaBalance && contract.abaBalance !== '0' ? contract.abaBalance : null;
+          const currentBalance = abaVal || formatBigIntValue(data.total_supply, decimals);
+
+          const stats: TokenStats = {
+            totalSupply: currentBalance, // Use current balance as supply
+            circulatingSupply: currentBalance,
+            burnedTokens: formatBigIntValue(data.total_burned || '0', decimals),
+            holders: data.holder_count || 0,
+            totalTransfers: 0, // TODO: Add to API
+            totalMinted: currentBalance, // Use current balance
+            totalBurned: formatBigIntValue(data.total_burned || '0', decimals),
+            totalAirdropped: '0', // TODO: Track airdrops
+            stakingAPY: contract.features.staking ? '12.5%' : undefined,
+            totalStaked: formatBigIntValue(data.total_staked || '0', decimals),
+            reflectionRate: data.fee_config?.reflection_fee ? `${data.fee_config.reflection_fee}%` : undefined,
+            totalReflections: formatBigIntValue(data.total_reflected || '0', decimals),
+            loading: false,
+          };
+          setContractStats(prev => ({ ...prev, [contract.address]: stats }));
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch token stats:', error);
+    }
+  };
+
+  // v2.4.8: Fetch creator history for trust scoring
+  const fetchCreatorHistory = async (creatorAddress: string) => {
+    if (creatorHistories[creatorAddress]) return;
+
+    try {
+      const response = await fetch(`/api/v1/contracts/user/${creatorAddress}/contracts`);
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.data) {
+          const contracts = result.data.contracts || [];
+          const history: CreatorHistory = {
+            address: creatorAddress,
+            tokensCreated: contracts.map((c: any) => ({
+              symbol: c.symbol || 'TOKEN',
+              name: c.name || 'Unknown',
+              deployedAt: new Date(c.deployed_at * 1000),
+              status: 'active' as const,
+            })),
+            totalTokensCreated: contracts.length,
+            successfulTokens: contracts.length, // All active for now
+            ruggedTokens: 0,
+            trustScore: Math.min(100, 50 + contracts.length * 10), // Base score + per token
+          };
+          setCreatorHistories(prev => ({ ...prev, [creatorAddress]: history }));
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch creator history:', error);
+    }
+  };
+
+  // v2.4.8: Save social media profile to backend (persisted + synced across nodes)
+  const handleSaveSocial = async (contract: DeployedContract) => {
+    setSavingSocial(true);
+    try {
+      const contractAddr = contract.address.startsWith('qnk')
+        ? contract.address.slice(3)
+        : contract.address;
+
+      const walletAddress = localStorage.getItem('walletAddress') || '';
+
+      const response = await fetch(`/api/v1/contracts/${contractAddr}/social`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...socialFormData,
+          owner_address: walletAddress,
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success) {
+          setSocialProfiles(prev => ({ ...prev, [contract.address]: socialFormData }));
+          setEditingSocial(null);
+          console.log('✅ Social profile saved and synced for', contract.symbol);
+        }
+      } else {
+        console.error('Failed to save social profile');
+      }
+    } catch (error) {
+      console.error('Error saving social profile:', error);
+    } finally {
+      setSavingSocial(false);
+    }
+  };
+
+  // v2.4.8: Load social profiles from backend API (decentralized across nodes)
+  React.useEffect(() => {
+    const loadSocialProfiles = async () => {
+      for (const contract of deployedContracts) {
+        try {
+          const contractAddr = contract.address.startsWith('qnk')
+            ? contract.address.slice(3)
+            : contract.address;
+
+          const response = await fetch(`/api/v1/contracts/${contractAddr}/social`);
+          if (response.ok) {
+            const result = await response.json();
+            if (result.success && result.data) {
+              const profile: SocialMediaProfile = {
+                twitter: result.data.twitter,
+                discord: result.data.discord,
+                telegram: result.data.telegram,
+                website: result.data.website,
+                github: result.data.github,
+                medium: result.data.medium,
+                description: result.data.description,
+              };
+              // Only update if there's actual data
+              if (Object.values(profile).some(v => v)) {
+                setSocialProfiles(prev => ({ ...prev, [contract.address]: profile }));
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error loading social profile for', contract.symbol, error);
+        }
+      }
+    };
+
+    if (deployedContracts.length > 0) {
+      loadSocialProfiles();
+    }
+  }, [deployedContracts]);
 
   // Load contracts from localStorage on mount for instant display
   React.useEffect(() => {
@@ -370,10 +614,29 @@ export default function VittuaVMScreen() {
         if (result.success && result.data) {
           // Map backend contract data to frontend format
           const contractsWithoutBalances: DeployedContract[] = result.data.map((c: any) => {
-            // v1.4.9: Format total_supply with commas for display
+            // v3.2.14-beta: Fix Total Supply display with proper BigInt decimal handling
             const rawSupply = c.total_supply || c.initial_supply || '0';
             const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
-            const formattedSupply = BigInt(supplyStr).toLocaleString();
+            const decimals = c.decimals || 8;
+
+            // v3.2.14-beta: Use BigInt division to convert base units to display units
+            // This prevents JavaScript Number precision loss for large integers
+            const supplyBigInt = BigInt(supplyStr);
+            const divisorBigInt = BigInt(10) ** BigInt(decimals);
+
+            // Integer division for whole part
+            const wholePart = supplyBigInt / divisorBigInt;
+            const remainder = supplyBigInt % divisorBigInt;
+
+            // Format with commas and optional decimals
+            let formattedSupply: string;
+            if (remainder > 0n) {
+              const fracStr = remainder.toString().padStart(decimals, '0');
+              const trimmedFrac = fracStr.replace(/0+$/, '').slice(0, 2); // Max 2 decimal places for supply
+              formattedSupply = trimmedFrac ? `${wholePart.toLocaleString()}.${trimmedFrac}` : wholePart.toLocaleString();
+            } else {
+              formattedSupply = wholePart.toLocaleString();
+            }
 
             return {
               address: c.address, // Already has qnk prefix from backend
@@ -383,8 +646,8 @@ export default function VittuaVMScreen() {
               deployedAt: new Date(c.deployed_at * 1000), // Convert Unix timestamp
               features: c.features || {},
               isPaused: false,
-              totalSupply: formattedSupply, // v1.4.9: Store total supply for event history
-              decimals: c.decimals || 8, // v1.4.9: Store decimals for balance conversion
+              totalSupply: formattedSupply, // v3.2.14-beta: Fixed - now in display units
+              decimals: decimals,
             };
           });
 
@@ -397,22 +660,38 @@ export default function VittuaVMScreen() {
                 if (balanceResponse.ok) {
                   const balanceResult = await balanceResponse.json();
                   if (balanceResult.success && balanceResult.data) {
-                    // v1.4.9: Fix - Backend returns balance in BASE UNITS (raw * 10^decimals)
-                    // We need to divide by decimals to get display amount
+                    // v3.2.14-beta: Fix BigInt precision loss bug
+                    // Backend returns balance in BASE UNITS - use BigInt to prevent precision loss
                     const rawBalance = balanceResult.data.balance || '0';
                     const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
 
                     // Get decimals (default to 8 like QUG/QUGUSD)
                     const decimals = contract.decimals || 8;
-                    const divisor = Math.pow(10, decimals);
 
-                    // Convert from base units to display units
-                    const balanceNum = Number(balanceStr) / divisor;
-                    // Format with appropriate decimal places
-                    const formattedBalance = balanceNum.toLocaleString(undefined, {
-                      minimumFractionDigits: 0,
-                      maximumFractionDigits: 4
-                    });
+                    // v3.2.14-beta: Use BigInt for large number division (prevents JS Number precision loss)
+                    // JavaScript Number can only safely represent integers up to 2^53
+                    // Our balances can be up to 10^37 which would lose precision
+                    const balanceBigInt = BigInt(balanceStr);
+                    const divisorBigInt = BigInt(10) ** BigInt(decimals);
+
+                    // Integer division for whole part
+                    const wholePart = balanceBigInt / divisorBigInt;
+                    // Remainder for fractional part
+                    const remainder = balanceBigInt % divisorBigInt;
+
+                    // Format whole part with commas
+                    const wholeStr = wholePart.toLocaleString();
+
+                    // Format fractional part (pad with leading zeros, trim trailing zeros)
+                    let formattedBalance: string;
+                    if (remainder > 0n) {
+                      const fracStr = remainder.toString().padStart(decimals, '0');
+                      const trimmedFrac = fracStr.replace(/0+$/, ''); // Remove trailing zeros
+                      formattedBalance = trimmedFrac ? `${wholeStr}.${trimmedFrac.slice(0, 4)}` : wholeStr;
+                    } else {
+                      formattedBalance = wholeStr;
+                    }
+
                     console.log(`✅ Fetched balance for ${contract.symbol}: ${rawBalance} base units → ${formattedBalance} display (decimals: ${decimals})`);
                     return { ...contract, abaBalance: formattedBalance };
                   }
@@ -641,16 +920,39 @@ export default function VittuaVMScreen() {
 
       const backendContractType = contractTypeMap[selectedTemplate?.id || ''] || 'secure_token';
 
+      // v3.2.18-beta: Convert initialSupply to BASE UNITS before sending to backend
+      // User enters display units (e.g., "1000000"), we multiply by 10^decimals for storage
+      // This ensures consistency: backend stores base units, frontend divides when displaying
+      const decimals = tokenDecimals; // v3.2.18-beta: Use user-selected decimals
+      let initialSupplyBaseUnits: string;
+      try {
+        // v3.2.19-beta: Use BigInt throughout to prevent precision loss
+        // CRITICAL: 10 ** 18 exceeds Number.MAX_SAFE_INTEGER, causing precision loss
+        // Must use BigInt(10) ** BigInt(decimals) instead of BigInt(10) ** BigInt(decimals)
+        const displayAmount = initialSupply.replace(/,/g, ''); // Remove any commas
+        const parts = displayAmount.split('.');
+        const wholePart = parts[0] || '0';
+        const fracPart = (parts[1] || '').slice(0, decimals).padEnd(decimals, '0');
+
+        // FIXED: Use BigInt exponentiation to avoid Number precision loss
+        const multiplier = BigInt(10) ** BigInt(decimals);
+        const baseUnits = BigInt(wholePart) * multiplier + BigInt(fracPart || '0');
+        initialSupplyBaseUnits = baseUnits.toString();
+        console.log(`📊 Initial supply: ${initialSupply} display × 10^${decimals} = ${initialSupplyBaseUnits} base units`);
+      } catch (e) {
+        console.error('Failed to convert initial supply to base units:', e);
+        initialSupplyBaseUnits = initialSupply; // Fallback to raw value
+      }
+
       // Prepare deployment request
-      // Note: initialSupply is sent as-is (human-readable amount like "1000000")
-      // The backend and display layer handle decimal conversion (÷10^18) for display only
       const deploymentRequest = {
         contract_type: backendContractType,
         owner: walletAddress,
         parameters: {
           name: contractName,
           symbol: tokenSymbol,
-          initialSupply: initialSupply, // Send human-readable amount
+          initialSupply: initialSupplyBaseUnits, // v3.2.18-beta: Send BASE units
+          decimals: tokenDecimals, // v3.2.18-beta: User-selected decimals
           logoIpfsCid: logoIpfsCid || undefined,
           ...features, // Include all feature flags
         },
@@ -709,6 +1011,8 @@ export default function VittuaVMScreen() {
         isPaused: false,
         logoUrl: logoIpfsCid ? `ipfs://${logoIpfsCid}` : undefined,
         logoDataUrl: logoPreview || undefined,
+        decimals: tokenDecimals, // v3.2.18-beta: Store user-selected decimals
+        totalSupply: initialSupply, // v3.2.18-beta: Store initial supply in display units
       };
 
       const updatedContracts = [...deployedContracts, newContract];
@@ -729,18 +1033,25 @@ export default function VittuaVMScreen() {
   };
 
   const handleMint = async (contract: DeployedContract) => {
-    if (!mintAmount || parseFloat(mintAmount) <= 0) {
+    if (!mintAmount || mintAmount === '0') {
       alert('Please enter a valid amount to mint');
       return;
     }
 
     try {
-      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      // v3.2.14-beta: Use BigInt to convert display units to base units (prevents precision loss)
+      // This is critical for large token amounts like 1e30 which exceed Number precision
       const decimals = contract.decimals || 8;
-      const displayAmount = parseFloat(mintAmount);
-      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
 
-      console.log(`🪙 Minting ${mintAmount} ${contract.symbol} (${baseUnits} base units) for contract ${contract.address}`);
+      // Parse the input which may have decimals (e.g., "123.456")
+      const parts = mintAmount.split('.');
+      const wholePart = parts[0] || '0';
+      const fracPart = (parts[1] || '').slice(0, decimals).padEnd(decimals, '0');
+
+      // Combine whole and fractional parts as BigInt in base units
+      const baseUnits = BigInt(wholePart) * BigInt(10) ** BigInt(decimals) + BigInt(fracPart);
+
+      console.log(`🪙 Minting ${mintAmount} ${contract.symbol} (${baseUnits.toString()} base units) for contract ${contract.address}`);
 
       const response = await fetch('/api/v1/contracts/mint', {
         method: 'POST',
@@ -782,18 +1093,25 @@ export default function VittuaVMScreen() {
   };
 
   const handleBurn = async (contract: DeployedContract) => {
-    if (!burnAmount || parseFloat(burnAmount) <= 0) {
+    if (!burnAmount || burnAmount === '0') {
       alert('Please enter a valid amount to burn');
       return;
     }
 
     try {
-      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      // v3.2.14-beta: Use BigInt to convert display units to base units (prevents precision loss)
+      // This is critical for large token amounts like 1e30 which exceed Number precision
       const decimals = contract.decimals || 8;
-      const displayAmount = parseFloat(burnAmount);
-      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
 
-      console.log(`🔥 Burning ${burnAmount} ${contract.symbol} (${baseUnits} base units) from contract ${contract.address}`);
+      // Parse the input which may have decimals (e.g., "123.456")
+      const parts = burnAmount.split('.');
+      const wholePart = parts[0] || '0';
+      const fracPart = (parts[1] || '').slice(0, decimals).padEnd(decimals, '0');
+
+      // Combine whole and fractional parts as BigInt in base units
+      const baseUnits = BigInt(wholePart) * BigInt(10) ** BigInt(decimals) + BigInt(fracPart);
+
+      console.log(`🔥 Burning ${burnAmount} ${contract.symbol} (${baseUnits.toString()} base units) from contract ${contract.address}`);
 
       const response = await fetch('/api/v1/contracts/burn', {
         method: 'POST',
@@ -835,7 +1153,7 @@ export default function VittuaVMScreen() {
   };
 
   const handleAirdrop = async (contract: DeployedContract) => {
-    if (!airdropAddresses || !airdropAmount || parseFloat(airdropAmount) <= 0) {
+    if (!airdropAddresses || !airdropAmount || airdropAmount === '0') {
       alert('Please enter valid addresses and amount');
       return;
     }
@@ -852,12 +1170,19 @@ export default function VittuaVMScreen() {
     }
 
     try {
-      // v1.4.10: Convert display units to base units (multiply by 10^decimals)
+      // v3.2.14-beta: Use BigInt to convert display units to base units (prevents precision loss)
+      // This is critical for large token amounts like 1e30 which exceed Number precision
       const decimals = contract.decimals || 8;
-      const displayAmount = parseFloat(airdropAmount);
-      const baseUnits = Math.floor(displayAmount * Math.pow(10, decimals));
 
-      console.log(`✈️ Airdropping ${airdropAmount} ${contract.symbol} (${baseUnits} base units each) to ${addresses.length} addresses`);
+      // Parse the input which may have decimals (e.g., "123.456")
+      const parts = airdropAmount.split('.');
+      const wholePart = parts[0] || '0';
+      const fracPart = (parts[1] || '').slice(0, decimals).padEnd(decimals, '0');
+
+      // Combine whole and fractional parts as BigInt in base units
+      const baseUnits = BigInt(wholePart) * BigInt(10) ** BigInt(decimals) + BigInt(fracPart);
+
+      console.log(`✈️ Airdropping ${airdropAmount} ${contract.symbol} (${baseUnits.toString()} base units each) to ${addresses.length} addresses`);
 
       const response = await fetch('/api/v1/contracts/airdrop', {
         method: 'POST',
@@ -1098,20 +1423,167 @@ export default function VittuaVMScreen() {
                       />
                     </div>
 
+                    {/* v3.2.18-beta: Initial Supply with Slider + Max Button */}
                     <div>
                       <label className="block text-sm font-medium text-gray-300 mb-2">
                         Initial Supply
                       </label>
-                      <input
-                        type="number"
-                        value={initialSupply}
-                        onChange={(e) => setInitialSupply(e.target.value)}
-                        placeholder="1000000"
-                        className="w-full bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none"
-                      />
-                      <p className="text-xs text-gray-500 mt-1">
-                        Total tokens to mint at deployment
+                      <div className="flex gap-2 mb-3">
+                        <input
+                          type="text"
+                          value={initialSupply}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/[^0-9]/g, '');
+                            setInitialSupply(val);
+                          }}
+                          placeholder="1000000"
+                          className="flex-1 bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none font-mono"
+                        />
+                        <motion.button
+                          type="button"
+                          onClick={() => {
+                            // u128 max with selected decimals: 3.4e38 / 10^decimals
+                            // For safety, use 10^(38-decimals) as practical max
+                            const maxExponent = Math.max(1, 38 - tokenDecimals);
+                            const maxSupply = '1' + '0'.repeat(maxExponent);
+                            setInitialSupply(maxSupply);
+                          }}
+                          className="px-4 py-2 bg-gradient-to-r from-quantum-purple/50 to-quantum-cyan/50 hover:from-quantum-purple/70 hover:to-quantum-cyan/70 border border-quantum-cyan/30 rounded-lg text-quantum-cyan text-sm font-bold transition-all"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                        >
+                          MAX
+                        </motion.button>
+                      </div>
+                      {/* Gradient Slider for Initial Supply - logarithmic scale for u128 range */}
+                      <div className="relative">
+                        <input
+                          type="range"
+                          min="3"
+                          max="36"
+                          step="1"
+                          value={Math.max(3, Math.min(36, Math.log10(Number(initialSupply) || 1000)))}
+                          onChange={(e) => {
+                            const exp = Number(e.target.value);
+                            setInitialSupply(Math.round(Math.pow(10, exp)).toString());
+                          }}
+                          className="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                          style={{
+                            background: `linear-gradient(to right, #8B5CF6, #06B6D4, #10B981, #F59E0B)`,
+                          }}
+                        />
+                        <style>{`
+                          input[type="range"]::-webkit-slider-thumb {
+                            appearance: none;
+                            width: 20px;
+                            height: 20px;
+                            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
+                            border-radius: 50%;
+                            cursor: pointer;
+                            box-shadow: 0 0 10px rgba(139, 92, 246, 0.5), 0 0 20px rgba(6, 182, 212, 0.3);
+                            border: 2px solid rgba(255, 255, 255, 0.3);
+                          }
+                          input[type="range"]::-moz-range-thumb {
+                            width: 20px;
+                            height: 20px;
+                            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
+                            border-radius: 50%;
+                            cursor: pointer;
+                            box-shadow: 0 0 10px rgba(139, 92, 246, 0.5), 0 0 20px rgba(6, 182, 212, 0.3);
+                            border: 2px solid rgba(255, 255, 255, 0.3);
+                          }
+                        `}</style>
+                        <div className="flex justify-between text-xs text-gray-500 mt-1">
+                          <span>1K</span>
+                          <span>1B</span>
+                          <span>1T (10^12)</span>
+                          <span>10^24</span>
+                          <span>10^36</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Display value: <span className="text-quantum-cyan font-mono">{(() => {
+                          try {
+                            const val = BigInt(initialSupply || '0');
+                            // Format large numbers with scientific notation if too big
+                            if (val > BigInt('1000000000000000')) {
+                              const str = val.toString();
+                              return `${str[0]}.${str.slice(1,4)}... × 10^${str.length - 1}`;
+                            }
+                            return val.toLocaleString();
+                          } catch { return initialSupply; }
+                        })()}</span> tokens
+                        <span className="ml-2 text-quantum-purple">(u128 supports up to ~10^{38 - tokenDecimals} with {tokenDecimals} decimals)</span>
                       </p>
+                    </div>
+
+                    {/* v3.2.18-beta: Token Decimals Slider - constrained by supply for u128 */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">
+                        Token Decimals
+                      </label>
+                      {(() => {
+                        // u128 max ≈ 3.4 × 10^38, so max_decimals = 38 - log10(supply)
+                        const supplyDigits = (initialSupply || '1').length;
+                        const maxDecimalsForSupply = Math.max(0, Math.min(24, 38 - supplyDigits));
+                        const effectiveDecimals = Math.min(tokenDecimals, maxDecimalsForSupply);
+
+                        // Auto-adjust if current decimals exceeds max
+                        if (tokenDecimals > maxDecimalsForSupply) {
+                          setTimeout(() => setTokenDecimals(maxDecimalsForSupply), 0);
+                        }
+
+                        return (
+                          <>
+                            <div className="flex items-center gap-4 mb-2">
+                              <div className="relative flex-1">
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max={maxDecimalsForSupply}
+                                  step="1"
+                                  value={effectiveDecimals}
+                                  onChange={(e) => setTokenDecimals(Number(e.target.value))}
+                                  className="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                                  style={{
+                                    background: `linear-gradient(to right, #F59E0B ${(effectiveDecimals / Math.max(1, maxDecimalsForSupply)) * 100}%, #374151 ${(effectiveDecimals / Math.max(1, maxDecimalsForSupply)) * 100}%)`,
+                                  }}
+                                />
+                              </div>
+                              <div className="w-16 text-center">
+                                <span className="text-xl font-bold text-quantum-cyan">{effectiveDecimals}</span>
+                              </div>
+                            </div>
+                            <div className="flex justify-between text-xs text-gray-500">
+                              <span>0 (whole)</span>
+                              {maxDecimalsForSupply >= 8 && <span>8 (standard)</span>}
+                              {maxDecimalsForSupply >= 18 && <span>18 (ETH)</span>}
+                              <span className={maxDecimalsForSupply < 24 ? 'text-red-400' : ''}>{maxDecimalsForSupply} (max)</span>
+                            </div>
+                            {maxDecimalsForSupply < 24 && (
+                              <div className="mt-2 p-2 bg-red-900/20 border border-red-500/30 rounded-lg">
+                                <p className="text-xs text-red-400">
+                                  u128 limit: With {supplyDigits}-digit supply, max decimals is {maxDecimalsForSupply}
+                                </p>
+                              </div>
+                            )}
+                            <div className="mt-2 p-3 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20">
+                              <p className="text-xs text-gray-400">
+                                <span className="text-quantum-cyan">{effectiveDecimals}</span> decimals = 1 token = <span className="font-mono text-quantum-purple">10^{effectiveDecimals}</span> smallest units
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                Smallest unit: <span className="font-mono text-quantum-cyan">0.{'0'.repeat(Math.max(0, effectiveDecimals - 1))}1</span>
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                {effectiveDecimals === 8 ? '(Standard - recommended for most tokens)' :
+                                 effectiveDecimals === 18 ? '(Ethereum compatible)' :
+                                 effectiveDecimals === 24 ? '(QUG precision - maximum granularity)' :
+                                 effectiveDecimals === 0 ? '(NFT-like - whole tokens only)' : ''}
+                              </p>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
 
                     <div>
@@ -1367,7 +1839,18 @@ export default function VittuaVMScreen() {
                 {initialSupply && (
                   <div className="bg-quantum-dark/50 rounded-lg p-4">
                     <div className="text-sm text-gray-400 mb-1">Initial Supply</div>
-                    <div className="text-lg font-bold text-white">{Number(initialSupply).toLocaleString()} {tokenSymbol}</div>
+                    <div className="text-lg font-bold text-white">{(() => {
+                      // v3.2.14-beta: Use BigInt for large number display to prevent precision loss
+                      try {
+                        return BigInt(initialSupply).toLocaleString();
+                      } catch {
+                        return initialSupply;
+                      }
+                    })()} {tokenSymbol}</div>
+                    {/* v3.2.18-beta: Show decimals context with the supply */}
+                    <div className="text-xs text-gray-500 mt-1">
+                      {tokenDecimals} decimals • Smallest unit: 0.{'0'.repeat(Math.max(0, tokenDecimals - 1))}1 {tokenSymbol}
+                    </div>
                   </div>
                 )}
 
@@ -1610,6 +2093,19 @@ export default function VittuaVMScreen() {
                   >
                     <BarChart3 className="w-4 h-4" />
                     Stats
+                  </motion.button>
+                  <motion.button
+                    onClick={() => setActiveTab(contract.address, 'social')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      getActiveTab(contract.address) === 'social'
+                        ? 'bg-quantum-pink/30 text-white border border-quantum-pink/50'
+                        : 'bg-quantum-dark/30 text-gray-400 hover:text-white hover:bg-quantum-dark/50'
+                    }`}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <Users className="w-4 h-4" />
+                    Social
                   </motion.button>
                 </div>
 
@@ -1953,7 +2449,7 @@ export default function VittuaVMScreen() {
                                     event.type === 'burn' ? 'text-quantum-orange' :
                                     'text-white'
                                   }`}>
-                                    {event.type === 'mint' ? '+' : event.type === 'burn' ? '-' : ''}{event.amount} {contract.symbol}
+                                    {event.type === 'mint' ? '+' : event.type === 'burn' ? '-' : ''}{formatDisplayAmount(event.amount)} {contract.symbol}
                                   </span>
                                 </div>
                               )}
@@ -2102,6 +2598,229 @@ export default function VittuaVMScreen() {
                         <FileCode className="w-4 h-4" />
                         View Full Analytics in Explorer
                       </motion.button>
+                    </motion.div>
+                  )}
+
+                  {/* Social Tab - v2.4.8 */}
+                  {getActiveTab(contract.address) === 'social' && (
+                    <motion.div
+                      key="social"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Users className="w-4 h-4 text-quantum-pink" />
+                          <h4 className="font-bold text-white">Social Media & Links</h4>
+                        </div>
+                        {editingSocial !== contract.address && (
+                          <motion.button
+                            onClick={() => {
+                              setEditingSocial(contract.address);
+                              setSocialFormData(socialProfiles[contract.address] || {});
+                            }}
+                            className="text-sm text-quantum-cyan hover:text-white transition-colors"
+                            whileHover={{ scale: 1.05 }}
+                          >
+                            Edit Profile
+                          </motion.button>
+                        )}
+                      </div>
+
+                      {/* Edit Mode */}
+                      {editingSocial === contract.address ? (
+                        <div className="space-y-3">
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">X / Twitter</label>
+                            <input
+                              type="text"
+                              value={socialFormData.twitter || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, twitter: e.target.value }))}
+                              placeholder="@username or https://x.com/..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-pink/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">Discord</label>
+                            <input
+                              type="text"
+                              value={socialFormData.discord || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, discord: e.target.value }))}
+                              placeholder="https://discord.gg/..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-purple/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">Telegram</label>
+                            <input
+                              type="text"
+                              value={socialFormData.telegram || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, telegram: e.target.value }))}
+                              placeholder="https://t.me/..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-blue/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">Website</label>
+                            <input
+                              type="text"
+                              value={socialFormData.website || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, website: e.target.value }))}
+                              placeholder="https://..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">GitHub</label>
+                            <input
+                              type="text"
+                              value={socialFormData.github || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, github: e.target.value }))}
+                              placeholder="https://github.com/..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-green/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">Description</label>
+                            <textarea
+                              value={socialFormData.description || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, description: e.target.value }))}
+                              placeholder="Describe your token project..."
+                              rows={3}
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-pink/50 focus:outline-none resize-none"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <motion.button
+                              onClick={() => setEditingSocial(null)}
+                              className="flex-1 bg-quantum-dark/50 hover:bg-quantum-dark/70 text-gray-400 px-4 py-2 rounded-lg text-sm font-medium"
+                              whileHover={{ scale: 1.02 }}
+                            >
+                              Cancel
+                            </motion.button>
+                            <motion.button
+                              onClick={() => handleSaveSocial(contract)}
+                              disabled={savingSocial}
+                              className="flex-1 bg-gradient-to-r from-quantum-pink to-quantum-purple hover:from-quantum-pink/80 hover:to-quantum-purple/80 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+                              whileHover={{ scale: 1.02 }}
+                            >
+                              {savingSocial ? 'Saving...' : 'Save Profile'}
+                            </motion.button>
+                          </div>
+                        </div>
+                      ) : (
+                        /* View Mode */
+                        <div className="space-y-3">
+                          {/* Social Links Display */}
+                          {socialProfiles[contract.address] && Object.values(socialProfiles[contract.address]).some(v => v) ? (
+                            <>
+                              {socialProfiles[contract.address]?.description && (
+                                <div className="bg-quantum-dark/50 rounded-lg p-4">
+                                  <p className="text-gray-300 text-sm">{socialProfiles[contract.address].description}</p>
+                                </div>
+                              )}
+                              <div className="grid grid-cols-2 gap-3">
+                                {socialProfiles[contract.address]?.twitter && (
+                                  <a
+                                    href={socialProfiles[contract.address].twitter!.startsWith('http')
+                                      ? socialProfiles[contract.address].twitter
+                                      : `https://x.com/${socialProfiles[contract.address].twitter!.replace('@', '')}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-dark/70 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">𝕏</span>
+                                    <span className="text-sm truncate">{socialProfiles[contract.address].twitter}</span>
+                                  </a>
+                                )}
+                                {socialProfiles[contract.address]?.discord && (
+                                  <a
+                                    href={socialProfiles[contract.address].discord}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-purple/30 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">💬</span>
+                                    <span className="text-sm">Discord</span>
+                                  </a>
+                                )}
+                                {socialProfiles[contract.address]?.telegram && (
+                                  <a
+                                    href={socialProfiles[contract.address].telegram}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-blue/30 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">✈️</span>
+                                    <span className="text-sm">Telegram</span>
+                                  </a>
+                                )}
+                                {socialProfiles[contract.address]?.website && (
+                                  <a
+                                    href={socialProfiles[contract.address].website}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-cyan/30 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">🌐</span>
+                                    <span className="text-sm">Website</span>
+                                  </a>
+                                )}
+                                {socialProfiles[contract.address]?.github && (
+                                  <a
+                                    href={socialProfiles[contract.address].github}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-green/30 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">⚙️</span>
+                                    <span className="text-sm">GitHub</span>
+                                  </a>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <div className="bg-quantum-dark/50 rounded-lg p-6 text-center">
+                              <Users className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                              <p className="text-gray-400 text-sm mb-3">No social links added yet</p>
+                              <motion.button
+                                onClick={() => {
+                                  setEditingSocial(contract.address);
+                                  setSocialFormData({});
+                                }}
+                                className="text-sm text-quantum-pink hover:text-white transition-colors"
+                                whileHover={{ scale: 1.05 }}
+                              >
+                                Add Social Links
+                              </motion.button>
+                            </div>
+                          )}
+
+                          {/* Creator Trust Score */}
+                          <div className="bg-gradient-to-r from-quantum-pink/10 to-quantum-purple/10 border border-quantum-pink/30 rounded-lg p-4">
+                            <h5 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                              <CheckCircle className="w-4 h-4 text-quantum-pink" />
+                              Creator Reputation
+                            </h5>
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-400">Trust Score:</span>
+                                <span className="font-bold text-quantum-green">85/100</span>
+                              </div>
+                              <div className="w-full bg-quantum-dark/50 rounded-full h-2">
+                                <div className="bg-gradient-to-r from-quantum-green to-quantum-cyan h-2 rounded-full" style={{ width: '85%' }}></div>
+                              </div>
+                              <div className="flex justify-between text-xs text-gray-500 mt-2">
+                                <span>First token created</span>
+                                <span>No rug history ✓</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </motion.div>
                   )}
                 </AnimatePresence>

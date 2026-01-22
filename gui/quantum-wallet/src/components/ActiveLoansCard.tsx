@@ -54,7 +54,7 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
 
   const calculateHealthRatio = (loan: ActiveLoan) => {
     const QUG_PRICE = 42.50;
-    const loanValue = loan.loan_amount / 1e8;
+    const loanValue = loan.loan_amount / 1e24;
     const collateralValue = loan.collateral_amount * QUG_PRICE;
     return (collateralValue / loanValue) * 100;
   };
@@ -116,7 +116,7 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
                 <div>
                   <div className="text-sm text-gray-400 mb-1">Loan Amount</div>
                   <div className="text-2xl font-bold text-white">
-                    {(loan.loan_amount / 1e8).toFixed(2)} QUGUSD
+                    {(loan.loan_amount / 1e24).toFixed(2)} QUGUSD
                   </div>
                 </div>
                 <div className="text-right">

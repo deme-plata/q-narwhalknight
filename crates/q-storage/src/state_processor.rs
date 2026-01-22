@@ -22,8 +22,12 @@
 use anyhow::{bail, Context, Result};
 use q_types::{
     Address, Amount, StateChange, StateChangeCategory, Transaction, TransactionType,
-    QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS,
+    QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS, FOUNDER_WALLET,
+    DEX_TOTAL_FEE_BPS, DEX_PROTOCOL_FEE_BPS, DEX_LP_FEE_BPS, BPS_DIVISOR,
+    ProtocolFeeRecord,
+    u128_serde, // v3.2.2: MessagePack P2P compatibility
 };
+use sha3::{Sha3_256, Digest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
@@ -72,10 +76,10 @@ pub struct ExecutionLog {
 /// State accessor for reading current state during execution
 pub trait StateReader: Send + Sync {
     /// Get native QUG balance for an account
-    fn get_balance(&self, account: &[u8; 32]) -> Result<u64>;
+    fn get_balance(&self, account: &[u8; 32]) -> Result<u128>;
 
     /// Get token balance for an account
-    fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u64>;
+    fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u128>;
 
     /// Get account nonce
     fn get_nonce(&self, account: &[u8; 32]) -> Result<u64>;
@@ -98,24 +102,25 @@ pub trait StateReader: Send + Sync {
     /// Get contract storage value
     fn get_contract_storage(&self, address: &[u8; 32], key: &[u8; 32]) -> Result<Option<Vec<u8>>>;
 
-    /// Get current oracle price
-    fn get_oracle_price(&self, feed_id: &[u8; 32]) -> Result<Option<u64>>;
+    /// Get current oracle price (in 8 decimal fixed point)
+    fn get_oracle_price(&self, feed_id: &[u8; 32]) -> Result<Option<u128>>;
 
     /// Get AI credits balance
-    fn get_ai_credits(&self, account: &[u8; 32]) -> Result<u64>;
+    fn get_ai_credits(&self, account: &[u8; 32]) -> Result<u128>;
 
     /// Get stake amount
-    fn get_stake(&self, staker: &[u8; 32], validator: &[u8; 32]) -> Result<u64>;
+    fn get_stake(&self, staker: &[u8; 32], validator: &[u8; 32]) -> Result<u128>;
 }
 
 /// Token metadata structure
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenMetadata {
     pub name: [u8; 32],
     pub symbol: [u8; 8],
     pub decimals: u8,
-    pub total_supply: u64,
-    pub max_supply: u64,
+    pub total_supply: u128,
+    pub max_supply: u128,
     pub mint_authority: [u8; 32],
     pub freeze_authority: Option<[u8; 32]>,
     pub is_mintable: bool,
@@ -126,18 +131,18 @@ pub struct TokenMetadata {
 pub struct PoolState {
     pub token_a: [u8; 32],
     pub token_b: [u8; 32],
-    pub reserve_a: u64,
-    pub reserve_b: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
     pub fee_bps: u16,
-    pub lp_supply: u64,
+    pub lp_supply: u128,
 }
 
 /// Vault state for stablecoin
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultState {
     pub owner: [u8; 32],
-    pub collateral_amount: u64,
-    pub debt_amount: u64,
+    pub collateral_amount: u128,
+    pub debt_amount: u128,
     pub created_at: i64,
 }
 
@@ -302,10 +307,8 @@ impl StateProcessor {
 
         // Deduct fee (unless coinbase)
         if !tx.is_coinbase() && tx.fee > 0 {
-            let fee_token = match tx.fee_token_type {
-                q_types::TokenType::QUG => QUG_TOKEN_ADDRESS,
-                q_types::TokenType::QUGUSD => QUGUSD_TOKEN_ADDRESS,
-            };
+            // v2.4.0-beta: Use TokenType::address() method (supports Custom tokens)
+            let fee_token = tx.fee_token_type.address();
             changes.push(StateChange::BalanceDebit {
                 account: tx.from,
                 token: fee_token,
@@ -321,7 +324,7 @@ impl StateProcessor {
         })
     }
 
-    /// Process a simple QUG/QUGUSD transfer
+    /// Process a simple QUG/QUGUSD/Custom transfer
     fn process_transfer<S: StateReader>(
         &self,
         tx: &Transaction,
@@ -329,10 +332,8 @@ impl StateProcessor {
         changes: &mut Vec<StateChange>,
         _logs: &mut Vec<ExecutionLog>,
     ) -> Result<()> {
-        let token = match tx.token_type {
-            q_types::TokenType::QUG => QUG_TOKEN_ADDRESS,
-            q_types::TokenType::QUGUSD => QUGUSD_TOKEN_ADDRESS,
-        };
+        // v2.4.0-beta: Use TokenType::address() method (supports Custom tokens)
+        let token = tx.token_type.address();
 
         // Check sender has sufficient balance
         let sender_balance = state.get_token_balance(&tx.from, &token)?;
@@ -383,6 +384,8 @@ impl StateProcessor {
         _logs: &mut Vec<ExecutionLog>,
     ) -> Result<()> {
         // Parse token parameters from tx.data
+        // v2.10.0: Extended format supports u128 supplies (16 bytes each)
+        // Format: name(32) + symbol(8) + decimals(1) + initial_supply(16) + max_supply(16) = 73 bytes min
         if tx.data.len() < 73 {
             bail!("Token create data too short: need at least 73 bytes");
         }
@@ -393,15 +396,34 @@ impl StateProcessor {
         symbol.copy_from_slice(&tx.data[32..40]);
         let decimals = tx.data[40];
 
-        // Parse initial/max supply as big-endian u64
-        let initial_supply = u64::from_be_bytes([
-            tx.data[41], tx.data[42], tx.data[43], tx.data[44],
-            tx.data[45], tx.data[46], tx.data[47], tx.data[48],
-        ]);
-        let max_supply = u64::from_be_bytes([
-            tx.data[49], tx.data[50], tx.data[51], tx.data[52],
-            tx.data[53], tx.data[54], tx.data[55], tx.data[56],
-        ]);
+        // Parse initial/max supply - support both old u64 (8 bytes) and new u128 (16 bytes) formats
+        let (initial_supply, max_supply, data_offset) = if tx.data.len() >= 89 {
+            // New u128 format: 16 bytes each
+            let initial = u128::from_be_bytes([
+                tx.data[41], tx.data[42], tx.data[43], tx.data[44],
+                tx.data[45], tx.data[46], tx.data[47], tx.data[48],
+                tx.data[49], tx.data[50], tx.data[51], tx.data[52],
+                tx.data[53], tx.data[54], tx.data[55], tx.data[56],
+            ]);
+            let max = u128::from_be_bytes([
+                tx.data[57], tx.data[58], tx.data[59], tx.data[60],
+                tx.data[61], tx.data[62], tx.data[63], tx.data[64],
+                tx.data[65], tx.data[66], tx.data[67], tx.data[68],
+                tx.data[69], tx.data[70], tx.data[71], tx.data[72],
+            ]);
+            (initial, max, 73usize)
+        } else {
+            // Legacy u64 format: 8 bytes each - convert to u128
+            let initial = u64::from_be_bytes([
+                tx.data[41], tx.data[42], tx.data[43], tx.data[44],
+                tx.data[45], tx.data[46], tx.data[47], tx.data[48],
+            ]) as u128;
+            let max = u64::from_be_bytes([
+                tx.data[49], tx.data[50], tx.data[51], tx.data[52],
+                tx.data[53], tx.data[54], tx.data[55], tx.data[56],
+            ]) as u128;
+            (initial, max, 57usize)
+        };
 
         // Derive token address from creator + nonce
         let token_address = derive_token_address(&tx.from, tx.nonce);
@@ -411,14 +433,20 @@ impl StateProcessor {
             bail!("Token already exists at address");
         }
 
-        // Is mintable flag (last byte)
-        let is_mintable = tx.data.get(72).copied().unwrap_or(0) != 0;
+        // Is mintable flag (comes after supply bytes)
+        let is_mintable = tx.data.get(data_offset).copied().unwrap_or(0) != 0;
 
-        // Freeze authority (optional, bytes 57-89)
-        let freeze_authority = if tx.data.len() >= 89 && tx.data[57..89] != [0u8; 32] {
-            let mut fa = [0u8; 32];
-            fa.copy_from_slice(&tx.data[57..89]);
-            Some(fa)
+        // Freeze authority (optional, 32 bytes after is_mintable flag)
+        let freeze_authority = if tx.data.len() >= data_offset + 1 + 32 {
+            let fa_start = data_offset + 1;
+            let fa_end = fa_start + 32;
+            if tx.data[fa_start..fa_end] != [0u8; 32] {
+                let mut fa = [0u8; 32];
+                fa.copy_from_slice(&tx.data[fa_start..fa_end]);
+                Some(fa)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -566,12 +594,12 @@ impl StateProcessor {
         changes: &mut Vec<StateChange>,
         _logs: &mut Vec<ExecutionLog>,
     ) -> Result<()> {
-        // tx.data format:
+        // tx.data format (v2.10.0 - u128 support):
         // [0..32] token_a address
         // [32..64] token_b address
-        // [64..72] initial_a (u64 BE)
-        // [72..80] initial_b (u64 BE)
-        // [80..82] fee_bps (u16 BE)
+        // [64..80] initial_a (u128 BE) or [64..72] for legacy u64
+        // [80..96] initial_b (u128 BE) or [72..80] for legacy u64
+        // [96..98] fee_bps (u16 BE) or [80..82] for legacy
 
         if tx.data.len() < 82 {
             bail!("Pool create data too short");
@@ -582,15 +610,36 @@ impl StateProcessor {
         token_a.copy_from_slice(&tx.data[0..32]);
         token_b.copy_from_slice(&tx.data[32..64]);
 
-        let initial_a = u64::from_be_bytes([
-            tx.data[64], tx.data[65], tx.data[66], tx.data[67],
-            tx.data[68], tx.data[69], tx.data[70], tx.data[71],
-        ]);
-        let initial_b = u64::from_be_bytes([
-            tx.data[72], tx.data[73], tx.data[74], tx.data[75],
-            tx.data[76], tx.data[77], tx.data[78], tx.data[79],
-        ]);
-        let fee_bps = u16::from_be_bytes([tx.data[80], tx.data[81]]);
+        // Support both u128 (new) and u64 (legacy) format
+        let (initial_a, initial_b, fee_bps) = if tx.data.len() >= 98 {
+            // New u128 format
+            let a = u128::from_be_bytes([
+                tx.data[64], tx.data[65], tx.data[66], tx.data[67],
+                tx.data[68], tx.data[69], tx.data[70], tx.data[71],
+                tx.data[72], tx.data[73], tx.data[74], tx.data[75],
+                tx.data[76], tx.data[77], tx.data[78], tx.data[79],
+            ]);
+            let b = u128::from_be_bytes([
+                tx.data[80], tx.data[81], tx.data[82], tx.data[83],
+                tx.data[84], tx.data[85], tx.data[86], tx.data[87],
+                tx.data[88], tx.data[89], tx.data[90], tx.data[91],
+                tx.data[92], tx.data[93], tx.data[94], tx.data[95],
+            ]);
+            let fee = u16::from_be_bytes([tx.data[96], tx.data[97]]);
+            (a, b, fee)
+        } else {
+            // Legacy u64 format
+            let a = u64::from_be_bytes([
+                tx.data[64], tx.data[65], tx.data[66], tx.data[67],
+                tx.data[68], tx.data[69], tx.data[70], tx.data[71],
+            ]) as u128;
+            let b = u64::from_be_bytes([
+                tx.data[72], tx.data[73], tx.data[74], tx.data[75],
+                tx.data[76], tx.data[77], tx.data[78], tx.data[79],
+            ]) as u128;
+            let fee = u16::from_be_bytes([tx.data[80], tx.data[81]]);
+            (a, b, fee)
+        };
 
         // Derive pool ID from tokens
         let pool_id = derive_pool_id(&token_a, &token_b);
@@ -607,8 +656,11 @@ impl StateProcessor {
             bail!("Insufficient liquidity tokens");
         }
 
-        // Calculate initial LP tokens (sqrt(a * b))
-        let lp_supply = (initial_a as u128 * initial_b as u128).isqrt() as u64;
+        // Calculate initial LP tokens (sqrt(a * b)) - use u256 for multiplication
+        // Since we're dealing with u128, we can safely do u128 * u128 with checked multiplication
+        // and then take sqrt. For very large amounts, we use a safe calculation.
+        let product = initial_a.saturating_mul(initial_b);
+        let lp_supply = integer_sqrt_u128(product);
 
         // Debit tokens from creator
         changes.push(StateChange::BalanceDebit {
@@ -653,17 +705,27 @@ impl StateProcessor {
         _logs: &mut Vec<ExecutionLog>,
     ) -> Result<()> {
         // tx.to is pool_id, tx.amount is amount_a
-        // tx.data contains amount_b (u64 BE)
+        // tx.data contains amount_b (u128 BE for new format, u64 BE for legacy)
 
         if tx.data.len() < 8 {
             bail!("Add liquidity data too short");
         }
 
         let amount_a = tx.amount;
-        let amount_b = u64::from_be_bytes([
-            tx.data[0], tx.data[1], tx.data[2], tx.data[3],
-            tx.data[4], tx.data[5], tx.data[6], tx.data[7],
-        ]);
+        // Support both u128 (16 bytes) and legacy u64 (8 bytes) format
+        let amount_b = if tx.data.len() >= 16 {
+            u128::from_be_bytes([
+                tx.data[0], tx.data[1], tx.data[2], tx.data[3],
+                tx.data[4], tx.data[5], tx.data[6], tx.data[7],
+                tx.data[8], tx.data[9], tx.data[10], tx.data[11],
+                tx.data[12], tx.data[13], tx.data[14], tx.data[15],
+            ])
+        } else {
+            u64::from_be_bytes([
+                tx.data[0], tx.data[1], tx.data[2], tx.data[3],
+                tx.data[4], tx.data[5], tx.data[6], tx.data[7],
+            ]) as u128
+        };
 
         let pool = state.get_pool(&tx.to)?
             .ok_or_else(|| anyhow::anyhow!("Pool not found"))?;
@@ -676,9 +738,13 @@ impl StateProcessor {
         }
 
         // Calculate LP tokens to mint (proportional to smaller ratio)
-        let ratio_a = (amount_a as u128 * pool.lp_supply as u128) / pool.reserve_a as u128;
-        let ratio_b = (amount_b as u128 * pool.lp_supply as u128) / pool.reserve_b as u128;
-        let lp_tokens = std::cmp::min(ratio_a, ratio_b) as u64;
+        // Guard against division by zero
+        if pool.reserve_a == 0 || pool.reserve_b == 0 {
+            bail!("Pool reserves cannot be zero");
+        }
+        let ratio_a = amount_a.saturating_mul(pool.lp_supply) / pool.reserve_a;
+        let ratio_b = amount_b.saturating_mul(pool.lp_supply) / pool.reserve_b;
+        let lp_tokens = std::cmp::min(ratio_a, ratio_b);
 
         // Debit tokens
         changes.push(StateChange::BalanceDebit {
@@ -724,10 +790,13 @@ impl StateProcessor {
             .ok_or_else(|| anyhow::anyhow!("Pool not found"))?;
 
         // Calculate tokens to return
-        let share = tx.amount as u128;
-        let total_lp = pool.lp_supply as u128;
-        let amount_a = ((pool.reserve_a as u128 * share) / total_lp) as u64;
-        let amount_b = ((pool.reserve_b as u128 * share) / total_lp) as u64;
+        let share = tx.amount;
+        let total_lp = pool.lp_supply;
+        if total_lp == 0 {
+            bail!("Pool has no LP supply");
+        }
+        let amount_a = pool.reserve_a.saturating_mul(share) / total_lp;
+        let amount_b = pool.reserve_b.saturating_mul(share) / total_lp;
 
         // Burn LP tokens
         changes.push(StateChange::LPTokenDebit {
@@ -759,7 +828,12 @@ impl StateProcessor {
         Ok(())
     }
 
-    /// Process token swap
+    /// Process token swap with protocol fee split (v2.4.5-beta)
+    ///
+    /// Fee structure:
+    /// - Total fee: 0.30% (30 bps) paid by trader
+    /// - Protocol fee: 0.05% (5 bps) → FOUNDER_WALLET (dev/protocol revenue)
+    /// - LP fee: 0.25% (25 bps) → stays in pool (liquidity provider rewards)
     fn process_swap<S: StateReader>(
         &self,
         tx: &Transaction,
@@ -779,10 +853,20 @@ impl StateProcessor {
         let mut pool_id = [0u8; 32];
         pool_id.copy_from_slice(&tx.data[0..32]);
         let direction = tx.data[32];
-        let min_amount_out = u64::from_be_bytes([
-            tx.data[33], tx.data[34], tx.data[35], tx.data[36],
-            tx.data[37], tx.data[38], tx.data[39], tx.data[40],
-        ]);
+        // Support both u128 (16 bytes) and legacy u64 (8 bytes) for min_amount_out
+        let min_amount_out = if tx.data.len() >= 49 {
+            u128::from_be_bytes([
+                tx.data[33], tx.data[34], tx.data[35], tx.data[36],
+                tx.data[37], tx.data[38], tx.data[39], tx.data[40],
+                tx.data[41], tx.data[42], tx.data[43], tx.data[44],
+                tx.data[45], tx.data[46], tx.data[47], tx.data[48],
+            ])
+        } else {
+            u64::from_be_bytes([
+                tx.data[33], tx.data[34], tx.data[35], tx.data[36],
+                tx.data[37], tx.data[38], tx.data[39], tx.data[40],
+            ]) as u128
+        };
 
         let pool = state.get_pool(&pool_id)?
             .ok_or_else(|| anyhow::anyhow!("Pool not found"))?;
@@ -800,38 +884,113 @@ impl StateProcessor {
             bail!("Insufficient balance for swap");
         }
 
-        // Calculate output using constant product formula with fee
-        // amount_out = reserve_out * amount_in * (10000 - fee_bps) / (reserve_in * 10000 + amount_in * (10000 - fee_bps))
-        let fee_multiplier = 10000u128 - pool.fee_bps as u128;
-        let amount_in_with_fee = amount_in as u128 * fee_multiplier;
-        let numerator = reserve_out as u128 * amount_in_with_fee;
-        let denominator = reserve_in as u128 * 10000 + amount_in_with_fee;
-        let amount_out = (numerator / denominator) as u64;
+        // =========================================================================
+        // v2.4.5-beta: Protocol Fee Split Implementation (u128 support in v2.10.0)
+        // =========================================================================
+        // Total fee = 0.30% (DEX_TOTAL_FEE_BPS = 30)
+        // Protocol fee = 0.05% (DEX_PROTOCOL_FEE_BPS = 5) → Master wallet
+        // LP fee = 0.25% (DEX_LP_FEE_BPS = 25) → Stays in pool
+        // =========================================================================
+
+        // Calculate protocol fee (0.05% of input goes to master wallet)
+        let protocol_fee = amount_in * DEX_PROTOCOL_FEE_BPS as u128 / BPS_DIVISOR;
+
+        // Amount after protocol fee extraction (this goes into the AMM formula)
+        let amount_after_protocol_fee = amount_in.saturating_sub(protocol_fee);
+
+        // Calculate output using constant product formula with LP fee only
+        // LP fee stays in pool by reducing effective input amount
+        // amount_out = reserve_out * amount_in_effective * (10000 - lp_fee_bps) /
+        //              (reserve_in * 10000 + amount_in_effective * (10000 - lp_fee_bps))
+        let lp_fee_multiplier = BPS_DIVISOR - DEX_LP_FEE_BPS as u128;
+        let amount_in_with_lp_fee = amount_after_protocol_fee * lp_fee_multiplier;
+        let numerator = reserve_out * amount_in_with_lp_fee;
+        let denominator = reserve_in * BPS_DIVISOR + amount_in_with_lp_fee;
+        if denominator == 0 {
+            bail!("Swap denominator is zero");
+        }
+        let amount_out = numerator / denominator;
 
         // Slippage check
         if amount_out < min_amount_out {
             bail!("Slippage exceeded: {} < {}", amount_out, min_amount_out);
         }
 
-        // Debit input token
+        // Debit full input from trader (includes both fees)
         changes.push(StateChange::BalanceDebit {
             account: tx.from,
             token: token_in,
             amount: amount_in,
         });
 
-        // Credit output token
+        // Credit output token to trader
         changes.push(StateChange::BalanceCredit {
             account: tx.from,
             token: token_out,
             amount: amount_out,
         });
 
+        // Credit protocol fee to master wallet (FOUNDER_WALLET)
+        // This is the 0.05% that goes to protocol development
+        if protocol_fee > 0 {
+            changes.push(StateChange::BalanceCredit {
+                account: FOUNDER_WALLET,
+                token: token_in,
+                amount: protocol_fee,
+            });
+
+            // =========================================================================
+            // v2.9.2-beta: Emit ProtocolFeeCollected for consensus verification
+            // All nodes MUST verify this fee record matches the expected calculation
+            // =========================================================================
+
+            // Create fee_id from tx hash (deterministic across all nodes)
+            let mut fee_id = [0u8; 32];
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"protocol_fee_id_v1");
+            hasher.update(&tx.id);
+            hasher.update(&protocol_fee.to_le_bytes());
+            fee_id.copy_from_slice(&hasher.finalize());
+
+            // Create verification hash (deterministic across all nodes)
+            // This hash binds: trade_tx_hash, fee_amount, recipient, fee_rate
+            let mut verification_hash = [0u8; 32];
+            let mut hasher = Sha3_256::new();
+            hasher.update(&tx.id);
+            hasher.update(&protocol_fee.to_le_bytes());
+            hasher.update(&FOUNDER_WALLET);
+            hasher.update(&0u64.to_le_bytes()); // Block height filled at block creation
+            hasher.update(&(DEX_PROTOCOL_FEE_BPS as u64).to_le_bytes());
+            verification_hash.copy_from_slice(&hasher.finalize());
+
+            // Emit ProtocolFeeCollected state change for consensus verification
+            changes.push(StateChange::ProtocolFeeCollected {
+                fee_id,
+                trade_tx_hash: tx.id,
+                fee_amount: protocol_fee,
+                fee_token: token_in,
+                recipient: FOUNDER_WALLET,
+                trade_amount: amount_in,
+                fee_rate_bps: DEX_PROTOCOL_FEE_BPS,
+                verification_hash,
+            });
+
+            debug!(
+                "💰 DEX Protocol Fee: {} of {} ({:.3}%) → Master Wallet [consensus-verified: {}]",
+                protocol_fee, token_in[0],
+                (protocol_fee as f64 / amount_in as f64) * 100.0,
+                hex::encode(&fee_id[..8])
+            );
+        }
+
         // Update pool reserves
+        // Note: Pool receives (amount_in - protocol_fee) but outputs (amount_out)
+        // The LP fee (0.25%) stays implicitly in the pool via the AMM formula
+        let effective_input = amount_after_protocol_fee;
         let (new_a, new_b) = if direction == 0 {
-            (pool.reserve_a + amount_in, pool.reserve_b - amount_out)
+            (pool.reserve_a + effective_input, pool.reserve_b - amount_out)
         } else {
-            (pool.reserve_a - amount_out, pool.reserve_b + amount_in)
+            (pool.reserve_a - amount_out, pool.reserve_b + effective_input)
         };
         changes.push(StateChange::PoolReservesUpdate {
             pool_id,
@@ -839,6 +998,13 @@ impl StateProcessor {
             reserve_b: new_b,
             lp_supply: pool.lp_supply,
         });
+
+        info!(
+            "🔄 Swap: {} {} → {} {} | Protocol fee: {} → Master Wallet",
+            amount_in, hex::encode(&token_in[..4]),
+            amount_out, hex::encode(&token_out[..4]),
+            protocol_fee
+        );
 
         Ok(())
     }
@@ -1213,12 +1379,27 @@ fn derive_pool_id(token_a: &[u8; 32], token_b: &[u8; 32]) -> [u8; 32] {
     pool_id
 }
 
+/// Integer square root for u128 using Newton's method
+/// Used for LP token calculations with large amounts
+fn integer_sqrt_u128(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct MockStateReader {
-        balances: HashMap<([u8; 32], [u8; 32]), u64>,
+        balances: HashMap<([u8; 32], [u8; 32]), u128>,
         nonces: HashMap<[u8; 32], u64>,
     }
 
@@ -1230,17 +1411,17 @@ mod tests {
             }
         }
 
-        fn set_balance(&mut self, account: [u8; 32], token: [u8; 32], amount: u64) {
+        fn set_balance(&mut self, account: [u8; 32], token: [u8; 32], amount: u128) {
             self.balances.insert((account, token), amount);
         }
     }
 
     impl StateReader for MockStateReader {
-        fn get_balance(&self, account: &[u8; 32]) -> Result<u64> {
+        fn get_balance(&self, account: &[u8; 32]) -> Result<u128> {
             Ok(self.balances.get(&(*account, QUG_TOKEN_ADDRESS)).copied().unwrap_or(0))
         }
 
-        fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u64> {
+        fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u128> {
             Ok(self.balances.get(&(*account, *token)).copied().unwrap_or(0))
         }
 
@@ -1272,15 +1453,15 @@ mod tests {
             Ok(None)
         }
 
-        fn get_oracle_price(&self, _feed_id: &[u8; 32]) -> Result<Option<u64>> {
+        fn get_oracle_price(&self, _feed_id: &[u8; 32]) -> Result<Option<u128>> {
             Ok(Some(100_000_000)) // $1
         }
 
-        fn get_ai_credits(&self, _account: &[u8; 32]) -> Result<u64> {
+        fn get_ai_credits(&self, _account: &[u8; 32]) -> Result<u128> {
             Ok(0)
         }
 
-        fn get_stake(&self, _staker: &[u8; 32], _validator: &[u8; 32]) -> Result<u64> {
+        fn get_stake(&self, _staker: &[u8; 32], _validator: &[u8; 32]) -> Result<u128> {
             Ok(0)
         }
     }

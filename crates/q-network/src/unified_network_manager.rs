@@ -59,9 +59,25 @@ use q_types::QBlock;
 ///   }
 /// }
 
-/// v1.3.5-beta: Get bootstrap peers from environment variables only (NO HARDCODED PEERS)
-/// Primary source: network_config.bootstrap_peers (from HTTP discovery in config.rs)
-/// Fallback: Q_BOOTSTRAP_PEERS or Q_BOOTSTRAP_PEER env vars
+/// 🔧 v3.3.2-beta: MULTIPLE HARDCODED BOOTSTRAP PEERS - Mainnet safety
+/// This ensures nodes can connect even when one bootstrap node is down
+/// Server Beta (185.182.185.227) = Primary production
+/// Server Alpha (161.35.219.10) = Secondary production
+pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
+    // Server Beta - Primary production bootstrap
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx",
+    // Server Alpha - Secondary bootstrap (configure Q_BOOTSTRAP_PEER_ALPHA to override peer ID)
+    // Note: Actual peer ID will be determined when Server Alpha P2P is configured
+];
+
+/// Legacy single bootstrap peer constant (for backwards compatibility)
+pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx";
+
+/// v3.3.2-beta: Get bootstrap peers with MULTIPLE HARDCODED FALLBACKS
+/// Priority:
+/// 1. Q_BOOTSTRAP_PEERS env var (comma-separated)
+/// 2. Q_BOOTSTRAP_PEER env var (single peer)
+/// 3. HARDCODED_BOOTSTRAP_PEERS (all included as fallbacks for mainnet safety)
 fn get_bootstrap_peers() -> Vec<String> {
     let mut peers = Vec::new();
 
@@ -91,10 +107,20 @@ fn get_bootstrap_peers() -> Vec<String> {
         }
     }
 
-    if peers.is_empty() {
-        info!("🔧 [BOOTSTRAP] No bootstrap peers from environment variables");
-        info!("   → Primary discovery: HTTP from Q_BOOTSTRAP_URL (config.rs)");
-        info!("   → Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 for production");
+    // 🔧 v3.3.2-beta: ALWAYS add ALL hardcoded bootstrap peers as fallback
+    // This ensures connectivity even when one bootstrap node is down (mainnet safety)
+    for hardcoded in HARDCODED_BOOTSTRAP_PEERS {
+        let hardcoded_str = hardcoded.to_string();
+        if !peers.contains(&hardcoded_str) {
+            info!("🔧 [BOOTSTRAP] Adding hardcoded bootstrap peer: {}", hardcoded_str);
+            peers.push(hardcoded_str);
+        }
+    }
+
+    if peers.len() == 1 {
+        info!("🔧 [BOOTSTRAP] Using single hardcoded bootstrap peer");
+    } else {
+        info!("🔧 [BOOTSTRAP] Total bootstrap peers: {} (mainnet resilient)", peers.len());
     }
 
     peers
@@ -282,8 +308,24 @@ pub enum NetworkCommand {
         topic: String,
         message: crate::distributed_ai::AIGossipsubMessage,
     },
+    /// ⚡ v2.6.0: Publish raw all-reduce message for tensor parallelism
+    PublishAllReduce {
+        topic: String,
+        data: Vec<u8>,
+    },
+    /// 🔐 v2.4.6-beta: Publish BFT consensus messages (sig-requests, sig-responses, certificates, validators)
+    PublishConsensusMessage {
+        topic: String,
+        message_bytes: Vec<u8>,
+    },
     /// Publish a liquidity pool announcement to the DEX network (v0.6.1-beta)
     PublishPoolAnnouncement {
+        topic: String,
+        announcement_bytes: Vec<u8>,
+    },
+    /// v2.3.7-beta: Publish a token deployment announcement to the DEX network
+    /// Enables cross-node token discovery for true DEX decentralization
+    PublishTokenAnnouncement {
         topic: String,
         announcement_bytes: Vec<u8>,
     },
@@ -301,6 +343,24 @@ pub enum NetworkCommand {
         update_bytes: Vec<u8>,
         wallet_address: String,
         amount: u64,
+    },
+    /// v2.2.1-beta: Publish mining solution to P2P network
+    /// Enables decentralized mining by broadcasting solutions to all nodes
+    /// Any node can include the solution in a block, not just the receiving node
+    PublishMiningSolution {
+        topic: String,
+        solution_bytes: Vec<u8>,
+        miner_address: String,
+        block_height: u64,
+        nonce: u64,
+    },
+    /// v3.3.0-beta: Publish transaction to P2P mempool network
+    /// Enables real-time mempool synchronization across all nodes
+    /// Transactions are immediately visible on all nodes before block inclusion
+    PublishTransaction {
+        topic: String,
+        tx_bytes: Vec<u8>,
+        tx_hash: String,
     },
     /// 🚀 v1.3.9-beta: Direct request-response for Turbo Sync (replaces gossipsub)
     /// Uses libp2p request-response protocol for reliable, point-to-point block fetching.
@@ -368,6 +428,22 @@ pub enum NetworkCommand {
         topic: String,
         message: crate::distributed_qno::QnoGossipMessage,
     },
+
+    /// v2.4.8-beta: Publish token social media profile update
+    /// Syncs social profiles (Twitter, Discord, etc.) across all nodes
+    PublishTokenSocial {
+        topic: String,
+        contract_address: String,
+        profile_bytes: Vec<u8>,
+    },
+
+    /// v2.9.2-beta: Publish DEX event (trade, liquidity, price) to all peers
+    /// Enables TRUE decentralization by syncing DEX state across all nodes
+    /// This is the missing piece that makes the DEX fully P2P!
+    PublishDexEvent {
+        topic: String,
+        message: Vec<u8>,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -390,7 +466,8 @@ struct PeerIdData {
 ///
 /// # Returns
 /// * Persistent keypair loaded from disk or newly generated and saved
-fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<Keypair> {
+/// v3.3.7-beta: Returns (Keypair, is_new_identity) to enable connection warmup for new nodes
+fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<(Keypair, bool)> {
     let key_path = data_dir.join("libp2p_identity.key");
 
     if key_path.exists() {
@@ -399,7 +476,7 @@ fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<Keypa
         let keypair = Keypair::from_protobuf_encoding(&bytes)?;
         info!("🔑 Loaded persistent libp2p identity: {}", keypair.public().to_peer_id());
         info!("   Identity file: {}", key_path.display());
-        Ok(keypair)
+        Ok((keypair, false)) // Existing identity
     } else {
         // Generate new identity and persist to disk
         let keypair = Keypair::generate_ed25519();
@@ -411,10 +488,11 @@ fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<Keypa
         }
 
         std::fs::write(&key_path, &bytes)?;
-        info!("🔑 Generated new persistent libp2p identity: {}", keypair.public().to_peer_id());
+        info!("🔑 Generated NEW persistent libp2p identity: {}", keypair.public().to_peer_id());
         info!("   Identity saved to: {}", key_path.display());
         info!("   ⚠️  IMPORTANT: Back up this file to preserve PeerID across server migrations");
-        Ok(keypair)
+        info!("   🔄 NEW IDENTITY: Connection warmup will be enabled for DHT registration");
+        Ok((keypair, true)) // New identity - needs warmup
     }
 }
 
@@ -739,14 +817,18 @@ impl UnifiedNetworkManager {
         // 🚀 v1.0.4-beta: CRITICAL FIX - Persistent libp2p identity
         // Load existing identity from disk or generate new one and save
         // This prevents PeerID churn on every restart (breaks bootstrap DHT routing)
+        // 🔄 v3.3.7-beta: Track if identity is NEW for connection warmup
         let data_dir = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data-mine12".to_string());
         let data_path = std::path::Path::new(&data_dir);
-        let keypair = load_or_generate_identity(data_path)?;
+        let (keypair, is_new_identity) = load_or_generate_identity(data_path)?;
         let local_peer_id = PeerId::from(keypair.public());
 
         info!("🚀 Starting Q-NarwhalKnight Zero-Knowledge Discovery");
         info!("🌐 Network: {}", network_config.network_id.display_name());
         info!("🆔 Local Peer ID: {}", local_peer_id);
+        if is_new_identity {
+            info!("🔄 [NEW IDENTITY] Connection warmup will be performed after initial bootstrap");
+        }
 
         // 🐳 v1.2.2-beta: Log Docker/container address filtering configuration
         log_filter_configuration();
@@ -1223,12 +1305,18 @@ impl UnifiedNetworkManager {
             IdentTopic::new(network_config.network_id.dex_pools_topic()),
             IdentTopic::new(network_config.network_id.contract_deployments_topic()),
             IdentTopic::new(network_config.network_id.ai_credits_topic()),
+            // v2.9.2-beta: Protocol fees consensus verification topic
+            // All nodes MUST verify protocol fees to ensure master wallet receives correct %
+            IdentTopic::new(network_config.network_id.protocol_fees_topic()),
             // ⚠️ v1.2.0-beta Phase 3: DEPRECATED - balance_updates_topic REMOVED from default subscriptions
             // Balance updates now go through DAG-Knight consensus (coinbase transactions in blocks)
             // To enable legacy gossipsub balance updates: set Q_ENABLE_LEGACY_BALANCE_GOSSIP=1
             // This will be REMOVED entirely in v1.3.0
             // IdentTopic::new(network_config.network_id.balance_updates_topic()),
             IdentTopic::new(network_config.network_id.miner_stats_topic()),
+            // v3.3.0-beta: P2P mempool transaction propagation
+            // Enables real-time transaction synchronization across all nodes before block inclusion
+            IdentTopic::new(network_config.network_id.mempool_transactions_topic()),
         ];
 
         // ⚠️ v1.2.0-beta Phase 3: Legacy balance gossip (DEPRECATED)
@@ -1572,6 +1660,83 @@ impl UnifiedNetworkManager {
             info!("🔌 [DIRECT] Direct connection mode - using 30s timeouts and 5000-block batches");
         }
 
+        // 🔄 v3.3.7-beta: Connection warmup for NEW identity
+        // When a new libp2p identity is generated, DHT routing tables are empty and
+        // bootstrap connections often fail on first attempt. This warmup period:
+        // 1. Waits for initial connections to establish
+        // 2. Re-triggers Kademlia bootstrap if no connections were established
+        // 3. Re-dials bootstrap peers with exponential backoff
+        // This fixes the "works after restart but not first boot" issue
+        if is_new_identity && bootstrap_count > 0 {
+            info!("🔄 [CONNECTION WARMUP] New identity detected - starting connection warmup period");
+
+            // Clone bootstrap_peer_map before moving into loop
+            let warmup_bootstrap_peers: Vec<(PeerId, Multiaddr)> = bootstrap_peer_map
+                .iter()
+                .filter(|(peer_id, _)| **peer_id != local_peer_id)
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+
+            for warmup_attempt in 1..=3 {
+                // Wait for connections to establish (exponential backoff: 3s, 6s, 12s)
+                let wait_secs = 3 * (1 << (warmup_attempt - 1));
+                info!("🔄 [WARMUP {}/3] Waiting {}s for DHT propagation and connections...",
+                      warmup_attempt, wait_secs);
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+
+                // Check connection status
+                let conn_info = swarm.network_info();
+                let established = conn_info.connection_counters().num_established();
+                let pending = conn_info.connection_counters().num_pending_outgoing();
+
+                info!("🔄 [WARMUP {}/3] Connection status: established={}, pending={}",
+                      warmup_attempt, established, pending);
+
+                if established > 0 {
+                    info!("✅ [WARMUP] Connection warmup SUCCEEDED! {} established connections", established);
+                    break;
+                }
+
+                if warmup_attempt < 3 {
+                    // No connections yet - retry bootstrap
+                    info!("🔄 [WARMUP {}/3] No connections established - retrying bootstrap...", warmup_attempt);
+
+                    // Re-trigger Kademlia bootstrap
+                    match swarm.behaviour_mut().kademlia.bootstrap() {
+                        Ok(query_id) => {
+                            info!("🔄 [WARMUP] Kademlia bootstrap re-triggered (query_id: {:?})", query_id);
+                        }
+                        Err(e) => {
+                            warn!("⚠️  [WARMUP] Kademlia bootstrap retry failed: {}", e);
+                        }
+                    }
+
+                    // Re-dial bootstrap peers
+                    for (peer_id, addr) in &warmup_bootstrap_peers {
+                        // Strip /p2p/ for add_peer_address
+                        let addr_without_p2p: Multiaddr = addr.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        swarm.add_peer_address(*peer_id, addr_without_p2p);
+
+                        match swarm.dial(addr.clone()) {
+                            Ok(_) => {
+                                info!("🔄 [WARMUP] Re-dialing bootstrap peer {}", peer_id);
+                            }
+                            Err(e) => {
+                                warn!("⚠️  [WARMUP] Re-dial failed for {}: {:?}", peer_id, e);
+                            }
+                        }
+                    }
+                } else {
+                    // Final attempt - log warning but don't fail
+                    warn!("⚠️  [WARMUP] Connection warmup exhausted all 3 attempts");
+                    warn!("   Node will continue with background discovery (mDNS, Identify)");
+                    warn!("   P2P sync may be delayed until connections are established");
+                }
+            }
+        }
+
         Ok(Self {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
@@ -1652,6 +1817,9 @@ impl UnifiedNetworkManager {
         let mut last_heartbeat = std::time::Instant::now();
         let heartbeat_interval = tokio::time::Duration::from_secs(5);
 
+        // 🔧 v2.4.8: Track consecutive disconnected checks for aggressive reconnection
+        let mut consecutive_no_peers = 0u32;
+
         info!("💓 [EVENT LOOP] Starting with heartbeat monitoring (every {:?})", heartbeat_interval);
 
         loop {
@@ -1685,25 +1853,171 @@ impl UnifiedNetworkManager {
                     }
                 }
 
-                // 🩺 Periodic P2P health check (every 30 seconds)
+                // 🩺 Periodic P2P health check (every 10 seconds)
                 _ = health_check_interval.tick() => {
                     let peer_count = self.discovered_peers.read().await.len();
+                    let conn_info = self.swarm.network_info();
+                    let pending_out = conn_info.connection_counters().num_pending_outgoing();
+                    let established = conn_info.connection_counters().num_established();
+
+                    // 🚨 v2.2.3: Detect stuck pending connections (silent dial failures)
+                    if pending_out > 0 && established == 0 {
+                        warn!("🚨 [STUCK CONNECTION] {} pending outgoing, 0 established!", pending_out);
+                        warn!("   This may indicate a silent dial failure (NAT/firewall issue)");
+                        warn!("   Network counters: {:?}", conn_info.connection_counters());
+                    }
 
                     if peer_count == 0 {
-                        warn!("⚠️  [P2P HEALTH] NO CONNECTIONS - Network isolated!");
+                        consecutive_no_peers += 1;
+                        warn!("⚠️  [P2P HEALTH] NO CONNECTIONS - Network isolated! (consecutive_checks: {})", consecutive_no_peers);
+                        warn!("   pending_outgoing={}, established={}", pending_out, established);
                         warn!("   Check bootstrap peer configuration and firewall settings");
 
-                        // If bootstrap peer is configured, attempt reconnection
-                        if let Ok(bootstrap_env) = std::env::var("Q_BOOTSTRAP_PEER") {
-                            if let Ok(bootstrap_addr) = bootstrap_env.parse::<Multiaddr>() {
-                                info!("🔄 [AUTO-RECONNECT] Attempting to reconnect to bootstrap peer...");
-                                if let Err(e) = self.swarm.dial(bootstrap_addr.clone()) {
-                                    error!("❌ [AUTO-RECONNECT] Dial failed: {:?}", e);
+                        // 🔧 v1.4.3-beta: Reduced from 6 checks (60s) to 3 checks (30s) for faster reconnection
+                        // After 3 consecutive checks with no peers, clear stale peer state and force fresh discovery
+                        if consecutive_no_peers >= 3 {
+                            warn!("🚨 [AUTO-RECONNECT] Been disconnected for {} checks - clearing stale bootstrap peers and refreshing",
+                                  consecutive_no_peers);
+                            // Clear potentially stale bootstrap peer IDs (they may have regenerated keys)
+                            let mut bp = self.bootstrap_peers.write().await;
+                            bp.clear();
+                            drop(bp);
+                            consecutive_no_peers = 0; // Reset counter to allow fresh discovery
+                        }
+
+                        // 🚀 v2.3.2-beta: CRITICAL FIX - Use stored bootstrap peers for auto-reconnect
+                        // Previously only checked Q_BOOTSTRAP_PEER env var, ignoring hardcoded bootstrap!
+                        // This caused nodes to stay disconnected after transient network failures.
+                        let mut reconnect_attempted = false;
+
+                        // 1. 🔧 v2.4.8: Try ALL stored bootstrap peers (was only trying one with break)
+                        // This is critical when some bootstrap nodes are temporarily offline
+                        let bootstrap_peers = self.bootstrap_peers.read().await;
+                        let mut dial_count = 0;
+                        for (peer_id, addr) in bootstrap_peers.iter() {
+                            if *peer_id == self.local_peer_id {
+                                continue; // Don't dial ourselves
+                            }
+                            info!("🔄 [AUTO-RECONNECT] Attempting to reconnect to stored bootstrap peer {}...", peer_id);
+                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                warn!("❌ [AUTO-RECONNECT] Dial to {} failed: {:?}", peer_id, e);
+                            } else {
+                                info!("✅ [AUTO-RECONNECT] Dial initiated to {} at {}", peer_id, addr);
+                                reconnect_attempted = true;
+                                dial_count += 1;
+                                // v2.4.8: Continue trying ALL peers, don't break
+                            }
+                        }
+                        if dial_count > 0 {
+                            info!("🔄 [AUTO-RECONNECT] Initiated {} dial attempts to stored bootstrap peers", dial_count);
+                        }
+                        drop(bootstrap_peers); // Release lock
+
+                        // 2. Fallback to env var bootstrap peer (if configured and not already tried)
+                        if !reconnect_attempted {
+                            if let Ok(bootstrap_env) = std::env::var("Q_BOOTSTRAP_PEER") {
+                                if let Ok(bootstrap_addr) = bootstrap_env.parse::<Multiaddr>() {
+                                    info!("🔄 [AUTO-RECONNECT] Attempting to reconnect via Q_BOOTSTRAP_PEER env...");
+                                    if let Err(e) = self.swarm.dial(bootstrap_addr.clone()) {
+                                        error!("❌ [AUTO-RECONNECT] Dial failed: {:?}", e);
+                                    } else {
+                                        reconnect_attempted = true;
+                                    }
                                 }
                             }
                         }
+
+                        // 3. 🔧 v2.4.8: Dynamic bootstrap discovery via Q_BOOTSTRAP_URL (for stale peer IDs)
+                        // This is crucial when bootstrap peer regenerates its identity key
+                        if !reconnect_attempted {
+                            if let Ok(bootstrap_url) = std::env::var("Q_BOOTSTRAP_URL") {
+                                info!("🔄 [AUTO-RECONNECT] Fetching fresh bootstrap peer from Q_BOOTSTRAP_URL...");
+                                let url = format!("{}/api/v1/status", bootstrap_url.trim_end_matches('/'));
+                                match reqwest::Client::new()
+                                    .get(&url)
+                                    .timeout(std::time::Duration::from_secs(5))
+                                    .send()
+                                    .await
+                                {
+                                    Ok(response) if response.status().is_success() => {
+                                        if let Ok(text) = response.text().await {
+                                            // 🔧 v1.4.3-beta: FIX - Parse correct API response format
+                                            // API returns: {"success":true,"data":{"peer_id":"...","multiaddrs":["...",...]}}
+                                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                // Try the correct format first: data.multiaddrs[]
+                                                let multiaddrs = json.get("data")
+                                                    .and_then(|d| d.get("multiaddrs"))
+                                                    .and_then(|m| m.as_array());
+
+                                                if let Some(addrs) = multiaddrs {
+                                                    // Find a public IP multiaddr (skip localhost)
+                                                    for addr_val in addrs {
+                                                        if let Some(addr_str) = addr_val.as_str() {
+                                                            // Skip localhost addresses
+                                                            if addr_str.contains("127.0.0.1") || addr_str.contains("::1") {
+                                                                continue;
+                                                            }
+                                                            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                                                                info!("🔄 [AUTO-RECONNECT] Found fresh bootstrap: {}", addr_str);
+                                                                if let Err(e) = self.swarm.dial(addr.clone()) {
+                                                                    error!("❌ [AUTO-RECONNECT] Fresh dial failed: {:?}", e);
+                                                                } else {
+                                                                    info!("✅ [AUTO-RECONNECT] Dial initiated to fresh bootstrap");
+                                                                    reconnect_attempted = true;
+
+                                                                    // Update stored bootstrap peers with fresh address
+                                                                    if let Some(peer_id) = addr.iter().find_map(|p| {
+                                                                        if let libp2p::multiaddr::Protocol::P2p(id) = p {
+                                                                            Some(id)
+                                                                        } else { None }
+                                                                    }) {
+                                                                        let mut bp = self.bootstrap_peers.write().await;
+                                                                        bp.insert(peer_id, addr);
+                                                                        info!("📋 [AUTO-RECONNECT] Updated bootstrap peer cache with fresh ID");
+                                                                    }
+                                                                    break; // Success, stop trying more addresses
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Fallback: try legacy p2p_address field
+                                                    if let Some(p2p_addr) = json.get("p2p_address").and_then(|v| v.as_str()) {
+                                                        if let Ok(addr) = p2p_addr.parse::<Multiaddr>() {
+                                                            info!("🔄 [AUTO-RECONNECT] Found fresh bootstrap (legacy): {}", p2p_addr);
+                                                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                                                error!("❌ [AUTO-RECONNECT] Fresh dial failed: {:?}", e);
+                                                            } else {
+                                                                info!("✅ [AUTO-RECONNECT] Dial initiated to fresh bootstrap");
+                                                                reconnect_attempted = true;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        warn!("⚠️ [AUTO-RECONNECT] Bootstrap response missing multiaddrs and p2p_address");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(response) => {
+                                        warn!("⚠️ [AUTO-RECONNECT] Bootstrap URL returned status: {}", response.status());
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ [AUTO-RECONNECT] Failed to reach Q_BOOTSTRAP_URL: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        if !reconnect_attempted {
+                            error!("❌ [AUTO-RECONNECT] No bootstrap peers available for reconnection!");
+                            error!("   Set Q_BOOTSTRAP_PEER, Q_BOOTSTRAP_URL, or ensure network config has bootstrap_peers");
+                        }
                     } else {
-                        info!("✅ [P2P HEALTH] {} connected peer(s) - Network healthy", peer_count);
+                        // 🔧 v2.4.8: Reset disconnection counter when connected
+                        consecutive_no_peers = 0;
+                        info!("✅ [P2P HEALTH] {} connected peer(s), {} established - Network healthy",
+                              peer_count, established);
                     }
                 }
                 // Process network commands from API
@@ -1941,8 +2255,18 @@ impl UnifiedNetworkManager {
                         warn!("   → Check for transport/protocol version mismatch with the peer");
                     }
 
+                    // 🚨 v2.2.3: Enhanced dial diagnostics for silent connection failures
+                    SwarmEvent::Dialing { peer_id, connection_id } => {
+                        info!("📞 [DIALING] Initiating connection to peer: {:?}", peer_id);
+                        info!("   Connection ID: {:?}", connection_id);
+                        let conn_info = self.swarm.network_info();
+                        info!("   Current state: pending_out={}, established={}",
+                              conn_info.connection_counters().num_pending_outgoing(),
+                              conn_info.connection_counters().num_established());
+                    }
+
                     // 🚨 v1.0.20-beta: CRITICAL - Log ALL unhandled SwarmEvents
-                    // This catches NewExternalAddrCandidate, Dialing, etc. that might indicate dial activity
+                    // This catches NewExternalAddrCandidate, etc. that might indicate dial activity
                     other => {
                         info!("🔍 [SWARM EVENT] Unhandled event: {:?}", other);
                     }
@@ -2792,6 +3116,49 @@ impl UnifiedNetworkManager {
             .publish(ident_topic, data)
             .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
         info!("✅ Successfully published message to gossipsub topic: {}", topic);
+        Ok(())
+    }
+
+    /// v2.9.2-beta: Broadcast a protocol fee record for consensus verification
+    /// All nodes on the network will verify this fee matches expected calculations
+    /// This ensures the master wallet receives the correct percentage per DEX trade
+    pub fn broadcast_protocol_fee(&mut self, fee_gossip: q_types::ProtocolFeeGossip) -> anyhow::Result<()> {
+        use q_types::NetworkId;
+
+        // Get the protocol fees topic for the current network
+        let network_id = std::env::var("Q_NETWORK_ID")
+            .ok()
+            .and_then(|s| s.parse::<NetworkId>().ok())
+            .unwrap_or(NetworkId::TestnetPhase16);
+
+        let topic = network_id.protocol_fees_topic();
+
+        // Serialize the fee gossip message
+        let data = serde_json::to_vec(&fee_gossip)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize protocol fee gossip: {}", e))?;
+
+        info!(
+            "💰 [PROTOCOL FEE BROADCAST] Publishing fee record to topic: {}",
+            topic
+        );
+        info!(
+            "   Fee ID: {}, Trade: {}, Amount: {}, Token: {}",
+            hex::encode(&fee_gossip.fee_record.fee_id[..8]),
+            hex::encode(&fee_gossip.fee_record.trade_tx_hash[..8]),
+            fee_gossip.fee_record.fee_amount,
+            hex::encode(&match fee_gossip.fee_record.fee_token {
+                q_types::TokenType::QUG => q_types::QUG_TOKEN_ADDRESS,
+                q_types::TokenType::QUGUSD => q_types::QUGUSD_TOKEN_ADDRESS,
+                q_types::TokenType::Custom(addr) => addr,
+            }[..4])
+        );
+
+        self.publish_topic(&topic, data)?;
+
+        info!(
+            "✅ [PROTOCOL FEE BROADCAST] Fee record published for consensus verification"
+        );
+
         Ok(())
     }
 
@@ -3741,25 +4108,133 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::PublishAIMessage { topic, message } => {
-                info!("🤖 [DISTRIBUTED AI] Publishing AI message to topic: {}", topic);
-                info!("   Message ID: {}", message.message_id);
-                info!("   Sender: {}", message.sender_node_id);
+                // v2.3.19-beta: Enhanced debugging for distributed AI troubleshooting
+                info!("═══════════════════════════════════════════════════════════════");
+                info!("🤖 [DISTRIBUTED AI TX] SENDING AI MESSAGE");
+                info!("═══════════════════════════════════════════════════════════════");
+                info!("   📍 Topic: {}", topic);
+                info!("   🆔 Message ID: {}", message.message_id);
+                info!("   👤 Sender Node: {}", message.sender_node_id);
+                info!("   🔗 Sender Peer: {}", message.sender_peer_id);
+                info!("   ⏰ Timestamp: {}", message.timestamp);
+                info!("   🔢 Sequence #: {}", message.sequence_number);
+                info!("   🔄 Retry Count: {}", message.retry_count);
+                info!("   ⚡ Priority: {:?}", message.priority);
 
-                // Serialize AI message to bytes
-                match postcard::to_allocvec(&message) {
+                // Log payload type with details (v2.3.19: Correct field names from AIMessagePayload enum)
+                let payload_desc = match &message.payload {
+                    crate::distributed_ai::AIMessagePayload::InferenceRequest { request_id, prompt, .. } => {
+                        format!("InferenceRequest(id={}, prompt_len={})", request_id, prompt.len())
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceResponse { request_id, generated_text, tokens_generated, .. } => {
+                        format!("InferenceResponse(id={}, text_len={}, tokens={})", request_id, generated_text.len(), tokens_generated)
+                    }
+                    crate::distributed_ai::AIMessagePayload::TargetedInferenceRequest { request_id, target_node_id, prompt, .. } => {
+                        format!("TargetedInferenceRequest(id={}, target={}, prompt_len={})", request_id, target_node_id, prompt.len())
+                    }
+                    crate::distributed_ai::AIMessagePayload::TokenChunk { request_id, token_index, encrypted_token, .. } => {
+                        // v2.5.1-beta: Privacy-safe - never log token content
+                        format!("TokenChunk(id={}, idx={}, encrypted={})", request_id, token_index, encrypted_token.is_some())
+                    }
+                    crate::distributed_ai::AIMessagePayload::BulkTokenChunk { request_id, start_index, tokens, encrypted_tokens, .. } => {
+                        // v2.5.1-beta: Privacy-safe - log count, not content
+                        format!("BulkTokenChunk(id={}, start={}, count={}, encrypted={})",
+                                request_id, start_index, tokens.len(), encrypted_tokens.is_some())
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceStarted { request_id, worker_node_id, model, .. } => {
+                        format!("InferenceStarted(id={}, worker={}, model={})", request_id, worker_node_id, model)
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceComplete { request_id, worker_node_id, finish_reason, tokens_generated, .. } => {
+                        format!("InferenceComplete(id={}, worker={}, reason={}, tokens={})", request_id, worker_node_id, finish_reason, tokens_generated)
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceError { request_id, worker_node_id, code, message, .. } => {
+                        format!("InferenceError(id={}, worker={}, code={}, msg={})", request_id, worker_node_id, code, message)
+                    }
+                    crate::distributed_ai::AIMessagePayload::NodeCapability { node_id, peer_id, capability, available_layers, .. } => {
+                        format!("NodeCapability(node={}, peer={}, layers={}, cap={:?})", node_id, peer_id, available_layers, capability)
+                    }
+                    crate::distributed_ai::AIMessagePayload::Heartbeat { node_id, active_requests, layers_assigned, .. } => {
+                        format!("Heartbeat(node={}, active={}, layers={:?})", node_id, active_requests, layers_assigned)
+                    }
+                    crate::distributed_ai::AIMessagePayload::CoordinatorElection { node_id, score, uptime_secs, inference_count, .. } => {
+                        format!("CoordinatorElection(node={}, score={}, uptime={}s, inferences={})", node_id, score, uptime_secs, inference_count)
+                    }
+                    crate::distributed_ai::AIMessagePayload::CancelInference { request_id, target_node_id, reason, .. } => {
+                        format!("CancelInference(id={}, target={}, reason={})", request_id, target_node_id, reason)
+                    }
+                    crate::distributed_ai::AIMessagePayload::LayerOutput { request_id, layer_index, .. } => {
+                        format!("LayerOutput(id={}, layer={})", request_id, layer_index)
+                    }
+                    crate::distributed_ai::AIMessagePayload::LayerAssignment { request_id, .. } => {
+                        format!("LayerAssignment(id={})", request_id)
+                    }
+                    crate::distributed_ai::AIMessagePayload::KVCacheUpdate { request_id, layer_index, sequence_length, .. } => {
+                        format!("KVCacheUpdate(id={}, layer={}, seq_len={})", request_id, layer_index, sequence_length)
+                    }
+                    // Tensor Parallelism messages (v2.4.0)
+                    crate::distributed_ai::AIMessagePayload::AllReduceChunk { request_id, layer_index, step, .. } => {
+                        format!("AllReduceChunk(id={}, layer={}, step={})", request_id, layer_index, step)
+                    }
+                    crate::distributed_ai::AIMessagePayload::AllReduceComplete { request_id, layer_index, .. } => {
+                        format!("AllReduceComplete(id={}, layer={})", request_id, layer_index)
+                    }
+                    crate::distributed_ai::AIMessagePayload::ShardAssignment { request_id, node_rank, world_size, .. } => {
+                        format!("ShardAssignment(id={}, rank={}/{})", request_id, node_rank, world_size)
+                    }
+                    crate::distributed_ai::AIMessagePayload::WeightShard { request_id, layer_index, weight_name, .. } => {
+                        format!("WeightShard(id={}, layer={}, name={})", request_id, layer_index, weight_name)
+                    }
+                    crate::distributed_ai::AIMessagePayload::ShardReady { request_id, node_id, layer_index, weight_name, .. } => {
+                        format!("ShardReady(id={}, node={}, layer={}, name={})", request_id, node_id, layer_index, weight_name)
+                    }
+                    crate::distributed_ai::AIMessagePayload::TensorParallelRequest { request_id, prompt, .. } => {
+                        format!("TensorParallelRequest(id={}, prompt_len={})", request_id, prompt.len())
+                    }
+                    crate::distributed_ai::AIMessagePayload::HiddenStates { request_id, layer_index, sequence_position, .. } => {
+                        format!("HiddenStates(id={}, layer={}, seq_pos={})", request_id, layer_index, sequence_position)
+                    }
+                    crate::distributed_ai::AIMessagePayload::TensorParallelToken { request_id, token_id, token_text, token_index, .. } => {
+                        format!("TensorParallelToken(id={}, token={}, text='{}', idx={})", request_id, token_id, token_text, token_index)
+                    }
+                };
+                info!("   📦 Payload: {}", payload_desc);
+
+                // v2.3.18-beta FIX: Use JSON serialization for AI messages
+                // JSON is more tolerant of version differences than postcard binary format
+                // This fixes the "Option discriminant" error when nodes have different struct layouts
+                match serde_json::to_vec(&message) {
                     Ok(message_bytes) => {
+                        info!("   📏 Serialized Size: {} bytes (JSON)", message_bytes.len());
+
+                        // Log first 200 chars of JSON for debugging
+                        if let Ok(json_str) = String::from_utf8(message_bytes.clone()) {
+                            let preview: String = json_str.chars().take(300).collect();
+                            info!("   📝 JSON Preview: {}...", preview);
+                        }
+
                         let ident_topic = IdentTopic::new(topic.as_str());
+
+                        // Check mesh peers before publishing
+                        let mesh_peers = self.swarm.behaviour().gossipsub.mesh_peers(&ident_topic.hash()).count();
+                        let all_peers = self.swarm.behaviour().gossipsub.all_peers().count();
+                        info!("   👥 Mesh Peers for topic: {}, Total Gossipsub Peers: {}", mesh_peers, all_peers);
+
                         match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes.clone()) {
-                            Ok(_) => {
-                                info!("✅ [DISTRIBUTED AI] Successfully published AI message ({} bytes) to P2P network", message_bytes.len());
+                            Ok(msg_id) => {
+                                info!("   ✅ PUBLISHED SUCCESSFULLY!");
+                                info!("   📨 Gossipsub Message ID: {:?}", msg_id);
+                                info!("═══════════════════════════════════════════════════════════════");
                             }
                             Err(e) => {
-                                error!("❌ [DISTRIBUTED AI] Failed to publish AI message to topic {}: {}", topic, e);
+                                error!("   ❌ PUBLISH FAILED: {}", e);
+                                error!("   💡 Hint: Check if topic is subscribed and has mesh peers");
+                                error!("═══════════════════════════════════════════════════════════════");
                             }
                         }
                     }
                     Err(e) => {
-                        error!("❌ [DISTRIBUTED AI] Failed to serialize AI message: {}", e);
+                        error!("   ❌ JSON SERIALIZATION FAILED: {}", e);
+                        error!("═══════════════════════════════════════════════════════════════");
                     }
                 }
             }
@@ -3772,6 +4247,19 @@ impl UnifiedNetworkManager {
                     }
                     Err(e) => {
                         error!("❌ [LIQUIDITY POOLS] Failed to publish pool announcement to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishTokenAnnouncement { topic, announcement_bytes } => {
+                // v2.3.7-beta: Publish token deployment for cross-node discovery
+                info!("🪙 [TOKEN ANNOUNCEMENT] Publishing token deployment to topic: {} ({} bytes)", topic, announcement_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes.clone()) {
+                    Ok(_) => {
+                        info!("✅ [TOKEN ANNOUNCEMENT] Successfully broadcast token deployment to P2P network");
+                    }
+                    Err(e) => {
+                        error!("❌ [TOKEN ANNOUNCEMENT] Failed to publish token to topic {}: {}", topic, e);
                     }
                 }
             }
@@ -3806,6 +4294,37 @@ impl UnifiedNetworkManager {
                     }
                 }
             }
+            NetworkCommand::PublishMiningSolution { topic, solution_bytes, miner_address, block_height, nonce } => {
+                // v2.2.1-beta: P2P mining solution broadcasting
+                // Enables decentralized mining - any node can include the solution in a block
+                info!("⛏️ [P2P MINING] Broadcasting solution from {} for block #{} (nonce: {}) to topic: {} ({} bytes)",
+                       &miner_address[..16.min(miner_address.len())], block_height, nonce, topic, solution_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, solution_bytes) {
+                    Ok(_) => {
+                        info!("✅ [P2P MINING] Successfully broadcast mining solution to P2P network");
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [P2P MINING] Failed to broadcast mining solution to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishTransaction { topic, tx_bytes, tx_hash } => {
+                // v3.3.0-beta: P2P mempool transaction propagation
+                // Broadcast transaction to all peers for real-time mempool synchronization
+                debug!("📤 [P2P MEMPOOL] Broadcasting tx {} ({} bytes) to topic: {}",
+                       &tx_hash[..16.min(tx_hash.len())], tx_bytes.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, tx_bytes) {
+                    Ok(_) => {
+                        debug!("✅ [P2P MEMPOOL] Successfully broadcast tx {} to P2P network", &tx_hash[..16.min(tx_hash.len())]);
+                    }
+                    Err(e) => {
+                        // Debug level - common when no peers subscribed to this topic
+                        debug!("⚠️ [P2P MEMPOOL] Failed to broadcast tx {}: {}", &tx_hash[..16.min(tx_hash.len())], e);
+                    }
+                }
+            }
             NetworkCommand::PublishQnoOperation { topic, message } => {
                 // v1.4.2-beta: Publish QNO operation for decentralized stake validation
                 debug!("🔮 [QNO P2P] Publishing {:?} operation to topic: {}", message.message_type, topic);
@@ -3823,6 +4342,34 @@ impl UnifiedNetworkManager {
                     }
                     Err(e) => {
                         error!("❌ [QNO P2P] Failed to serialize QNO message: {}", e);
+                    }
+                }
+            }
+            NetworkCommand::PublishTokenSocial { topic, contract_address, profile_bytes } => {
+                // v2.4.8-beta: Publish token social profile for cross-node sync
+                info!("📱 [TOKEN SOCIAL] Publishing social profile for {} to topic: {} ({} bytes)",
+                      contract_address, topic, profile_bytes.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, profile_bytes.clone()) {
+                    Ok(_) => {
+                        info!("✅ [TOKEN SOCIAL] Successfully broadcast social profile to P2P network");
+                    }
+                    Err(e) => {
+                        error!("❌ [TOKEN SOCIAL] Failed to publish social profile to topic {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::PublishDexEvent { topic, message } => {
+                // v2.9.2-beta: Publish DEX event (trade, liquidity, price) to all peers
+                // This enables TRUE DEX decentralization by broadcasting state changes
+                info!("💱 [DEX P2P] Publishing DEX event to topic: {} ({} bytes)", topic, message.len());
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message.clone()) {
+                    Ok(msg_id) => {
+                        info!("✅ [DEX P2P] Successfully broadcast DEX event to P2P network (msg_id: {:?})", msg_id);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [DEX P2P] Failed to publish DEX event to topic {}: {}", topic, e);
                     }
                 }
             }
@@ -4097,6 +4644,34 @@ impl UnifiedNetworkManager {
                     }
                     Err(e) => {
                         error!("❌ [CONSENSUS P2P] Failed to broadcast equivocation proof: {}", e);
+                    }
+                }
+            }
+
+            // ⚡ v2.6.0: Handle all-reduce messages for tensor parallelism
+            NetworkCommand::PublishAllReduce { topic, data } => {
+                debug!("⚡ [ALL-REDUCE] Publishing {} bytes to topic: {}", data.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
+                    Ok(_) => {
+                        debug!("✅ [ALL-REDUCE] Message published successfully");
+                    }
+                    Err(e) => {
+                        warn!("❌ [ALL-REDUCE] Failed to publish: {}", e);
+                    }
+                }
+            }
+
+            // 🔐 v2.4.6-beta: BFT consensus message publishing
+            NetworkCommand::PublishConsensusMessage { topic, message_bytes } => {
+                debug!("🔐 [BFT] Publishing {} bytes to consensus topic: {}", message_bytes.len(), topic);
+                let ident_topic = IdentTopic::new(topic.as_str());
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes) {
+                    Ok(_) => {
+                        info!("✅ [BFT] Consensus message published to {}", topic);
+                    }
+                    Err(e) => {
+                        warn!("❌ [BFT] Failed to publish consensus message: {}", e);
                     }
                 }
             }

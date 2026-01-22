@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub mod blockchain_life;
 pub mod collaborative_behaviors;
 pub mod conflict_resolution;
+pub mod convergence_readiness; // CCC (Conformal Cyclic Cosmology) integration
 pub mod cryptobia_store;
 pub mod distributed_ai;
 pub mod fleet_management;

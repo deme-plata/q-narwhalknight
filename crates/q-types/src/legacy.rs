@@ -20,14 +20,19 @@ use crate::block::{
     SpectralSignature, SignaturePhase, HypergraphCoordinates, EnergyComponents,
 };
 
+/// v3.1.4: Legacy Amount type (u64) for pre-u128 blocks
+/// Old blocks stored amount/fee as u64 (8 bytes), new blocks use u128 (16 bytes)
+pub type LegacyAmount = u64;
+
 /// Legacy Transaction without tx_type field (pre-v1.0.60-beta)
+/// v3.1.4: Uses LegacyAmount (u64) for backwards compatibility with old blocks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyTransaction {
     pub id: TxHash,
     pub from: Address,
     pub to: Address,
-    pub amount: Amount,
-    pub fee: Amount,
+    pub amount: LegacyAmount, // v3.1.4: u64 for old blocks
+    pub fee: LegacyAmount,    // v3.1.4: u64 for old blocks
     pub nonce: u64,
     pub signature: Vec<u8>,
     pub timestamp: DateTime<Utc>,
@@ -43,8 +48,8 @@ impl From<LegacyTransaction> for Transaction {
             id: legacy.id,
             from: legacy.from,
             to: legacy.to,
-            amount: legacy.amount,
-            fee: legacy.fee,
+            amount: legacy.amount as u128, // v3.1.4: Convert u64 -> u128
+            fee: legacy.fee as u128,       // v3.1.4: Convert u64 -> u128
             nonce: legacy.nonce,
             signature: legacy.signature,
             timestamp: legacy.timestamp,
@@ -52,11 +57,39 @@ impl From<LegacyTransaction> for Transaction {
             token_type: legacy.token_type,
             fee_token_type: legacy.fee_token_type,
             tx_type: TransactionType::Transfer, // Default for legacy transactions
+            // v2.3.0-beta: Default PQC fields for legacy transactions (Phase 0 Ed25519)
+            pqc_signature: None,
+            signature_phase: crate::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+        }
+    }
+}
+
+/// v3.1.4: Legacy BalanceUpdate with u64 fields (pre-v2.5.0)
+/// Old blocks stored old_balance/new_balance as u64 (8 bytes each)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyBalanceUpdate {
+    pub address: Address,
+    pub old_balance: u64, // v3.1.4: u64 for old blocks
+    pub new_balance: u64, // v3.1.4: u64 for old blocks
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+impl From<LegacyBalanceUpdate> for BalanceUpdate {
+    fn from(legacy: LegacyBalanceUpdate) -> Self {
+        BalanceUpdate {
+            address: legacy.address,
+            old_balance: legacy.old_balance as u128, // v3.1.4: Convert u64 -> u128
+            new_balance: legacy.new_balance as u128, // v3.1.4: Convert u64 -> u128
+            reason: legacy.reason,
+            timestamp: legacy.timestamp,
         }
     }
 }
 
 /// Legacy QBlock with LegacyTransaction vec (pre-v1.0.60-beta)
+/// v3.1.4: Uses LegacyBalanceUpdate for u64 backwards compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyQBlock {
     pub header: BlockHeader,
@@ -65,7 +98,7 @@ pub struct LegacyQBlock {
     pub quantum_metadata: QuantumMetadata,
     pub transactions: Vec<LegacyTransaction>,
     #[serde(default)]
-    pub balance_updates: Vec<BalanceUpdate>,
+    pub balance_updates: Vec<LegacyBalanceUpdate>, // v3.1.4: u64 balance updates
     pub size_bytes: usize,
 }
 
@@ -77,7 +110,7 @@ impl From<LegacyQBlock> for QBlock {
             dag_parents: legacy.dag_parents,
             quantum_metadata: legacy.quantum_metadata,
             transactions: legacy.transactions.into_iter().map(Into::into).collect(),
-            balance_updates: legacy.balance_updates,
+            balance_updates: legacy.balance_updates.into_iter().map(Into::into).collect(), // v3.1.4: Convert
             size_bytes: legacy.size_bytes,
         }
     }
@@ -145,16 +178,64 @@ impl From<LegacyQuantumMetadata> for QuantumMetadata {
     }
 }
 
-/// Legacy QBlock V2 - with modern Transaction but pre-SQIsign SpectralSignature
+/// v3.1.4: Legacy Transaction V2 - has tx_type field but uses u64 for amounts
+/// This is for blocks between v1.0.60-beta (added tx_type) and v2.5.0 (changed to u128)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyTransactionV2 {
+    pub id: TxHash,
+    pub from: Address,
+    pub to: Address,
+    pub amount: LegacyAmount, // v3.1.4: u64 for old blocks
+    pub fee: LegacyAmount,    // v3.1.4: u64 for old blocks
+    pub nonce: u64,
+    pub signature: Vec<u8>,
+    pub timestamp: DateTime<Utc>,
+    pub data: Vec<u8>,
+    pub token_type: TokenType,
+    pub fee_token_type: TokenType,
+    pub tx_type: TransactionType, // Has tx_type (unlike LegacyTransaction)
+    // v2.3.0-beta PQC fields - defaulted for old blocks
+    #[serde(default)]
+    pub pqc_signature: Option<Vec<u8>>,
+    #[serde(default)]
+    pub signature_phase: crate::TxSignaturePhase,
+    #[serde(default)]
+    pub pqc_public_key: Option<Vec<u8>>,
+}
+
+impl From<LegacyTransactionV2> for Transaction {
+    fn from(legacy: LegacyTransactionV2) -> Self {
+        Transaction {
+            id: legacy.id,
+            from: legacy.from,
+            to: legacy.to,
+            amount: legacy.amount as u128, // v3.1.4: Convert u64 -> u128
+            fee: legacy.fee as u128,       // v3.1.4: Convert u64 -> u128
+            nonce: legacy.nonce,
+            signature: legacy.signature,
+            timestamp: legacy.timestamp,
+            data: legacy.data,
+            token_type: legacy.token_type,
+            fee_token_type: legacy.fee_token_type,
+            tx_type: legacy.tx_type,
+            pqc_signature: legacy.pqc_signature,
+            signature_phase: legacy.signature_phase,
+            pqc_public_key: legacy.pqc_public_key,
+        }
+    }
+}
+
+/// Legacy QBlock V2 - with tx_type field but pre-u128 and pre-SQIsign
+/// v3.1.4: Uses LegacyTransactionV2 and LegacyBalanceUpdate for u64 backwards compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyQBlockV2 {
     pub header: BlockHeader,
     pub mining_solutions: Vec<MiningSolution>,
     pub dag_parents: Vec<VertexId>,
     pub quantum_metadata: LegacyQuantumMetadata,
-    pub transactions: Vec<Transaction>, // Modern transactions with tx_type
+    pub transactions: Vec<LegacyTransactionV2>, // v3.1.4: tx_type + u64 amounts
     #[serde(default)]
-    pub balance_updates: Vec<BalanceUpdate>,
+    pub balance_updates: Vec<LegacyBalanceUpdate>, // v3.1.4: u64 balance updates
     pub size_bytes: usize,
 }
 
@@ -165,8 +246,8 @@ impl From<LegacyQBlockV2> for QBlock {
             mining_solutions: legacy.mining_solutions,
             dag_parents: legacy.dag_parents,
             quantum_metadata: legacy.quantum_metadata.into(),
-            transactions: legacy.transactions,
-            balance_updates: legacy.balance_updates,
+            transactions: legacy.transactions.into_iter().map(Into::into).collect(), // v3.1.4: Convert
+            balance_updates: legacy.balance_updates.into_iter().map(Into::into).collect(), // v3.1.4: Convert
             size_bytes: legacy.size_bytes,
         }
     }
@@ -174,6 +255,7 @@ impl From<LegacyQBlockV2> for QBlock {
 
 /// Legacy QBlock V3 - with LegacyTransaction AND pre-SQIsign SpectralSignature
 /// (This handles the oldest blocks from before v1.0.60-beta)
+/// v3.1.4: Uses LegacyBalanceUpdate for u64 backwards compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyQBlockV3 {
     pub header: BlockHeader,
@@ -182,7 +264,7 @@ pub struct LegacyQBlockV3 {
     pub quantum_metadata: LegacyQuantumMetadata,
     pub transactions: Vec<LegacyTransaction>, // Old transactions without tx_type
     #[serde(default)]
-    pub balance_updates: Vec<BalanceUpdate>,
+    pub balance_updates: Vec<LegacyBalanceUpdate>, // v3.1.4: u64 balance updates
     pub size_bytes: usize,
 }
 
@@ -194,7 +276,7 @@ impl From<LegacyQBlockV3> for QBlock {
             dag_parents: legacy.dag_parents,
             quantum_metadata: legacy.quantum_metadata.into(),
             transactions: legacy.transactions.into_iter().map(Into::into).collect(),
-            balance_updates: legacy.balance_updates,
+            balance_updates: legacy.balance_updates.into_iter().map(Into::into).collect(), // v3.1.4: Convert
             size_bytes: legacy.size_bytes,
         }
     }

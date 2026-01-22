@@ -1,8 +1,14 @@
-//! ✅ v1.1.9-beta: P2P Balance Update Messages - SECURITY HARDENED
+//! ✅ v3.2.7-beta: P2P Balance Update Messages - SECURITY HARDENED + U128 FIX
 //!
 //! Enables decentralized mining by broadcasting balance updates across the network.
 //! When a node accepts a mining solution and credits a balance, it broadcasts
 //! the update to all peers so they can apply the same balance change.
+//!
+//! ## v3.2.7-beta CRITICAL FIX: U128 Serialization for CBOR
+//!
+//! CBOR (like MessagePack) does NOT natively support u128 - it truncates to u64!
+//! This caused mining rewards to be corrupted during P2P broadcast.
+//! Fixed by using u128_serde to serialize as strings.
 //!
 //! ## Security Model (v1.1.9-beta HARDENED)
 //!
@@ -32,23 +38,32 @@
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
+// Import u128_serde from parent module for CBOR compatibility
+use crate::u128_serde;
+
 /// P2P Balance Update Message
 /// Broadcast when a mining reward is credited to a wallet
 ///
 /// v1.1.9-beta: Signature is now MANDATORY for security
+/// v2.5.0: Amount fields upgraded to u128 (version 3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct P2PBalanceUpdate {
-    /// Version for protocol evolution (2 = v1.1.9 with mandatory signatures)
+    /// Version for protocol evolution
+    /// - v2: v1.1.9 with mandatory signatures (u64 amounts)
+    /// - v3: v2.5.0 with u128 amounts (24 decimals)
     pub version: u8,
 
     /// Wallet address receiving the balance update (qnk format)
     pub wallet_address: String,
 
-    /// Amount in base units (satoshi-equivalent, 1 QNK = 100_000_000 base units)
-    pub amount: u64,
+    /// v3.2.7-beta: CRITICAL FIX - Use u128_serde for CBOR compatibility
+    /// CBOR truncates u128 to u64, corrupting mining rewards during P2P broadcast!
+    #[serde(with = "u128_serde")]
+    pub amount: u128,
 
-    /// New total balance after update (for consistency verification)
-    pub new_balance: u64,
+    /// v3.2.7-beta: CRITICAL FIX - Use u128_serde for CBOR compatibility
+    #[serde(with = "u128_serde")]
+    pub new_balance: u128,
 
     /// Block height at which this reward was earned
     pub block_height: u64,
@@ -96,11 +111,15 @@ pub enum BalanceUpdateType {
 }
 
 impl P2PBalanceUpdate {
+    /// Current protocol version (3 = u128 amounts)
+    pub const CURRENT_VERSION: u8 = 3;
+
     /// Create a new mining reward balance update (unsigned - must call sign() before broadcast)
+    /// v2.5.0: Now uses u128 for amount and new_balance
     pub fn new_mining_reward(
         wallet_address: String,
-        amount: u64,
-        new_balance: u64,
+        amount: u128,
+        new_balance: u128,
         block_height: u64,
         nonce: u64,
         origin_node_id: String,
@@ -113,7 +132,7 @@ impl P2PBalanceUpdate {
         let solution_hash: [u8; 32] = hasher.finalize().into();
 
         Self {
-            version: 2, // v1.1.9-beta: Version 2 = mandatory signatures
+            version: Self::CURRENT_VERSION, // v2.5.0: Version 3 = u128 amounts
             wallet_address,
             amount,
             new_balance,
@@ -131,12 +150,32 @@ impl P2PBalanceUpdate {
         }
     }
 
+    /// Create from legacy v2 message (u64 amounts) for backward compatibility
+    pub fn from_legacy_v2(
+        wallet_address: String,
+        amount: u64,
+        new_balance: u64,
+        block_height: u64,
+        nonce: u64,
+        origin_node_id: String,
+    ) -> Self {
+        Self::new_mining_reward(
+            wallet_address,
+            super::legacy_to_u128(amount),
+            super::legacy_to_u128(new_balance),
+            block_height,
+            nonce,
+            origin_node_id,
+        )
+    }
+
     /// Get the payload that should be signed
     /// This is SHA3-256(wallet_address || amount || block_height || nonce || timestamp_ms || origin_node_id)
+    /// v2.5.0: Now uses u128 (16 bytes) for amount
     pub fn signing_payload(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
         hasher.update(self.wallet_address.as_bytes());
-        hasher.update(&self.amount.to_le_bytes());
+        hasher.update(&self.amount.to_le_bytes()); // 16 bytes for u128
         hasher.update(&self.block_height.to_le_bytes());
         hasher.update(&self.nonce.to_le_bytes());
         hasher.update(&self.timestamp_ms.to_le_bytes());
@@ -226,11 +265,13 @@ impl P2PBalanceUpdate {
 
     /// Full validation: solution hash + signature (v1.1.9-beta)
     /// Both must pass for the update to be accepted
+    /// v2.5.0: Accepts version 2 (u64) or version 3 (u128)
     pub fn validate_full(&self) -> Result<(), BalanceUpdateError> {
-        // Check version
+        // Check version (accept v2 or v3)
         if self.version < 2 {
             return Err(BalanceUpdateError::LegacyVersion(self.version));
         }
+        // Note: v3 uses u128, v2 uses u64 but both serialize correctly
 
         // Check solution hash
         if !self.verify_solution_hash() {

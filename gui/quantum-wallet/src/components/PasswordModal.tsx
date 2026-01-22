@@ -53,11 +53,12 @@ const PasswordModal: React.FC<PasswordModalProps> = ({
   if (!isOpen) return null;
 
   return createPortal(
-    <div className="password-modal-overlay" onClick={onCancel}>
+    <div className="password-modal-overlay" onClick={onCancel} style={{ zIndex: 999999 }}>
       <div
         className="password-modal-content"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ zIndex: 1000000 }}
       >
         {/* Quantum-themed animated background */}
         <div className="password-modal-bg-animation">

@@ -95,10 +95,12 @@ impl NemoStats {
 }
 
 /// Multi-Version Memory entry for NEMO
+/// v2.10.0: Updated value to u128 for 24 decimal precision
 #[derive(Debug, Clone)]
 pub struct MVEntry {
     /// The value (balance in our case)
-    pub value: u64,
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub value: u128,
     /// Transaction that wrote this value
     pub written_by: TxIndex,
     /// Is this an ESTIMATE marker (write pending validation)?
@@ -131,7 +133,8 @@ impl MVMemory {
     }
 
     /// Write a value (marks as ESTIMATE until validated)
-    pub fn write(&self, addr: &Address, tx_idx: TxIndex, value: u64, is_estimate: bool) {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn write(&self, addr: &Address, tx_idx: TxIndex, value: u128, is_estimate: bool) {
         let version = self.version_counter.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut entries) = self.entries.write() {
             let addr_entries = entries.entry(*addr).or_default();
@@ -146,7 +149,8 @@ impl MVMemory {
 
     /// Read the latest committed value for an address (before tx_idx)
     /// Returns (value, version, writer_tx_idx, is_estimate)
-    pub fn read(&self, addr: &Address, before_tx_idx: TxIndex) -> Option<(u64, u64, TxIndex, bool)> {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn read(&self, addr: &Address, before_tx_idx: TxIndex) -> Option<(u128, u64, TxIndex, bool)> {
         if let Ok(entries) = self.entries.read() {
             if let Some(addr_entries) = entries.get(addr) {
                 // Find the latest write before this transaction
@@ -374,12 +378,13 @@ impl NemoExecutor {
     }
 
     /// Execute a block with NEMO optimizations
+    /// v2.10.0: Updated to u128 for 24 decimal precision
     pub fn execute_block(
         &self,
         transactions: &[Transaction],
         hints: &BlockExecutionHints,
-        initial_balances: &HashMap<Address, u64>,
-    ) -> Result<(HashMap<Address, u64>, NemoStats), String> {
+        initial_balances: &HashMap<Address, u128>,
+    ) -> Result<(HashMap<Address, u128>, NemoStats), String> {
         let start = Instant::now();
         let mut stats = NemoStats {
             total_txs: transactions.len(),
@@ -510,12 +515,13 @@ impl NemoExecutor {
     }
 
     /// Execute a single transaction
+    /// v2.10.0: Updated to u128 for 24 decimal precision
     fn execute_single_tx(
         &self,
-        tx_idx: TxIndex,
+        _tx_idx: TxIndex,
         tx: &Transaction,
-        balances: &HashMap<Address, u64>,
-    ) -> Result<(u64, u64), String> {
+        balances: &HashMap<Address, u128>,
+    ) -> Result<(u128, u128), String> {
         // Read sender balance
         let sender_balance = balances.get(&tx.from).copied().unwrap_or(0);
 

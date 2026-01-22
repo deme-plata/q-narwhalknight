@@ -577,6 +577,146 @@ impl ValidatorKeypair {
             preferred_phase: serializable.preferred_phase,
         })
     }
+
+    // === v2.4.1-beta: TemporalShield Backup Methods ===
+
+    /// Serialize keypair to bytes for TemporalShield backup
+    ///
+    /// Outputs a deterministic byte representation suitable for threshold encryption.
+    /// Format: [ed25519_secret(32) | ed25519_public(32) | dilithium5_secret | dilithium5_public | sqisign_secret | sqisign_public | phase(1)]
+    pub fn to_backup_bytes(&self) -> Vec<u8> {
+        use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SecretKey as PQSecretKey};
+
+        let mut bytes = Vec::with_capacity(32 + 32 + 4880 + 2592 + 64 + 64 + 1);
+
+        // Ed25519 keys
+        bytes.extend_from_slice(&self.ed25519_signing.to_bytes());
+        bytes.extend_from_slice(self.ed25519_verifying.as_bytes());
+
+        // Dilithium5 keys
+        let dil_sk = self.dilithium5_secret.as_bytes();
+        let dil_pk = self.dilithium5_public.as_bytes();
+        bytes.extend_from_slice(&(dil_sk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(dil_sk);
+        bytes.extend_from_slice(&(dil_pk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(dil_pk);
+
+        // SQIsign keys
+        bytes.extend_from_slice(&(self.sqisign_secret.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.sqisign_secret);
+        bytes.extend_from_slice(&(self.sqisign_public.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.sqisign_public);
+
+        // Preferred phase
+        bytes.push(match self.preferred_phase {
+            SignaturePhase::Phase0Ed25519 => 0,
+            SignaturePhase::Phase1Dilithium5 => 1,
+            SignaturePhase::Phase2SQIsign => 2,
+            SignaturePhase::HybridEd25519Dilithium5 => 3,
+            SignaturePhase::HybridEd25519SQIsign => 4,
+        });
+
+        bytes
+    }
+
+    /// Restore keypair from backup bytes
+    ///
+    /// Reverses the serialization done by `to_backup_bytes()`.
+    pub fn from_backup_bytes(bytes: &[u8]) -> Result<Self> {
+        use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SecretKey as PQSecretKey};
+
+        if bytes.len() < 68 {
+            return Err(anyhow!("Backup bytes too short"));
+        }
+
+        let mut cursor = 0;
+
+        // Ed25519 secret key (32 bytes)
+        let mut ed25519_secret_bytes = [0u8; 32];
+        ed25519_secret_bytes.copy_from_slice(&bytes[cursor..cursor + 32]);
+        cursor += 32;
+        let ed25519_signing = SigningKey::from_bytes(&ed25519_secret_bytes);
+
+        // Ed25519 public key (32 bytes)
+        let mut ed25519_public_bytes = [0u8; 32];
+        ed25519_public_bytes.copy_from_slice(&bytes[cursor..cursor + 32]);
+        cursor += 32;
+        let ed25519_verifying = VerifyingKey::from_bytes(&ed25519_public_bytes)
+            .map_err(|e| anyhow!("Invalid Ed25519 public key: {}", e))?;
+
+        // Dilithium5 secret key
+        let dil_sk_len = u32::from_le_bytes([
+            bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]
+        ]) as usize;
+        cursor += 4;
+        let dilithium5_secret = dilithium5::SecretKey::from_bytes(&bytes[cursor..cursor + dil_sk_len])
+            .map_err(|_| anyhow!("Invalid Dilithium5 secret key"))?;
+        cursor += dil_sk_len;
+
+        // Dilithium5 public key
+        let dil_pk_len = u32::from_le_bytes([
+            bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]
+        ]) as usize;
+        cursor += 4;
+        let dilithium5_public = dilithium5::PublicKey::from_bytes(&bytes[cursor..cursor + dil_pk_len])
+            .map_err(|_| anyhow!("Invalid Dilithium5 public key"))?;
+        cursor += dil_pk_len;
+
+        // SQIsign secret key
+        let sqi_sk_len = u32::from_le_bytes([
+            bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]
+        ]) as usize;
+        cursor += 4;
+        let sqisign_secret = bytes[cursor..cursor + sqi_sk_len].to_vec();
+        cursor += sqi_sk_len;
+
+        // SQIsign public key
+        let sqi_pk_len = u32::from_le_bytes([
+            bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]
+        ]) as usize;
+        cursor += 4;
+        let sqisign_public = bytes[cursor..cursor + sqi_pk_len].to_vec();
+        cursor += sqi_pk_len;
+
+        // Preferred phase
+        let preferred_phase = if cursor < bytes.len() {
+            match bytes[cursor] {
+                0 => SignaturePhase::Phase0Ed25519,
+                1 => SignaturePhase::Phase1Dilithium5,
+                2 => SignaturePhase::Phase2SQIsign,
+                3 => SignaturePhase::HybridEd25519Dilithium5,
+                4 => SignaturePhase::HybridEd25519SQIsign,
+                _ => SignaturePhase::Phase0Ed25519,
+            }
+        } else {
+            SignaturePhase::Phase0Ed25519
+        };
+
+        Ok(Self {
+            node_id: ed25519_verifying.to_bytes(),
+            ed25519_signing,
+            ed25519_verifying,
+            dilithium5_secret,
+            dilithium5_public,
+            sqisign_secret,
+            sqisign_public,
+            preferred_phase,
+        })
+    }
+
+    /// Compute fingerprint for backup verification
+    ///
+    /// Uses Blake3 hash of all public keys for unique identification.
+    pub fn compute_fingerprint(&self) -> [u8; 32] {
+        use pqcrypto_traits::sign::PublicKey as PQPublicKey;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ValidatorKeypair-Fingerprint-v1");
+        hasher.update(self.ed25519_verifying.as_bytes());
+        hasher.update(self.dilithium5_public.as_bytes());
+        hasher.update(&self.sqisign_public);
+        *hasher.finalize().as_bytes()
+    }
 }
 
 #[cfg(test)]

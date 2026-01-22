@@ -21,33 +21,137 @@ use tracing::{debug, error, info, warn};
 pub struct DistributedMistralRsConfig {
     /// Model path
     pub model_path: String,
-    
-    /// Total number of model layers (32 for Mistral-7B)
+
+    /// Total number of model layers (32 for Mistral-7B, 24 for Ministral-3B)
     pub total_layers: usize,
-    
+
+    /// Hidden size (4096 for Mistral-7B, 2048 for Ministral-3B)
+    pub hidden_size: usize,
+
+    /// Model name for logging
+    pub model_name: String,
+
     /// Layers assigned to this node
     pub assigned_layers: Option<(usize, usize)>,
-    
+
     /// Enable KV-cache coordination
     pub enable_kv_cache: bool,
-    
+
     /// Maximum concurrent requests
     pub max_concurrent: usize,
-    
+
     /// KV-cache max age (seconds)
     pub cache_max_age_secs: i64,
 }
 
-impl Default for DistributedMistralRsConfig {
-    fn default() -> Self {
+impl DistributedMistralRsConfig {
+    /// Create config for Qwen3-0.6B (fastest, smallest, only 379MB!)
+    /// 0.6B params, 28 layers, 379MB Q4_K_M, 32K context
+    pub fn qwen3_0_6b() -> Self {
+        Self {
+            model_path: "/opt/orobit/shared/q-narwhalknight/models/Qwen3-0.6B-Q4_K_M.gguf".to_string(),
+            total_layers: 28,
+            hidden_size: 1024, // Qwen3-0.6B hidden size
+            model_name: "Qwen3-0.6B".to_string(),
+            assigned_layers: None,
+            enable_kv_cache: true,
+            max_concurrent: 8, // High concurrency for tiny model
+            cache_max_age_secs: 3600,
+        }
+    }
+
+    /// Create config for Qwen3-4B (balanced, qwen3 architecture supported by mistral.rs)
+    /// 4B params, 36 layers, 2.4GB Q4_K_M, supports 32K context (up to 131K with YaRN)
+    pub fn qwen3_4b() -> Self {
+        Self {
+            model_path: "/opt/orobit/shared/q-narwhalknight/models/Qwen3-4B-Q4_K_M.gguf".to_string(),
+            total_layers: 36,
+            hidden_size: 2560, // Qwen3-4B hidden size
+            model_name: "Qwen3-4B".to_string(),
+            assigned_layers: None,
+            enable_kv_cache: true,
+            max_concurrent: 4, // Good concurrency for 4B model
+            cache_max_age_secs: 3600,
+        }
+    }
+
+    /// Create config for Ministral-3B (⚠️ NOT SUPPORTED - mistral3 architecture not in mistral.rs GGUF)
+    #[deprecated(note = "Ministral-3B uses mistral3 architecture not supported by mistral.rs GGUF. Use qwen3_4b() instead.")]
+    pub fn ministral_3b() -> Self {
+        Self {
+            model_path: "/opt/orobit/shared/q-narwhalknight/models/Ministral-3B-Instruct-Q4_K_M.gguf".to_string(),
+            total_layers: 24,
+            hidden_size: 2048,
+            model_name: "Ministral-3B".to_string(),
+            assigned_layers: None,
+            enable_kv_cache: true,
+            max_concurrent: 4,
+            cache_max_age_secs: 3600,
+        }
+    }
+
+    /// Create config for Mistral-7B (larger, more capable, llama architecture)
+    pub fn mistral_7b() -> Self {
         Self {
             model_path: "/opt/orobit/shared/q-narwhalknight/models/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf".to_string(),
             total_layers: 32,
-            assigned_layers: None, // Will be assigned by coordinator
+            hidden_size: 4096,
+            model_name: "Mistral-7B".to_string(),
+            assigned_layers: None,
             enable_kv_cache: true,
             max_concurrent: 2,
-            cache_max_age_secs: 3600, // 1 hour
+            cache_max_age_secs: 3600,
         }
+    }
+
+    /// Auto-detect config from model path
+    pub fn from_path(model_path: &str) -> Self {
+        let path_lower = model_path.to_lowercase();
+        if path_lower.contains("qwen3-0.6b") || path_lower.contains("qwen3_0.6b") || path_lower.contains("qwen3-0_6b") {
+            let mut config = Self::qwen3_0_6b();
+            config.model_path = model_path.to_string();
+            config
+        } else if path_lower.contains("qwen3-4b") || path_lower.contains("qwen3_4b") {
+            let mut config = Self::qwen3_4b();
+            config.model_path = model_path.to_string();
+            config
+        } else if path_lower.contains("mistral-7b") || path_lower.contains("mistral_7b") {
+            let mut config = Self::mistral_7b();
+            config.model_path = model_path.to_string();
+            config
+        } else {
+            // Default to Qwen3-0.6B for unknown models (fastest, safe fallback with supported architecture)
+            let mut config = Self::qwen3_0_6b();
+            config.model_path = model_path.to_string();
+            config
+        }
+    }
+
+    /// Get optimal layer ranges for N nodes
+    pub fn optimal_layer_ranges(&self, num_nodes: usize) -> Vec<(usize, usize)> {
+        let layers_per_node = self.total_layers / num_nodes;
+        let remainder = self.total_layers % num_nodes;
+
+        let mut ranges = Vec::with_capacity(num_nodes);
+        let mut start = 0;
+
+        for i in 0..num_nodes {
+            let extra = if i < remainder { 1 } else { 0 };
+            let end = start + layers_per_node + extra - 1;
+            ranges.push((start, end));
+            start = end + 1;
+        }
+
+        ranges
+    }
+}
+
+impl Default for DistributedMistralRsConfig {
+    fn default() -> Self {
+        // v1.4.9-beta: Default to Qwen3-0.6B for fastest inference (only 379MB!)
+        // Has qwen3 architecture supported by mistral.rs GGUF loader
+        // For better quality use qwen3_4b() or mistral_7b()
+        Self::qwen3_0_6b()
     }
 }
 

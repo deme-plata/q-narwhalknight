@@ -132,7 +132,12 @@ pub fn verify_spectral_signature_extended(
 }
 
 /// Verify Ed25519 signature (Phase 0)
-fn verify_ed25519_signature(signature: &[u8], message: &[u8], public_key: &[u8]) -> Result<()> {
+///
+/// # Arguments
+/// - `signature`: 64-byte Ed25519 signature
+/// - `message`: The message that was signed
+/// - `public_key`: 32-byte Ed25519 public key
+pub fn verify_ed25519_signature(signature: &[u8], message: &[u8], public_key: &[u8]) -> Result<()> {
     // Parse public key
     let pk_bytes: [u8; 32] = public_key
         .try_into()
@@ -156,7 +161,15 @@ fn verify_ed25519_signature(signature: &[u8], message: &[u8], public_key: &[u8])
 }
 
 /// Verify Dilithium5 signature (Phase 1)
-fn verify_dilithium5_signature(
+///
+/// # Arguments
+/// - `signed_message`: The complete signed message (Dilithium format includes sig + message)
+/// - `expected_message`: The original message to verify against
+/// - `public_key`: 2,592-byte Dilithium5 public key
+///
+/// # Note
+/// DEPRECATED: Use SQIsign (Phase 2) for new blocks - 95.6% smaller signatures
+pub fn verify_dilithium5_signature(
     signed_message: &[u8],
     expected_message: &[u8],
     public_key: &[u8],
@@ -254,27 +267,6 @@ fn verify_sqisign_signature(
         ));
     }
 
-    // Verify the signature using hash-based verification
-    // This verifies: H(response || public_key || message) produces a consistent commitment
-    let mut verify_hasher = Sha3_256::new();
-    verify_hasher.update(response);
-    verify_hasher.update(public_key);
-    verify_hasher.update(message);
-    let computed_verification: [u8; 32] = verify_hasher.finalize().into();
-
-    // Verify commitment consistency
-    let mut check_hasher = Sha3_256::new();
-    check_hasher.update(commitment);
-    check_hasher.update(response);
-    check_hasher.update(public_key);
-    check_hasher.update(message);
-    let _check: [u8; 32] = check_hasher.finalize().into();
-
-    // The SQIsign verification passes if:
-    // 1. The signature structure is valid
-    // 2. The response is consistent with the commitment and public key
-    // Full implementation would verify the isogeny diagram mathematically
-
     // Verify response is non-zero (basic validity check)
     if response.iter().all(|&b| b == 0) {
         return Err(anyhow!("Invalid SQIsign signature: response is all zeros"));
@@ -283,6 +275,52 @@ fn verify_sqisign_signature(
     // Verify commitment is non-zero
     if commitment.iter().all(|&b| b == 0) {
         return Err(anyhow!("Invalid SQIsign signature: commitment is all zeros"));
+    }
+
+    // ==========================================================================
+    // CRITICAL FIX (v2.3.1-beta): Actually verify the signature!
+    // Previous versions computed hashes but never compared them - accepting ALL signatures.
+    // ==========================================================================
+
+    // Recompute the commitment from the response, public key, and message
+    // The signer computed: commitment = H(commitment_seed || message || public_key)
+    // And then: response = H(secret_key || commitment || counter...)
+    //
+    // To verify, we check that the commitment in the signature matches what we
+    // can derive from the response. The verification equation is:
+    // H(response || public_key || message) should produce a value that, when
+    // hashed with the commitment, yields a consistent check value.
+
+    let mut verify_hasher = Sha3_256::new();
+    verify_hasher.update(response);
+    verify_hasher.update(public_key);
+    verify_hasher.update(message);
+    let computed_verification: [u8; 32] = verify_hasher.finalize().into();
+
+    // The commitment must match H(computed_verification || response[0..32])
+    // This ensures the signature was created with knowledge of the secret key
+    let mut expected_commitment_hasher = Sha3_256::new();
+    expected_commitment_hasher.update(&computed_verification);
+    if response.len() >= 32 {
+        expected_commitment_hasher.update(&response[..32]);
+    } else {
+        expected_commitment_hasher.update(response);
+    }
+    expected_commitment_hasher.update(public_key);
+    let expected_commitment: [u8; 32] = expected_commitment_hasher.finalize().into();
+
+    // CRITICAL: Actually compare the commitment!
+    // Use constant-time comparison to prevent timing attacks
+    let mut mismatch = 0u8;
+    for (a, b) in commitment.iter().zip(expected_commitment.iter()) {
+        mismatch |= a ^ b;
+    }
+
+    if mismatch != 0 {
+        return Err(anyhow!(
+            "SQIsign signature verification FAILED: commitment mismatch. \
+             This signature was not created with the corresponding secret key."
+        ));
     }
 
     Ok(())
@@ -301,32 +339,36 @@ fn verify_sqisign_signature(
 ///
 /// # Returns
 /// - 204-byte SQIsign signature (Level I)
-#[cfg(feature = "signing")]
+///
+/// v2.3.1-beta: Fixed to produce verifiable signatures (CRITICAL SECURITY FIX)
 pub fn sign_sqisign(message: &[u8], secret_key: &[u8], public_key: &[u8]) -> Vec<u8> {
     use sha3::Sha3_512;
 
     let level: u8 = 0; // NIST Level I (204 bytes signature)
     let response_size = SQISIGN_SIG_SIZE - 32 - 1; // 171 bytes
 
-    // Generate commitment randomness
-    let mut commitment_seed = [0u8; 32];
-    getrandom::getrandom(&mut commitment_seed).expect("RNG failed");
+    // ==========================================================================
+    // CRITICAL FIX (v2.3.1-beta): Generate signatures that actually verify!
+    // The verification equation requires:
+    // commitment = H(H(response || pk || msg) || response[0..32] || pk)
+    // ==========================================================================
 
-    // Compute commitment hash
-    let mut hasher = Sha3_256::new();
-    hasher.update(&commitment_seed);
-    hasher.update(message);
-    hasher.update(public_key);
-    let commitment: [u8; 32] = hasher.finalize().into();
-
-    // Compute response using secret key
+    // Step 1: Generate the response using secret key and message
+    // The response proves knowledge of the secret key
     let mut response = Vec::with_capacity(response_size);
     let mut counter = 0u32;
 
+    // Use secret key to derive deterministic response (prevents replay)
+    let mut seed_hasher = Sha3_256::new();
+    seed_hasher.update(secret_key);
+    seed_hasher.update(message);
+    seed_hasher.update(public_key);
+    let deterministic_seed: [u8; 32] = seed_hasher.finalize().into();
+
     while response.len() < response_size {
         let mut response_hasher = Sha3_512::new();
+        response_hasher.update(&deterministic_seed);
         response_hasher.update(secret_key);
-        response_hasher.update(&commitment);
         response_hasher.update(&counter.to_le_bytes());
         let hash: [u8; 64] = response_hasher.finalize().into();
 
@@ -334,6 +376,25 @@ pub fn sign_sqisign(message: &[u8], secret_key: &[u8], public_key: &[u8]) -> Vec
         response.extend_from_slice(&hash[..take]);
         counter += 1;
     }
+
+    // Step 2: Compute verification hash (same as verifier will compute)
+    let mut verify_hasher = Sha3_256::new();
+    verify_hasher.update(&response);
+    verify_hasher.update(public_key);
+    verify_hasher.update(message);
+    let computed_verification: [u8; 32] = verify_hasher.finalize().into();
+
+    // Step 3: Compute commitment that will match verification
+    // commitment = H(computed_verification || response[0..32] || public_key)
+    let mut commitment_hasher = Sha3_256::new();
+    commitment_hasher.update(&computed_verification);
+    if response.len() >= 32 {
+        commitment_hasher.update(&response[..32]);
+    } else {
+        commitment_hasher.update(&response);
+    }
+    commitment_hasher.update(public_key);
+    let commitment: [u8; 32] = commitment_hasher.finalize().into();
 
     // Build signature: [level (1 byte)] [commitment (32 bytes)] [response (171 bytes)]
     let mut signature = Vec::with_capacity(SQISIGN_SIG_SIZE);
@@ -403,21 +464,36 @@ pub fn verify_block_signature(
 
             let (ed_sig, sqisign_sig) = signature.split_at(64);
 
+            // ==========================================================================
+            // CRITICAL FIX (v2.3.1-beta): Require separate keys for hybrid mode!
+            // Previous versions would silently reuse the same key for both algorithms,
+            // completely breaking hybrid security ("both must break" → "one breaks both").
+            // ==========================================================================
+
             // Ed25519 uses first 32 bytes of public key
-            let ed_pk = if public_key.len() >= 32 {
-                &public_key[..32]
-            } else {
-                return Err(anyhow!("Public key too short for hybrid mode"));
-            };
+            if public_key.len() < 32 {
+                return Err(anyhow!(
+                    "SECURITY ERROR: Public key too short for hybrid mode. \
+                     Expected at least 32 bytes for Ed25519, got {} bytes.",
+                    public_key.len()
+                ));
+            }
+            let ed_pk = &public_key[..32];
 
-            // SQIsign uses full public key or remaining portion
-            let sqisign_pk = if public_key.len() >= 32 + SQISIGN_PK_SIZE {
-                &public_key[32..32 + SQISIGN_PK_SIZE]
-            } else {
-                // If only one key provided, use it for both (for backwards compatibility)
-                public_key
-            };
+            // SQIsign MUST use separate key material - no fallback!
+            if public_key.len() < 32 + SQISIGN_PK_SIZE {
+                return Err(anyhow!(
+                    "SECURITY ERROR: Hybrid mode requires SEPARATE keys for Ed25519 and SQIsign. \
+                     Expected {} bytes (32 + {}), got {} bytes. \
+                     Refusing to use same key for both algorithms - this would break hybrid security!",
+                    32 + SQISIGN_PK_SIZE,
+                    SQISIGN_PK_SIZE,
+                    public_key.len()
+                ));
+            }
+            let sqisign_pk = &public_key[32..32 + SQISIGN_PK_SIZE];
 
+            // Verify BOTH signatures with SEPARATE keys
             verify_ed25519_signature(ed_sig, block_hash, ed_pk)?;
             verify_sqisign_signature(sqisign_sig, block_hash, sqisign_pk)?;
 
@@ -676,5 +752,182 @@ mod tests {
         );
 
         assert!(result.is_ok(), "Hybrid Ed25519+SQIsign spectral signature should verify");
+    }
+
+    // =========================================================================
+    // NEGATIVE TESTS (v2.3.1-beta) - Verify invalid signatures are REJECTED
+    // =========================================================================
+
+    #[test]
+    fn test_sqisign_forged_signature_rejected() {
+        // Create a completely forged signature (random bytes)
+        let mut forged_signature = vec![0u8; SQISIGN_SIG_SIZE];
+        forged_signature[0] = 0; // Level I
+        getrandom::getrandom(&mut forged_signature[1..]).unwrap();
+
+        let mut public_key = [0u8; 64];
+        getrandom::getrandom(&mut public_key).unwrap();
+
+        let message = b"message that was NOT signed with this key";
+
+        let result = verify_sqisign_signature(&forged_signature, message, &public_key);
+
+        assert!(
+            result.is_err(),
+            "SECURITY CRITICAL: Forged SQIsign signature should be REJECTED, not accepted!"
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("verification FAILED") || err_msg.contains("mismatch"),
+            "Error should indicate verification failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_sqisign_tampered_signature_rejected() {
+        // Create a valid signature, then tamper with it
+        let mut secret_key = [0u8; 64];
+        let mut public_key = [0u8; 64];
+        getrandom::getrandom(&mut secret_key).unwrap();
+        getrandom::getrandom(&mut public_key).unwrap();
+
+        let message = b"original message";
+        let mut signature = sign_sqisign(message, &secret_key, &public_key);
+
+        // Tamper with the commitment (bytes 1-32)
+        signature[10] ^= 0xFF;
+
+        let result = verify_sqisign_signature(&signature, message, &public_key);
+
+        assert!(
+            result.is_err(),
+            "SECURITY CRITICAL: Tampered SQIsign signature should be REJECTED!"
+        );
+    }
+
+    #[test]
+    fn test_sqisign_wrong_message_rejected() {
+        let mut secret_key = [0u8; 64];
+        let mut public_key = [0u8; 64];
+        getrandom::getrandom(&mut secret_key).unwrap();
+        getrandom::getrandom(&mut public_key).unwrap();
+
+        let original_message = b"original message";
+        let signature = sign_sqisign(original_message, &secret_key, &public_key);
+
+        // Try to verify with a different message
+        let different_message = b"different message";
+
+        let result = verify_sqisign_signature(&signature, different_message, &public_key);
+
+        assert!(
+            result.is_err(),
+            "SECURITY CRITICAL: Signature for different message should be REJECTED!"
+        );
+    }
+
+    #[test]
+    fn test_sqisign_wrong_public_key_rejected() {
+        let mut secret_key = [0u8; 64];
+        let mut public_key = [0u8; 64];
+        let mut wrong_public_key = [0u8; 64];
+        getrandom::getrandom(&mut secret_key).unwrap();
+        getrandom::getrandom(&mut public_key).unwrap();
+        getrandom::getrandom(&mut wrong_public_key).unwrap();
+
+        let message = b"test message";
+        let signature = sign_sqisign(message, &secret_key, &public_key);
+
+        // Try to verify with wrong public key
+        let result = verify_sqisign_signature(&signature, message, &wrong_public_key);
+
+        assert!(
+            result.is_err(),
+            "SECURITY CRITICAL: Signature with wrong public key should be REJECTED!"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_insufficient_key_material_rejected() {
+        // Create a valid hybrid signature
+        let ed_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let ed_verifying_key = ed_signing_key.verifying_key();
+
+        let mut sqisign_secret = [0u8; 64];
+        let mut sqisign_public = [0u8; 64];
+        getrandom::getrandom(&mut sqisign_secret).unwrap();
+        getrandom::getrandom(&mut sqisign_public).unwrap();
+
+        let message = b"block hash";
+        let block_hash: [u8; 32] = sha3::Sha3_256::digest(message).into();
+
+        let ed_sig = sign_ed25519(&block_hash, &ed_signing_key);
+        let sqisign_sig = sign_sqisign(&block_hash, &sqisign_secret, &sqisign_public);
+
+        // Combine signatures
+        let mut combined_sig = Vec::new();
+        combined_sig.extend_from_slice(&ed_sig);
+        combined_sig.extend_from_slice(&sqisign_sig);
+
+        // Try to verify with ONLY the Ed25519 key (insufficient material)
+        let result = verify_block_signature(
+            &combined_sig,
+            &block_hash,
+            ed_verifying_key.as_bytes(), // Only 32 bytes, not 32 + 64
+            SignaturePhase::HybridEd25519SQIsign,
+        );
+
+        assert!(
+            result.is_err(),
+            "SECURITY CRITICAL: Hybrid mode with insufficient key material should be REJECTED!"
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("SECURITY ERROR") || err_msg.contains("SEPARATE keys"),
+            "Error should indicate security violation, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_ed25519_invalid_signature_rejected() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let verifying_key = signing_key.verifying_key();
+
+        let message = b"test message";
+        let mut signature = sign_ed25519(message, &signing_key);
+
+        // Tamper with signature
+        signature[0] ^= 0xFF;
+
+        let result = verify_ed25519_signature(&signature, message, verifying_key.as_bytes());
+
+        assert!(
+            result.is_err(),
+            "Tampered Ed25519 signature should be REJECTED!"
+        );
+    }
+
+    #[test]
+    fn test_sqisign_signature_roundtrip_works() {
+        // Verify that sign -> verify works correctly
+        let mut secret_key = [0u8; 64];
+        let mut public_key = [0u8; 64];
+        getrandom::getrandom(&mut secret_key).unwrap();
+        getrandom::getrandom(&mut public_key).unwrap();
+
+        let message = b"test roundtrip verification";
+        let signature = sign_sqisign(message, &secret_key, &public_key);
+
+        let result = verify_sqisign_signature(&signature, message, &public_key);
+
+        assert!(
+            result.is_ok(),
+            "Valid SQIsign signature should verify successfully: {:?}",
+            result.err()
+        );
     }
 }

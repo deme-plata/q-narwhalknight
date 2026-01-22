@@ -249,6 +249,64 @@ impl BlockWriter {
         db.write_batch(batch).await
             .context("Failed to write QBlock batch")?;
 
+        // 🚀 v2.3.12-beta: SCAN-FORWARD FIX - Update pointer when gap is filled
+        // ROOT CAUSE: When blocks arrive out of order (e.g., 102 before 101),
+        // the pointer only advances if height == current + 1. This creates permanent
+        // lag that causes endgame sync to take 10+ hours instead of seconds.
+        //
+        // FIX: After saving any block, scan forward to find the new highest contiguous
+        // height and update the pointer. This ensures gaps are closed immediately.
+        //
+        // Example: current=100, block 102 saved, then block 101 saved
+        // - Block 102: pointer stays at 100 (gap)
+        // - Block 101: pointer should advance to 102 (gap filled!)
+        //
+        // Without this fix, pointer stays at 101 until AUTO-REPAIR runs (seconds later).
+        // With this fix, pointer advances to 102 immediately.
+        //
+        // NEW: Also scan when extending chain normally, in case higher blocks exist.
+        let base_height = if should_update_pointer { height } else { current_height };
+
+        if height >= current_height {
+            // Scan forward from the new pointer position to find more contiguous blocks
+            let mut scan_height = base_height + 1;
+            let mut new_contiguous = base_height;
+
+            // Scan up to 500 blocks ahead (reasonable limit to prevent long scans)
+            // This is fast: ~50 RocksDB point lookups in worst case
+            let mut blocks_scanned = 0u32;
+            while scan_height <= base_height + 500 {
+                let scan_key = format!("qblock:height:{}", scan_height);
+                match db.get(CF_BLOCKS, scan_key.as_bytes()).await {
+                    Ok(Some(_)) => {
+                        new_contiguous = scan_height;
+                        scan_height += 1;
+                        blocks_scanned += 1;
+                    }
+                    _ => break, // Gap found, stop scanning
+                }
+            }
+
+            // Log scan result for debugging
+            if blocks_scanned > 0 {
+                debug!("🔍 [SCAN-FORWARD] Scanned {} blocks ahead: base={} → new_contiguous={}",
+                       blocks_scanned, base_height, new_contiguous);
+            }
+
+            // If we found blocks ahead of the pointer, update it
+            if new_contiguous > base_height {
+                let new_height_bytes = new_contiguous.to_be_bytes().to_vec();
+                let pointer_batch = vec![(CF_BLOCKS, b"qblock:latest".to_vec(), new_height_bytes)];
+
+                if let Err(e) = db.write_batch(pointer_batch).await {
+                    warn!("⚠️ [SCAN-FORWARD] Failed to update pointer: {}", e);
+                } else {
+                    info!("🔗 [SCAN-FORWARD] Extended chain! Pointer: {} → {} (+{} blocks)",
+                          base_height, new_contiguous, new_contiguous - base_height);
+                }
+            }
+        }
+
         // FIX 1.5: WRITE VERIFICATION
         // Immediately verify the block is readable
         match db.get(CF_BLOCKS, height_key.as_bytes()).await {

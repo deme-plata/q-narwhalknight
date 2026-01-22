@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet } from 'lucide-react';
-import { qnkAPI } from '../services/api';
+import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown } from 'lucide-react';
+import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG } from '../services/api';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
 import QuantumMixerVisualization from './QuantumMixerVisualization';
 import AddressBook from './AddressBook';
+import { flashBorderRed } from './AnimatedBorder';
 
 interface WalletBalance {
   symbol: string;
@@ -85,6 +86,12 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [showQRDisplay, setShowQRDisplay] = useState(false);
 
+  // Dynamic fee states (v3.4.0: height-gated 10x fee reduction)
+  const [currentFee, setCurrentFee] = useState(CURRENT_MIN_FEE_QUG);
+  const [networkHeight, setNetworkHeight] = useState(0);
+  const [feeReductionActive, setFeeReductionActive] = useState(false);
+  const [blocksUntilFeeReduction, setBlocksUntilFeeReduction] = useState(0);
+
   // v1.4.4: Calculate required confirmations based on transaction value (retail-first)
   const calculateConfirmations = (amountUsd: number): TransactionState['confirmations'] => {
     // Retail-optimized confirmation tiers with DAG-Knight finality
@@ -129,13 +136,15 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         isFinalized: false
       };
     } else {
-      // 🏦 SETTLEMENT: Large transfers - 30 confirmations
+      // 🏦 SETTLEMENT: Large transfers - 3 BFT confirmations
+      // v2.9.23: DAG-Knight BFT provides instant finality with 2f+1 validator signatures
+      // 3 blocks = ~6 seconds for institutional-grade certainty (vs 30 blocks = 60 seconds legacy)
       return {
         current: 0,
-        required: 30,
+        required: 3,
         tier: 'SETTLEMENT',
         tierEmoji: '🏦',
-        estimatedTimeRemaining: '~1 minute',
+        estimatedTimeRemaining: '~6 seconds',
         isFinalized: false
       };
     }
@@ -162,6 +171,45 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     };
 
     checkMixerAvailability();
+  }, []);
+
+  // v3.4.0: Fetch dynamic fee based on network height
+  useEffect(() => {
+    const fetchFeeInfo = async () => {
+      try {
+        // Fetch network height
+        const height = await qnkAPI.getNetworkHeight();
+        setNetworkHeight(height);
+
+        // Check if fee reduction is active
+        const isActive = height >= FEE_REDUCTION_ACTIVATION_HEIGHT;
+        setFeeReductionActive(isActive);
+
+        // Calculate blocks until fee reduction
+        if (!isActive) {
+          setBlocksUntilFeeReduction(FEE_REDUCTION_ACTIVATION_HEIGHT - height);
+        } else {
+          setBlocksUntilFeeReduction(0);
+        }
+
+        // Get current minimum fee (computed locally using height)
+        const fee = isActive ? NEW_MIN_FEE_QUG : CURRENT_MIN_FEE_QUG;
+        setCurrentFee(fee);
+
+        console.log(`💰 [FEE v3.4.0] Height: ${height}, Fee: ${fee} QUG, Reduction active: ${isActive}`);
+      } catch (error) {
+        console.warn('Failed to fetch fee info:', error);
+        // Default to current fee on error
+        setCurrentFee(CURRENT_MIN_FEE_QUG);
+      }
+    };
+
+    // Fetch immediately
+    fetchFeeInfo();
+
+    // Refresh every 30 seconds (blocks are ~2 seconds)
+    const interval = setInterval(fetchFeeInfo, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   // Restore ongoing mixing session on component mount
@@ -266,6 +314,19 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     const fetchBalances = async () => {
       const balances: WalletBalance[] = [];
 
+      // v2.9.16-beta: Check cooldown and get protected balances
+      const now = Date.now();
+      const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
+      const isInCooldown = now < globalCooldownUntil;
+      let protectedBalances: Record<string, { balance: number; until: number }> = {};
+
+      if (isInCooldown) {
+        try {
+          protectedBalances = JSON.parse(localStorage.getItem('protectedTokenBalances') || '{}');
+          console.log('🔒 [TransactionScreen v2.9.16] In cooldown - will use protected balances:', protectedBalances);
+        } catch (e) { /* ignore */ }
+      }
+
       // Use balance from App.tsx (same as TopBar) for immediate display
       console.log('✅ TransactionScreenV2: QUG balance from prop:', currentBalance);
       balances.push({
@@ -294,7 +355,13 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
             // Handle QUGUSD (native USD stablecoin)
             if (upperSymbol === 'QUGUSD') {
-              const qugUsdBalance = parseFloat(token.balance || '0');
+              let qugUsdBalance = parseFloat(token.balance || '0');
+              // v2.9.16-beta: Use protected balance during cooldown
+              const protectedData = protectedBalances[upperSymbol];
+              if (isInCooldown && protectedData && protectedData.until > now) {
+                console.log(`🔒 [TransactionScreen v2.9.16] Using protected QUGUSD: ${protectedData.balance} (API: ${qugUsdBalance})`);
+                qugUsdBalance = protectedData.balance;
+              }
               balances.push({
                 symbol: 'QUGUSD',
                 name: 'Quillon USD',
@@ -308,10 +375,32 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             }
 
             // Add custom tokens (any token that's not QUG or QUGUSD)
-            const customBalance = parseFloat(token.balance || '0');
+            // v3.0.7-beta: Validate token data to filter out invalid entries (like 404 HTML responses)
+            const tokenName = token.name || upperSymbol;
+
+            // Skip tokens with invalid symbols or names (contains HTML, too long, or empty)
+            if (!upperSymbol ||
+                upperSymbol.length > 20 ||
+                upperSymbol.includes('<') ||
+                upperSymbol.includes('>') ||
+                tokenName.includes('<html') ||
+                tokenName.includes('<!DOCTYPE') ||
+                tokenName.includes('404') ||
+                tokenName.length > 100) {
+              console.warn('⚠️ TransactionScreenV2: Skipping invalid token:', { symbol: upperSymbol, name: tokenName });
+              continue;
+            }
+
+            let customBalance = parseFloat(token.balance || '0');
+            // v2.9.16-beta: Use protected balance during cooldown for custom tokens
+            const protectedData = protectedBalances[upperSymbol];
+            if (isInCooldown && protectedData && protectedData.until > now) {
+              console.log(`🔒 [TransactionScreen v2.9.16] Using protected ${upperSymbol}: ${protectedData.balance} (API: ${customBalance})`);
+              customBalance = protectedData.balance;
+            }
             balances.push({
               symbol: upperSymbol,
-              name: token.name || upperSymbol,
+              name: tokenName,
               balance: customBalance,
               icon: 'custom',
               color: 'from-purple-400 to-pink-500',
@@ -419,13 +508,26 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     );
 
     // v1.4.10-beta: Listen for custom token balance updates via SSE
+    // v2.9.17-beta: Added cooldown check to prevent stale data
     const handleTokenBalanceUpdate = (event: CustomEvent) => {
       const { tokenSymbol, newBalance, reason } = event.detail;
-      console.log('🪙 [TransactionScreen] Token balance updated via SSE:', { tokenSymbol, newBalance, reason });
+      console.log('🪙 [TransactionScreen v2.9.17] Token balance updated:', { tokenSymbol, newBalance, reason });
+
+      // v2.9.17-beta: Check if this is a DEX swap - only trust DEX swap events during cooldown
+      const isDexSwap = reason === 'dex-swap-add' || reason === 'dex-swap-deduct';
+      const now = Date.now();
+      const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
+      const isInCooldown = now < globalCooldownUntil;
+
+      // During cooldown, only accept DEX swap events, block everything else
+      if (isInCooldown && !isDexSwap) {
+        console.log(`🛡️ [TransactionScreen v2.9.17] BLOCKED non-DEX event for ${tokenSymbol} during cooldown`);
+        return;
+      }
 
       // Update the balance for the matching token
       setWalletBalances(prev => prev.map(wallet => {
-        if (wallet.symbol === tokenSymbol) {
+        if (wallet.symbol?.toUpperCase() === tokenSymbol?.toUpperCase()) {
           console.log(`✅ [TransactionScreen] Updated ${wallet.symbol} balance: ${wallet.balance} → ${newBalance}`);
           return { ...wallet, balance: newBalance };
         }
@@ -435,9 +537,76 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
     window.addEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
 
+    // v2.9.17-beta: On mount, immediately check for protected balances and apply them
+    // This handles the case where user navigates to this page after a swap
+    const applyProtectedBalances = () => {
+      const now = Date.now();
+      const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
+      if (now < globalCooldownUntil) {
+        try {
+          const protectedBalances = JSON.parse(localStorage.getItem('protectedTokenBalances') || '{}');
+          console.log('🔒 [TransactionScreen v2.9.17] Applying protected balances on mount:', protectedBalances);
+
+          setWalletBalances(prev => prev.map(wallet => {
+            const upperSymbol = wallet.symbol?.toUpperCase() || '';
+            const protectedData = protectedBalances[upperSymbol];
+            if (protectedData && protectedData.until > now) {
+              console.log(`🔒 [TransactionScreen v2.9.17] Applied protected balance for ${wallet.symbol}: ${wallet.balance} → ${protectedData.balance}`);
+              return { ...wallet, balance: protectedData.balance };
+            }
+            return wallet;
+          }));
+        } catch (e) { /* ignore */ }
+      }
+    };
+
+    // Apply protected balances after a short delay to let fetchBalances complete first
+    const protectedTimeout = setTimeout(applyProtectedBalances, 100);
+    // Also apply again after 500ms to catch any race conditions
+    const protectedTimeout2 = setTimeout(applyProtectedBalances, 500);
+
+    // v2.9.3-beta: Listen for wallet-balance-updated events (DEX swaps for QUG and QUGUSD)
+    // This is critical for showing updated balances after swaps without waiting for API
+    const handleWalletBalanceUpdate = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { symbol, balance: newBalance, reason } = customEvent.detail || {};
+
+      // Only handle native tokens (QUG and QUGUSD) - custom tokens use token-balance-updated
+      if (symbol !== 'QUG' && symbol !== 'QUGUSD') return;
+
+      const isDexSwap = reason === 'dex-swap-deduct' || reason === 'dex-swap-add';
+      console.log(`💰 [TransactionScreen] wallet-balance-updated for ${symbol}:`, newBalance, 'reason:', reason, 'isDexSwap:', isDexSwap);
+
+      if (isDexSwap && typeof newBalance === 'number' && !isNaN(newBalance)) {
+        // DEX swaps are authoritative - update immediately without validation
+        setWalletBalances(prev => prev.map(wallet => {
+          if (wallet.symbol === symbol) {
+            console.log(`✅ [TransactionScreen] DEX SWAP: Updated ${symbol}: ${wallet.balance} → ${newBalance}`);
+            // Also update highestKnownBalancesRef for increases
+            if (newBalance > (highestKnownBalancesRef.current[symbol] || 0)) {
+              highestKnownBalancesRef.current[symbol] = newBalance;
+            }
+            return { ...wallet, balance: newBalance };
+          }
+          return wallet;
+        }));
+
+        // Update localStorage cache
+        if (symbol === 'QUGUSD') {
+          localStorage.setItem('cachedQugusdBalance', newBalance.toString());
+        }
+      }
+    };
+
+    window.addEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
+    console.log('👂 [TransactionScreen] Listening for wallet-balance-updated events');
+
     return () => {
       eventSource.close();
       window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
+      window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
+      clearTimeout(protectedTimeout);
+      clearTimeout(protectedTimeout2);
     };
   }, [currentBalance]);
 
@@ -460,20 +629,22 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
       return { valid: false, error: 'Please enter a valid amount' };
     }
 
-    const fee = 0.00001;
+    // v3.4.0: Use dynamic fee based on network height
+    const fee = currentFee;
     const totalRequired = amount + fee;
 
-    console.log('💰 Balance check:');
+    console.log('💰 Balance check (v3.4.0):');
     console.log('   Amount:', amount);
-    console.log('   Fee:', fee);
+    console.log('   Fee:', fee, feeReductionActive ? '(10x reduced!)' : '(legacy)');
     console.log('   Total required:', totalRequired);
     console.log('   Current balance:', balance);
+    console.log('   Network height:', networkHeight);
     console.log('   Has sufficient balance?', balance >= totalRequired);
 
     if (balance < totalRequired) {
       return {
         valid: false,
-        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} ${selectedCoin} (${amount} + ${fee} fee), Available: ${balance.toFixed(8)} ${selectedCoin}`
+        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} ${selectedCoin} (${amount} + ${fee.toFixed(6)} fee), Available: ${balance.toFixed(8)} ${selectedCoin}`
       };
     }
 
@@ -551,6 +722,9 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
           // For fallback transactions, handle success immediately
           if (result.success && result.data) {
+            // Flash border red to indicate transaction sent
+            flashBorderRed();
+
             setTransaction(prev => ({
               ...prev,
               success: true,
@@ -607,6 +781,9 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
       if (result.success && result.data) {
         console.log('✅ Transaction successful! Hash:', result.data.transaction_hash);
         console.log('✅ Full transaction data:', JSON.stringify(result.data, null, 2));
+
+        // Flash border red to indicate transaction sent
+        flashBorderRed();
 
         // v1.3.12-beta: Extract validator count from consensus certificate
         // This shows how many nodes cooperated in confirming the transaction
@@ -858,9 +1035,44 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                   Available: <span className="text-quantum-green font-semibold">{(selectedWallet?.balance || 0).toFixed(8)} {selectedCoin}</span>
                 </span>
                 <span className="text-gray-400">
-                  Fee: <span className="text-quantum-yellow">0.00001 {selectedCoin}</span>
+                  Fee: <span className={feeReductionActive ? "text-quantum-green" : "text-quantum-yellow"}>
+                    {currentFee.toFixed(6)} {selectedCoin}
+                  </span>
+                  {feeReductionActive && (
+                    <span className="ml-1 text-quantum-green text-xs">(10x reduced!)</span>
+                  )}
                 </span>
               </div>
+
+              {/* v3.4.0: Fee reduction notice */}
+              {!feeReductionActive && blocksUntilFeeReduction > 0 && (
+                <div className="mt-3 p-3 bg-gradient-to-r from-amber-500/10 to-yellow-500/10 border border-amber-500/30 rounded-xl">
+                  <div className="flex items-center gap-2">
+                    <TrendingDown className="w-4 h-4 text-amber-400" />
+                    <span className="text-sm text-amber-300 font-medium">
+                      10x Fee Reduction Coming Soon!
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">
+                    At block {FEE_REDUCTION_ACTIVATION_HEIGHT.toLocaleString()} (in ~{blocksUntilFeeReduction.toLocaleString()} blocks),
+                    fees drop from {CURRENT_MIN_FEE_QUG} to {NEW_MIN_FEE_QUG} QUG.
+                  </p>
+                </div>
+              )}
+
+              {feeReductionActive && (
+                <div className="mt-3 p-3 bg-gradient-to-r from-green-500/10 to-emerald-500/10 border border-green-500/30 rounded-xl">
+                  <div className="flex items-center gap-2">
+                    <TrendingDown className="w-4 h-4 text-green-400" />
+                    <span className="text-sm text-green-300 font-medium">
+                      10x Fee Reduction Active!
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Transaction fees are now 10x cheaper: {NEW_MIN_FEE_QUG} QUG minimum.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Memo */}
@@ -1201,7 +1413,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                       '3-deep DAG confirmation for high-value protection'
                     )}
                     {transaction.confirmations.tier === 'SETTLEMENT' && (
-                      'Full cryptographic proof for institutional-grade security'
+                      'DAG-Knight BFT: 2f+1 validator signatures per block (~6s finality)'
                     )}
                   </div>
                 </div>
@@ -1248,7 +1460,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 bg-black"
           >
-            <QuantumMixerVisualization
+            <div className="w-full h-full">
+              <QuantumMixerVisualization
               sessionId={mixingSessionId}
               privacyLevel={privacyLevel}
               onComplete={() => {
@@ -1266,6 +1479,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 }));
               }}
             />
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

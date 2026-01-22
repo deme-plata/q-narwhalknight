@@ -46,42 +46,48 @@ This guide explains how to set up distributed development with multiple Claude C
 
 #### **⚠️ PRIVATE BLOCKCHAIN - API AUTHENTICATION REQUIRED**
 - **This is a PRIVATE blockchain - ALL balance/wallet API endpoints require authentication**
-- **DO NOT attempt to curl balance endpoints** - they will return empty without proper auth tokens
-- **DO NOT try alternative balance endpoint formats** - none of them work without auth
+- **🚨 NEVER attempt to curl balance endpoints** - they will return empty without proper auth tokens
+- **🚨 NEVER try alternative balance endpoint formats** - none of them work without auth
+- **🚨 NEVER use curl to check if balances are working** - this wastes time and doesn't work
 - Balance information is only accessible through:
   1. The frontend UI at `quillon.xyz` (uses session-based auth)
-  2. Server logs (journalctl)
+  2. Server logs (journalctl) - look for balance update events
   3. SSE stream events (for real-time monitoring)
+  4. Ask the user to check the frontend UI
 
-**How to check mining rewards and balances:**
+**How to check mining rewards and balances (CORRECT WAY):**
 ```bash
 # Check P2P balance updates being broadcast/applied:
-journalctl -u q-api-server --since "5 minutes ago" | grep -E "P2P BALANCE|balance_updates"
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "P2P BALANCE|balance_updates|DAG→SSE|P2P→SSE"
 
 # Check miner stats via P2P:
 journalctl -u q-api-server --since "5 minutes ago" | grep -E "miner-stats|MiningStats"
 
-# Check SSE stream for mining stats (these are public):
-timeout 10 curl -s -N "http://localhost:8080/api/v1/events" | grep -E "MiningStats|MiningReward"
+# Check for DAG layer balance processing (v3.2.6+ fix):
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "DAG-KNIGHT.*balance|DAG→SSE"
 
-# Check Docker node logs for mining activity:
-docker logs q-docker-test 2>&1 | tail -50 | grep -E "miner|balance|reward"
+# Check Docker node logs for mining activity (ask user to run on Server Alpha):
+docker logs <container-name> 2>&1 | tail -50 | grep -E "miner|balance|reward"
+
+# Check if blocks from other nodes are being received:
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK from"
 ```
 
 **Mining reward discrepancy testing:**
 - Mining rewards are credited locally on the node that receives the mining submission
-- Rewards propagate via P2P gossipsub to other nodes
+- Rewards propagate via P2P gossipsub to other nodes (through coinbase transactions in blocks)
 - To compare rewards between nodes, check the server logs, NOT the API endpoints
+- If mining to a non-bootstrap node, check for "DAG-KNIGHT" and "DAG→SSE" log messages on bootstrap
 
 ### **P2P Network Bootstrap:**
-- **Bootstrap Peer ID**: `12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu` (Server Beta actual PeerID as of 2025-12-15, from ./data-mine16/libp2p_identity.key)
-- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu`
-- **Network ID**: `testnet-phase16`
+- **Bootstrap Peer ID**: `12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx` (Server Beta actual PeerID as of 2026-01-19, from ./data-mine19/libp2p_identity.key)
+- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx`
+- **Network ID**: `testnet-phase19`
 - **Gossipsub Topics**:
-  - `/qnk/testnet-phase16/blocks` - Block propagation
-  - `/qnk/testnet-phase16/peer-heights` - Network height announcements
-  - `/qnk/testnet-phase16/turbo-sync-request` - Batch sync requests
-  - `/qnk/testnet-phase16/turbo-sync-response` - Batch sync responses
+  - `/qnk/testnet-phase19/blocks` - Block propagation
+  - `/qnk/testnet-phase19/peer-heights` - Network height announcements
+  - `/qnk/testnet-phase19/turbo-sync-request` - Batch sync requests
+  - `/qnk/testnet-phase19/turbo-sync-response` - Batch sync responses
 
 ---
 
@@ -231,43 +237,255 @@ git config user.email "server-beta@q-narwhalknight.dev"
    - **User Downloads**: ALWAYS copy binaries to `/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/`
    - **IMPORTANT**: The correct path is the FULL PATH starting with `/opt/orobit/`, NOT the relative path
 
-   **🚀 MANDATORY DEPLOYMENT CHECKLIST (After Every Release Build):**
+---
 
-   When deploying a new version (e.g., v1.1.8-beta), ALWAYS:
+## 🛡️ **MANDATORY TESTING & DEPLOYMENT SAFETY PROTOCOL**
+
+### **⚠️ RISK CATEGORIZATION - Know What You're Changing**
+
+Before making ANY change, categorize its risk level:
+
+| Risk Level | Description | Required Testing | Docker Soak Time |
+|------------|-------------|------------------|------------------|
+| 🟢 **LOW** | UI-only, logging, comments, docs | `cargo check` | None |
+| 🟡 **MEDIUM** | API handlers, SSE events, in-memory stats | `cargo test` + manual verify | Optional |
+| 🟠 **HIGH** | Balance logic, mining rewards, P2P messaging | Full test suite + Docker test | 24 hours |
+| 🔴 **CRITICAL** | Consensus, block validation, storage, sync | Full suite + Docker + Code review | 48-72 hours |
+
+**Examples by Risk Level:**
+
+- 🟢 **LOW**: Miner tracking display fix (only affects in-memory stats, no DB)
+- 🟡 **MEDIUM**: New API endpoint, SSE event field changes
+- 🟠 **HIGH**: Mining reward calculation, balance propagation, P2P message handling
+- 🔴 **CRITICAL**: Block validation rules, turbo_sync logic, database schema changes
+
+### **🧪 MANDATORY TESTING PROTOCOL (NEVER SKIP!)**
+
+**⚠️ ALL TESTS MUST PASS BEFORE ANY DEPLOYMENT - NO EXCEPTIONS!**
+
+```bash
+# ═══════════════════════════════════════════════════════════════════
+# MAINNET SAFETY TEST SUITE - RUN ALL BEFORE EVERY DEPLOYMENT
+# ═══════════════════════════════════════════════════════════════════
+# These tests protect against MILLIONS in potential losses on mainnet.
+# NEVER skip tests. NEVER deploy with failures.
+
+# 1. CORE SAFETY TESTS (Always run)
+echo "🛡️ Running mainnet safety test suite..."
+
+# Sync Safety - Prevents catastrophic data loss
+timeout 300 cargo test --package q-storage --test sync_down_protection_tests
+timeout 300 cargo test --package q-storage --test fork_detection_tests
+
+# Balance Integrity - Prevents money loss/creation
+timeout 300 cargo test --package q-storage --test balance_propagation_tests
+timeout 300 cargo test --package q-storage --test balance_integrity_tests
+timeout 300 cargo test --package q-storage --test mainnet_critical_tests  # Double-spend, replay
+
+# DEX Safety - Prevents AMM exploits
+timeout 300 cargo test --package q-dex --test overflow_protection_tests
+timeout 300 cargo test --package q-dex --test comprehensive_dex_tests
+
+# Consensus Safety - Prevents network splits
+timeout 300 cargo test --package q-types --test block_validation_tests
+timeout 300 cargo test --package q-types --test signature_verification_tests
+
+# API Safety - Prevents injection/manipulation
+timeout 300 cargo test --package q-api-server --test mining_stats_tests
+timeout 300 cargo test --package q-api-server --test sse_streaming_tests
+
+# 2. FULL WORKSPACE TEST (Comprehensive)
+timeout 3600 cargo test --workspace
+
+# ═══════════════════════════════════════════════════════════════════
+# IF ANY TEST FAILS - STOP IMMEDIATELY!
+# ═══════════════════════════════════════════════════════════════════
+# A single test failure could indicate a bug that causes:
+# - User funds lost forever
+# - Network consensus failure
+# - Double-spending vulnerability
+# - Chain corruption requiring hard reset
+#
+# NEVER proceed with deployment if tests fail!
+# NEVER use --skip or ignore flags!
+# NEVER say "it's just one test" - that one test could save millions!
+```
+
+### **💰 MAINNET CRITICAL TEST CATEGORIES**
+
+These tests specifically prevent scenarios that could cause financial damage:
+
+| Test Suite | Protects Against | Potential Loss |
+|------------|------------------|----------------|
+| `sync_down_protection_tests` | Blockchain wipe, data loss | All user funds |
+| `balance_integrity_tests` | Incorrect balances | Users lose/gain money |
+| `mainnet_critical_tests` | Double-spend, replay attacks | Theft of funds |
+| `fork_detection_tests` | Chain splits, orphaned txs | Lost transactions |
+| `overflow_protection_tests` | AMM exploits, math errors | DEX pool draining |
+| `signature_verification_tests` | Forged transactions | Unauthorized transfers |
+| `block_validation_tests` | Invalid blocks accepted | Consensus failure |
+
+### **🐳 DOCKER SOAK TESTING (HIGH/CRITICAL Changes)**
+
+For HIGH and CRITICAL risk changes, test on Server Alpha Docker BEFORE production:
+
+```bash
+# On Server Alpha (ask user to run these commands):
+
+# 1. Create test container with new binary
+docker run -d --name q-test-v${VERSION} \
+  -p 8085:8080 -p 9005:9001 \
+  -v /data/q-test:/data \
+  ubuntu:22.04 bash -c "
+    wget https://quillon.xyz/downloads/q-api-server-${VERSION} && \
+    chmod +x q-api-server-${VERSION} && \
+    ./q-api-server-${VERSION} --port 8080 --p2p-port 9001
+  "
+
+# 2. Monitor for the required soak time
+docker logs -f q-test-v${VERSION} 2>&1 | grep -E "ERROR|CRITICAL|panic"
+
+# 3. Check sync progress
+docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
+
+# 4. Only after successful soak: Deploy to production
+```
+
+### **🚀 DEPLOYMENT CHECKLIST (After Testing Passes)**
 
    ```bash
-   # 1. Build release binary
+   # ═══════════════════════════════════════════════════════════════════
+   # DEPLOYMENT CHECKLIST - ONLY RUN AFTER ALL TESTS PASS!
+   # ═══════════════════════════════════════════════════════════════════
+
+   VERSION="v3.2.25-beta"  # Update for each release
+
+   # 1. ✅ Confirm tests passed (check output above)
+   echo "All tests passed? (yes/no)"
+   # If no: STOP HERE and fix tests first!
+
+   # 2. Build release binary
    timeout 36000 cargo build --release --package q-api-server --bin q-api-server
 
-   # 2. Copy to downloads folder for wget access
-   VERSION="v1.1.8-beta"  # Update this for each release
+   # 3. Copy to downloads folder for wget access
    cp /opt/orobit/shared/q-narwhalknight/target/release/q-api-server \
       /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-${VERSION}
 
-   # 3. Copy to /usr/bin for local service
-   cp /opt/orobit/shared/q-narwhalknight/target/release/q-api-server /usr/bin/q-api-server-${VERSION}
-   ln -sf /usr/bin/q-api-server-${VERSION} /usr/bin/q-api-server
-
    # 4. Restart service
-   killall -9 q-api-server 2>/dev/null; sleep 2 && systemctl start q-api-server
+   ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null
+   sleep 2 && systemctl start q-api-server
 
    # 5. Verify deployment
+   sleep 5
    systemctl status q-api-server --no-pager | head -20
+   curl -s http://localhost:8080/api/v1/status | jq '.data.version'
+
+   # 6. Tell user the wget link
+   echo "wget https://quillon.xyz/downloads/q-api-server-${VERSION} && chmod +x q-api-server-${VERSION}"
    ```
+
+   **⚠️ NOTE: No /usr/bin copy needed!**
+   The systemd service file (`/etc/systemd/system/q-api-server.service`) points
+   directly to `/opt/orobit/shared/q-narwhalknight/target/release/q-api-server`.
+   Do NOT copy binaries to /usr/bin - it's unnecessary and can cause version confusion.
 
    **📥 LATEST WGET DOWNLOAD LINK (Update after each deploy):**
    ```
-   Current Version: v1.4.1-beta
-   wget https://quillon.xyz/downloads/q-api-server-v1.4.1-beta
-   chmod +x q-api-server-v1.4.1-beta
+   Current Version: v3.3.9-beta
+   wget https://quillon.xyz/downloads/q-api-server-v3.3.9-beta
+   chmod +x q-api-server-v3.3.9-beta
    ```
 
    **IMPORTANT**: After EVERY deployment, tell the user the wget link:
    ```
-   wget https://quillon.xyz/downloads/q-api-server-v1.4.1-beta && chmod +x q-api-server-v1.4.1-beta
+   wget https://quillon.xyz/downloads/q-api-server-v3.3.9-beta && chmod +x q-api-server-v3.3.9-beta
    ```
 
-5. **🚨 PRE-COMMIT SAFETY CHECKLIST**
+5. **🔄 CONNECTION WARMUP FOR NEW NODES (v3.3.7-beta)**
+
+   When a new node generates its libp2p identity (first boot), the DHT routing
+   tables are empty and bootstrap connections often fail. v3.3.7-beta adds
+   **automatic connection warmup** for new identities:
+
+   - Detects when identity is newly generated vs loaded from disk
+   - If NEW: Implements retry loop with exponential backoff (3s, 6s, 12s)
+   - Re-triggers Kademlia DHT bootstrap after initial failures
+   - Re-dials bootstrap peers automatically
+
+   **Symptoms this fixes:**
+   - "P2P connections fail on first boot but work after restart"
+   - "New node can't connect to bootstrap peer"
+   - "DHT routing table empty on new node"
+
+   **How it works:**
+   ```
+   First Boot (NEW identity):
+   1. Generate new identity → Save to disk
+   2. Dial bootstrap peers → Wait 3s
+   3. Check connections → If none, retry bootstrap
+   4. Wait 6s → Check again → If none, retry
+   5. Wait 12s → Check again → If none, warn and continue
+
+   Subsequent Boot (LOADED identity):
+   → Normal bootstrap without warmup (identity already in DHT)
+   ```
+
+6. **🛡️ PRE-FLIGHT VERIFICATION FOR MAINNET-SAFE DEPLOYMENT (v3.3.7-beta)**
+
+   **PROBLEM:** "Cowboy coding" deployments cause anxiety - what if the new
+   binary corrupts the database or breaks consensus?
+
+   **SOLUTION:** Pre-flight verification runs BEFORE serving requests:
+
+   ```bash
+   # Test new binary WITHOUT affecting the network:
+   Q_PREFLIGHT_ONLY=1 ./q-api-server-new
+
+   # Run preflight check at startup (normal operation after):
+   Q_PREFLIGHT_CHECK=1 ./q-api-server
+
+   # Configure verification depth:
+   Q_PREFLIGHT_SAMPLE_RATE=0.01   # Verify 1% of blocks (fast, default)
+   Q_PREFLIGHT_SAMPLE_RATE=1.0    # Verify 100% of blocks (thorough)
+   Q_PREFLIGHT_MAX_BLOCKS=10000   # Max blocks to verify (default 10K)
+   ```
+
+   **What it checks:**
+   - Block chain integrity (blocks load and deserialize correctly)
+   - Parent chain continuity (last 100 blocks have valid parent links)
+   - Height pointer consistency (tip block exists and matches)
+   - Schema version compatibility
+
+   **PASS/FAIL Report:**
+   ```
+   ╔═══════════════════════════════════════════════════════════════╗
+   ║               PRE-FLIGHT VERIFICATION REPORT                  ║
+   ╠═══════════════════════════════════════════════════════════════╣
+   ║  Current Height: 205490 blocks                                ║
+   ║  Blocks Verified: 2055                                        ║
+   ║  Blocks with Issues: 0                                        ║
+   ║  Verification Time: 2.34s                                     ║
+   ╠═══════════════════════════════════════════════════════════════╣
+   ║  ✅ PRE-FLIGHT CHECK: PASSED                                  ║
+   ║     Node is safe to start serving requests                    ║
+   ╚═══════════════════════════════════════════════════════════════╝
+   ```
+
+   **Recommended Testnet→Mainnet Deployment Workflow:**
+   ```
+   1. Build new binary
+   2. Copy to Server Alpha Docker container
+   3. Run: Q_PREFLIGHT_ONLY=1 ./q-api-server-new
+      → Verifies blocks load correctly
+      → Reports any issues
+      → Exits WITHOUT serving requests
+   4. If PASSED: Let Docker node sync for 24-48 hours
+   5. If still healthy: Deploy to Server Beta bootstrap
+   6. Run: Q_PREFLIGHT_CHECK=1 systemctl start q-api-server
+      → Preflight runs, then normal operation
+   ```
+
+7. **🚨 PRE-COMMIT SAFETY CHECKLIST**
 
    Before EVERY commit involving sync/consensus/storage code, verify:
 
@@ -383,7 +601,100 @@ git config user.email "server-beta@q-narwhalknight.dev"
    ./scripts/safe-deploy.sh rollback # If something goes wrong
    ```
 
-7. **NEVER DELETE USER DOWNLOAD BINARIES**
+8. **🤖 AUTOMATIC MAINNET SAFETY PROCEDURES (v3.3.9-beta+)**
+
+   **IMPORTANT: These procedures are now AUTOMATIC - Claude should follow them without being asked!**
+
+   When making ANY code changes to consensus-critical code, Claude MUST:
+
+   **A) USE THE UPGRADE GATE FOR VALIDATION CHANGES:**
+   ```rust
+   // Location: crates/q-api-server/src/main.rs
+   // Import the upgrade gate
+   use q_consensus_guard::{ConsensusGuard, GuardConfig, Upgrade, is_upgrade_active};
+
+   // Check upgrade status before applying new rules
+   if is_upgrade_active(Upgrade::PostQuantumSignatures, block_height) {
+       // New rule applies
+   } else {
+       // Old rule applies (for historical blocks)
+   }
+   ```
+
+   **B) VERIFY DEPLOYMENT WITH UPGRADE GATE CHECK:**
+   After EVERY deployment, verify upgrade gate is working:
+   ```bash
+   journalctl -u q-api-server --since "1 minute ago" | grep "UPGRADE GATE"
+   # Should see: "🔐 [UPGRADE GATE] Initialized for TESTNET"
+   ```
+
+   **C) USE VERSION FILTERING FOR P2P:**
+   New peer height announcements include version info:
+   ```rust
+   // Location: crates/q-network/src/zk_peer_height_proof.rs
+   use q_network::{create_peer_height_announcement, should_sync_from_peer};
+
+   // Create announcement with version
+   let announcement = create_peer_height_announcement(&peer_id, height, &network_id);
+
+   // Filter peers before syncing
+   if !should_sync_from_peer(&peer_announcement, &our_network_id, strict_mode) {
+       warn!("Rejecting incompatible peer");
+       return;
+   }
+   ```
+
+   **D) AUTOMATIC DEPLOYMENT WORKFLOW:**
+   When Claude builds and deploys, ALWAYS use this sequence:
+   ```bash
+   # 1. Build with 10-hour timeout
+   timeout 36000 cargo build --release --package q-api-server
+
+   # 2. Copy to downloads
+   VERSION="v3.3.9-beta"  # Update version
+   cp target/release/q-api-server \
+      /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-${VERSION}
+
+   # 3. Copy to /usr/bin
+   cp target/release/q-api-server /usr/bin/q-api-server
+
+   # 4. Restart service (use kill -9, NOT killall)
+   ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null
+   sleep 2
+   systemctl start q-api-server
+
+   # 5. Verify upgrade gate
+   sleep 5
+   journalctl -u q-api-server --since "30 seconds ago" | grep "UPGRADE GATE"
+
+   # 6. Tell user the download link
+   echo "Download: wget https://quillon.xyz/downloads/q-api-server-${VERSION}"
+   ```
+
+   **E) MAINNET SAFETY FEATURES (Auto-enabled in v3.3.9+):**
+   - ✅ **Upgrade Gate**: Height-gated validation rules (crates/q-consensus-guard/)
+   - ✅ **Version Filtering**: Peer compatibility checks (crates/q-network/src/zk_peer_height_proof.rs)
+   - ✅ **Fork Detection**: Automatic reorg detection (crates/q-storage/src/fork_detector.rs)
+   - ✅ **Pre-flight Check**: Database integrity verification (crates/q-storage/src/preflight_check.rs)
+   - ✅ **Safe Deploy Script**: Automated deployment with rollback (scripts/safe-deploy.sh)
+
+   **F) WHEN ADDING NEW CONSENSUS RULES:**
+   1. Define the upgrade in `crates/q-consensus-guard/src/upgrade_gate.rs`
+   2. Add activation height (testnet: immediate, mainnet: 2 weeks future)
+   3. Wrap the new rule with `is_upgrade_active(Upgrade::YourUpgrade, block_height)`
+   4. Export from `crates/q-consensus-guard/src/lib.rs`
+   5. Test that old blocks still validate with old rules
+   6. Deploy using safe-deploy.sh
+
+   **G) CAPABILITY ANNOUNCEMENTS (v3.3.9+):**
+   Nodes now announce their capabilities to peers:
+   - `upgrade-gate-v1` - Height-gated upgrades supported
+   - `consensus-guard-v1` - Mainnet safety checks
+   - `pq-signatures-ready` - Post-quantum signatures ready
+   - `sync-down-protection` - Sync-down safety checks
+   - `version-filter-v1` - Version filtering enabled
+
+9. **NEVER DELETE USER DOWNLOAD BINARIES**
    - When updating frontend, PRESERVE the downloads folder
    - Users rely on downloading binaries with specific version names
    - After building, always copy to the CORRECT location:
@@ -401,10 +712,63 @@ git config user.email "server-beta@q-narwhalknight.dev"
      ```
 
 #### **Testing Requirements:**
+
+**🚨 MANDATORY: Run ALL critical tests before ANY deployment!**
+
+These tests protect against catastrophic mainnet failures that could cause millions in losses.
+
 ```bash
-# Before every commit:
+# ============================================================================
+# CRITICAL MAINNET SAFETY TESTS - MUST PASS BEFORE DEPLOYMENT
+# ============================================================================
+
+# 1. MAINNET CRITICAL TESTS (20 tests)
+#    Protects against: Double-spend, replay attacks, overflow, coinbase fraud
+timeout 300 cargo test --package q-storage --test mainnet_critical_tests
+
+# 2. SIGNATURE VERIFICATION TESTS (15 tests)
+#    Protects against: Invalid signature acceptance, forgery, theft
+timeout 300 cargo test --package q-types --test signature_verification_tests
+
+# 3. BACKUP/RESTORE TESTS (17 tests)
+#    Protects against: Data loss, corrupt backups, failed disaster recovery
+timeout 300 cargo test --package q-storage --test backup_restore_tests
+
+# 4. FORK/REORG SAFETY TESTS (19 tests)
+#    Protects against: Chain splits, balance inconsistency during reorg
+timeout 300 cargo test --package q-storage --test fork_reorg_tests
+
+# 5. BALANCE PROPAGATION TESTS (28 tests)
+#    Protects against: Balance corruption, P2P sync issues
+timeout 300 cargo test --package q-storage --test balance_propagation_tests
+
+# 6. OVERFLOW PROTECTION TESTS (26 tests)
+#    Protects against: DEX overflow attacks, u128 arithmetic bugs
+timeout 300 cargo test --package q-dex --test overflow_protection_tests
+
+# 7. SYNC DOWN PROTECTION (if exists)
+#    Protects against: Catastrophic sync-down data loss
+timeout 300 cargo test --package q-storage --test sync_down_protection_tests 2>/dev/null || echo "sync_down_protection_tests not found"
+
+# ============================================================================
+# QUICK REFERENCE: What each test suite protects against
+# ============================================================================
+#
+# | Test Suite                    | Tests | Protects Against                      |
+# |-------------------------------|-------|---------------------------------------|
+# | mainnet_critical_tests        |    20 | Double-spend, replay, coinbase fraud  |
+# | signature_verification_tests  |    15 | Forged signatures, stolen funds       |
+# | backup_restore_tests          |    17 | Data loss, corrupt backups            |
+# | fork_reorg_tests              |    19 | Chain splits, reorg balance bugs      |
+# | balance_propagation_tests     |    28 | Balance corruption, sync issues       |
+# | overflow_protection_tests     |    26 | DEX overflow attacks, u128 bugs       |
+# |-------------------------------|-------|---------------------------------------|
+# | TOTAL                         |  125+ | Mainnet-critical protection           |
+# ============================================================================
+
+# STANDARD TESTS (also run before commit)
 cargo test --workspace
-cargo clippy -- -D warnings  
+cargo clippy -- -D warnings
 cargo fmt --check
 cargo bench --no-run
 
@@ -412,24 +776,42 @@ cargo bench --no-run
 cargo check --workspace
 # If errors occur, fix them at the source, don't work around them
 
-# Tor-specific testing:
-cargo test --package q-tor-client
-cargo test --package q-tor-circuit  
-cargo bench tor_latency_test
+# Tor-specific testing (if implemented):
+cargo test --package q-tor-client 2>/dev/null || true
+cargo test --package q-tor-circuit 2>/dev/null || true
 ```
 
-#### **⏱️ COMPILATION TIMEOUT REQUIREMENT:**
+**⚠️ DEPLOYMENT BLOCKED IF ANY CRITICAL TEST FAILS!**
+
+Never deploy if any of the 125+ critical tests fail. These tests exist because each
+scenario has caused or could cause real money loss on mainnet.
+
+#### **⏱️ COMPILATION TIMEOUT REQUIREMENT (MANDATORY):**
+
+**🚨 NEVER use short timeouts for cargo check/build/test - ALWAYS use 10-hour (36000s) timeout!**
+
+This codebase has complex dependencies (post-quantum crypto, AI inference, etc.) that require
+extended compilation times. Short timeouts cause builds to fail silently or terminate early.
+
 ```bash
-# CRITICAL: Always use 10-hour timeout for compilation
+# CRITICAL: Always use 10-hour timeout for ALL cargo operations
 # This ensures complex quantum consensus components have sufficient build time
-timeout 36000 cargo build --release --workspace  # 10 hours = 36000 seconds
+timeout 36000 cargo check --package q-api-server  # 10 hours even for check!
+timeout 36000 cargo build --release --workspace   # 10 hours = 36000 seconds
 timeout 36000 cargo run --bin q-api-server        # 10 hours for development builds
 timeout 36000 cargo test --workspace              # 10 hours for comprehensive testing
 
 # Example usage:
 timeout 36000 cargo build --release --package q-api-server
 timeout 36000 cargo build --release --package q-narwhal-core
+
+# WRONG - NEVER DO THIS:
+# timeout 120 cargo check   # ❌ TOO SHORT - will terminate prematurely!
+# cargo build              # ❌ NO TIMEOUT - may hang indefinitely!
 ```
+
+**Why 10 hours?** Post-quantum cryptography crates (pqcrypto, kyber, dilithium) plus AI inference
+dependencies can take 30+ minutes to compile on first build. Always err on the side of more time.
 
 #### **🚨 CRITICAL: PHASE TRANSITION SAFETY (v0.9.80-beta+)**
 

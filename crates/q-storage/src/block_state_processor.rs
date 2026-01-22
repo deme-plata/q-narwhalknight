@@ -465,6 +465,14 @@ impl BlockStateProcessor {
                 value.extend_from_slice(state_root);
                 value.extend_from_slice(tx_root);
             }
+
+            // v2.9.2-beta: Protocol fee operations
+            StateChange::ProtocolFeeCollected { fee_amount, trade_amount, fee_rate_bps, verification_hash, .. } => {
+                value.extend_from_slice(&fee_amount.to_le_bytes());
+                value.extend_from_slice(&trade_amount.to_le_bytes());
+                value.extend_from_slice(&fee_rate_bps.to_le_bytes());
+                value.extend_from_slice(verification_hash);
+            }
         }
 
         value
@@ -501,7 +509,8 @@ impl BlockStateProcessor {
     }
 
     /// Get total balance for an account (for validation)
-    pub fn get_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u64> {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn get_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u128> {
         self.applicator.get_token_balance(account, token)
     }
 
@@ -523,22 +532,28 @@ impl RocksDbStateReader {
 }
 
 impl crate::state_processor::StateReader for RocksDbStateReader {
-    fn get_balance(&self, account: &[u8; 32]) -> Result<u64> {
+    fn get_balance(&self, account: &[u8; 32]) -> Result<u128> {
         // Get native QUG balance
         self.get_token_balance(account, &q_types::QUG_TOKEN_ADDRESS)
     }
 
-    fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u64> {
+    fn get_token_balance(&self, account: &[u8; 32], token: &[u8; 32]) -> Result<u128> {
         // Build key: account (32 bytes) + token (32 bytes)
         let mut key = Vec::with_capacity(64);
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
         // Try to get from CF_TOKEN_BALANCES
+        // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
         if let Some(cf) = self.db.cf_handle(crate::CF_TOKEN_BALANCES) {
             if let Ok(Some(value)) = self.db.get_cf(&cf, &key) {
-                if value.len() >= 8 {
-                    return Ok(u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])));
+                if value.len() >= 16 {
+                    // New u128 format
+                    return Ok(u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16])));
+                } else if value.len() >= 8 {
+                    // Legacy u64 format - convert with decimal upgrade
+                    let legacy = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                    return Ok((legacy as u128) * 10u128.pow(16));
                 }
             }
         }
@@ -634,11 +649,15 @@ impl crate::state_processor::StateReader for RocksDbStateReader {
         Ok(None)
     }
 
-    fn get_oracle_price(&self, feed_id: &[u8; 32]) -> Result<Option<u64>> {
+    fn get_oracle_price(&self, feed_id: &[u8; 32]) -> Result<Option<u128>> {
         if let Some(cf) = self.db.cf_handle(crate::CF_ORACLE_PRICES) {
             if let Ok(Some(value)) = self.db.get_cf(&cf, feed_id) {
-                if value.len() >= 8 {
-                    return Ok(Some(u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8]))));
+                // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
+                if value.len() >= 16 {
+                    return Ok(Some(u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))));
+                } else if value.len() >= 8 {
+                    let legacy = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                    return Ok(Some((legacy as u128) * 10u128.pow(16)));
                 }
             }
         }
@@ -646,11 +665,15 @@ impl crate::state_processor::StateReader for RocksDbStateReader {
         Ok(None)
     }
 
-    fn get_ai_credits(&self, account: &[u8; 32]) -> Result<u64> {
+    fn get_ai_credits(&self, account: &[u8; 32]) -> Result<u128> {
         if let Some(cf) = self.db.cf_handle(crate::CF_AI_CREDITS_V2) {
             if let Ok(Some(value)) = self.db.get_cf(&cf, account) {
-                if value.len() >= 8 {
-                    return Ok(u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])));
+                // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
+                if value.len() >= 16 {
+                    return Ok(u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16])));
+                } else if value.len() >= 8 {
+                    let legacy = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                    return Ok((legacy as u128) * 10u128.pow(16));
                 }
             }
         }
@@ -658,7 +681,7 @@ impl crate::state_processor::StateReader for RocksDbStateReader {
         Ok(0)
     }
 
-    fn get_stake(&self, staker: &[u8; 32], validator: &[u8; 32]) -> Result<u64> {
+    fn get_stake(&self, staker: &[u8; 32], validator: &[u8; 32]) -> Result<u128> {
         // Build key: staker (32 bytes) + validator (32 bytes)
         let mut key = Vec::with_capacity(64);
         key.extend_from_slice(staker);
@@ -666,8 +689,12 @@ impl crate::state_processor::StateReader for RocksDbStateReader {
 
         if let Some(cf) = self.db.cf_handle(crate::CF_STAKES) {
             if let Ok(Some(value)) = self.db.get_cf(&cf, &key) {
-                if value.len() >= 8 {
-                    return Ok(u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])));
+                // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
+                if value.len() >= 16 {
+                    return Ok(u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16])));
+                } else if value.len() >= 8 {
+                    let legacy = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8]));
+                    return Ok((legacy as u128) * 10u128.pow(16));
                 }
             }
         }

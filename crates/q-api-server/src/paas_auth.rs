@@ -73,8 +73,10 @@ impl AccountTier {
         }
     }
 
-    pub fn from_balance_qnk(balance: u64) -> Self {
-        let balance_whole = balance / 100_000_000; // Convert to whole QNK
+    // v3.0.6-beta: Updated for u128 with 24 decimals (1 QNK = 10^24 base units)
+    pub fn from_balance_qnk(balance: u128) -> Self {
+        const ONE_QNK: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
+        let balance_whole = balance / ONE_QNK; // Convert to whole QNK
 
         match balance_whole {
             0..=100 => AccountTier::Free,

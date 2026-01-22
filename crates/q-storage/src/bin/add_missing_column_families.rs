@@ -59,13 +59,20 @@ fn main() -> Result<()> {
     let has_peer_trust = existing_cfs.contains(&"peer_trust".to_string());
     let has_banned_peers = existing_cfs.contains(&"banned_peers".to_string());
     let has_ai_attachments = existing_cfs.contains(&"ai_attachments".to_string());
+    let has_swap_history = existing_cfs.contains(&"cf_swap_history".to_string());
+    // v2.7.9-beta: Perpetual trading column families
+    let has_perp_positions = existing_cfs.contains(&"cf_perp_positions".to_string());
+    let has_perp_trades = existing_cfs.contains(&"cf_perp_trades".to_string());
 
-    if has_sync_certificates && has_peer_trust && has_banned_peers && has_ai_attachments {
+    if has_sync_certificates && has_peer_trust && has_banned_peers && has_ai_attachments && has_swap_history && has_perp_positions && has_perp_trades {
         println!("✅ Database already has all required column families!");
         println!("   • sync_certificates: EXISTS");
         println!("   • peer_trust: EXISTS");
         println!("   • banned_peers: EXISTS");
         println!("   • ai_attachments: EXISTS");
+        println!("   • cf_swap_history: EXISTS");
+        println!("   • cf_perp_positions: EXISTS");
+        println!("   • cf_perp_trades: EXISTS");
         println!();
         println!("🎯 No migration needed!");
         return Ok(());
@@ -91,6 +98,21 @@ fn main() -> Result<()> {
         println!("   ❌ ai_attachments");
     } else {
         println!("   ✅ ai_attachments (already exists)");
+    }
+    if !has_swap_history {
+        println!("   ❌ cf_swap_history");
+    } else {
+        println!("   ✅ cf_swap_history (already exists)");
+    }
+    if !has_perp_positions {
+        println!("   ❌ cf_perp_positions");
+    } else {
+        println!("   ✅ cf_perp_positions (already exists)");
+    }
+    if !has_perp_trades {
+        println!("   ❌ cf_perp_trades");
+    } else {
+        println!("   ✅ cf_perp_trades (already exists)");
     }
     println!();
 
@@ -180,6 +202,57 @@ fn main() -> Result<()> {
         println!("      • Write buffer: 16MB");
     }
 
+    // v2.3.9-beta: Swap history for Token Details Modal transaction history
+    if !has_swap_history {
+        println!("➕ Adding cf_swap_history column family...");
+
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB - many small records
+        opts.set_max_write_buffer_number(2);
+
+        db.create_cf("cf_swap_history", &opts)
+            .context("Failed to create cf_swap_history column family")?;
+
+        println!("   ✅ cf_swap_history created successfully");
+        println!("      • Compression: LZ4");
+        println!("      • Write buffer: 32MB");
+    }
+
+    // v2.7.9-beta: Perpetual positions column family
+    if !has_perp_positions {
+        println!("➕ Adding cf_perp_positions column family...");
+
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+
+        db.create_cf("cf_perp_positions", &opts)
+            .context("Failed to create cf_perp_positions column family")?;
+
+        println!("   ✅ cf_perp_positions created successfully");
+        println!("      • Compression: LZ4");
+        println!("      • Write buffer: 32MB");
+    }
+
+    // v2.7.9-beta: Perpetual trades column family
+    if !has_perp_trades {
+        println!("➕ Adding cf_perp_trades column family...");
+
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+
+        db.create_cf("cf_perp_trades", &opts)
+            .context("Failed to create cf_perp_trades column family")?;
+
+        println!("   ✅ cf_perp_trades created successfully");
+        println!("      • Compression: LZ4");
+        println!("      • Write buffer: 32MB");
+    }
+
     println!();
     println!("🎉 MIGRATION COMPLETE!");
     println!();
@@ -190,7 +263,7 @@ fn main() -> Result<()> {
 
     println!("   Total: {} column families", final_cfs.len());
     for cf in &final_cfs {
-        let marker = if cf == "sync_certificates" || cf == "peer_trust" || cf == "banned_peers" || cf == "ai_attachments" {
+        let marker = if cf == "sync_certificates" || cf == "peer_trust" || cf == "banned_peers" || cf == "ai_attachments" || cf == "cf_swap_history" {
             "🆕"
         } else {
             "  "

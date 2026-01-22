@@ -2,9 +2,14 @@
 ///
 /// Implements the handshake protocol for establishing authenticated connections
 /// between Q-NarwhalKnight nodes across different servers.
+///
+/// v2.5.0-beta: Added Ed25519 signature support for authenticated handshakes
 use anyhow::{anyhow, Result};
+use ed25519_dalek::{Signature, SigningKey, Signer, VerifyingKey, Verifier};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -79,11 +84,24 @@ pub enum HandshakeError {
 }
 
 /// Local node information
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalNodeInfo {
     pub node_id: String,
     pub server_role: ServerRole,
     pub capabilities: Vec<String>,
+    /// v2.5.0-beta: Ed25519 signing key for authenticated handshakes
+    pub signing_key: Option<Arc<SigningKey>>,
+}
+
+impl std::fmt::Debug for LocalNodeInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalNodeInfo")
+            .field("node_id", &self.node_id)
+            .field("server_role", &self.server_role)
+            .field("capabilities", &self.capabilities)
+            .field("has_signing_key", &self.signing_key.is_some())
+            .finish()
+    }
 }
 
 impl LocalNodeInfo {
@@ -97,6 +115,7 @@ impl LocalNodeInfo {
                 "quantum-consensus".to_string(),
                 "zero-config-discovery".to_string(),
             ],
+            signing_key: None,
         }
     }
 
@@ -110,7 +129,53 @@ impl LocalNodeInfo {
                 "quantum-consensus".to_string(),
                 "mesh-coordination".to_string(),
             ],
+            signing_key: None,
         }
+    }
+
+    /// v2.5.0-beta: Create node with signing key for authenticated handshakes
+    pub fn with_signing_key(mut self, signing_key: Arc<SigningKey>) -> Self {
+        self.signing_key = Some(signing_key);
+        self
+    }
+
+    /// v2.5.0-beta: Generate a new signing key for this node
+    pub fn generate_signing_key(&mut self) {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"handshake-signing-key-v2.5.0");
+        hasher.update(self.node_id.as_bytes());
+        hasher.update(&std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_le_bytes());
+        let key_bytes: [u8; 32] = hasher.finalize().into();
+        self.signing_key = Some(Arc::new(SigningKey::from_bytes(&key_bytes)));
+    }
+}
+
+/// v2.5.0-beta: Sign a handshake message using Ed25519
+fn sign_handshake_message(
+    message_type: &str,
+    node_id: &str,
+    challenge: &[u8],
+    timestamp: u64,
+    signing_key: Option<&Arc<SigningKey>>,
+) -> Option<String> {
+    if let Some(key) = signing_key {
+        // Create canonical data to sign: message_type + node_id + challenge + timestamp
+        let mut sign_data = Vec::with_capacity(128);
+        sign_data.extend_from_slice(message_type.as_bytes());
+        sign_data.extend_from_slice(node_id.as_bytes());
+        sign_data.extend_from_slice(challenge);
+        sign_data.extend_from_slice(&timestamp.to_le_bytes());
+
+        let signature = key.sign(&sign_data);
+        Some(hex::encode(signature.to_bytes()))
+    } else {
+        warn!("⚠️ No signing key provided for handshake - message will be unsigned");
+        None
     }
 }
 
@@ -123,6 +188,19 @@ pub async fn perform_client_handshake(
 
     // Generate challenge
     let challenge = generate_challenge();
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // v2.5.0-beta: Sign the handshake message
+    let signature = sign_handshake_message(
+        "handshake_request",
+        &local_node.node_id,
+        &challenge,
+        timestamp,
+        local_node.signing_key.as_ref(),
+    );
 
     // Create handshake message
     let handshake = HandshakeMessage {
@@ -132,11 +210,8 @@ pub async fn perform_client_handshake(
         protocol_version: PROTOCOL_VERSION,
         capabilities: local_node.capabilities.clone(),
         challenge: challenge.clone(),
-        timestamp: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        signature: None, // TODO: Implement cryptographic signature
+        timestamp,
+        signature, // v2.5.0-beta: Now signed if signing key available
     };
 
     // Send handshake request
@@ -151,6 +226,20 @@ pub async fn perform_client_handshake(
     verify_handshake_response(&handshake, &response)?;
 
     // Send handshake acknowledgment
+    let ack_timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // v2.5.0-beta: Sign the acknowledgment
+    let ack_signature = sign_handshake_message(
+        "handshake_ack",
+        &local_node.node_id,
+        &response.challenge,
+        ack_timestamp,
+        local_node.signing_key.as_ref(),
+    );
+
     let ack = HandshakeMessage {
         message_type: "handshake_ack".to_string(),
         node_id: local_node.node_id.clone(),
@@ -158,11 +247,8 @@ pub async fn perform_client_handshake(
         protocol_version: PROTOCOL_VERSION,
         capabilities: local_node.capabilities.clone(),
         challenge: response.challenge.clone(), // Echo their challenge
-        timestamp: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        signature: None,
+        timestamp: ack_timestamp,
+        signature: ack_signature, // v2.5.0-beta: Signed
     };
 
     send_handshake_message(stream, &ack).await?;
@@ -199,6 +285,19 @@ pub async fn perform_server_handshake(
 
     // Generate response challenge
     let response_challenge = generate_challenge();
+    let response_timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // v2.5.0-beta: Sign the response
+    let response_signature = sign_handshake_message(
+        "handshake_response",
+        &local_node.node_id,
+        &response_challenge,
+        response_timestamp,
+        local_node.signing_key.as_ref(),
+    );
 
     // Create handshake response
     let response = HandshakeMessage {
@@ -208,11 +307,8 @@ pub async fn perform_server_handshake(
         protocol_version: PROTOCOL_VERSION,
         capabilities: local_node.capabilities.clone(),
         challenge: response_challenge.clone(),
-        timestamp: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        signature: None,
+        timestamp: response_timestamp,
+        signature: response_signature, // v2.5.0-beta: Signed
     };
 
     // Send handshake response

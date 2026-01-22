@@ -27,8 +27,8 @@ pub struct TransactionAnnounce {
     pub tx_hash: [u8; 32],
     /// Transaction size in bytes
     pub size: u32,
-    /// Transaction fee (in nanoORB)
-    pub fee: u64,
+    /// Transaction fee (v2.5.0: u128 for extreme precision)
+    pub fee: u128,
     /// Timestamp when transaction was received
     pub timestamp: u64,
     /// Optional transaction priority hint

@@ -14,6 +14,39 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+/// v2.7.7-beta: Social media links for tokens
+/// Supports common platforms: Twitter/X, Discord, Telegram, Website, GitHub
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SocialLinks {
+    /// Twitter/X handle (e.g., "https://x.com/ViktorakaDeme" or "@handle")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twitter: Option<String>,
+    /// Discord server invite link
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord: Option<String>,
+    /// Telegram group/channel link
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<String>,
+    /// Official website URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// GitHub repository URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    /// Medium blog URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    /// Reddit community URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reddit: Option<String>,
+    /// CoinMarketCap listing URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coinmarketcap: Option<String>,
+    /// CoinGecko listing URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coingecko: Option<String>,
+}
+
 /// Token metadata stored in registry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenMetadata {
@@ -39,6 +72,10 @@ pub struct TokenMetadata {
     pub website: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
+
+    // v2.7.7-beta: Social media links
+    #[serde(default)]
+    pub social_links: Option<SocialLinks>,
 
     // DEX integration
     pub has_liquidity_pool: bool,
@@ -552,6 +589,7 @@ mod tests {
             has_liquidity_pool: false,
             liquidity_pools: vec![],
             last_updated: Utc::now(),
+            social_links: None, // v2.7.7-beta
         };
 
         registry.register_token(token.clone()).await.unwrap();

@@ -158,7 +158,7 @@ impl PaaSBillingManager {
 
         info!(
             "💳 Reserved {} QUG for wallet {} (service: {:?}, reservation: {})",
-            amount_qug as f64 / 100_000_000.0,
+            amount_qug as f64 / 1e24,
             hex::encode(&wallet_address[..8]),
             service,
             &reservation_id[..8]
@@ -207,10 +207,10 @@ impl PaaSBillingManager {
         info!(
             "💰 Wallet {} balance check: total={} QUG, reserved={} QUG, available={} QUG, required={} QUG",
             hex::encode(&wallet_address[..8]),
-            total_balance as f64 / 100_000_000.0,
-            reserved_balance as f64 / 100_000_000.0,
-            available_balance as f64 / 100_000_000.0,
-            required_amount as f64 / 100_000_000.0
+            total_balance as f64 / 1e24,
+            reserved_balance as f64 / 1e24,
+            available_balance as f64 / 1e24,
+            required_amount as f64 / 1e24
         );
 
         Ok(available_balance >= required_amount)
@@ -276,7 +276,7 @@ impl PaaSBillingManager {
         info!(
             "✅ Finalized reservation {} - charged {} QUG from wallet {} (tx: {})",
             &reservation_id[..8],
-            amount_qug as f64 / 100_000_000.0,
+            amount_qug as f64 / 1e24,
             hex::encode(&wallet_address[..8]),
             &billing_tx_id[..8]
         );
@@ -327,7 +327,7 @@ impl PaaSBillingManager {
         warn!(
             "🔄 Released reservation {} - returned {} QUG to wallet {} (reason: {})",
             &reservation_id[..8],
-            amount_qug as f64 / 100_000_000.0,
+            amount_qug as f64 / 1e24,
             hex::encode(&wallet_address[..8]),
             error_message.unwrap_or_else(|| "Service failed".to_string())
         );
@@ -387,8 +387,8 @@ impl PaaSBillingManager {
         if orb_balance.available < amount as u128 {
             return Err(format!(
                 "Insufficient balance: have {} QUG, need {} QUG",
-                orb_balance.available as f64 / 100_000_000.0,
-                amount as f64 / 100_000_000.0
+                orb_balance.available as f64 / 1e24,
+                amount as f64 / 1e24
             ));
         }
 
@@ -398,9 +398,9 @@ impl PaaSBillingManager {
 
         info!(
             "💸 Debited {} QUG from wallet {} (new balance: {} QUG)",
-            amount as f64 / 100_000_000.0,
+            amount as f64 / 1e24,
             hex::encode(&wallet_address[..8]),
-            orb_balance.available as f64 / 100_000_000.0
+            orb_balance.available as f64 / 1e24
         );
 
         Ok(())
@@ -483,10 +483,10 @@ impl PaaSBillingManager {
 
         info!(
             "🏦 Credited {} QUG to Quillon Bank master account (service: {:?}, customer: {}, new balance: {} QUG)",
-            amount as f64 / 100_000_000.0,
+            amount as f64 / 1e24,
             service,
             hex::encode(&customer_wallet[..8]),
-            orb_balance.available as f64 / 100_000_000.0
+            orb_balance.available as f64 / 1e24
         );
 
         Ok(())
@@ -533,7 +533,7 @@ impl PaaSBillingManager {
                             "⏱️  Auto-released expired reservation {} (wallet: {}, amount: {} QUG)",
                             &reservation.reservation_id[..8],
                             hex::encode(&reservation.wallet_address[..8]),
-                            reservation.amount_qug as f64 / 100_000_000.0
+                            reservation.amount_qug as f64 / 1e24
                         );
                     }
                 }

@@ -21,6 +21,9 @@ q-precision = { path = "../q-precision" }
 sha3 = "0.10"
 blake3 = "1.5"
 dilithium = "0.2.0-alpha.3"
+# v2.4.7-beta: NIST PQC standard Dilithium5 for block signatures
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

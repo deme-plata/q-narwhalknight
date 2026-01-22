@@ -97,8 +97,8 @@ impl DistributedInferenceBridge {
         &self,
         request_id: String,
         prompt: String,
-        max_tokens: usize,
-        temperature: f64,
+        _max_tokens: usize,
+        _temperature: f64,
     ) -> Result<String> {
         info!("🚀 Processing distributed request {}", request_id);
 

@@ -2,7 +2,7 @@
 // Handles all communication with the quantum consensus node
 // v1.0.53: Added automatic port discovery when default port is unavailable
 
-import { generateAuthHeader, walletSession, loadWallet } from './walletAuth';
+import { generateAuthHeader, walletSession, loadWallet, keypairFromMnemonic, recoverMnemonic } from './walletAuth';
 import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDiscovery';
 
 // Get API base URL from localStorage (set by network selector or auto-discovery) or use default
@@ -158,6 +158,22 @@ export interface ApiResponse<T> {
   timestamp: string;
 }
 
+// v3.4.0-beta: Fee estimation response from /api/v1/transactions/estimate-fee
+export interface FeeEstimate {
+  min_fee: string;          // Minimum fee in atomic units (as string for large numbers)
+  recommended_fee: string;  // Recommended fee based on priority
+  max_fee: string;          // Maximum reasonable fee
+  recommended_fee_qug: number; // Human-readable fee in QUG
+  gas_units: string;        // Gas units required
+  congestion: number;       // Network congestion (0.0 - 1.0)
+  tx_type: string;          // Transaction type parsed
+}
+
+// v3.4.0-beta: Fee reduction info for UI display
+export const FEE_REDUCTION_ACTIVATION_HEIGHT = 350000;
+export const CURRENT_MIN_FEE_QUG = 0.00021;  // Legacy fee before activation
+export const NEW_MIN_FEE_QUG = 0.000021;     // Reduced fee after activation (10x cheaper)
+
 export interface NodeStatus {
   node_id: string;
   current_round: number;
@@ -197,7 +213,19 @@ export interface NetworkSupply {
   block_reward_formatted: string;
   current_height: number;
   connected_miners: number;
+  holders: number;  // v2.3.8-beta: Real holder count from blockchain
+  holders_formatted: string;
   timestamp: string;
+}
+
+// v2.3.8-beta: QUGUSD Stablecoin Vault Stats (real CDP data)
+export interface VaultStats {
+  total_qug_locked: number;     // QUG locked as collateral (base units)
+  total_qugusd_minted: number;  // Total QUGUSD in circulation (base units)
+  qug_price_usd: number;        // Current QUG price in USD
+  global_collateral_ratio: number; // Collateralization ratio
+  num_positions: number;        // Number of CDP positions (holders count)
+  last_price_update: number;    // Unix timestamp of last price update
 }
 
 // Hashpower-weighted cryptographic security metrics (v1.3.0-beta)
@@ -314,7 +342,21 @@ class QNarwhalKnightAPI {
               } else {
                 const errorText = await response.text();
                 if (errorText) {
-                  errorMessage = errorText;
+                  // v3.0.7-beta: Filter out HTML error pages (like nginx 404/502)
+                  // Don't display raw HTML to users
+                  if (errorText.includes('<html') || errorText.includes('<!DOCTYPE') || errorText.includes('<body')) {
+                    // v2.3.0: Provide user-friendly error messages based on status code
+                    if (response.status === 502 || response.status === 503 || response.status === 504) {
+                      errorMessage = 'The server is temporarily unavailable or processing heavy load. Please wait a moment and try again.';
+                    } else if (response.status === 404) {
+                      errorMessage = 'The requested resource was not found. Please refresh the page and try again.';
+                    } else {
+                      errorMessage = `Server error (${response.status}). Please try again in a few moments.`;
+                    }
+                    console.warn('⚠️ Received HTML error page:', errorText.substring(0, 200));
+                  } else {
+                    errorMessage = errorText;
+                  }
                 }
               }
             } catch (e) {
@@ -382,12 +424,13 @@ class QNarwhalKnightAPI {
       console.log('🔐 [AUTH DEBUG] Session exists:', !!session);
       console.log('🔐 [AUTH DEBUG] globalPasswordPrompt available:', !!globalPasswordPrompt);
 
-      // If no active session, try to decrypt wallet with password
+      // If no active session, try to restore or decrypt wallet
       if (!session) {
         const encryptedKey = localStorage.getItem('walletEncryptedKey');
+        const sessionTimeout = localStorage.getItem('walletSessionTimeout') || 'never';
 
         console.log('🔐 [AUTH DEBUG] No session, encrypted key exists:', !!encryptedKey);
-        console.log('🔐 [AUTH DEBUG] Will prompt for password:', !!encryptedKey && !!globalPasswordPrompt);
+        console.log('🔐 [AUTH DEBUG] Session timeout setting:', sessionTimeout);
 
         if (!encryptedKey) {
           // No encrypted wallet found
@@ -400,59 +443,89 @@ class QNarwhalKnightAPI {
           };
         }
 
-        // Wallet is encrypted - need password
-
-        // Try using the provided passwordPrompt
-        if (passwordPrompt) {
+        // Check if "Never expire" is set - try to restore from stored session without password
+        if (sessionTimeout === 'never') {
           try {
-            password = await passwordPrompt();
+            // Try to get stored session data directly from sessionStorage
+            const storedSession = sessionStorage.getItem('walletSession');
+            if (storedSession) {
+              const data = JSON.parse(storedSession);
+              if (data.mnemonic) {
+                console.log('🔐 [AUTH DEBUG] "Never expire" enabled - restoring session from stored mnemonic');
+                const keyPair = await keypairFromMnemonic(data.mnemonic);
+                walletSession.setSession(keyPair.privateKey, keyPair.address, data.mnemonic);
+                session = { privateKey: keyPair.privateKey, address: keyPair.address, mnemonic: data.mnemonic };
+                console.log('✅ [AUTH DEBUG] Session auto-restored for "Never expire" user');
+              }
+            }
+          } catch (restoreError) {
+            console.warn('🔐 [AUTH DEBUG] Failed to auto-restore session:', restoreError);
+            // Fall through to password prompt
+          }
+        }
+
+        // If still no session, need password
+        if (!session) {
+          console.log('🔐 [AUTH DEBUG] Will prompt for password:', !!globalPasswordPrompt);
+
+          // Try using the provided passwordPrompt
+          if (passwordPrompt) {
+            try {
+              password = await passwordPrompt();
+            } catch (error) {
+              return {
+                success: false,
+                data: null,
+                error: 'Authentication cancelled by user',
+                timestamp: new Date().toISOString(),
+              };
+            }
+          }
+          // Try using the global password prompt (from PasswordModalProvider)
+          else if (globalPasswordPrompt) {
+            try {
+              password = await globalPasswordPrompt();
+            } catch (error) {
+              return {
+                success: false,
+                data: null,
+                error: 'Authentication cancelled by user',
+                timestamp: new Date().toISOString(),
+              };
+            }
+          }
+          // Fallback to browser prompt if no modal available
+          else {
+            password = prompt('Enter wallet password to sign request:');
+          }
+
+          if (!password) {
+            return {
+              success: false,
+              data: null,
+              error: 'Authentication required: Password not provided',
+              timestamp: new Date().toISOString(),
+            };
+          }
+
+          try {
+            const wallet = await loadWallet(password);
+            // For "never expire", also store the mnemonic for future auto-restore
+            if (sessionTimeout === 'never') {
+              const mnemonic = await recoverMnemonic(password);
+              walletSession.setSession(wallet.privateKey, wallet.address, mnemonic);
+            } else {
+              walletSession.setSession(wallet.privateKey, wallet.address);
+            }
+            session = { privateKey: wallet.privateKey, address: wallet.address };
           } catch (error) {
             return {
               success: false,
               data: null,
-              error: 'Authentication cancelled by user',
+              error: `Authentication failed: ${error instanceof Error ? error.message : 'Invalid password'}`,
               timestamp: new Date().toISOString(),
             };
           }
-        }
-        // Try using the global password prompt (from PasswordModalProvider)
-        else if (globalPasswordPrompt) {
-          try {
-            password = await globalPasswordPrompt();
-          } catch (error) {
-            return {
-              success: false,
-              data: null,
-              error: 'Authentication cancelled by user',
-              timestamp: new Date().toISOString(),
-            };
-          }
-        }
-        // Fallback to browser prompt if no modal available
-        else {
-          password = prompt('Enter wallet password to sign request:');
-        }
-
-        if (!password) {
-          return {
-            success: false,
-            data: null,
-            error: 'Authentication required: Password not provided',
-            timestamp: new Date().toISOString(),
-          };
-        }
-
-        try {
-          const wallet = await loadWallet(password);
-          walletSession.setSession(wallet.privateKey, wallet.address);
-          session = { privateKey: wallet.privateKey, address: wallet.address };
-        } catch (error) {
-          return {
-            success: false,
-            data: null,
-            error: `Authentication failed: ${error instanceof Error ? error.message : 'Invalid password'}`,
-            timestamp: new Date().toISOString(),
-          };
         }
       }
 
@@ -551,6 +624,11 @@ class QNarwhalKnightAPI {
   // Get network supply statistics (max supply, mined coins, hashrate)
   async getNetworkSupply(): Promise<ApiResponse<NetworkSupply>> {
     return this.request<NetworkSupply>('/v1/network/supply');
+  }
+
+  // v2.3.8-beta: Get QUGUSD stablecoin vault statistics (real CDP data)
+  async getVaultStats(): Promise<ApiResponse<VaultStats>> {
+    return this.request<VaultStats>('/v1/stablecoin/vault/stats');
   }
 
   // Get hashpower-weighted security metrics (v1.3.0-beta)
@@ -901,6 +979,60 @@ class QNarwhalKnightAPI {
     }
   }
 
+  // ============================================
+  // v3.4.0-beta: FEE ESTIMATION API
+  // ============================================
+
+  /**
+   * Estimate transaction fees based on type and network conditions
+   *
+   * Fee reduction at block 350,000:
+   * - Before: 0.00021 QUG (21,000 satoshis) for simple transfer
+   * - After: 0.000021 QUG (2,100 satoshis) - 10x cheaper!
+   *
+   * @param txType - Transaction type: 'transfer', 'swap', 'token_transfer', 'contract_call', etc.
+   * @param priority - Priority level: 'low', 'medium', 'high', 'urgent' (default: 'medium')
+   */
+  async estimateFee(txType: string = 'transfer', priority: string = 'medium'): Promise<ApiResponse<FeeEstimate>> {
+    console.log('💰 Estimating fee for:', txType, 'priority:', priority);
+    return this.request<FeeEstimate>('/v1/transactions/estimate-fee', {
+      method: 'POST',
+      body: JSON.stringify({ tx_type: txType, priority }),
+    });
+  }
+
+  /**
+   * Get current network height (for checking fee reduction activation)
+   */
+  async getNetworkHeight(): Promise<number> {
+    try {
+      const response = await this.request<any>('/v1/status');
+      if (response.success && response.data) {
+        return response.data.current_height || 0;
+      }
+      return 0;
+    } catch (error) {
+      console.warn('Failed to get network height:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Check if reduced fees are active (after block 350,000)
+   */
+  async isReducedFeesActive(): Promise<boolean> {
+    const height = await this.getNetworkHeight();
+    return height >= FEE_REDUCTION_ACTIVATION_HEIGHT;
+  }
+
+  /**
+   * Get current minimum fee in QUG based on network height
+   */
+  async getCurrentMinFee(): Promise<number> {
+    const isReduced = await this.isReducedFeesActive();
+    return isReduced ? NEW_MIN_FEE_QUG : CURRENT_MIN_FEE_QUG;
+  }
+
   // Quantum Privacy Mixer API methods
   async sendPrivateTransaction(request: {
     to: string;
@@ -1158,6 +1290,42 @@ class QNarwhalKnightAPI {
     return this.request<any[]>('/v1/defi/oracle/feeds');
   }
 
+  // v2.3.6-beta: Get real-time token price from AMM oracle (not hardcoded!)
+  async getAMMPrice(token: string): Promise<ApiResponse<{
+    token: string;
+    price_usd: number;
+    source: string;
+    last_updated: number;
+    pool_reserves?: {
+      token0: string;
+      token1: string;
+      reserve0: number;
+      reserve1: number;
+      pool_id: string;
+    };
+  }>> {
+    console.log('📊 Fetching AMM oracle price for:', token);
+    return this.request(`/v1/oracle/price/${encodeURIComponent(token)}`);
+  }
+
+  // v2.3.6-beta: Get all token prices from AMM oracle
+  async getAllAMMPrices(): Promise<ApiResponse<Array<{
+    token: string;
+    price_usd: number;
+    source: string;
+    last_updated: number;
+    pool_reserves?: {
+      token0: string;
+      token1: string;
+      reserve0: number;
+      reserve1: number;
+      pool_id: string;
+    };
+  }>>> {
+    console.log('📊 Fetching all AMM oracle prices');
+    return this.request('/v1/oracle/prices');
+  }
+
   // Get recent transactions (filtered by wallet address for privacy)
   async getRecentTransactions(limit = 100): Promise<ApiResponse<any[]>> {
     // Get wallet address from localStorage for privacy-filtered results
@@ -1182,17 +1350,25 @@ class QNarwhalKnightAPI {
   }
 
   // Add liquidity to a pool
+  // v3.2.14-beta: Support string amounts for u128 precision (BigInt values converted to strings)
+  // v3.2.15-beta: Use authenticatedRequest for proper wallet authentication
   async addLiquidity(request: {
     token0: string;
     token1: string;
-    amount0: number;
-    amount1: number;
+    amount0: number | string | bigint;
+    amount1: number | string | bigint;
     provider: string;
   }): Promise<ApiResponse<any>> {
-    console.log('💧 Adding liquidity:', request);
-    return this.request<any>('/v1/liquidity/add', {
+    // Convert BigInt to string for JSON serialization
+    const serializedRequest = {
+      ...request,
+      amount0: typeof request.amount0 === 'bigint' ? request.amount0.toString() : request.amount0,
+      amount1: typeof request.amount1 === 'bigint' ? request.amount1.toString() : request.amount1,
+    };
+    console.log('💧 Adding liquidity (authenticated):', serializedRequest);
+    return this.authenticatedRequest<any>('/v1/liquidity/add', {
       method: 'POST',
-      body: JSON.stringify(request),
+      body: JSON.stringify(serializedRequest),
     });
   }
 
@@ -1209,13 +1385,14 @@ class QNarwhalKnightAPI {
   }
 
   // Remove liquidity from a pool
+  // v3.2.15-beta: Use authenticatedRequest for proper wallet authentication
   async removeLiquidity(request: {
     pool_id: string;
     percentage: number;
     provider: string;
   }): Promise<ApiResponse<any>> {
-    console.log('💧 Removing liquidity:', request);
-    return this.request<any>('/v1/liquidity/remove', {
+    console.log('💧 Removing liquidity (authenticated):', request);
+    return this.authenticatedRequest<any>('/v1/liquidity/remove', {
       method: 'POST',
       body: JSON.stringify(request),
     });
@@ -1413,13 +1590,23 @@ class QNarwhalKnightAPI {
       console.log('✅ SSE: Connection opened successfully');
     };
 
+    // v3.3.10-beta: Helper to normalize addresses for comparison (handle qnk prefix and length differences)
+    const normalizeAddress = (addr: string): string => {
+      // Remove qnk prefix if present, then take first 40 chars for comparison
+      const withoutPrefix = addr.startsWith('qnk') ? addr.slice(3) : addr;
+      return withoutPrefix.slice(0, 40).toLowerCase();
+    };
+    const normalizedWallet = normalizeAddress(walletAddress);
+
     eventSource.addEventListener('mining_reward', (e: MessageEvent) => {
       console.log('📨 SSE: Received mining_reward event');
       try {
         const data = JSON.parse(e.data);
         console.log('📨 SSE: mining_reward data:', data);
-        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, match: data.miner_address === walletAddress });
-        if (data.miner_address === walletAddress) {
+        const normalizedReceived = normalizeAddress(data.miner_address || '');
+        const addressMatch = normalizedReceived === normalizedWallet;
+        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, normalizedReceived, normalizedWallet, match: addressMatch });
+        if (addressMatch) {
           console.log('✅ SSE: Address matches! Calling onReward callback');
           onReward(data);
         } else {
@@ -1433,24 +1620,52 @@ class QNarwhalKnightAPI {
     // v1.1.9-beta: FIX - Listen for 'balance-updated' (hyphen) not 'balance_updated' (underscore)
     // Backend sends: "balance-updated" (streaming.rs:765)
     eventSource.addEventListener('balance-updated', (e: MessageEvent) => {
-      console.log('📨 SSE: Received balance_updated event');
+      console.log('📨 SSE: Received balance_updated event - RAW DATA:', e.data);
       try {
-        const data = JSON.parse(e.data);
-        console.log('📨 SSE: balance_updated data:', data);
-        console.log('📨 SSE: Comparing addresses:', { received: data.wallet_address, expected: walletAddress, match: data.wallet_address === walletAddress });
-        console.log('📨 SSE: Change reason:', data.change_reason);
+        const parsed = JSON.parse(e.data);
+        console.log('📨 SSE: balance_updated parsed:', parsed);
+
+        // v2.7.4-beta FIX: Handle wrapped format {"type":"BalanceUpdated","data":{...}}
+        // Backend sends events with serde tag format - extract actual data
+        const data = parsed.data || parsed;
+
+        // v2.7.8-beta: EXTENSIVE DEBUGGING for P2P balance propagation
+        console.log('🔍 [DEBUG] balance_updated full data:', JSON.stringify(data, null, 2));
+        console.log('🔍 [DEBUG] Address comparison:', {
+          received: data.wallet_address,
+          receivedLength: data.wallet_address?.length,
+          expected: walletAddress,
+          expectedLength: walletAddress?.length,
+          exactMatch: data.wallet_address === walletAddress,
+          receivedFirst16: data.wallet_address?.substring(0, 16),
+          expectedFirst16: walletAddress?.substring(0, 16),
+        });
+        console.log('🔍 [DEBUG] Change reason:', data.change_reason);
+        console.log('🔍 [DEBUG] Balance values:', { old: data.old_balance, new: data.new_balance, diff: data.new_balance - data.old_balance });
+
         // Backend now sends addresses WITH "qnk" prefix - compare directly
-        // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, and development_fee reasons
+        // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, pending_mining_reward, and development_fee reasons
         const isMiningReward = data.change_reason === 'mining_reward' ||
                                data.change_reason === 'mining_reward_instant' ||
-                               data.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards
+                               data.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
+                               data.change_reason === 'pending_mining_reward' ||  // v2.7.6-beta: Pending rewards via P2P gossipsub
                                (data.change_reason && data.change_reason.startsWith('mining_reward_batch_'));
         const isDevFee = data.change_reason === 'development_fee';
+
+        console.log('🔍 [DEBUG] Filter results:', { isMiningReward, isDevFee, addressMatch: data.wallet_address === walletAddress });
+
         if (data.wallet_address === walletAddress && (isMiningReward || isDevFee)) {
           console.log('✅ SSE: Address matches and reason is mining-related! Calling onBalanceUpdate callback');
+          console.log('✅ [DEBUG] CALLING onBalanceUpdate with:', data);
           onBalanceUpdate(data);
         } else {
-          console.log('❌ SSE: Address mismatch or wrong reason, ignoring event', { reason: data.change_reason });
+          console.log('❌ SSE: Address mismatch or wrong reason, ignoring event');
+          console.log('❌ [DEBUG] REJECTED because:', {
+            addressMatch: data.wallet_address === walletAddress,
+            isMiningReward,
+            isDevFee,
+            reason: data.change_reason
+          });
         }
       } catch (error) {
         console.error('❌ SSE: Failed to parse balance_updated event:', error);
@@ -1466,9 +1681,20 @@ class QNarwhalKnightAPI {
         // Extract the actual data (handle both wrapped and unwrapped formats)
         const statsData = parsed.data || parsed;
         console.log('📨 SSE: mining_stats data:', statsData);
-        console.log('📨 SSE: Comparing addresses:', { received: statsData.miner_address, expected: walletAddress, match: statsData.miner_address === walletAddress });
 
-        if (statsData.miner_address === walletAddress && onMiningStats) {
+        // v3.3.10-beta: Use shared normalizeAddress helper
+        const normalizedReceived = normalizeAddress(statsData.miner_address || '');
+        const addressMatch = normalizedReceived === normalizedWallet;
+
+        console.log('📨 SSE: Comparing addresses:', {
+          received: statsData.miner_address,
+          expected: walletAddress,
+          normalizedReceived,
+          normalizedWallet,
+          match: addressMatch
+        });
+
+        if (addressMatch && onMiningStats) {
           console.log('✅ SSE: Address matches! Calling onMiningStats callback');
           onMiningStats(statsData);
         } else {
@@ -1485,17 +1711,27 @@ class QNarwhalKnightAPI {
     eventSource.addEventListener('pending_mining_reward', (e: MessageEvent) => {
       console.log('📨 SSE: Received pending_mining_reward event (P2P propagated)');
       try {
-        const data = JSON.parse(e.data);
-        console.log('📨 SSE: pending_mining_reward data:', data);
-        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, match: data.miner_address === walletAddress });
+        const parsed = JSON.parse(e.data);
+        console.log('📨 SSE: pending_mining_reward parsed:', parsed);
 
-        if (data.miner_address === walletAddress) {
+        // v2.7.4-beta FIX: Handle wrapped format {"type":"PendingMiningReward","data":{...}}
+        // Backend sends events with serde tag format - extract actual data
+        const data = parsed.data || parsed;
+        console.log('📨 SSE: pending_mining_reward data:', data);
+        // v3.3.10-beta: Use shared normalizeAddress helper for comparison
+        const normalizedReceived = normalizeAddress(data.miner_address || '');
+        const addressMatch = normalizedReceived === normalizedWallet;
+        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, normalizedReceived, normalizedWallet, match: addressMatch });
+
+        if (addressMatch) {
           console.log('✅ SSE: Address matches! Processing pending mining reward');
           // Convert to balance update event format for the callback
+          // v2.7.7-beta FIX: Backend sends values in QNK, NOT base units!
+          // DO NOT multiply - the frontend expects QNK values directly
           const balanceUpdateEvent: BalanceUpdateEvent = {
             wallet_address: data.miner_address,
-            old_balance: 0, // We don't have old balance from pending reward
-            new_balance: data.pending_reward_qnk * 100_000_000, // Convert QNK to base units
+            old_balance: 0, // Pending reward is incremental, old_balance=0 so new_balance-old_balance gives the reward amount
+            new_balance: data.pending_reward_qnk, // Already in QNK - DO NOT multiply!
             change_reason: 'pending_mining_reward',
             timestamp: data.timestamp || new Date().toISOString()
           };
@@ -1770,7 +2006,10 @@ export interface MiningRewardEvent {
   block_height: number;
   difficulty: string;
   hash_rate: number;
-  worker_name?: string; // v0.6.2-beta: Worker identification (optional for backward compatibility)
+  miner_id?: string; // v3.3.3-beta: Unique miner instance ID for identification
+  worker_name?: string; // v0.6.2-beta: Human-readable miner name (e.g., "Server Alpha", "Mining Rig 1")
+  origin_node_id?: string; // v2.3.5-beta: Which node mined this reward (peer ID)
+  origin_node_name?: string; // v2.3.5-beta: Human-friendly node name (e.g., "Bootstrap", "Alpha")
   timestamp: string;
 }
 
@@ -1788,6 +2027,9 @@ export interface MiningStatsEvent {
   total_blocks_found: number;
   current_balance: number;
   avg_hash_rate: number;
+  // v3.2.25-beta: Added for multi-miner tracking
+  miner_id?: string;
+  worker_id?: string;
   timestamp: string;
 }
 

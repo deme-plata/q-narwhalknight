@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { InfiniteBlockList } from './InfiniteBlockList';
+import DAGKnight3DPopup from './DAGKnight3DPopup';
 
 interface NetworkStats {
   currentHeight: number;
@@ -698,7 +699,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
               </div>
               <div className="p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20">
                 <div className="text-sm text-gray-400">Network Hash Rate</div>
-                <div className="text-2xl font-bold text-yellow-500">{networkStats.networkHashRate.toLocaleString()} H/s</div>
+                <div className="text-2xl font-bold text-yellow-500">{hashpowerSecurity?.metrics?.network_hashrate_formatted || '0 H/s'}</div>
                 <div className="text-xs text-gray-500">Compute power</div>
               </div>
             </div>
@@ -1230,10 +1231,16 @@ export default function ExplorerScreen() {
   // Track highest known mined value to prevent display of lower values (stale data)
   const highestMinedRef = useRef<number>(0);
 
+  // v2.3.8-beta: Track highest known height to prevent flickering from stale data
+  const highestKnownHeightRef = useRef<number>(0);
+
   // v1.4.12-beta: Connected peers list and hover state for the cool dropdown
   const [connectedPeers, setConnectedPeers] = useState<PeerInfo[]>([]);
   const [isPeerDropdownOpen, setIsPeerDropdownOpen] = useState(false);
   const peerDropdownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // v3.3.5-beta: DAG-Knight 3D visualization popup state
+  const [showDAG3D, setShowDAG3D] = useState(false);
 
   // Hashpower security state (v1.3.0-beta)
   const [hashpowerSecurity, setHashpowerSecurity] = useState<HashpowerSecurity | null>(null);
@@ -1339,10 +1346,18 @@ export default function ExplorerScreen() {
           // Silently ignore - older servers won't have this endpoint
         }
 
+        // v2.3.8-beta: CRITICAL FIX - Prevent height flickering from stale data
+        // Only accept height if it's >= highest known to prevent backwards jumps
+        const newHeight = nodeStatus.data?.current_height || 0;
+        const effectiveHeight = Math.max(newHeight, highestKnownHeightRef.current);
+        if (newHeight >= highestKnownHeightRef.current) {
+          highestKnownHeightRef.current = newHeight;
+        }
+
         // Update network stats with ONLY real data from API
         setNetworkStats({
-          currentHeight: nodeStatus.data?.current_height || 0,
-          currentRound: nodeStatus.data?.current_round || 0,
+          currentHeight: effectiveHeight,
+          currentRound: nodeStatus.data?.current_round || Math.floor((nodeStatus.data?.current_height || 0) / 100), // Estimate round from height
           currentTps: nodeStatus.data?.tps_current || 0,
           totalTransactions: 0, // TODO: Add API endpoint for total tx count
           activePeers: nodeStatus.data?.connected_peers || 0,
@@ -1350,7 +1365,7 @@ export default function ExplorerScreen() {
           consensusParticipation: nodeStatus.data?.is_validator ? 1.0 : 0.0,
           mempoolSize: nodeStatus.data?.tx_pool_size || 0,
           quantumEntropy: 0.92, // TODO: Add quantum entropy API endpoint
-          avgBlockTime: nodeStatus.data?.last_block_time ? nodeStatus.data.last_block_time / 1000 : 2.5,
+          avgBlockTime: 2.3, // DAG-Knight typical block time ~2.3s (TODO: calculate from recent blocks)
           networkHashRate: (nodeStatus.data?.tps_current || 0) * 1000, // Estimated from TPS
           byzantineTolerance: (nodeStatus.data?.connected_peers || 0) >= 4 ? 0.95 : 0.75,
           postQuantumReady: 0.88 // TODO: Add PQ readiness API endpoint
@@ -1447,8 +1462,8 @@ export default function ExplorerScreen() {
   useEffect(() => {
     const fetchPeers = async () => {
       try {
-        // 🔧 v1.5.0-beta: Fetch real peer data from /api/mesh/peers
-        const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8080'}/api/mesh/peers`);
+        // 🔧 v2.2.3: Fixed - use relative URL (like qnkAPI) instead of localhost
+        const response = await fetch('/api/mesh/peers');
         const data = await response.json();
 
         if (data.success && data.data) {
@@ -1641,10 +1656,52 @@ export default function ExplorerScreen() {
         
         {/* Quick Stats Preview */}
         <div className="mt-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 overflow-visible">
-          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-lg border border-quantum-purple/20 p-4 text-center">
-            <div className="text-2xl font-bold text-quantum-cyan">{networkStats.currentHeight}</div>
-            <div className="text-sm text-gray-400">Current Height</div>
-          </div>
+          {/* v3.3.5-beta: Current Height card with DAG-Knight 3D visualization on click */}
+          <motion.div
+            className="bg-quantum-indigo/20 backdrop-blur-xl rounded-lg border border-quantum-cyan/30 p-4 text-center cursor-pointer relative overflow-hidden group"
+            whileHover={{ scale: 1.02, borderColor: 'rgba(0, 255, 255, 0.6)' }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => setShowDAG3D(true)}
+          >
+            {/* Animated background glow on hover */}
+            <div className="absolute inset-0 bg-gradient-to-br from-quantum-cyan/0 via-quantum-purple/0 to-quantum-cyan/0 group-hover:from-quantum-cyan/10 group-hover:via-quantum-purple/5 group-hover:to-quantum-cyan/10 transition-all duration-500" />
+
+            {/* Floating particles effect on hover */}
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none">
+              {[...Array(6)].map((_, i) => (
+                <motion.div
+                  key={i}
+                  className="absolute w-1 h-1 rounded-full bg-quantum-cyan"
+                  style={{
+                    left: `${15 + i * 14}%`,
+                    bottom: '15%',
+                  }}
+                  animate={{
+                    y: [-5, -20, -5],
+                    opacity: [0, 1, 0],
+                  }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    delay: i * 0.15,
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="relative z-10">
+              <div className="text-2xl font-bold text-quantum-cyan">{networkStats.currentHeight}</div>
+              <div className="text-sm text-gray-400 flex items-center justify-center gap-1">
+                Current Height
+                <span className="text-[10px] text-quantum-cyan opacity-0 group-hover:opacity-100 transition-opacity ml-1">
+                  Click for 3D
+                </span>
+              </div>
+            </div>
+
+            {/* Corner accent on hover */}
+            <div className="absolute top-0 right-0 w-0 h-0 border-l-[15px] border-l-transparent border-t-[15px] border-t-quantum-cyan/0 group-hover:border-t-quantum-cyan/50 transition-all duration-300" />
+          </motion.div>
           <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-lg border border-quantum-purple/20 p-4 text-center">
             <div className="text-2xl font-bold text-quantum-green">{networkStats.currentTps.toFixed(1)}</div>
             <div className="text-sm text-gray-400">TPS</div>
@@ -1876,6 +1933,16 @@ export default function ExplorerScreen() {
           />
         )}
       </AnimatePresence>
+
+      {/* v3.3.5-beta: DAG-Knight 3D Visualization Popup */}
+      <DAGKnight3DPopup
+        currentHeight={networkStats.currentHeight}
+        consensusRound={networkStats.currentRound}
+        avgBlockTime={networkStats.avgBlockTime}
+        activePeers={networkStats.activePeers}
+        visible={showDAG3D}
+        onClose={() => setShowDAG3D(false)}
+      />
     </div>
   );
 }

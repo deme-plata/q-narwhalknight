@@ -32,9 +32,10 @@ pub struct MultiTokenBalanceResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBalance {
-    pub balance: String,         // Human-readable (e.g., "1234.56789012")
-    pub balance_base_units: u64, // Raw base units
-    pub usd_value: f64,          // USD value
+    pub balance: String,          // Human-readable (e.g., "1234.56789012")
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub balance_base_units: u128, // Raw base units
+    pub usd_value: f64,           // USD value
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,            // Token name (for custom tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,14 +166,15 @@ pub async fn get_multi_token_balance(
         };
 
         // Combine both sources
-        let total = minted_qugusd + swapped_qugusd;
+        let total = minted_qugusd as u128 + swapped_qugusd;
         if total > 0 {
+            // v3.0.5: Use 1e24 for logging consistency
             info!(
                 "💰 QUGUSD balance for {}: minted={}, swapped={}, total={}",
                 &address_hex[..16],
-                minted_qugusd as f64 / 1e8,
-                swapped_qugusd as f64 / 1e8,
-                total as f64 / 1e8
+                minted_qugusd as f64 / 1e24,
+                swapped_qugusd as f64 / 1e24,
+                total as f64 / 1e24
             );
         }
         total
@@ -181,20 +183,24 @@ pub async fn get_multi_token_balance(
     // Get current QUG price from vault
     let qug_price_usd = state.collateral_vault.read().await.qug_price_usd;
 
+    // v3.0.5-beta FIX: Use 1e24 divisor (not 1e8!) to match new decimal precision
+    // QUG uses 24 decimal places: 1 QUG = 10^24 base units
+    const QUG_DIVISOR: f64 = 1e24;
+
     // Calculate USD values for native tokens
-    let qug_usd_value = (qug_balance as f64 / 1e8) * qug_price_usd;
-    let qugusd_usd_value = qugusd_balance as f64 / 1e8; // QUGUSD is pegged to $1
+    let qug_usd_value = (qug_balance as f64 / QUG_DIVISOR) * qug_price_usd;
+    let qugusd_usd_value = qugusd_balance as f64 / QUG_DIVISOR; // QUGUSD is pegged to $1
 
     // Add QUG token
     tokens.insert(
         "QUG".to_string(),
         TokenBalance {
-            balance: format!("{:.8}", qug_balance as f64 / 1e8),
-            balance_base_units: qug_balance,
+            balance: format!("{:.8}", qug_balance as f64 / QUG_DIVISOR),
+            balance_base_units: qug_balance as u128,
             usd_value: qug_usd_value,
             name: Some("Quillon".to_string()),
             contract_address: Some(hex::encode(QUG_TOKEN_ADDRESS)),
-            decimals: Some(8),
+            decimals: Some(24), // v3.0.5: Updated to 24 decimals
         },
     );
     total_usd_value += qug_usd_value;
@@ -203,21 +209,34 @@ pub async fn get_multi_token_balance(
     tokens.insert(
         "QUGUSD".to_string(),
         TokenBalance {
-            balance: format!("{:.8}", qugusd_balance as f64 / 1e8),
+            balance: format!("{:.8}", qugusd_balance as f64 / QUG_DIVISOR),
             balance_base_units: qugusd_balance,
             usd_value: qugusd_usd_value,
             name: Some("Quillon USD".to_string()),
             contract_address: Some(hex::encode(QUGUSD_TOKEN_ADDRESS)),
-            decimals: Some(8),
+            decimals: Some(24), // v3.0.5: Updated to 24 decimals
         },
     );
     total_usd_value += qugusd_usd_value;
 
-    // Get all custom token balances for this wallet
-    let token_balances = state.token_balances.read().await;
+    // ============================================
+    // 🔧 v2.9.21-beta: CRITICAL FIX - Read token balances from RocksDB, not in-memory HashMap
+    // ROOT CAUSE: In-memory HashMap can be stale after swap confirmation
+    // FIX: Always read from RocksDB (source of truth) for API responses
+    // ============================================
     let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
 
-    for ((wallet_addr, token_addr), balance) in token_balances.iter() {
+    // Load token balances directly from RocksDB (guaranteed to be up-to-date)
+    let rocksdb_balances = match state.storage_engine.load_token_balances().await {
+        Ok(balances) => balances,
+        Err(e) => {
+            warn!("⚠️ [v2.9.21] Failed to load token balances from RocksDB: {}, falling back to in-memory", e);
+            // Fallback to in-memory if RocksDB fails
+            state.token_balances.read().await.clone()
+        }
+    };
+
+    for ((wallet_addr, token_addr), balance) in rocksdb_balances.iter() {
         // Only include tokens for this wallet
         if wallet_addr != &addr_bytes {
             continue;
@@ -247,13 +266,14 @@ pub async fn get_multi_token_balance(
                     balance_base_units: *balance,
                     usd_value: 0.0, // Custom tokens don't have USD pricing yet
                     name: Some(contract_info.metadata.name.clone()),
-                    contract_address: Some(hex::encode(token_addr)),
+                    // v2.4.2: Include qnk prefix so oracle price lookup matches pool addresses
+                    contract_address: Some(format!("qnk{}", hex::encode(token_addr))),
                     decimals: Some(decimals),
                 },
             );
 
-            info!(
-                "📊 Added custom token balance: {} = {:.8} (contract: {})",
+            debug!(
+                "📊 [v2.9.21] Token from RocksDB: {} = {:.8} (contract: {})",
                 symbol,
                 balance_display,
                 hex::encode(&token_addr[..8])
@@ -267,12 +287,11 @@ pub async fn get_multi_token_balance(
         total_usd_value,
     };
 
-    info!(
-        "✅ Retrieved balances for {}: QUG={:.4}, QUGUSD={:.4}, {} custom tokens",
-        &address_hex[..16],
-        qug_balance as f64 / 1e8,
-        qugusd_balance as f64 / 1e8,
-        response.tokens.len() - 2  // Subtract native tokens
+    // v2.2.4: Privacy fix - don't log actual balances
+    debug!(
+        "✅ Retrieved balances for {} ({} tokens)",
+        &address_hex[..8],
+        response.tokens.len()
     );
 
     Ok(Json(ApiResponse::success(response)))
@@ -292,11 +311,12 @@ pub async fn mint_qugusd(
     );
 
     // Parse QUG amount
+    // v3.0.4: Migrated to u128 with 24-decimal precision
     let qug_amount_f64: f64 = request
         .qug_amount
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let qug_amount_base_units = (qug_amount_f64 * 1e8) as u64;
+    let qug_amount_base_units: u128 = (qug_amount_f64 * 1e24) as u128;
 
     // Mint QUGUSD
     let mut vault_write = state.collateral_vault.write().await;
@@ -308,17 +328,18 @@ pub async fn mint_qugusd(
         }
     };
 
+    // v3.0.4: Use 24-decimal precision (1e24)
     let response = MintQUGUSDResponse {
-        qug_locked: format!("{:.8}", mint_result.qug_locked as f64 / 1e8),
-        qugusd_minted: format!("{:.8}", mint_result.qugusd_minted as f64 / 1e8),
+        qug_locked: format!("{:.8}", mint_result.qug_locked as f64 / 1e24),
+        qugusd_minted: format!("{:.8}", mint_result.qugusd_minted as f64 / 1e24),
         collateral_ratio: mint_result.collateral_ratio,
         liquidation_price: mint_result.liquidation_price,
     };
 
     info!(
         "✅ Minted {:.4} QUGUSD (locked {:.4} QUG)",
-        mint_result.qugusd_minted as f64 / 1e8,
-        mint_result.qug_locked as f64 / 1e8
+        mint_result.qugusd_minted as f64 / 1e24,
+        mint_result.qug_locked as f64 / 1e24
     );
 
     Ok(Json(ApiResponse::success(response)))
@@ -338,11 +359,12 @@ pub async fn redeem_qug(
     );
 
     // Parse QUGUSD amount
+    // v3.0.4: Migrated to u128 with 24-decimal precision
     let qugusd_amount_f64: f64 = request
         .qugusd_amount
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let qugusd_amount_base_units = (qugusd_amount_f64 * 1e8) as u64;
+    let qugusd_amount_base_units: u128 = (qugusd_amount_f64 * 1e24) as u128;
 
     // Redeem QUG
     let mut vault_write = state.collateral_vault.write().await;
@@ -354,16 +376,17 @@ pub async fn redeem_qug(
         }
     };
 
+    // v3.0.4: Use 24-decimal precision (1e24)
     let response = RedeemQUGResponse {
-        qugusd_burned: format!("{:.8}", redeem_result.qugusd_burned as f64 / 1e8),
-        qug_unlocked: format!("{:.8}", redeem_result.qug_unlocked as f64 / 1e8),
+        qugusd_burned: format!("{:.8}", redeem_result.qugusd_burned as f64 / 1e24),
+        qug_unlocked: format!("{:.8}", redeem_result.qug_unlocked as f64 / 1e24),
         remaining_collateral_ratio: redeem_result.remaining_collateral_ratio,
     };
 
     info!(
         "✅ Redeemed {:.4} QUG (burned {:.4} QUGUSD)",
-        redeem_result.qug_unlocked as f64 / 1e8,
-        redeem_result.qugusd_burned as f64 / 1e8
+        redeem_result.qug_unlocked as f64 / 1e24,
+        redeem_result.qugusd_burned as f64 / 1e24
     );
 
     Ok(Json(ApiResponse::success(response)))

@@ -384,7 +384,8 @@ pub enum BroadcastMessage {
     TransactionAnnounce {
         tx_hash: [u8; 32],
         size: usize,
-        fee: u64,
+        /// v2.5.0: Updated to u128 for consistency with Amount type
+        fee: u128,
         priority: u8,
     },
 

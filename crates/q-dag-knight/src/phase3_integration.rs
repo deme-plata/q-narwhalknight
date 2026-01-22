@@ -5,7 +5,7 @@
 
 use crate::{DAGKnightConsensus, VotingCoordinator, VotingCoordinatorConfig};
 use anyhow::Result;
-use q_narwhal_core::{ProductionMempool, ConsensusVoting, ByzantineDetector};
+use q_narwhal_core::{ProductionMempool, ConsensusVoting, ByzantineDetector, SuspicionLevel};
 use q_types::*;
 use std::sync::Arc;
 use tracing::{info, debug, error, warn};
@@ -192,25 +192,33 @@ impl Phase3Integration {
     
     /// Byzantine monitoring loop (Server Beta Phase 2C integration)
     async fn run_byzantine_monitoring(byzantine_detector: Arc<ByzantineDetector>) -> Result<()> {
-        debug!("Starting Byzantine monitoring with Phase 3 integration");
-        
+        info!("🔍 Starting Byzantine monitoring with Phase 3 integration");
+
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        
+
         loop {
             interval.tick().await;
-            
-            // Perform comprehensive Byzantine analysis
-            // TODO: Fix missing method - perform_network_analysis doesn't exist  
-            // match byzantine_detector.perform_network_analysis().await {
-            //     Ok(suspicious_validators) => {
-            //         if !suspicious_validators.is_empty() {
-            //             warn!("Byzantine behavior detected: {:?}", suspicious_validators);
-            //         }
-            //     },
-            //     Err(e) => {
-            //         error!("Byzantine analysis failed: {:?}", e);
-            //     }
-            // }
+
+            // Perform comprehensive Byzantine analysis using available methods
+            let malicious_validators = byzantine_detector.get_malicious_validators().await;
+
+            if !malicious_validators.is_empty() {
+                warn!("🚨 Byzantine behavior detected! {} malicious validators identified",
+                      malicious_validators.len());
+                for validator_id in &malicious_validators {
+                    warn!("   - Malicious validator: {}", hex::encode(&validator_id[..8]));
+
+                    // Report this validator to the network
+                    if let Err(e) = byzantine_detector.report_byzantine_validator(*validator_id).await {
+                        error!("Failed to report Byzantine validator: {:?}", e);
+                    }
+                }
+            }
+
+            // Get overall detection stats
+            let stats = byzantine_detector.get_detection_stats().await;
+            debug!("📊 Byzantine detection stats: {} validators tracked, {} reports filed",
+                   stats.total_validators_tracked, stats.metrics.byzantine_reports);
         }
     }
     
@@ -228,10 +236,20 @@ impl Phase3Integration {
         let behavior_analysis = self.byzantine_detector
             .analyze_validator_behavior(from_peer)
             .await?;
-            
-        // TODO: Fix missing method - is_suspicious doesn't exist
-        if false { // behavior_analysis.is_suspicious() {
-            warn!("Suspicious vertex {} from potentially Byzantine peer {}", format_vertex_id(&vertex.id), format_vertex_id(&from_peer));
+
+        // Check suspicion level from analysis result
+        if behavior_analysis.suspicion_level >= SuspicionLevel::Suspicious {
+            warn!("⚠️ Suspicious vertex {} from potentially Byzantine peer {} (suspicion: {:?}, reputation: {:.2})",
+                  format_vertex_id(&vertex.id),
+                  format_vertex_id(&from_peer),
+                  behavior_analysis.suspicion_level,
+                  behavior_analysis.reputation_score);
+
+            // If highly malicious, consider rejecting the vertex
+            if behavior_analysis.suspicion_level >= SuspicionLevel::HighlyMalicious {
+                warn!("🚨 REJECTING vertex from highly malicious peer {}", format_vertex_id(&from_peer));
+                return Ok(());
+            }
         }
         
         // 3. Submit to voting coordinator (Phase 3)

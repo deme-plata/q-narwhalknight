@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { TrendingUp, TrendingDown, Zap, ChevronLeft, ChevronRight, Flame } from 'lucide-react';
@@ -15,13 +15,15 @@ interface Token {
   volume24h: number;
   icon: string;
   isNitroBoost?: boolean;
+  marketCap?: number; // v2.8.1-beta: Market cap for filtering/sorting
 }
 
 interface TokenBarProps {
   onTokenClick?: (token: Token) => void;
 }
 
-export default function TokenBar({ onTokenClick }: TokenBarProps) {
+// v2.4.0: Memoized for performance
+const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [loading, setLoading] = useState(true);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -91,9 +93,14 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
             const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
             if (balanceResponse.success && balanceResponse.data) {
               nativeQugBalance = balanceResponse.data.balance_qnk || 0;
-              // Cache balance for use after refresh
-              localStorage.setItem('cachedBalance', nativeQugBalance.toString());
-              console.log('💰 TokenBar: Cached balance:', nativeQugBalance);
+              // v2.3.27-beta: Check global DEX cooldown before writing to localStorage
+              const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+              if (Date.now() < cooldownUntil) {
+                console.log('🚫 TokenBar: SKIPPING localStorage write - DEX cooldown active');
+              } else {
+                localStorage.setItem('cachedBalance', nativeQugBalance.toString());
+                console.log('💰 TokenBar: Cached balance:', nativeQugBalance);
+              }
             } else {
               // Authentication failed - use cached balance from localStorage
               console.warn('⚠️ TokenBar: Balance fetch failed, using cached balance');
@@ -166,15 +173,59 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
           },
         ];
 
-        // Fetch custom tokens
+        // Fetch custom tokens - v2.8.1-beta: Only show established tokens with minimum requirements
         const response = await qnkAPI.getSupportedTokens();
         let enrichedTokens = nativeTokens;
+
+        // v2.8.1-beta: Minimum requirements for TokenBar display
+        // This prevents brand new tokens from appearing immediately in the top bar
+        const MIN_MARKET_CAP = 10000;      // $10,000 minimum market cap
+        const MIN_VOLUME_24H = 1000;        // $1,000 minimum 24h volume
+        const MIN_LIQUIDITY = 5000;         // $5,000 minimum liquidity (if available)
 
         if (response.success && response.data) {
           const apiTokensPromises = response.data
             .filter(apiToken => apiToken.symbol !== 'QUG' && apiToken.symbol !== 'QUGUSD')
             .map(async (apiToken) => {
-              // Fetch balance
+              // Fetch price from oracle FIRST to determine if token meets criteria
+              let customPrice = 0;
+              let customChange = 0.0;
+              let customVolume = 0.0;
+              let hasNitroBoost = false;
+
+              try {
+                const oracleResponse = await qnkAPI.getOraclePrice(apiToken.address);
+                if (oracleResponse.success && oracleResponse.data) {
+                  customPrice = oracleResponse.data.price || 0;
+                  customChange = oracleResponse.data.change_24h || 0;
+                  customVolume = oracleResponse.data.volume_24h || 0;
+                  // Nitro Boost enabled if token has volume > 100k and price > 0.1
+                  hasNitroBoost = customVolume > 100000 && customPrice > 0.1;
+                }
+              } catch (error) {
+                console.log(`ℹ️ No oracle price for ${apiToken.symbol}`);
+              }
+
+              // v2.8.1-beta: Calculate market cap from total supply and price
+              const totalSupply = parseInt(apiToken.total_supply || '0');
+              const decimals = apiToken.decimals || 8;
+              const adjustedSupply = totalSupply / Math.pow(10, decimals);
+              const marketCap = adjustedSupply * customPrice;
+
+              // v2.8.1-beta: Filter out tokens that don't meet minimum requirements
+              // New tokens won't have volume or meaningful market cap
+              const meetsRequirements = (
+                marketCap >= MIN_MARKET_CAP ||       // Has minimum market cap
+                customVolume >= MIN_VOLUME_24H ||    // OR has trading volume
+                hasNitroBoost                         // OR has Nitro Boost (manually promoted)
+              );
+
+              if (!meetsRequirements) {
+                console.log(`🚫 TokenBar: Filtering out ${apiToken.symbol} - marketCap: $${marketCap.toFixed(2)}, volume: $${customVolume.toFixed(2)}`);
+                return null; // Will be filtered out
+              }
+
+              // Fetch balance only for tokens that meet requirements
               let tokenBalance = 0;
               if (walletAddress) {
                 try {
@@ -187,25 +238,6 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
                 }
               }
 
-              // Fetch price from oracle
-              let customPrice = 1.0;
-              let customChange = 0.0;
-              let customVolume = 0.0;
-              let hasNitroBoost = false;
-
-              try {
-                const oracleResponse = await qnkAPI.getOraclePrice(apiToken.address);
-                if (oracleResponse.success && oracleResponse.data) {
-                  customPrice = oracleResponse.data.price;
-                  customChange = oracleResponse.data.change_24h || 0;
-                  customVolume = oracleResponse.data.volume_24h || 0;
-                  // Nitro Boost enabled if token has volume > 100k and price > 0.1
-                  hasNitroBoost = customVolume > 100000 && customPrice > 0.1;
-                }
-              } catch (error) {
-                console.log(`ℹ️ No oracle price for ${apiToken.symbol}`);
-              }
-
               return {
                 id: apiToken.address,
                 symbol: apiToken.symbol,
@@ -216,11 +248,19 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
                 volume24h: customVolume,
                 icon: '🪙',
                 isNitroBoost: hasNitroBoost,
+                marketCap: marketCap, // Include for sorting
               };
             });
 
-          const apiTokens = await Promise.all(apiTokensPromises);
+          const apiTokensRaw = await Promise.all(apiTokensPromises);
+          // v2.8.1-beta: Filter out null entries (tokens that didn't meet requirements)
+          // and sort by volume (highest first) to show best performing tokens
+          const apiTokens = apiTokensRaw
+            .filter((t): t is NonNullable<typeof t> => t !== null)
+            .sort((a, b) => b.volume24h - a.volume24h);
+
           enrichedTokens = [...nativeTokens, ...apiTokens];
+          console.log(`✅ TokenBar: Showing ${apiTokens.length} custom tokens (filtered by market cap/volume)`);
         }
 
         setTokens(enrichedTokens);
@@ -797,4 +837,6 @@ export default function TokenBar({ onTokenClick }: TokenBarProps) {
       />
     </div>
   );
-}
+});
+
+export default TokenBar;

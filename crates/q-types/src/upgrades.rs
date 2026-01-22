@@ -71,6 +71,121 @@ pub mod upgrades {
         activation_height: u64::MAX, // Set to specific height when ready
         description: "Description of the upgrade",
     };
+
+    // =========================================================================
+    // CRITICAL SECURITY FIXES (v2.3.1-beta)
+    // =========================================================================
+
+    /// SQIsign Signature Verification Fix
+    ///
+    /// CRITICAL SECURITY FIX: Previous versions accepted ALL SQIsign signatures
+    /// without actual cryptographic verification. This upgrade enables proper
+    /// commitment comparison in SQIsign verification.
+    ///
+    /// - Before: Any SQIsign signature accepted (security theater)
+    /// - After: Only cryptographically valid signatures accepted
+    ///
+    /// Set to 0 for testnet (immediate activation).
+    /// For mainnet: Set to current_height + 20000 before launch.
+    pub const SQISIGN_VERIFICATION_FIX: NetworkUpgrade = NetworkUpgrade {
+        name: "sqisign_verification_fix",
+        activation_height: 0, // TESTNET: Immediate activation
+        description: "CRITICAL: Enable actual SQIsign signature verification",
+    };
+
+    /// Hybrid Key Separation Requirement
+    ///
+    /// CRITICAL SECURITY FIX: Previous versions would silently use the same key
+    /// for both Ed25519 and SQIsign in hybrid mode, breaking the "both must break"
+    /// security guarantee.
+    ///
+    /// - Before: Hybrid mode could use same key for both algorithms
+    /// - After: Hybrid mode requires separate key material (32 + 64 bytes)
+    ///
+    /// Set to 0 for testnet (immediate activation).
+    pub const HYBRID_KEY_SEPARATION: NetworkUpgrade = NetworkUpgrade {
+        name: "hybrid_key_separation",
+        activation_height: 0, // TESTNET: Immediate activation
+        description: "CRITICAL: Require separate keys for hybrid Ed25519+SQIsign",
+    };
+
+    /// Phase 1 (Dilithium5) Deprecation
+    ///
+    /// Dilithium5 signatures deprecated in v1.0.86-beta due to size (4,627 bytes).
+    /// At activation: New blocks MUST NOT use Phase1Dilithium5.
+    /// Historical Phase1 blocks remain valid for chain consistency.
+    pub const PHASE1_DILITHIUM5_DEPRECATED: NetworkUpgrade = NetworkUpgrade {
+        name: "phase1_dilithium5_deprecated",
+        activation_height: 1_000_000, // Future activation
+        description: "Deprecate Dilithium5 signatures - use SQIsign instead",
+    };
+
+    /// Phase 2 (SQIsign) Mandatory
+    ///
+    /// At activation: New blocks MUST use Phase2SQIsign or HybridEd25519SQIsign.
+    /// Phase0Ed25519 no longer accepted for NEW blocks (historical blocks valid).
+    pub const PHASE2_SQISIGN_MANDATORY: NetworkUpgrade = NetworkUpgrade {
+        name: "phase2_sqisign_mandatory",
+        activation_height: 2_000_000, // Future activation
+        description: "Require SQIsign or hybrid signatures for new blocks",
+    };
+
+    // =========================================================================
+    // U128 AMOUNT UPGRADE (v2.5.0)
+    // =========================================================================
+
+    /// U128 Token Amounts
+    ///
+    /// Upgrades token amounts from u64 to u128 for:
+    /// - Token supplies up to 10^38 (u128 max: ~3.4 × 10^38)
+    /// - 24 decimals for native coin (extreme precision)
+    /// - Smart contracts with massive token supplies (10^30+)
+    ///
+    /// Before activation:
+    /// - Blocks use u64 amounts (8 decimals)
+    /// - P2PBalanceUpdate version 2
+    ///
+    /// After activation:
+    /// - New blocks use u128 amounts (24 decimals)
+    /// - P2PBalanceUpdate version 3
+    /// - Legacy u64 values automatically converted to u128
+    ///
+    /// Set to 0 for testnet (immediate activation for testing).
+    /// For mainnet: Set to current_height + 50000 (~1 week notice).
+    pub const U128_AMOUNTS: NetworkUpgrade = NetworkUpgrade {
+        name: "u128_amounts",
+        activation_height: 0, // TESTNET: Immediate activation
+        description: "Upgrade token amounts to u128 for 10^38 supply support",
+    };
+
+    // =========================================================================
+    // FEE REDUCTION UPGRADE (v3.4.0-beta)
+    // =========================================================================
+
+    /// 10x Transaction Fee Reduction
+    ///
+    /// Reduces minimum transaction fees by 10x to improve user experience:
+    /// - Simple transfer: 0.00021 QUG → 0.000021 QUG
+    /// - Token transfer: 0.00042 QUG → 0.000042 QUG
+    /// - Swap: 0.00063 QUG → 0.000063 QUG
+    /// - Contract call: 0.00105 QUG → 0.000105 QUG
+    ///
+    /// Before activation:
+    /// - MIN_FEE_PER_GAS = 1 (legacy fees)
+    /// - Minimum transfer fee = 21,000 gas * 1 = 0.00021 QUG
+    ///
+    /// After activation:
+    /// - get_min_fee_per_gas() returns 0.1 (10x reduction)
+    /// - Minimum transfer fee = 21,000 gas * 0.1 = 0.000021 QUG
+    ///
+    /// Mainnet safety: Height-gated so old blocks validate with old rules.
+    /// Set to 350,000 for testnet (~2 weeks notice from current ~300k).
+    /// For mainnet: Set to current_height + 20000 before launch.
+    pub const REDUCED_FEES_V1: NetworkUpgrade = NetworkUpgrade {
+        name: "reduced_fees_v1",
+        activation_height: 350_000, // TESTNET: ~2 weeks from now
+        description: "10x reduction in transaction fees for better UX",
+    };
 }
 
 /// Upgrade manager - checks if upgrades are active at given height

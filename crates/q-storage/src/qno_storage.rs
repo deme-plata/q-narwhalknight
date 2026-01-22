@@ -5,6 +5,8 @@
 //! - Domain statistics
 //! - Global stats
 //! - P2P gossip integration for decentralized validation
+//!
+//! v3.2.2: Added u128_serde for MessagePack P2P compatibility
 
 use anyhow::{anyhow, Result};
 use rocksdb::DB;
@@ -14,6 +16,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+// Import u128_serde for MessagePack compatibility
+use q_types::{u128_serde, option_u128_serde};
+
 use crate::{CF_QNO_DOMAINS, CF_QNO_STAKES, CF_QNO_STATS};
 
 // ============================================================================
@@ -21,6 +26,7 @@ use crate::{CF_QNO_DOMAINS, CF_QNO_STAKES, CF_QNO_STATS};
 // ============================================================================
 
 /// Prediction domain for staking
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictionDomain {
     pub id: String,
@@ -28,45 +34,50 @@ pub struct PredictionDomain {
     pub description: String,
     pub apy: f64,
     pub risk_level: String,
-    pub total_staked: u64,
+    pub total_staked: u128,
     pub validator_count: u32,
     pub accuracy_30d: f64,
-    pub min_stake: u64,
-    pub max_stake: u64,
+    pub min_stake: u128,
+    pub max_stake: u128,
     pub active: bool,
 }
 
 /// Staking position for a user
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakingPosition {
     pub id: String,
     pub wallet_address: String,  // Added for P2P sync
     pub domain: String,
     pub domain_name: String,
-    pub amount: u64,
+    pub amount: u128,
     pub confidence: f64,
     pub lock_days: u32,
     pub lock_multiplier: f64,
     pub staked_at: u64,
     pub unlocks_at: u64,
-    pub reward: u64,
-    pub accrued_reward: u64,     // Continuously accrued reward
+    pub reward: u128,
+    pub accrued_reward: u128,    // Continuously accrued reward
     pub status: String,
     pub prediction_accuracy: f64,
 }
 
 /// Overall staking statistics
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StakingStats {
-    pub total_staked: u64,
+    #[serde(default)]
+    pub total_staked: u128,
     pub total_stakers: u32,
     pub average_apy: f64,
-    pub total_rewards_paid: u64,
+    #[serde(default)]
+    pub total_rewards_paid: u128,
     pub active_domains: u32,
     pub prediction_accuracy_global: f64,
 }
 
 /// QNO operation for P2P gossip
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QnoOperation {
     Stake {
@@ -77,21 +88,21 @@ pub enum QnoOperation {
     Unstake {
         wallet_address: String,
         stake_id: String,
-        penalty_amount: u64,
+        penalty_amount: u128,
         signature: Vec<u8>,
         timestamp: u64,
     },
     Claim {
         wallet_address: String,
         stake_id: String,
-        reward_amount: u64,
-        principal_returned: u64,
+        reward_amount: u128,
+        principal_returned: u128,
         signature: Vec<u8>,
         timestamp: u64,
     },
     RewardAccrual {
         stake_id: String,
-        accrued_amount: u64,
+        accrued_amount: u128,
         timestamp: u64,
     },
 }
@@ -141,6 +152,7 @@ pub struct PredictionRecord {
 }
 
 /// Slashing event record
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashingRecord {
     pub id: String,
@@ -148,7 +160,7 @@ pub struct SlashingRecord {
     pub wallet_address: String,
     pub domain: String,
     pub slash_reason: SlashReason,
-    pub slash_amount: u64,              // Amount slashed (in base units)
+    pub slash_amount: u128,             // Amount slashed (in base units)
     pub slash_percentage: f64,          // Percentage of stake slashed
     pub consecutive_failures: u32,      // How many failures led to this
     pub timestamp: u64,
@@ -448,7 +460,7 @@ impl QnoStorage {
         let domains = self.domains_cache.read().await;
 
         let total_stakers = positions.len() as u32;
-        let total_staked: u64 = positions
+        let total_staked: u128 = positions
             .values()
             .flat_map(|p| p.iter())
             .filter(|p| p.status == "active")
@@ -551,9 +563,9 @@ impl QnoStorage {
         let mut domains = self.domains_cache.write().await;
         if let Some(domain) = domains.iter_mut().find(|d| d.id == domain_id) {
             if staked_delta >= 0 {
-                domain.total_staked = domain.total_staked.saturating_add(staked_delta as u64);
+                domain.total_staked = domain.total_staked.saturating_add(staked_delta as u128);
             } else {
-                domain.total_staked = domain.total_staked.saturating_sub((-staked_delta) as u64);
+                domain.total_staked = domain.total_staked.saturating_sub((-staked_delta) as u128);
             }
 
             if validator_delta >= 0 {
@@ -639,7 +651,7 @@ impl QnoStorage {
     }
 
     /// Update total rewards paid
-    pub async fn add_rewards_paid(&self, amount: u64) -> Result<()> {
+    pub async fn add_rewards_paid(&self, amount: u128) -> Result<()> {
         let mut stats = self.stats_cache.write().await;
         stats.total_rewards_paid = stats.total_rewards_paid.saturating_add(amount);
         let stats_clone = stats.clone();
@@ -681,10 +693,14 @@ impl QnoStorage {
                 // Calculate accrued reward since last update
                 // Reward per second = (amount * APY) / (365 * 24 * 60 * 60)
                 let seconds_staked = now.saturating_sub(position.staked_at);
-                let annual_reward = (position.amount as f64 * apy / 100.0)
-                    * position.confidence
-                    * position.lock_multiplier;
-                let expected_reward = (annual_reward * seconds_staked as f64 / (365.0 * 24.0 * 60.0 * 60.0)) as u64;
+                // Use high-precision basis points to avoid f64 precision loss
+                let rate_bps = ((apy / 100.0) * position.confidence * position.lock_multiplier * 1_000_000_000.0) as u128;
+                let seconds_per_year: u128 = 365 * 24 * 60 * 60;
+                // expected_reward = amount * rate_bps * seconds / (1e9 * seconds_per_year)
+                let expected_reward = position.amount
+                    .saturating_mul(rate_bps)
+                    .saturating_mul(seconds_staked as u128)
+                    / (1_000_000_000 * seconds_per_year);
 
                 if expected_reward > position.accrued_reward {
                     position.accrued_reward = expected_reward;
@@ -901,7 +917,7 @@ impl QnoStorage {
     }
 
     /// Calculate slash amount based on consecutive failures
-    fn calculate_slash_amount(&self, stake_amount: u64, consecutive_failures: u32) -> (u64, f64) {
+    fn calculate_slash_amount(&self, stake_amount: u128, consecutive_failures: u32) -> (u128, f64) {
         // Escalating slash: base% + 5% per additional failure, capped at max%
         let failure_multiplier = (consecutive_failures.saturating_sub(
             self.resolution_config.slash_after_failures
@@ -911,7 +927,9 @@ impl QnoStorage {
             + failure_multiplier * 0.05)
             .min(self.resolution_config.max_slash_percentage);
 
-        let slash_amount = (stake_amount as f64 * slash_percentage) as u64;
+        // Use basis points to avoid f64 precision loss with large amounts
+        let slash_bps = (slash_percentage * 10_000.0) as u128;
+        let slash_amount = stake_amount.saturating_mul(slash_bps) / 10_000;
         (slash_amount, slash_percentage)
     }
 
@@ -959,10 +977,12 @@ impl QnoStorage {
         };
 
         // Apply the slash to the position
+        // Convert slash_percentage to basis points to avoid f64 precision loss
+        let slash_bps_for_reward = (slash_percentage * 10_000.0) as u128;
         let slashed = self.update_position(wallet_address, stake_id, |p| {
             p.amount = p.amount.saturating_sub(slash_amount);
-            // Also reduce accrued reward proportionally
-            let reward_slash = (p.accrued_reward as f64 * slash_percentage) as u64;
+            // Also reduce accrued reward proportionally using integer math
+            let reward_slash = p.accrued_reward.saturating_mul(slash_bps_for_reward) / 10_000;
             p.accrued_reward = p.accrued_reward.saturating_sub(reward_slash);
         }).await?;
 
@@ -992,7 +1012,7 @@ impl QnoStorage {
 
     /// Adjust reward based on prediction accuracy
     /// Returns the adjusted reward amount
-    pub fn adjust_reward_for_accuracy(&self, base_reward: u64, accuracy_score: f64) -> u64 {
+    pub fn adjust_reward_for_accuracy(&self, base_reward: u128, accuracy_score: f64) -> u128 {
         let is_correct = self.is_prediction_correct(accuracy_score);
 
         if is_correct {
@@ -1000,11 +1020,16 @@ impl QnoStorage {
             // Higher accuracy = higher bonus (up to 50% extra)
             let bonus_multiplier = 1.0 + (accuracy_score - self.resolution_config.accuracy_threshold)
                 .max(0.0) * self.resolution_config.accuracy_bonus_multiplier;
-            (base_reward as f64 * bonus_multiplier) as u64
+            // Use basis points to avoid f64 precision loss with large amounts
+            let multiplier_bps = (bonus_multiplier * 10_000.0) as u128;
+            base_reward.saturating_mul(multiplier_bps) / 10_000
         } else {
             // Penalty for inaccurate predictions
             let penalty = self.resolution_config.inaccuracy_penalty_multiplier;
-            (base_reward as f64 * (1.0 - penalty * (1.0 - accuracy_score))) as u64
+            let final_multiplier = 1.0 - penalty * (1.0 - accuracy_score);
+            // Use basis points to avoid f64 precision loss with large amounts
+            let multiplier_bps = (final_multiplier * 10_000.0) as u128;
+            base_reward.saturating_mul(multiplier_bps) / 10_000
         }
     }
 

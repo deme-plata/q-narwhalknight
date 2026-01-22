@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use tracing::{debug, info, warn};
 
+// v3.2.2: Import u128_serde for MessagePack P2P compatibility
+use q_types::u128_serde;
+
 /// Genesis timestamp: Oct 26, 2025 00:00 UTC
 pub const GENESIS_TIMESTAMP: u64 = 1761436800;
 
@@ -24,15 +27,16 @@ pub const SECONDS_PER_HALVING: u64 = 126_144_000; // 365.25 * 4 * 24 * 60 * 60
 /// Seconds per year (365.25 days for leap years)
 pub const SECONDS_PER_YEAR: f64 = 31_557_600.0;
 
-/// Base annual emission for Era 1 (82,031 QUG with 8 decimals)
+/// Base annual emission for Era 1 (82,031 QUG with 24 decimals)
 /// Calculated as: 21M ÷ 256 ÷ 1 = 82,031 QUG/year
-pub const BASE_ANNUAL_EMISSION: u64 = 82_031_000_000_000;
+/// v2.10.0: Updated to u128 for 24 decimal precision
+pub const BASE_ANNUAL_EMISSION: u128 = 82_031_000_000_000_000_000_000_000_000_000;
 
-/// Minimum reward per block (0.000001 QUG) - prevents division by zero
-pub const MIN_REWARD: u64 = 100;
+/// Minimum reward per block (0.000001 QUG with 24 decimals) - prevents division by zero
+pub const MIN_REWARD: u128 = 1_000_000_000_000_000_000;
 
-/// Maximum reward per block (1 QUG) - safety cap
-pub const MAX_REWARD_PER_BLOCK: u64 = 100_000_000;
+/// Maximum reward per block (1 QUG with 24 decimals) - safety cap
+pub const MAX_REWARD_PER_BLOCK: u128 = 1_000_000_000_000_000_000_000_000;
 
 /// Fixed-point precision for intermediate calculations (6 decimal places)
 const PRECISION: u128 = 1_000_000;
@@ -87,6 +91,7 @@ impl BlockWindow {
 }
 
 /// Emission controller - manages adaptive block rewards
+/// v2.10.0: Updated to u128 for 24 decimal precision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmissionController {
     /// Recent block windows for rate tracking
@@ -95,11 +100,11 @@ pub struct EmissionController {
     /// Current halving era (0 = 2025-2029, 1 = 2029-2033, etc.)
     current_era: u64,
 
-    /// Total emitted this era (for cap enforcement)
-    total_emitted_this_era: u64,
+    /// Total emitted this era (for cap enforcement) - v2.10.0: u128
+    total_emitted_this_era: u128,
 
-    /// Target emission for current era
-    era_target_emission: u64,
+    /// Target emission for current era - v2.10.0: u128
+    era_target_emission: u128,
 
     /// Current emission phase
     phase: EmissionPhase,
@@ -228,15 +233,17 @@ impl EmissionController {
     /// Calculate adaptive block reward
     ///
     /// Uses integer arithmetic with 128-bit precision to avoid rounding errors.
+    /// v2.10.0: Updated to u128 for 24 decimal precision
     ///
     /// Formula: reward = TARGET_ANNUAL_EMISSION / blocks_expected_this_year
     pub fn calculate_adaptive_reward(
         &self,
         current_timestamp: u64,
         recent_block_rate: f64,
-        total_supply: u64,
-    ) -> Result<u64> {
-        const QUG_MAX_SUPPLY: u64 = 2_100_000_000_000_000; // 21M QUG
+        total_supply: u128,
+    ) -> Result<u128> {
+        // 21M QUG with 24 decimals
+        const QUG_MAX_SUPPLY: u128 = 21_000_000_000_000_000_000_000_000_000_000;
 
         // Safety 1: Hard cap enforcement
         if total_supply >= QUG_MAX_SUPPLY {
@@ -266,8 +273,8 @@ impl EmissionController {
 
         // Integer arithmetic with 128-bit precision
         // reward = (annual_target * PRECISION) / expected_blocks / PRECISION
-        let reward_fp = (annual_target as u128 * PRECISION) / expected_blocks_this_year;
-        let mut reward = (reward_fp / PRECISION) as u64;
+        let reward_fp = (annual_target * PRECISION) / expected_blocks_this_year;
+        let mut reward = reward_fp / PRECISION;
 
         // Safety 4: Enforce bounds
         reward = reward.clamp(MIN_REWARD, MAX_REWARD_PER_BLOCK);
@@ -279,7 +286,7 @@ impl EmissionController {
 
         debug!(
             "💰 Adaptive reward calculated: {} QUG (rate: {:.2} blocks/sec, era: {})",
-            reward as f64 / 100_000_000.0,
+            reward as f64 / 1e24,
             sane_block_rate,
             self.current_era
         );
@@ -291,11 +298,12 @@ impl EmissionController {
     ///
     /// **Bootstrap Phase (Era 0)**: Base reward + adaptive subsidy
     /// **Mature Phase (Era 1+)**: Pure adaptive reward
+    /// v2.10.0: Updated to u128 for 24 decimal precision
     pub fn calculate_block_reward(
         &mut self,
         current_timestamp: u64,
-        total_supply: u64,
-    ) -> Result<u64> {
+        total_supply: u128,
+    ) -> Result<u128> {
         // Update era based on timestamp
         self.update_era(current_timestamp);
 
@@ -304,8 +312,8 @@ impl EmissionController {
 
         match self.phase {
             EmissionPhase::Bootstrap => {
-                // Bootstrap: 0.01 QUG base + adaptive subsidy
-                const BASE_REWARD: u64 = 1_000_000; // 0.01 QUG (8 decimals)
+                // Bootstrap: 0.01 QUG base + adaptive subsidy (24 decimals)
+                const BASE_REWARD: u128 = 10_000_000_000_000_000_000_000; // 0.01 QUG (24 decimals)
 
                 let adaptive_reward = self.calculate_adaptive_reward(
                     current_timestamp,
@@ -318,9 +326,9 @@ impl EmissionController {
                 let total = BASE_REWARD + subsidy;
 
                 info!(
-                    "🎁 Bootstrap reward: {:.8} QUG (base: 0.01, subsidy: {:.8})",
-                    total as f64 / 100_000_000.0,
-                    subsidy as f64 / 100_000_000.0
+                    "🎁 Bootstrap reward: {:.24} QUG (base: 0.01, subsidy: {:.24})",
+                    total as f64 / 1e24,
+                    subsidy as f64 / 1e24
                 );
 
                 Ok(total)
@@ -334,8 +342,8 @@ impl EmissionController {
                 )?;
 
                 info!(
-                    "💎 Mature reward: {:.8} QUG (pure adaptive)",
-                    reward as f64 / 100_000_000.0
+                    "💎 Mature reward: {:.24} QUG (pure adaptive)",
+                    reward as f64 / 1e24
                 );
 
                 Ok(reward)
@@ -344,7 +352,8 @@ impl EmissionController {
     }
 
     /// Record emission (update total emitted this era)
-    pub fn record_emission(&mut self, amount: u64) {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn record_emission(&mut self, amount: u128) {
         self.total_emitted_this_era += amount;
     }
 
@@ -372,11 +381,13 @@ impl EmissionController {
 }
 
 /// Emission statistics
+/// v2.10.0: Updated to u128 for 24 decimal precision
+/// v3.2.2: Added u128_serde for MessagePack P2P compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmissionStats {
     pub current_era: u64,
-    pub era_target_emission: u64,
-    pub total_emitted_this_era: u64,
+    pub era_target_emission: u128,
+    pub total_emitted_this_era: u128,
     pub phase: EmissionPhase,
     pub current_block_rate: f64,
     pub window_count: usize,

@@ -292,8 +292,12 @@ impl AsyncStorageEngine {
                     block_bytes,
                     response,
                 } => {
-                    let key = height.to_be_bytes();
-                    wb.put_cf(&cf_blocks_handle, &key, &block_bytes);
+                    // 🚨 v3.2.13-beta: CRITICAL FIX - Use consistent key format!
+                    // BUG: Was using `height.to_be_bytes()` (8-byte numeric key)
+                    // But `get_qblocks_range()` looks for `"qblock:height:{height}"` (string key)
+                    // This mismatch caused 73% of blocks to be "missing" during P2P sync!
+                    let key = format!("qblock:height:{}", height);
+                    wb.put_cf(&cf_blocks_handle, key.as_bytes(), &block_bytes);
                     responses.push((response, Ok(())));
                 }
                 StorageCommand::SaveBalance {
@@ -489,10 +493,10 @@ mod tests {
         // Test flush
         engine.flush().await.unwrap();
 
-        // Verify block was saved
+        // Verify block was saved (v3.2.13-beta: use consistent key format)
         let cf_blocks = db.cf_handle("blocks").unwrap();
-        let key = 1u64.to_be_bytes();
-        let retrieved = db.get_cf(&cf_blocks, &key).unwrap();
+        let key = format!("qblock:height:{}", 1);
+        let retrieved = db.get_cf(&cf_blocks, key.as_bytes()).unwrap();
         assert_eq!(retrieved, Some(block_data));
 
         // Test shutdown
@@ -541,12 +545,12 @@ mod tests {
         // Flush to ensure all writes complete
         engine.flush().await.unwrap();
 
-        // Verify all blocks were saved
+        // Verify all blocks were saved (v3.2.13-beta: use consistent key format)
         let cf_blocks = db.cf_handle("blocks").unwrap();
-        for i in 0..100 {
-            let key = i.to_be_bytes();
-            let retrieved = db.get_cf(&cf_blocks, &key).unwrap();
-            assert!(retrieved.is_some());
+        for i in 0..100u64 {
+            let key = format!("qblock:height:{}", i);
+            let retrieved = db.get_cf(&cf_blocks, key.as_bytes()).unwrap();
+            assert!(retrieved.is_some(), "Block {} should exist", i);
             let expected = format!("block {}", i).into_bytes();
             assert_eq!(retrieved.unwrap(), expected);
         }

@@ -19,7 +19,7 @@ use q_types::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock; // Still need RwLock for SharedBlockProducer wrapper
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Block production configuration
 #[derive(Debug, Clone)]
@@ -85,6 +85,13 @@ pub struct BlockProducer {
     /// Current blockchain height
     current_height: u64,
 
+    /// 🚀 v2.3.14-beta: RACE CONDITION FIX - Track last produced height
+    /// Prevents producing multiple blocks at the same height when production loops race.
+    /// Root cause: Two production loops (block_production_v2 and mining handler) both
+    /// call produce_block() at the same height before height is advanced.
+    /// Fix: Skip if we've already produced at this height.
+    last_produced_height: u64,
+
     /// Total accumulated difficulty
     total_difficulty: u128,
 
@@ -130,6 +137,14 @@ pub struct BlockProducer {
     /// Integrates cumulative work security, adaptive VDF complexity, and mining randomness beacon
     /// More hashpower = better cryptographic security guarantees
     hashpower_security: Option<Arc<q_mining::HashpowerSecurityManager>>,
+
+    /// 📡 v2.3.5-beta: Local Peer ID for P2P mining attribution
+    /// Identifies which node mined the reward in the SSE event
+    local_peer_id: Option<String>,
+
+    /// 🏷️ v2.3.5-beta: Human-friendly node name (e.g., "Bootstrap", "Alpha")
+    /// Displayed in UI to help users identify mining sources
+    node_name: Option<String>,
 }
 
 /// 📊 v1.0.72-beta: Finality metrics for sub-50ms tracking
@@ -162,6 +177,7 @@ impl BlockProducer {
             last_block_time: Instant::now(),
             latest_block_hash: [0u8; 32], // Genesis
             current_height: 0,
+            last_produced_height: 0, // v2.3.14-beta: Race condition fix
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: None,       // Scalar fallback
@@ -173,6 +189,8 @@ impl BlockProducer {
             production_mempool: None, // v1.0.72-beta: Narwhal mempool for user transactions
             finality_metrics: Arc::new(FinalityMetrics::default()), // v1.0.72-beta: Sub-50ms latency tracking
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
+            local_peer_id: None,     // v2.3.5-beta: P2P mining attribution (use set_node_identity to enable)
+            node_name: None,         // v2.3.5-beta: Human-friendly node name
         }
     }
 
@@ -189,6 +207,7 @@ impl BlockProducer {
             last_block_time: Instant::now(),
             latest_block_hash: [0u8; 32],
             current_height: 0,
+            last_produced_height: 0, // v2.3.14-beta: Race condition fix
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: None,
@@ -200,6 +219,8 @@ impl BlockProducer {
             production_mempool: None, // v1.0.72-beta: Narwhal mempool for user transactions
             finality_metrics: Arc::new(FinalityMetrics::default()), // v1.0.72-beta: Sub-50ms latency tracking
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
+            local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
+            node_name: None,         // v2.3.5-beta: Human-friendly node name
         }
     }
 
@@ -227,6 +248,7 @@ impl BlockProducer {
             last_block_time: Instant::now(),
             latest_block_hash: [0u8; 32],
             current_height: 0,
+            last_produced_height: 0, // v2.3.14-beta: Race condition fix
             total_difficulty: 0,
             dag_round: 0,
             simd_merkle: Some(simd_merkle),
@@ -238,7 +260,16 @@ impl BlockProducer {
             production_mempool: None, // v1.0.72-beta: Narwhal mempool for user transactions
             finality_metrics: Arc::new(FinalityMetrics::default()), // v1.0.72-beta: Sub-50ms latency tracking
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
+            local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
+            node_name: None,         // v2.3.5-beta: Human-friendly node name
         })
+    }
+
+    /// 📡 v2.3.5-beta: Set node identity for P2P mining attribution
+    /// Used in SSE events to identify which node mined rewards
+    pub fn set_node_identity(&mut self, peer_id: String, node_name: Option<String>) {
+        self.local_peer_id = Some(peer_id);
+        self.node_name = node_name;
     }
 
     /// Load blockchain state from storage on startup
@@ -374,6 +405,19 @@ impl BlockProducer {
     /// v1.0.69-beta: Added ancestor finality check to prevent tail forking
     pub async fn produce_block(&mut self) -> Option<QBlock> {
         if !self.config.is_validator {
+            return None;
+        }
+
+        // 🚀 v2.3.14-beta: RACE CONDITION FIX - Skip if we already produced at this height
+        // Root cause: Two production loops (block_production_v2 and mining handler) both
+        // call produce_block() at the same height before height is advanced after storage.
+        // Fix: Track last produced height and skip duplicate production.
+        let proposed_height = self.current_height + 1;
+        if proposed_height <= self.last_produced_height {
+            debug!(
+                "⏸️ [DUPLICATE PREVENTION] Already produced block at height {}, skipping",
+                proposed_height
+            );
             return None;
         }
 
@@ -668,8 +712,8 @@ impl BlockProducer {
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 16, // Phase 16 testnet - P2P Sync Priority Fix & DAG-Knight Stability (v1.3.1-beta)
-                network_id: "testnet-phase16".to_string(), // ✅ v1.3.1-beta: Phase 16 - CRITICAL Bug #4 fix
+                phase: 19, // Phase 19 testnet - AsyncStorageEngine Key Format Fix (v3.2.14-beta)
+                network_id: "testnet-phase19".to_string(), // ✅ v3.2.14-beta: Phase 19 - CRITICAL Bug #4 fix
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -749,7 +793,7 @@ impl BlockProducer {
             "✅ [Phase 3 Step 6] Block {} coinbase merkle root set (count: {}, total: {} QUG)",
             block.header.height,
             block.header.coinbase_count.unwrap_or(0),
-            block.header.total_coinbase_reward.unwrap_or(0) as f64 / 100_000_000.0
+            block.header.total_coinbase_reward.unwrap_or(0) as f64 / 1e24
         );
 
         // ============================================================================
@@ -876,6 +920,10 @@ impl BlockProducer {
             block.header.height
         );
 
+        // 🚀 v2.3.14-beta: Update last_produced_height IMMEDIATELY after creating block
+        // This prevents race condition where multiple calls produce at the same height
+        self.last_produced_height = block.header.height;
+
         Some(block)
     }
 
@@ -923,12 +971,12 @@ impl BlockProducer {
 
         // v1.4.5-beta: Use integer basis points instead of floating-point for determinism
         // 100 basis points = 1% (10_000 bps = 100%)
-        const DEV_FEE_BPS: u64 = 100; // 1% = 100 basis points
-        const BPS_DIVISOR: u64 = 10_000; // Basis points divisor for percentage calculation
+        const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+        const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
         const FOUNDER_WALLET_HEX: &str =
             "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
         const ADAPTIVE_ACTIVATION_HEIGHT: u64 = 200_000; // ~90 days at 5-10 bps
-        const LEGACY_FIXED_REWARD: u64 = 5_000_000; // 0.05 QUG (Phase 1-10 legacy)
+        const LEGACY_FIXED_REWARD: u128 = 5_000_000; // 0.05 QUG (Phase 1-10 legacy)
 
         let mut transactions = Vec::new();
 
@@ -966,7 +1014,7 @@ impl BlockProducer {
                     info!(
                         "📊 Block #{}: Adaptive reward = {} QUG (throughput-adjusted)",
                         block_height,
-                        reward as f64 / 100_000_000.0
+                        reward as f64 / 1e24
                     );
                     reward
                 }
@@ -981,7 +1029,7 @@ impl BlockProducer {
         // v1.4.5-beta: Integer-only fee calculation for cross-platform determinism
         // Using saturating_mul to prevent overflow (handled in next task)
         let dev_fee_amount = total_reward.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
-        let miner_reward_per_solution = (total_reward.saturating_sub(dev_fee_amount)) / solutions.len() as u64;
+        let miner_reward_per_solution = (total_reward.saturating_sub(dev_fee_amount)) / solutions.len() as u128;
 
         // Decode founder wallet
         let founder_wallet_bytes =
@@ -1020,6 +1068,9 @@ impl BlockProducer {
             token_type: TokenType::QUG,
             fee_token_type: TokenType::QUGUSD,
             tx_type: TransactionType::Coinbase,
+            pqc_signature: None,
+            signature_phase: TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
         });
 
         // Transaction 2-N: Miner rewards (99% split among all miners)
@@ -1049,14 +1100,21 @@ impl BlockProducer {
                 token_type: TokenType::QUG,
                 fee_token_type: TokenType::QUGUSD,
                 tx_type: TransactionType::Coinbase,
+                pqc_signature: None,
+                signature_phase: TxSignaturePhase::Phase0Ed25519,
+                pqc_public_key: None,
             });
 
             // ✨ v1.0.17-beta: Emit SSE event for mining reward
             if let Some(ref emitter) = self.event_emitter {
                 let miner_address_hex = hex::encode(solution.miner_address);
-                let reward_qnk = miner_reward_per_solution as f64 / 100_000_000.0;
+                let reward_qnk = miner_reward_per_solution as f64 / 1e24;
 
                 // Use the emit_mining_reward helper method from HighPerformanceEmitter
+                // v2.3.5-beta: Include origin node info for P2P mining attribution
+                let origin_node_id = self.local_peer_id.clone();
+                let origin_node_name = self.node_name.clone();
+
                 if let Err(e) = emitter
                     .emit_mining_reward(
                         miner_address_hex,
@@ -1065,7 +1123,10 @@ impl BlockProducer {
                         block_height,
                         hex::encode(solution.difficulty_target),
                         solution.hash_rate_hs as f64,
-                        None, // v0.6.2-beta: worker_name (None until miner updated)
+                        solution.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
+                        solution.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
+                        origin_node_id, // v2.3.5-beta: Which node mined this
+                        origin_node_name, // v2.3.5-beta: Human-friendly node name
                     )
                     .await
                 {
@@ -1076,9 +1137,9 @@ impl BlockProducer {
         }
 
         // ✅ v0.9.99-beta: Enhanced logging for adaptive rewards
-        let qug_total = total_reward as f64 / 100_000_000.0; // Convert to QUG (8 decimals)
-        let qug_dev_fee = dev_fee_amount as f64 / 100_000_000.0;
-        let qug_per_miner = miner_reward_per_solution as f64 / 100_000_000.0;
+        let qug_total = total_reward as f64 / 1e24; // Convert to QUG (8 decimals)
+        let qug_dev_fee = dev_fee_amount as f64 / 1e24;
+        let qug_per_miner = miner_reward_per_solution as f64 / 1e24;
 
         let reward_type = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
             "FIXED (Phase 1 Bootstrap)"
@@ -1091,17 +1152,17 @@ impl BlockProducer {
             reward_type,
             transactions.len()
         );
-        info!(
-            "   📊 Block #{}: {} solutions, Total: {:.9} QUG ({} atomic units)",
+        // v2.2.4: Privacy - reduce amount logging to debug level
+        debug!(
+            "   📊 Block #{}: {} solutions",
             block_height,
-            solutions.len(),
-            qug_total,
-            total_reward
+            solutions.len()
         );
-        info!("   🏦 Dev Fee (1%): {:.9} QUG → founder", qug_dev_fee);
-        info!("   ⛏️  Each Miner Gets: {:.9} QUG", qug_per_miner);
+        // v2.2.4: Privacy - reduce reward logging to debug level
+        debug!("   🏦 Dev Fee (1%): {:.9} QUG", qug_dev_fee);
+        debug!("   ⛏️  Miner reward: {:.9} QUG each", qug_per_miner);
         if block_height >= ADAPTIVE_ACTIVATION_HEIGHT {
-            info!("   ⚡ Adaptive rewards active: Emission constant at 82,031 QUG/year regardless of bps!");
+            trace!("   ⚡ Adaptive rewards active");
         }
 
         Ok(transactions)
@@ -1835,7 +1896,26 @@ impl BlockProducer {
             parallel_witnesses: vec![], // TODO: Add witnesses if available
         };
 
-        // Create DAG vertex with block data
+        // v2.4.9-beta: Sign vertex with validator keypair (Ed25519)
+        // Uses same signing format as vote signatures for consistency
+        let signature = if let Some(keypair) = &self.validator_keypair {
+            use ed25519_dalek::Signer;
+            // Create canonical vertex data to sign (id + round + timestamp + proposer)
+            let mut sign_data = Vec::with_capacity(32 + 8 + 8 + 32);
+            sign_data.extend_from_slice(&vertex_id);
+            sign_data.extend_from_slice(&block.header.height.to_le_bytes());
+            sign_data.extend_from_slice(&block.header.timestamp.to_le_bytes());
+            sign_data.extend_from_slice(&self.config.node_id);
+            let sig = keypair.ed25519_signing.sign(&sign_data);
+            debug!("🔐 Signed vertex {} with Ed25519 ({} bytes)",
+                   hex::encode(&vertex_id[..8]), sig.to_bytes().len());
+            sig.to_bytes().to_vec()
+        } else {
+            warn!("⚠️ No validator keypair - vertex {} created unsigned", hex::encode(&vertex_id[..8]));
+            vec![]
+        };
+
+        // Create DAG vertex with block data and signature
         Ok(Vertex {
             id: vertex_id,
             round: block.header.height, // Height serves as consensus round
@@ -1844,7 +1924,7 @@ impl BlockProducer {
             parents,
             vdf_proof: quantum_vdf_proof,
             timestamp: block.header.timestamp,
-            signature: vec![], // TODO Phase 3 Part 2: Add vertex signature
+            signature,
         })
     }
 

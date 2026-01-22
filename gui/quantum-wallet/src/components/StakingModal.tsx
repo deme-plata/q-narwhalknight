@@ -138,13 +138,13 @@ export default function StakingModal({
           id: s.id,
           domain: s.domain,
           domain_name: s.domain_name,
-          amount: (s.amount || 0) / 100_000_000, // Convert from base units to QUG (8 decimals)
+          amount: (s.amount || 0) / 1e24, // Convert from base units to QUG (8 decimals)
           confidence: (s.confidence || 0) * 100, // Convert from decimal (0.1-1.0) to percentage
           lock_days: s.lock_days || 0,
           staked_at: (s.staked_at || 0) * 1000, // Convert to milliseconds
           unlocks_at: (s.unlocks_at || 0) * 1000, // Convert to milliseconds
           status: s.status || 'active',
-          reward: (s.reward || 0) / 100_000_000, // Convert from base units to QUG (8 decimals)
+          reward: (s.reward || 0) / 1e24, // Convert from base units to QUG (8 decimals)
           prediction_accuracy: (s.prediction_accuracy || 0) * 100,
         }));
         setActiveStakes(stakes);
@@ -781,7 +781,7 @@ export default function StakingModal({
                         <div>
                           <p className="text-gray-500 text-xs">Reward Adjustment</p>
                           <p className={result.reward_adjustment >= 0 ? 'text-green-400' : 'text-red-400'}>
-                            {result.reward_adjustment >= 0 ? '+' : ''}{(result.reward_adjustment / 100_000_000).toFixed(2)} QUG
+                            {result.reward_adjustment >= 0 ? '+' : ''}{(result.reward_adjustment / 1e24).toFixed(2)} QUG
                           </p>
                         </div>
                       </div>
@@ -789,7 +789,7 @@ export default function StakingModal({
                         <div className="mt-2 p-2 rounded-lg bg-red-500/20 flex items-center gap-2">
                           <AlertTriangle className="w-4 h-4 text-red-400" />
                           <span className="text-xs text-red-400">
-                            Slashing applied: -{(result.slashing_applied / 100_000_000).toFixed(2)} QUG
+                            Slashing applied: -{(result.slashing_applied / 1e24).toFixed(2)} QUG
                           </span>
                         </div>
                       )}

@@ -74,6 +74,25 @@ pub enum VmNetworkMessage {
         state_data: Vec<u8>,
     },
 
+    /// v2.9.2-beta: Encrypted state synchronization request
+    /// Uses EncryptedStateSyncMessage for secure state transfer
+    EncryptedStateSyncRequest {
+        contract_address: String,
+        encrypted_request: super::EncryptedStateSyncMessage,
+    },
+
+    /// v2.9.2-beta: Encrypted state synchronization response
+    EncryptedStateSyncResponse {
+        contract_address: String,
+        encrypted_data: super::EncryptedStateSyncMessage,
+    },
+
+    /// v2.9.2-beta: Signed execution request (for caller verification)
+    SignedContractExecution {
+        request: super::SignedExecutionRequest,
+        request_id: String,
+    },
+
     /// VM capabilities announcement
     VmCapabilities {
         vm_version: String,
@@ -595,6 +614,75 @@ impl VmNetworkBridge {
                 );
             }
 
+            // v2.9.2-beta: Handle encrypted state sync request
+            VmNetworkMessage::EncryptedStateSyncRequest { contract_address, encrypted_request } => {
+                info!(
+                    contract = %&contract_address[..16.min(contract_address.len())],
+                    "🔐 Received encrypted state sync request"
+                );
+
+                // Check freshness
+                if !encrypted_request.is_fresh() {
+                    warn!("Rejecting stale encrypted state sync request");
+                    return Ok(());
+                }
+
+                // Decryption would be done with our private key
+                // For now, log that we received it
+                debug!(
+                    "Encrypted request: {} bytes ciphertext, timestamp={}",
+                    encrypted_request.ciphertext.len(),
+                    encrypted_request.timestamp
+                );
+            }
+
+            // v2.9.2-beta: Handle encrypted state sync response
+            VmNetworkMessage::EncryptedStateSyncResponse { contract_address, encrypted_data } => {
+                info!(
+                    contract = %&contract_address[..16.min(contract_address.len())],
+                    "🔐 Received encrypted state sync response"
+                );
+
+                if !encrypted_data.is_fresh() {
+                    warn!("Rejecting stale encrypted state sync response");
+                    return Ok(());
+                }
+
+                debug!(
+                    "Encrypted response: {} bytes, timestamp={}",
+                    encrypted_data.ciphertext.len(),
+                    encrypted_data.timestamp
+                );
+            }
+
+            // v2.9.2-beta: Handle signed contract execution request
+            VmNetworkMessage::SignedContractExecution { request, request_id } => {
+                info!(
+                    request_id = %request_id,
+                    contract = %&request.contract_address[..16.min(request.contract_address.len())],
+                    function = %request.function,
+                    "🔐 Received signed execution request"
+                );
+
+                // Verify the signature first
+                if let Err(e) = request.verify() {
+                    warn!(
+                        request_id = %request_id,
+                        error = %e,
+                        "Rejecting signed execution request: signature verification failed"
+                    );
+                    return Ok(());
+                }
+
+                info!(
+                    request_id = %request_id,
+                    "✅ Signature verified for execution request"
+                );
+
+                // Further verification (nonce, balance, rate limit) would be done by RemoteExecutionVerifier
+                // This is handled at the NetworkedVmExecutor level
+            }
+
             _ => {
                 debug!("Unhandled VM network message");
             }
@@ -610,12 +698,16 @@ impl VmNetworkBridge {
         // Announce capabilities if enabled
         if self.config.announce_capabilities {
             let capabilities = VmNetworkMessage::VmCapabilities {
-                vm_version: "0.1.0".to_string(),
+                vm_version: "2.9.2-beta".to_string(),
                 supported_features: vec![
                     "wasm".to_string(),
                     "parallel-execution".to_string(),
                     "ultra-performance".to_string(),
                     "state-sync".to_string(),
+                    "encrypted-state-sync".to_string(),      // v2.9.2-beta
+                    "signed-execution".to_string(),          // v2.9.2-beta
+                    "caller-verification".to_string(),       // v2.9.2-beta
+                    "consensus-finality-check".to_string(),  // v2.9.2-beta
                 ],
                 max_gas_limit: 15_000_000,
                 tps_capacity: 150_000,

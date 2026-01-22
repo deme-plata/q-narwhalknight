@@ -432,11 +432,9 @@ async fn get_reputation(
 }
 
 /// Helper function to get governance coordinator from AppState
+/// v2.4.0-beta: Now uses persistent coordinator from AppState (no longer creates new instance)
 fn get_governance_coordinator(
     state: &Arc<AppState>,
 ) -> Result<Arc<GovernanceCoordinator>, (StatusCode, String)> {
-    // TODO: Add governance_coordinator to AppState
-    // For now, create a new instance (not persistent)
-    // This should be replaced with a field in AppState
-    Ok(Arc::new(GovernanceCoordinator::new()))
+    Ok(state.governance_coordinator.clone())
 }

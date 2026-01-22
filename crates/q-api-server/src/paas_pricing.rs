@@ -164,7 +164,7 @@ impl PaaSPricingManager {
         let qug_amount = usd_amount / qug_usd_price;
 
         // Convert to atomic units (1 QUG = 100_000_000 atomic units)
-        let atomic_units = (qug_amount * 100_000_000.0) as u64;
+        let atomic_units = (qug_amount * 1e24) as u64;
 
         atomic_units
     }

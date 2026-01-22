@@ -547,7 +547,7 @@ pub async fn convert_usd_to_qugusd(
                         .get_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS)
                         .await
                         .unwrap_or(0);
-                    let new_qugusd_total = current_qugusd + qugusd_amount;
+                    let new_qugusd_total = current_qugusd + qugusd_amount as u128;
 
                     // Mint QUGUSD by saving the new balance
                     match state
@@ -590,7 +590,7 @@ pub async fn convert_usd_to_qugusd(
                                     ),
                                     new_qugusd_balance: format!(
                                         "{:.8}",
-                                        new_qugusd_balance as f64 / 100_000_000.0
+                                        new_qugusd_balance as f64 / 1e24
                                     ),
                                 }),
                                 error: None,
@@ -816,11 +816,20 @@ pub struct AIWalletBalanceResponse {
 #[derive(Debug, Serialize)]
 pub struct AIWalletBalanceData {
     pub wallet_address: String,
-    pub balance_qnk: u64, // QUG balance (changed from QNK ticker)
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub balance_qnk: u128, // QUG balance in base units (24 decimals)
     pub balance_qnk_usd: f64,
-    pub balance_qugusd: u64,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub balance_qugusd: u128, // QUGUSD balance in base units (24 decimals)
     pub tokens_generated_lifetime: u64,
     pub updated_at: u64,
+}
+
+fn serialize_u128_as_string<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 /// AI usage statistics response
@@ -834,11 +843,13 @@ pub struct AIUsageStatsResponse {
 #[derive(Debug, Serialize)]
 pub struct AIUsageStatsData {
     pub wallet_address: String,
-    pub total_spent_qnk: u64,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub total_spent_qnk: u128, // Total spent in base units (24 decimals)
     pub total_spent_usd: f64,
     pub total_requests: u64,
     pub total_tokens_generated: u64,
-    pub average_cost_per_request_qnk: u64,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub average_cost_per_request_qnk: u128, // Average cost in base units (24 decimals)
     pub average_tokens_per_request: u32,
     pub first_request_at: Option<u64>,
     pub last_request_at: Option<u64>,
@@ -873,11 +884,13 @@ pub struct TreasuryStatsResponse {
 #[derive(Debug, Serialize)]
 pub struct TreasuryStatsData {
     pub wallet_address: String,
-    pub total_revenue_qnk: u64,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub total_revenue_qnk: u128, // Total revenue in base units (24 decimals)
     pub total_revenue_usd: f64,
     pub total_requests_served: u64,
     pub total_tokens_generated: u64,
-    pub average_cost_per_request_qnk: u64,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub average_cost_per_request_qnk: u128, // Average cost in base units (24 decimals)
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -970,8 +983,9 @@ pub async fn get_ai_wallet_usage(
             let spent_usd = (credits.total_spent_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
 
             // Calculate averages (avoid division by zero)
-            let avg_cost = if credits.total_tokens_generated > 0 {
-                credits.total_spent_qnk / credits.total_tokens_generated
+            // v3.0.4: Cast to u128 for division
+            let avg_cost: u128 = if credits.total_tokens_generated > 0 {
+                credits.total_spent_qnk / credits.total_tokens_generated as u128
             } else {
                 0
             };
@@ -1084,8 +1098,9 @@ pub async fn get_ai_treasury_stats(
             let revenue_usd = (treasury.total_revenue_qnk as f64) * qnk_to_usd / 1_000_000_000.0;
 
             // Calculate average cost per request
-            let avg_cost = if treasury.total_requests_served > 0 {
-                treasury.total_revenue_qnk / treasury.total_requests_served
+            // v3.0.4: Cast total_requests_served to u128 for division
+            let avg_cost: u128 = if treasury.total_requests_served > 0 {
+                treasury.total_revenue_qnk / treasury.total_requests_served as u128
             } else {
                 0
             };

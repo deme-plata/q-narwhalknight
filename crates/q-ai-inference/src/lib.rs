@@ -49,6 +49,10 @@ pub mod distributed_engine;
 pub mod proof_of_inference;
 pub mod worker_benchmark;
 pub mod qwen3_vl;
+pub mod weight_shard_manager; // v2.4.0: Tensor parallelism weight sharding
+pub mod tensor_parallel_engine; // v2.4.0: Main tensor parallel inference engine
+pub mod bitnet_integration; // v2.5.0: BitNet 1.58-bit integration for 16x faster tensor parallelism
+pub mod bitnet_chat_engine; // v2.5.1: Native C++ BitNet chat engine via llama.cpp
 
 // Re-export commonly used types
 pub use types::{
@@ -100,6 +104,23 @@ pub use worker_benchmark::{
 pub use qwen3_vl::{
     Qwen3VLProcessor, Qwen3VLConfig, ImageAttachment,
 };
+pub use weight_shard_manager::{
+    WeightShardManager, WeightShard, ShardConfig,
+};
+pub use tensor_parallel_engine::{
+    TensorParallelEngine, TensorParallelConfig, TensorParallelStats,
+    ShardedLayer, AllReduceRequest, AllReduceResponse,
+};
+pub use bitnet_integration::{
+    BitNetTensorParallelEngine, BitNetTensorParallelConfig, BitNetStats as BitNetTPStats,
+    BitNetPerformanceEstimate, calculate_bitnet_advantage,
+};
+pub use bitnet_chat_engine::{
+    BitNetChatEngine, BitNetChatConfig, BitNetStreamEvent, BitNetGenerationStats,
+};
+
+// Re-export candle_core Device for use by q-network (ensures same version)
+pub use candle_core::Device as CandleDevice;
 
 #[cfg(test)]
 mod tests {

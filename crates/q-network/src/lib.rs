@@ -72,8 +72,13 @@ pub use transaction_tunneling::{
 };
 
 // Export ZK peer height proof components (v0.9.6-beta)
+// v3.3.9-beta: Added version filtering exports
 pub use zk_peer_height_proof::{
     PeerHeightWithProof, PeerHeightVerifier, generate_height_proof,
+    // v3.3.9-beta: Version filtering and capability announcement
+    SOFTWARE_VERSION, PROTOCOL_VERSION, MIN_PROTOCOL_VERSION,
+    get_upgrade_capabilities, create_peer_height_announcement,
+    VersionFilterResult, filter_peer_version, should_sync_from_peer,
 };
 
 // ✨ v1.0.58-beta: Lattice aggregate signature exports (98% bandwidth reduction)
@@ -94,12 +99,14 @@ pub mod distributed_ai_coordinator;
 pub mod distributed_ai_worker; // FLAW #1 FIX: Worker node inference handler
 pub mod distributed_protocol;
 pub mod distributed_qno; // v1.4.2-beta: QNO Prediction Staking P2P
+pub mod dex_p2p_publisher; // v2.9.2-beta: DEX P2P publishing for TRUE decentralization
 pub mod layer_forwarding;
 pub mod distributed_inference_bridge;
 pub mod kv_cache_manager;
 pub mod distributed_mistralrs_bridge;
 pub mod encrypted_tensor_forwarding; // PRIVACY: ZK + Aegis-QL encrypted tensors
 pub mod failover_manager; // Automatic failover & retry logic
+pub mod all_reduce; // v2.4.0: Ring all-reduce for tensor parallelism
 pub mod public_key_dht; // v1.0.3-beta: DHT-based public key distribution (Showstopper #2 fix)
 pub mod signature_cache; // v1.0.3-beta: Signature verification cache with TOCTOU fix (Showstopper #3 fix)
 pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verification (Week 2, Day 1-2)
@@ -118,6 +125,11 @@ pub use distributed_dex::{
     DistributedDEXCoordinator, OrderBookMessage, TradeMessage,
     LiquidityPoolMessage, TradingPair, Order, OrderType, OrderSide,
     DEXStats, ArbitrageOpportunity,
+    TOPIC_ORDER_BOOK, TOPIC_TRADE_EXECUTION, TOPIC_LIQUIDITY_POOL, TOPIC_PRICE_UPDATE,
+};
+pub use dex_p2p_publisher::{
+    DexP2PPublisher, DexNetworkCommand, DexNetworkMessage, DexMessageType,
+    DexPublisherStats, SharedDexPublisher, create_shared_publisher,
 };
 pub use distributed_protocol::{
     DistributedProtocolManager, DistributedNetworkStats,
@@ -128,7 +140,7 @@ pub use distributed_ai::{
 };
 pub use distributed_ai_coordinator::{
     DistributedAICoordinator, AINode, DistributedInferenceRequest,
-    DistributedAIStats, InferenceResponseChunk,
+    DistributedAIStats, InferenceResponseChunk, InferenceMode,
 };
 pub use distributed_ai_worker::{
     DistributedAIWorker, ActiveInferenceRequest,
@@ -160,6 +172,10 @@ pub use circuit_breaker::{
 pub use failover_manager::{
     FailoverManager, FailoverConfig, FailoverDecision, WorkerHealth,
     FailureRecord, FailureType,
+};
+pub use all_reduce::{
+    AllReduceCoordinator, AllReduceConfig, AllReduceMessage, AllReduceStats,
+    TOPIC_ALL_REDUCE,
 };
 
 // Simplified network structure for compilation

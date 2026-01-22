@@ -19,6 +19,7 @@ pub mod tegmark_level_iv;
 pub mod thought_ui;
 pub mod tor_mesh;
 pub mod unified_addressing;
+pub mod warp_drive;
 
 pub use analytics_engine::{AnalyticsEngine, CosmicWeather};
 pub use attosecond_laser::{AttosecondLaser, LaserPulse, XRayImprint};
@@ -36,6 +37,11 @@ pub use thought_ui::{TabManager, TabType, ThoughtUI, UIColor};
 pub use tor_mesh::TorAnalytics;
 pub use tor_mesh::{AquaMesh, WaterRobotNetwork};
 pub use unified_addressing::{MultiverseAddress, MultiverseRouter};
+pub use warp_drive::{
+    AlcubierreMetric, BioOpsBreakdown, BioOpsCalculator, DBraneConfig, ExoticMatterGenerator,
+    MultiverseJumpResult, MultiverseWarpDrive, ShapeFunction, StandardModelMasses,
+    StringWarpMechanism, WarpBubble, WarpDriveStatus,
+};
 
 /// Core constants for void-walker physics
 pub mod constants {

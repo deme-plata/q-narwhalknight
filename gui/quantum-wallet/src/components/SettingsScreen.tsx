@@ -16,6 +16,25 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
     fractalOverlay: true,
   });
 
+  // v2.4.0: Performance mode - disables heavy effects for better frame rates (DEFAULT: ON)
+  const [performanceMode, setPerformanceMode] = useState(() => {
+    const saved = localStorage.getItem('performanceMode');
+    // Default to true if not set
+    return saved === null ? true : saved === 'true';
+  });
+
+  // Apply performance mode to document
+  useEffect(() => {
+    if (performanceMode) {
+      document.documentElement.classList.add('performance-mode');
+    } else {
+      document.documentElement.classList.remove('performance-mode');
+    }
+    localStorage.setItem('performanceMode', performanceMode.toString());
+    // Notify App.tsx about the change
+    window.dispatchEvent(new CustomEvent('performance-mode-changed'));
+  }, [performanceMode]);
+
   // Blockchain Benchmark State
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkResult, setBenchmarkResult] = useState<any>(null);
@@ -879,103 +898,175 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
               </div>
             </div>
 
-            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8 border border-quantum-purple/30">
               <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
                 <Palette className="w-6 h-6 text-quantum-yellow" />
-                Preview
+                <span className="bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
+                  Quantum Visualization Chamber
+                </span>
               </h3>
 
-              <div className="relative h-64 bg-quantum-dark/50 rounded-xl overflow-hidden">
+              <div className="relative h-80 bg-gradient-to-br from-quantum-dark via-quantum-indigo/30 to-quantum-dark rounded-xl overflow-hidden border border-quantum-cyan/20 shadow-2xl shadow-quantum-purple/20">
+                {/* Animated border glow */}
+                <motion.div
+                  className="absolute inset-0 rounded-xl pointer-events-none"
+                  animate={{
+                    boxShadow: [
+                      'inset 0 0 30px rgba(0, 212, 255, 0.1), 0 0 20px rgba(107, 70, 193, 0.2)',
+                      'inset 0 0 50px rgba(107, 70, 193, 0.2), 0 0 40px rgba(0, 212, 255, 0.3)',
+                      'inset 0 0 30px rgba(0, 212, 255, 0.1), 0 0 20px rgba(107, 70, 193, 0.2)',
+                    ]
+                  }}
+                  transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                />
+
                 {/* Advanced Live preview of effects - DAG-inspired 3D visualizations */}
                 <div className="absolute inset-0">
                   {/* Fractal Overlay - Mandelbrot-inspired interference patterns */}
                   {visualEffects.fractalOverlay && (
-                    <svg className="absolute inset-0 w-full h-full opacity-20">
-                      {[...Array(12)].map((_, i) => (
+                    <svg className="absolute inset-0 w-full h-full opacity-30">
+                      {[...Array(16)].map((_, i) => (
                         <motion.path
                           key={i}
-                          d={`M ${i * 30} 0 Q ${i * 30 + 15} ${100 + Math.sin(i) * 50}, ${i * 30} 200 T ${i * 30 + 60} 300`}
+                          d={`M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200 T ${i * 25 + 60} 350`}
                           fill="none"
-                          stroke={`hsl(${(i * 30 + 180) % 360}, 70%, 50%)`}
-                          strokeWidth="1.5"
+                          stroke={`hsl(${(i * 22 + 180) % 360}, 80%, 55%)`}
+                          strokeWidth="2"
                           animate={{
                             d: [
-                              `M ${i * 30} 0 Q ${i * 30 + 15} ${100 + Math.sin(i) * 50}, ${i * 30} 200`,
-                              `M ${i * 30} 0 Q ${i * 30 + 25} ${120 + Math.sin(i + 1) * 60}, ${i * 30} 200`,
-                              `M ${i * 30} 0 Q ${i * 30 + 15} ${100 + Math.sin(i) * 50}, ${i * 30} 200`,
+                              `M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200`,
+                              `M ${i * 25} 0 Q ${i * 25 + 35} ${140 + Math.sin(i + 1) * 70}, ${i * 25} 200`,
+                              `M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200`,
                             ],
-                            opacity: [0.3, 0.6, 0.3]
+                            opacity: [0.4, 0.8, 0.4],
+                            strokeWidth: [1.5, 2.5, 1.5]
                           }}
                           transition={{
-                            duration: 3 + i * 0.2,
+                            duration: 2.5 + i * 0.15,
                             repeat: Infinity,
                             ease: "easeInOut"
                           }}
                         />
                       ))}
+                      {/* Central spiral */}
+                      <motion.circle
+                        cx="50%"
+                        cy="50%"
+                        r="60"
+                        fill="none"
+                        stroke="url(#fractalGradient)"
+                        strokeWidth="1"
+                        strokeDasharray="4 4"
+                        animate={{ rotate: [0, 360] }}
+                        transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                        style={{ transformOrigin: 'center' }}
+                      />
+                      <defs>
+                        <linearGradient id="fractalGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                          <stop offset="0%" stopColor="#00D4FF" />
+                          <stop offset="50%" stopColor="#6B46C1" />
+                          <stop offset="100%" stopColor="#EC4899" />
+                        </linearGradient>
+                      </defs>
                     </svg>
                   )}
 
                   {/* Rainbow Boxes - Quantum state superposition visualization */}
                   {visualEffects.rainbowBoxes && (
                     <div className="absolute inset-0 pointer-events-none">
-                      {[...Array(5)].map((_, i) => (
+                      {[...Array(8)].map((_, i) => (
                         <motion.div
                           key={i}
-                          className="absolute rounded-lg"
+                          className="absolute rounded-xl"
                           style={{
-                            width: 16 + i * 8,
-                            height: 16 + i * 8,
-                            left: `${20 + i * 15}%`,
-                            top: `${30 + Math.sin(i) * 20}%`,
-                            background: `linear-gradient(135deg,
-                              hsl(${i * 72}, 80%, 60%) 0%,
-                              hsl(${(i * 72 + 36) % 360}, 80%, 60%) 50%,
-                              hsl(${(i * 72 + 72) % 360}, 80%, 60%) 100%)`,
-                            boxShadow: `0 0 ${10 + i * 5}px hsl(${i * 72}, 80%, 60%)`,
+                            width: 20 + i * 10,
+                            height: 20 + i * 10,
+                            left: `${10 + i * 11}%`,
+                            top: `${25 + Math.sin(i * 0.8) * 25}%`,
+                            background: `linear-gradient(${i * 45}deg,
+                              hsl(${i * 45}, 90%, 60%) 0%,
+                              hsl(${(i * 45 + 60) % 360}, 90%, 50%) 50%,
+                              hsl(${(i * 45 + 120) % 360}, 90%, 60%) 100%)`,
+                            boxShadow: `0 0 ${15 + i * 8}px hsl(${i * 45}, 90%, 50%), inset 0 0 10px rgba(255,255,255,0.3)`,
                           }}
                           animate={{
-                            rotate: [0, 360],
-                            scale: [1, 1.2, 1],
-                            opacity: [0.5, 0.8, 0.5],
+                            rotate: [0, 180, 360],
+                            scale: [1, 1.4, 1],
+                            opacity: [0.6, 1, 0.6],
+                            borderRadius: ['20%', '50%', '20%'],
                           }}
                           transition={{
-                            duration: 4 + i * 0.5,
+                            duration: 3 + i * 0.4,
                             repeat: Infinity,
                             ease: "easeInOut",
-                            delay: i * 0.3
+                            delay: i * 0.2
                           }}
                         />
                       ))}
+                      {/* Central pulsing orb */}
+                      <motion.div
+                        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 rounded-full"
+                        style={{
+                          background: 'radial-gradient(circle, rgba(255,255,255,0.8) 0%, rgba(107,70,193,0.6) 40%, transparent 70%)',
+                        }}
+                        animate={{
+                          scale: [1, 1.5, 1],
+                          opacity: [0.5, 1, 0.5],
+                        }}
+                        transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                      />
                     </div>
                   )}
 
                   {/* Photon Waterfall - Particle stream simulation */}
                   {visualEffects.photonWaterfall && (
                     <div className="absolute inset-0">
-                      {[...Array(8)].map((_, i) => (
+                      {[...Array(15)].map((_, i) => (
                         <motion.div
                           key={i}
-                          className="absolute rounded-full blur-sm"
+                          className="absolute rounded-full"
                           style={{
-                            width: 4 + Math.random() * 4,
-                            height: 20 + Math.random() * 30,
-                            left: `${10 + i * 12}%`,
+                            width: 3 + (i % 3) * 2,
+                            height: 30 + (i % 4) * 15,
+                            left: `${5 + i * 6.5}%`,
                             background: `linear-gradient(to bottom,
                               transparent,
-                              ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B'][i % 5]} 50%,
+                              ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]} 30%,
+                              ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]} 70%,
                               transparent)`,
-                            boxShadow: `0 0 8px ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B'][i % 5]}`,
+                            boxShadow: `0 0 12px ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]}`,
+                            filter: 'blur(1px)',
                           }}
                           animate={{
-                            y: [-50, 300],
+                            y: [-60, 350],
                             opacity: [0, 1, 1, 0],
+                            scaleY: [0.8, 1.2, 0.8],
                           }}
                           transition={{
-                            duration: 2 + Math.random() * 2,
+                            duration: 1.5 + (i % 5) * 0.5,
                             repeat: Infinity,
-                            delay: i * 0.25,
+                            delay: i * 0.15,
                             ease: "linear"
+                          }}
+                        />
+                      ))}
+                      {/* Sparkles */}
+                      {[...Array(20)].map((_, i) => (
+                        <motion.div
+                          key={`sparkle-${i}`}
+                          className="absolute w-1 h-1 rounded-full bg-white"
+                          style={{
+                            left: `${Math.random() * 100}%`,
+                            top: `${Math.random() * 100}%`,
+                          }}
+                          animate={{
+                            opacity: [0, 1, 0],
+                            scale: [0, 1.5, 0],
+                          }}
+                          transition={{
+                            duration: 1 + Math.random(),
+                            repeat: Infinity,
+                            delay: Math.random() * 2,
                           }}
                         />
                       ))}
@@ -987,101 +1078,112 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                     <svg className="absolute inset-0 w-full h-full">
                       <defs>
                         <radialGradient id="entanglementGlow">
-                          <stop offset="0%" stopColor="#00D4FF" stopOpacity="0.8" />
-                          <stop offset="50%" stopColor="#6B46C1" stopOpacity="0.4" />
+                          <stop offset="0%" stopColor="#00D4FF" stopOpacity="1" />
+                          <stop offset="40%" stopColor="#6B46C1" stopOpacity="0.6" />
                           <stop offset="100%" stopColor="transparent" stopOpacity="0" />
                         </radialGradient>
+                        <filter id="glow">
+                          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                          <feMerge>
+                            <feMergeNode in="coloredBlur"/>
+                            <feMergeNode in="SourceGraphic"/>
+                          </feMerge>
+                        </filter>
                       </defs>
                       {/* Entangled particle pairs */}
-                      {[...Array(3)].map((_, i) => (
-                        <g key={i}>
+                      {[...Array(4)].map((_, i) => (
+                        <g key={i} filter="url(#glow)">
                           {/* Particle 1 */}
                           <motion.circle
-                            cx="30%"
-                            cy="50%"
-                            r="8"
+                            cx="25%"
+                            cy={`${30 + i * 15}%`}
+                            r="10"
                             fill="url(#entanglementGlow)"
                             animate={{
-                              cx: ['30%', '25%', '35%', '30%'],
-                              cy: ['50%', '45%', '55%', '50%'],
-                              r: [8, 12, 8],
+                              cx: ['25%', '20%', '30%', '25%'],
+                              cy: [`${30 + i * 15}%`, `${25 + i * 15}%`, `${35 + i * 15}%`, `${30 + i * 15}%`],
+                              r: [10, 15, 10],
                             }}
                             transition={{
-                              duration: 3,
+                              duration: 2.5,
                               repeat: Infinity,
-                              delay: i * 0.8,
+                              delay: i * 0.5,
                               ease: "easeInOut"
                             }}
                           />
                           {/* Particle 2 (entangled) */}
                           <motion.circle
-                            cx="70%"
-                            cy="50%"
-                            r="8"
+                            cx="75%"
+                            cy={`${30 + i * 15}%`}
+                            r="10"
                             fill="url(#entanglementGlow)"
                             animate={{
-                              cx: ['70%', '75%', '65%', '70%'],
-                              cy: ['50%', '55%', '45%', '50%'],
-                              r: [8, 12, 8],
+                              cx: ['75%', '80%', '70%', '75%'],
+                              cy: [`${30 + i * 15}%`, `${35 + i * 15}%`, `${25 + i * 15}%`, `${30 + i * 15}%`],
+                              r: [10, 15, 10],
                             }}
                             transition={{
-                              duration: 3,
+                              duration: 2.5,
                               repeat: Infinity,
-                              delay: i * 0.8,
+                              delay: i * 0.5,
                               ease: "easeInOut"
                             }}
                           />
                           {/* Connection wave */}
                           <motion.path
-                            d="M 30% 50% Q 50% 40%, 70% 50%"
+                            d={`M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`}
                             fill="none"
-                            stroke="#6B46C1"
-                            strokeWidth="1.5"
-                            strokeDasharray="5,5"
-                            opacity="0.4"
+                            stroke={`hsl(${180 + i * 40}, 80%, 60%)`}
+                            strokeWidth="2"
+                            strokeDasharray="8,4"
+                            opacity="0.6"
                             animate={{
                               d: [
-                                "M 30% 50% Q 50% 40%, 70% 50%",
-                                "M 30% 50% Q 50% 60%, 70% 50%",
-                                "M 30% 50% Q 50% 40%, 70% 50%",
+                                `M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`,
+                                `M 25% ${30 + i * 15}% Q 50% ${40 + i * 15}%, 75% ${30 + i * 15}%`,
+                                `M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`,
                               ],
-                              strokeDashoffset: [0, 20, 40],
+                              strokeDashoffset: [0, 24, 48],
                             }}
                             transition={{
-                              duration: 2,
+                              duration: 1.5,
                               repeat: Infinity,
-                              delay: i * 0.8,
+                              delay: i * 0.5,
                               ease: "linear"
                             }}
                           />
-                          {/* Interference pattern circles */}
-                          <motion.circle
-                            cx="50%"
-                            cy="50%"
-                            r="20"
-                            fill="none"
-                            stroke="#00D4FF"
-                            strokeWidth="0.5"
-                            opacity="0.3"
-                            animate={{
-                              r: [10, 40],
-                              opacity: [0.6, 0],
-                            }}
-                            transition={{
-                              duration: 2.5,
-                              repeat: Infinity,
-                              delay: i * 0.8,
-                              ease: "easeOut"
-                            }}
-                          />
                         </g>
+                      ))}
+                      {/* Interference ripples */}
+                      {[...Array(5)].map((_, i) => (
+                        <motion.circle
+                          key={`ripple-${i}`}
+                          cx="50%"
+                          cy="50%"
+                          r="20"
+                          fill="none"
+                          stroke="#00D4FF"
+                          strokeWidth="1"
+                          opacity="0.4"
+                          animate={{
+                            r: [20, 100],
+                            opacity: [0.6, 0],
+                          }}
+                          transition={{
+                            duration: 3,
+                            repeat: Infinity,
+                            delay: i * 0.6,
+                            ease: "easeOut"
+                          }}
+                        />
                       ))}
                     </svg>
                   )}
                 </div>
 
-                <div className="absolute bottom-4 left-4 text-sm text-gray-400 backdrop-blur-sm bg-black/30 px-3 py-1 rounded-lg">
-                  Live Preview • DAG-3D Quantum Visualization
+                <div className="absolute bottom-4 left-4 text-sm text-quantum-cyan backdrop-blur-sm bg-black/50 px-4 py-2 rounded-lg border border-quantum-cyan/30">
+                  <span className="animate-pulse mr-2">●</span>
+                  Live Preview • Quantum Visualization Engine
                 </div>
               </div>
             </div>
@@ -1091,6 +1193,42 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
         {/* Performance Tab */}
         {activeTab === 'performance' && (
           <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+            {/* v2.4.0: Performance Mode Toggle */}
+            <div className="mb-8 p-6 bg-quantum-dark/30 rounded-xl border border-amber-500/30">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-amber-500/20 rounded-xl flex items-center justify-center">
+                    <Zap className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div>
+                    <h4 className="text-lg font-semibold text-white">Performance Mode</h4>
+                    <p className="text-sm text-gray-400">
+                      Disable animations for better frame rates on slower devices
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setPerformanceMode(!performanceMode)}
+                  className={`relative w-14 h-7 rounded-full transition-colors duration-200 ${
+                    performanceMode ? 'bg-amber-500' : 'bg-gray-600'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform duration-200 ${
+                      performanceMode ? 'translate-x-8' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+              {performanceMode && (
+                <div className="mt-4 p-3 bg-amber-500/10 rounded-lg border border-amber-500/20">
+                  <p className="text-sm text-amber-300">
+                    Performance mode is enabled. Animations and visual effects are disabled for smoother operation.
+                  </p>
+                </div>
+              )}
+            </div>
+
             <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
               <Zap className="w-6 h-6 text-quantum-yellow" />
               System Performance Metrics

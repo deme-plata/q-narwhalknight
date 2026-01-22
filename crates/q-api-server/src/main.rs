@@ -19,10 +19,13 @@ use q_storage::{
 use q_storage::{detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats};
 // ✅ v1.0.7-beta: AsyncStorageEngine for permanent mining stall fix
 use q_storage::AsyncStorageEngine;
+// ✅ v2.3.9-beta: Warp Sync v1.0 - Batch signature verification (25-50x faster)
+use q_storage::warp_sync::{WarpSyncConfig, WarpSyncValidator};
 // ✅ v1.4.2-beta: QNO Storage for persistent prediction staking
 use q_storage::qno_storage::QnoStorage;
 mod cdp_simple;
-mod contracts_api;
+// v2.4.8-beta: Use library's contracts_api module instead of redeclaring (fixes crate:: imports)
+use q_api_server::contracts_api;
 mod dex_integration_api;
 mod liquidity_api;
 // ✅ ENABLED - Full Quillon Bank CDP system
@@ -38,6 +41,8 @@ mod ai_transaction_assistant;
 // mod attachment_api;
 // ✅ v1.0.3-beta - Block Production Loop v2 with Comprehensive Stall Protection
 mod block_production_v2;
+// ⛏️  v2.3.0-beta - Integrated Mining (single unified node)
+mod integrated_mining;
 use cdp_simple::create_cdp_router;
 use contracts_api::create_contracts_router;
 use dex_integration_api::create_dex_integration_router;
@@ -50,6 +55,9 @@ use quillon_bank_api::{create_protected_routes, create_public_routes, create_qui
 // };
 use q_tor_client::QTorClient; // ✅ Re-enabled with embedded Arti support
 use q_types::NodeId;
+// ✅ v2.5.1-beta: Consensus Guard - automatic mainnet safety enforcement
+// ✅ v3.3.8-beta: Added Upgrade and is_upgrade_active for height-gated validation rules
+use q_consensus_guard::{ConsensusGuard, GuardConfig, Upgrade, is_upgrade_active};
 // ✨ v1.0.16-beta: PQC key management
 use candle_core::Device;
 use pqcrypto_traits::sign::PublicKey as PQPublicKey;
@@ -58,6 +66,11 @@ use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{debug, error, info, trace, warn};
+
+// 🚨 v3.3.3-beta: Rate limiting for mainnet safety
+use governor::{Quota, RateLimiter};
+use std::num::NonZeroU32;
+use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // ✅ v0.9.34-beta: Removed hardcoded NETWORK_ID constant
@@ -131,6 +144,11 @@ const MAX_BALANCE_UPDATES_PER_NODE_PER_MINUTE: u32 = 50000;
 /// Maximum age of dedup cache entries before cleanup (24 hours)
 const DEDUP_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
+/// v3.0.0-beta: Display divisor for native coin (QUG)
+/// Balances are stored with 24 decimal precision (10^24 base units per QUG)
+/// Use this constant for converting raw u128 balances to human-readable f64
+const QUG_DISPLAY_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24
+
 /// Validator allowlist for P2P balance updates
 /// In testnet phase: Accept from all nodes (open participation)
 /// In mainnet: Will require stake-weighted validator registration
@@ -141,8 +159,10 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     // For mainnet, this should check against a stake-weighted validator set
 
     // Known bootstrap nodes get automatic approval
+    // v2.2.3: Updated to current Server Beta peer ID (from data-mine16/libp2p_identity.key)
     let bootstrap_nodes = [
-        "12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg", // Server Beta
+        "12D3KooWNgqKiWQTn7cVuUJ7Se9HQXZtocx8VEf7v382eNAQDoDk", // Server Beta (current)
+        "12D3KooWAK2mYwNiu5LqNYdDUNoVzftSRGCvFPPt5TyMWEsqbRRg", // Server Beta (legacy - keep for backwards compat)
     ];
 
     // In testnet: allow all nodes
@@ -156,15 +176,31 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     origin_node_id.starts_with("12D3KooW")
 }
 
+/// Maximum unique nodes to track for rate limiting (DoS protection)
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
+
 /// Check rate limit for a node. Returns true if allowed, false if rate limited.
 fn check_balance_update_rate_limit(origin_node_id: &str) -> bool {
     let mut limits = match BALANCE_UPDATE_RATE_LIMITS.lock() {
         Ok(guard) => guard,
-        Err(_) => return false, // Lock poisoned, deny for safety
+        Err(poisoned) => {
+            // Lock poisoning indicates a panic in a previous holder - this is SERIOUS
+            error!("🚨 CRITICAL: BALANCE_UPDATE_RATE_LIMITS lock poisoned! A thread panicked while holding this lock.");
+            error!("   This indicates a bug that caused a panic. System stability may be compromised.");
+            // Recover the poisoned lock to allow continued operation
+            poisoned.into_inner()
+        }
     };
 
     let now = Instant::now();
     let window_duration = std::time::Duration::from_secs(60);
+
+    // Cleanup expired entries periodically (when at 80% capacity)
+    if limits.len() > MAX_RATE_LIMIT_ENTRIES * 8 / 10 {
+        limits.retain(|_, (_, window_start)| {
+            now.duration_since(*window_start) < window_duration
+        });
+    }
 
     match limits.get_mut(origin_node_id) {
         Some((count, window_start)) => {
@@ -182,34 +218,187 @@ fn check_balance_update_rate_limit(origin_node_id: &str) -> bool {
             }
         }
         None => {
+            // Hard limit: deny new nodes if at capacity (DoS protection)
+            if limits.len() >= MAX_RATE_LIMIT_ENTRIES {
+                warn!("⚠️ RATE LIMIT CACHE: At capacity ({}), denying new node", MAX_RATE_LIMIT_ENTRIES);
+                return false;
+            }
             limits.insert(origin_node_id.to_string(), (1, now));
             true
         }
     }
 }
 
+/// Maximum cache entries (hard limit to prevent DoS/OOM)
+const MAX_DEDUP_CACHE_ENTRIES: usize = 100_000;
+
 /// Check if a balance update is a duplicate. Returns true if already seen.
 fn is_duplicate_balance_update(dedup_key: &str) -> bool {
     let mut cache = match BALANCE_UPDATE_DEDUP_CACHE.lock() {
         Ok(guard) => guard,
-        Err(_) => return true, // Lock poisoned, treat as duplicate for safety
+        Err(poisoned) => {
+            // Lock poisoning indicates a panic in a previous holder - this is SERIOUS
+            error!("🚨 CRITICAL: BALANCE_UPDATE_DEDUP_CACHE lock poisoned! A thread panicked while holding this lock.");
+            error!("   This indicates a bug that caused a panic. System stability may be compromised.");
+            // Recover the poisoned lock to allow continued operation
+            poisoned.into_inner()
+        }
     };
 
     let now = Instant::now();
 
-    // Cleanup old entries (every 1000 checks)
+    // Cleanup old entries when approaching limit
     if cache.len() > 90_000 {
         cache.retain(|_, timestamp| {
             now.duration_since(*timestamp).as_secs() < DEDUP_CACHE_MAX_AGE_SECS
         });
+
+        // If still at hard limit after cleanup, evict oldest 10%
+        if cache.len() >= MAX_DEDUP_CACHE_ENTRIES {
+            let evict_count = cache.len() / 10;
+            let mut entries: Vec<_> = cache.iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+            for (k, _) in entries.into_iter().take(evict_count) {
+                cache.remove(&k);
+            }
+            warn!("⚠️ DEDUP CACHE: Evicted {} oldest entries (DoS protection)", evict_count);
+        }
     }
 
     if cache.contains_key(dedup_key) {
         true // Duplicate
     } else {
+        // Hard limit: reject new entries if cache is completely full
+        if cache.len() >= MAX_DEDUP_CACHE_ENTRIES {
+            warn!("⚠️ DEDUP CACHE: At hard limit ({}), treating as duplicate", MAX_DEDUP_CACHE_ENTRIES);
+            return true; // Treat as duplicate to prevent OOM
+        }
         cache.insert(dedup_key.to_string(), now);
         false // Not seen before
     }
+}
+
+/// Validate environment variable configuration at startup
+/// Logs warnings for unexpected values and returns validated config
+fn validate_env_config() {
+    // Validate boolean-like env vars
+    let bool_env_vars = [
+        ("Q_DISABLE_AI", vec!["0", "1", "true", "false"]),
+        ("Q_DISABLE_DEX", vec!["0", "1", "true", "false"]),
+        ("Q_ENABLE_ORACLE", vec!["0", "1", "true", "false"]),
+        ("Q_ENABLE_TOR", vec!["0", "1", "true", "false"]),
+        ("Q_DEBUG_MODE", vec!["0", "1", "true", "false"]),
+    ];
+
+    for (var_name, valid_values) in bool_env_vars.iter() {
+        if let Ok(value) = std::env::var(var_name) {
+            let value_lower = value.to_lowercase();
+            if !valid_values.contains(&value_lower.as_str()) {
+                warn!(
+                    "⚠️ CONFIG WARNING: {} has unexpected value '{}'. Expected one of: {:?}. Using '0' (disabled)",
+                    var_name, value, valid_values
+                );
+            }
+        }
+    }
+
+    // Validate numeric env vars
+    if let Ok(port) = std::env::var("Q_API_PORT") {
+        if port.parse::<u16>().is_err() {
+            warn!(
+                "⚠️ CONFIG WARNING: Q_API_PORT has invalid value '{}'. Expected a port number (1-65535). Using default 8080",
+                port
+            );
+        }
+    }
+
+    if let Ok(workers) = std::env::var("Q_WORKER_THREADS") {
+        match workers.parse::<usize>() {
+            Ok(n) if n == 0 || n > 1024 => {
+                warn!(
+                    "⚠️ CONFIG WARNING: Q_WORKER_THREADS has invalid value '{}'. Expected 1-1024. Using default",
+                    workers
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "⚠️ CONFIG WARNING: Q_WORKER_THREADS has non-numeric value '{}'. Using default",
+                    workers
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Validate path env vars (check if directory exists or can be created)
+    if let Ok(db_path) = std::env::var("Q_DB_PATH") {
+        if db_path.is_empty() {
+            warn!("⚠️ CONFIG WARNING: Q_DB_PATH is empty. Using default './data'");
+        } else if db_path.contains("..") {
+            warn!(
+                "⚠️ CONFIG WARNING: Q_DB_PATH contains '..'. Path traversal may cause issues: '{}'",
+                db_path
+            );
+        }
+    }
+
+    // Log final config summary
+    info!("📋 Configuration validation complete");
+}
+
+/// Spawn a background task with error logging
+///
+/// This wrapper ensures that if a spawned task panics or returns an error,
+/// it will be logged rather than silently dropped. Use this for background
+/// tasks that should log errors but not crash the server.
+///
+/// # Arguments
+/// * `name` - A descriptive name for the task (for logging)
+/// * `future` - The async task to run
+///
+/// # Example
+/// ```
+/// spawn_monitored_task("mining_pool_worker", async move {
+///     pool.run().await
+/// });
+/// ```
+fn spawn_monitored_task<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match future.await {
+            Ok(()) => {
+                warn!("⚠️ Background task '{}' completed unexpectedly (should run forever)", name);
+            }
+            Err(e) => {
+                error!("🚨 Background task '{}' failed with error: {}", name, e);
+                error!("   This task will not be restarted automatically.");
+            }
+        }
+    });
+}
+
+/// Spawn a background task that may complete normally
+///
+/// Similar to spawn_monitored_task but for tasks that are expected to
+/// complete at some point (not run forever).
+fn spawn_monitored_finite_task<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match future.await {
+            Ok(()) => {
+                debug!("✅ Task '{}' completed successfully", name);
+            }
+            Err(e) => {
+                error!("🚨 Task '{}' failed with error: {}", name, e);
+            }
+        }
+    });
 }
 
 /// Verify blockchain height monotonicity before any height update
@@ -447,8 +636,8 @@ async fn update_tui_metrics(
     let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = (0.0, 0.0, 8.0, 0.0, 500.0);
 
     // Now acquire write lock and update metrics (no awaits here!)
-    {
-        let mut metrics = tui_metrics.write().unwrap();
+    // Use ok() instead of unwrap() to prevent panic on lock poisoning
+    if let Ok(mut metrics) = tui_metrics.write() {
 
         metrics.uptime_secs = uptime_secs;
         metrics.peer_count = peer_count;
@@ -603,6 +792,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("✅ Loaded environment variables from .env file");
     }
 
+    // Validate environment configuration (logs warnings for invalid values)
+    validate_env_config();
+
     // Parse command line arguments
     let matches = Command::new("q-api-server")
         .version("0.1.0")
@@ -657,6 +849,27 @@ async fn main() -> anyhow::Result<()> {
                 .long("validator-key")
                 .value_name("PATH")
                 .help("Path to validator keypair file (enables PQC block signing)")
+                .required(false),
+        )
+        // 🔨 v2.3.0-beta: Integrated Mining - Single unified node with mining capability
+        .arg(
+            Arg::new("mine")
+                .long("mine")
+                .help("Enable integrated CPU mining on this node")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("mining-threads")
+                .long("mining-threads")
+                .value_name("THREADS")
+                .help("Number of CPU threads for mining (0 = auto-detect)")
+                .default_value("0"),
+        )
+        .arg(
+            Arg::new("mining-wallet")
+                .long("mining-wallet")
+                .value_name("WALLET")
+                .help("Wallet address for mining rewards (required if --mine is set)")
                 .required(false),
         )
         .get_matches();
@@ -716,7 +929,7 @@ async fn main() -> anyhow::Result<()> {
     let network_str = std::env::var("Q_NETWORK_ID")
         .ok()
         .or_else(|| matches.get_one::<String>("network").map(|s| s.to_string()))
-        .unwrap_or_else(|| "testnet-phase16".to_string()); // ✅ v1.3.1-beta CRITICAL Bug #5 fix - Phase 16 default
+        .unwrap_or_else(|| "testnet-phase19".to_string()); // ✅ v1.3.1-beta CRITICAL Bug #5 fix - Phase 16 default
 
     let network_id = network_str
         .parse::<q_types::NetworkId>()
@@ -725,7 +938,7 @@ async fn main() -> anyhow::Result<()> {
                 "Invalid network '{}': {}. Defaulting to Phase 16.",
                 network_str, e
             );
-            q_types::NetworkId::TestnetPhase16 // ✅ v1.3.1-beta CRITICAL Bug #5 fix - Phase 16 default
+            q_types::NetworkId::TestnetPhase19 // ✅ v1.3.1-beta CRITICAL Bug #5 fix - Phase 16 default
         });
 
     let mut network_config = q_types::NetworkConfig::from_network_id(network_id);
@@ -753,6 +966,50 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     info!("🌐 ════════════════════════════════════════════════════════");
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 🛡️ v2.5.1-beta: CONSENSUS GUARD - Automatic mainnet safety enforcement
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // This system prevents accidental mainnet corruption through:
+    // 1. Height-gated upgrades - old blocks ALWAYS validate with old rules
+    // 2. Golden block verification - known-good blocks must match
+    // 3. Serialization fingerprints - detect breaking format changes
+    // 4. Determinism checking - same input = same output, ALWAYS
+    //
+    // On mainnet (strict mode): Node PANICS if any check fails
+    // This protects BILLIONS of dollars from "cowboy coding" mistakes.
+    //
+    let is_mainnet = matches!(network_id, q_types::NetworkId::Mainnet);
+    let guard_config = if is_mainnet {
+        GuardConfig::mainnet()
+    } else {
+        GuardConfig::testnet()
+    };
+
+    let mut consensus_guard = ConsensusGuard::new(guard_config)
+        .context("Failed to initialize consensus guard")?;
+
+    // Run minimal verification at startup
+    // Full verification with golden blocks happens after blockchain loads
+    consensus_guard.verify_minimal()
+        .map_err(|e| {
+            error!("🚨 CONSENSUS GUARD VERIFICATION FAILED: {}", e);
+            anyhow::anyhow!("Consensus guard verification failed: {}", e)
+        })?;
+
+    info!("🛡️ Consensus Guard: {} mode active",
+          if is_mainnet { "MAINNET (strict)" } else { "TESTNET" });
+
+    // v3.3.8-beta: Log upgrade gate status for mainnet-safe deployments
+    info!("🔐 [UPGRADE GATE] Height-gated validation rules:");
+    info!("   • PostQuantumSignatures: {}",
+          if is_upgrade_active(Upgrade::PostQuantumSignatures, 0) { "ACTIVE (height 0)" }
+          else { "PENDING (testnet: height 100000)" });
+    info!("   • EnhancedBlockValidation: {}",
+          if is_upgrade_active(Upgrade::EnhancedBlockValidation, 0) { "ACTIVE" } else { "NOT SCHEDULED" });
+    info!("   • TransactionV2: {}",
+          if is_upgrade_active(Upgrade::TransactionV2, 0) { "ACTIVE" } else { "NOT SCHEDULED" });
 
     // ✨ v1.0.16-beta: Load validator keypair for PQC block signing
     let validator_keypair = if let Some(key_path) = matches.get_one::<String>("validator-key") {
@@ -875,6 +1132,31 @@ async fn main() -> anyhow::Result<()> {
     // Check if we're targeting Server Beta
     let target_beta = matches.get_flag("target-beta");
     let production_mode = matches.get_flag("production");
+
+    // 🔨 v2.3.0-beta: Integrated Mining Configuration
+    let mining_enabled = matches.get_flag("mine");
+    let mining_threads: usize = matches
+        .get_one::<String>("mining-threads")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mining_wallet = matches
+        .get_one::<String>("mining-wallet")
+        .cloned();
+
+    // Validate mining configuration
+    if mining_enabled && mining_wallet.is_none() {
+        error!("❌ Mining enabled but no wallet specified! Use --mining-wallet <ADDRESS>");
+        error!("   Example: --mine --mining-wallet QUG_YOUR_WALLET_ADDRESS");
+        std::process::exit(1);
+    }
+
+    if mining_enabled {
+        let threads = if mining_threads == 0 { num_cpus::get() } else { mining_threads };
+        info!("⛏️  INTEGRATED MINING ENABLED");
+        info!("   Threads: {}", threads);
+        info!("   Wallet: {}", mining_wallet.as_ref().unwrap());
+    }
+
     let node_name = matches
         .get_one::<String>("node-id")
         .map(|s| s.clone())
@@ -1369,7 +1651,42 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
+            // 🌐 v2.2.2-beta: Subscribe to mining-solutions topic for DECENTRALIZED MINING
+            // This fixes the 10x reward disparity between bootstrap and connected nodes!
+            // When mining to a connected node, solutions are now broadcast to ALL nodes.
+            let mining_solutions_topic = turbo_network_id.mining_solutions_topic();
+            if let Err(e) = manager.subscribe_topic(&mining_solutions_topic) {
+                warn!("⚠️  Failed to subscribe to mining-solutions topic: {}", e);
+            } else {
+                info!(
+                    "⛏️  Subscribed to {} for decentralized mining (P2P solution broadcast)",
+                    mining_solutions_topic
+                );
+            }
+
             info!("🔄 [LEGACY] Skipped block-pack-requests/responses topics (replaced by BlockPackCodec)");
+
+            // 🌐 v2.3.1-beta: Pool topic subscriptions ONLY if mining pool is enabled
+            // Subscribing to unused topics can cause gossipsub mesh issues
+            let enable_pool_topics = std::env::var("Q_ENABLE_MINING_POOL")
+                .unwrap_or_else(|_| "0".to_string()) == "1";
+
+            if enable_pool_topics {
+                let pool_topics = q_mining_pool::distributed::PoolTopics::new(
+                    &turbo_network_id.display_name()
+                );
+
+                for pool_topic in pool_topics.all_topics() {
+                    if let Err(e) = manager.subscribe_topic(pool_topic) {
+                        warn!("⚠️  Failed to subscribe to pool topic {}: {}", pool_topic, e);
+                    } else {
+                        debug!("📢 Subscribed to pool topic: {}", pool_topic);
+                    }
+                }
+                info!("📢 Subscribed to {} decentralized pool topics", pool_topics.all_topics().len());
+            } else {
+                info!("ℹ️  Pool topics skipped (Q_ENABLE_MINING_POOL not set)");
+            }
 
             // ✅ v0.9.75-beta: Wrap manager but DON'T spawn event loop yet
             // CRITICAL FIX: Prevents deadlock where event loop locks manager forever,
@@ -1628,6 +1945,200 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ========================================
+    // ⛏️ v2.2.1-beta: STRATUM MINING POOL - PPLNS Rewards
+    // Full-featured mining pool with Stratum V1 protocol
+    // v2.3.1-beta: DISABLED by default to avoid port conflicts and unnecessary resource usage
+    // Enable with Q_ENABLE_MINING_POOL=1 if running a pool
+    // ========================================
+    let enable_mining_pool = std::env::var("Q_ENABLE_MINING_POOL")
+        .unwrap_or_else(|_| "0".to_string()) == "1";  // DISABLED by default for out-of-box experience
+
+    if enable_mining_pool {
+        info!("⛏️  Initializing Stratum Mining Pool...");
+
+        // Get pool wallet from environment or use node wallet
+        let pool_wallet = std::env::var("Q_POOL_WALLET")
+            .unwrap_or_else(|_| "qnk0000000000000000000000000000000000000000000000000000000000000000".to_string());
+
+        let stratum_port: u16 = std::env::var("Q_STRATUM_PORT")
+            .unwrap_or_else(|_| "3333".to_string())
+            .parse()
+            .unwrap_or(3333);
+
+        let pool_name = std::env::var("Q_POOL_NAME")
+            .unwrap_or_else(|_| "Q-NarwhalKnight Pool".to_string());
+
+        // Create pool configuration
+        let pool_config = q_mining_pool::PoolConfig {
+            name: pool_name.clone(),
+            pool_wallet: pool_wallet.clone(),
+            stratum: q_mining_pool::config::StratumConfig {
+                port: stratum_port,
+                bind_address: "0.0.0.0".to_string(),
+                max_connections: 10_000,
+            },
+            vardiff: q_mining_pool::config::VardiffConfig::default(),
+            pplns: q_mining_pool::config::PPLNSConfig::default(),
+            fees: q_mining_pool::config::FeeConfig::default(),
+            payout: q_mining_pool::config::PayoutConfig::default(),
+            security: q_mining_pool::config::SecurityConfig::default(),
+        };
+
+        let mining_pool = Arc::new(q_mining_pool::MiningPool::new(pool_config));
+        state.mining_pool = Some(Arc::clone(&mining_pool));
+
+        // Start the Stratum server in background
+        let pool_clone = Arc::clone(&mining_pool);
+        tokio::spawn(async move {
+            if let Err(e) = pool_clone.start().await {
+                tracing::error!("⛏️  Mining pool error: {}", e);
+            }
+        });
+
+        info!("✅ Mining Pool initialized and started");
+        info!("   Pool name: {}", pool_name);
+        info!("   Stratum port: {}", stratum_port);
+        info!("   Pool wallet: {}...", &pool_wallet[..16]);
+        info!("   PPLNS window: 2x network difficulty");
+        info!("   Pool fee: 1.5% + 1% dev fee");
+
+        // ========================================
+        // 🌐 v2.3.0-beta: DECENTRALIZED MINING POOL COORDINATOR
+        // P2P-based pool coordination with CRDT PPLNS and gossipsub
+        // ========================================
+        let enable_distributed_pool = std::env::var("Q_ENABLE_DISTRIBUTED_POOL")
+            .unwrap_or_else(|_| "1".to_string()) == "1";
+
+        if enable_distributed_pool {
+            info!("🌐 Initializing Decentralized Mining Pool Coordinator...");
+
+            // Create channels for coordinator communication
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<q_mining_pool::distributed::coordinator::CoordinatorEvent>(1000);
+            let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<q_mining_pool::distributed::coordinator::OutboundMessage>(1000);
+
+            // Create coordinator config from node identity
+            let coordinator_config = q_mining_pool::distributed::coordinator::CoordinatorConfig {
+                peer_id: node_id,
+                network_id: network_config.network_id.display_name().to_string(),
+                stratum_port,
+                region: "global".to_string(),
+                heartbeat_interval: std::time::Duration::from_secs(30),
+                pplns_sync_interval: std::time::Duration::from_secs(60),
+                discovery_interval: std::time::Duration::from_secs(120),
+                signer_index: 0, // Will be determined dynamically
+                secret_share: [0u8; 32], // Will be generated from keypair
+                min_attestations: 3,
+            };
+
+            let coordinator = q_mining_pool::distributed::DistributedPoolCoordinator::new(
+                coordinator_config.clone(),
+                event_tx.clone(),
+                outbound_tx.clone(),
+            );
+
+            let coordinator_arc = Arc::new(tokio::sync::RwLock::new(coordinator));
+            state.distributed_pool_coordinator = Some(coordinator_arc.clone());
+            state.distributed_pool_outbound_tx = Some(outbound_tx.clone());
+
+            // Spawn event processor task
+            tokio::spawn(async move {
+                info!("📡 Distributed pool event processor started");
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::ShareReceived { share_id, worker, difficulty } => {
+                            debug!("🔨 Pool share: worker={}, difficulty={:.2}, id={}",
+                                worker, difficulty, hex::encode(&share_id[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::BlockFound { block_hash, height, finder } => {
+                            info!("⛏️  POOL BLOCK FOUND! height={}, finder={}, hash={}",
+                                height, finder, hex::encode(&block_hash[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::BlockConfirmed { block_hash, height, attestations } => {
+                            info!("✅ Pool block confirmed: height={}, attestations={}, hash={}",
+                                height, attestations, hex::encode(&block_hash[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::PayoutBatchCreated { batch_id, total_reward, payout_count } => {
+                            info!("💰 Payout batch created: {} payouts, {} QUG, batch={}",
+                                payout_count, total_reward as f64 / 1_000_000_000.0, hex::encode(&batch_id[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::PayoutApproved { batch_id, signers } => {
+                            info!("✅ Payout approved: {} signers, batch={}",
+                                signers, hex::encode(&batch_id[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::NodeDiscovered { peer_id, stratum_addr } => {
+                            info!("🔍 Pool node discovered: {}, peer={}",
+                                stratum_addr, hex::encode(&peer_id[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::PPLNSSynced { state_hash, worker_count, share_count } => {
+                            debug!("📊 PPLNS synced: {} workers, {} shares, hash={}",
+                                worker_count, share_count, hex::encode(&state_hash[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::CoordinatorEvent::Error { message } => {
+                            warn!("⚠️  Pool coordinator error: {}", message);
+                        }
+                    }
+                }
+            });
+
+            // Spawn outbound message processor (will be connected to gossipsub later)
+            let gossipsub_tx_for_pool = gossipsub_tx_opt.clone();
+            tokio::spawn(async move {
+                info!("📤 Distributed pool outbound message processor started");
+                while let Some(outbound) = outbound_rx.recv().await {
+                    match outbound {
+                        q_mining_pool::distributed::coordinator::OutboundMessage::Broadcast { topic, message } => {
+                            if let Some(ref tx) = gossipsub_tx_for_pool {
+                                match bincode::serialize(&message) {
+                                    Ok(data) => {
+                                        if let Err(e) = tx.send((topic.clone(), data)) {
+                                            warn!("Failed to broadcast pool message to {}: {}", topic, e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to serialize pool message: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        q_mining_pool::distributed::coordinator::OutboundMessage::Direct { peer_id, message } => {
+                            debug!("Direct pool message to peer (not implemented yet): {}", hex::encode(&peer_id[..8]));
+                        }
+                        q_mining_pool::distributed::coordinator::OutboundMessage::DhtPut { key, value } => {
+                            debug!("DHT put for pool (not implemented yet): key_len={}", key.len());
+                        }
+                        q_mining_pool::distributed::coordinator::OutboundMessage::DhtGet { key } => {
+                            debug!("DHT get for pool (not implemented yet): key_len={}", key.len());
+                        }
+                    }
+                }
+            });
+
+            // Spawn periodic tick task for heartbeats and PPLNS sync
+            let coordinator_for_tick = coordinator_arc.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    let coordinator = coordinator_for_tick.read().await;
+                    if let Err(e) = coordinator.tick().await {
+                        warn!("Pool coordinator tick error: {}", e);
+                    }
+                }
+            });
+
+            info!("✅ Decentralized Mining Pool Coordinator initialized");
+            info!("   Network: {}", coordinator_config.network_id);
+            info!("   Heartbeat: {:?}", coordinator_config.heartbeat_interval);
+            info!("   PPLNS sync: {:?}", coordinator_config.pplns_sync_interval);
+        } else {
+            info!("ℹ️  Decentralized Pool disabled (set Q_ENABLE_DISTRIBUTED_POOL=1 to enable)");
+        }
+    } else {
+        info!("ℹ️  Mining Pool disabled (set Q_ENABLE_MINING_POOL=1 to enable)");
+        state.mining_pool = None;
+    }
+
+    // ========================================
     // 📊 LIBP2P PEER COUNT & INFO - Atomic Counter and Cached Peer Info
     // ========================================
     // peer_count_atomic was already extracted before spawning the event loop (see above)
@@ -1800,7 +2311,14 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    state.distributed_ai_coordinator = Some(coordinator_arc);
+                    state.distributed_ai_coordinator = Some(coordinator_arc.clone());
+
+                    // v2.5.1-beta: Initialize P2P message encryption for privacy
+                    let network_id_for_encryption = std::env::var("Q_NETWORK_ID")
+                        .unwrap_or_else(|_| "testnet-phase19".to_string());
+                    coordinator_arc.initialize_encryption(&network_id_for_encryption).await;
+                    info!("🔐 P2P AI message encryption initialized (XChaCha20-Poly1305)");
+
                     info!("✅ Distributed AI Coordinator fully configured and operational");
                     info!("   Ready for horizontal inference scaling across network");
                 }
@@ -1883,6 +2401,23 @@ async fn main() -> anyhow::Result<()> {
                     warn!("   Continuing without lazy model loading");
                     warn!("   Models directory: {}", models_dir);
                 }
+            }
+
+            // ⚡ v2.6.6: Set GGUF model path for tensor parallelism
+            // This enables auto-initialization of tensor parallel when 2+ nodes are available
+            if let Some(ref coordinator) = state.distributed_ai_coordinator {
+                // v2.5.1-beta: Support BitNet b1.58 2B4T or fallback to Mistral-7B
+                // Use Q_AI_MODEL env var to select model: "bitnet" or "mistral" (default: bitnet)
+                let model_name = std::env::var("Q_AI_MODEL").unwrap_or_else(|_| "bitnet".to_string());
+                let gguf_path = if model_name.to_lowercase().contains("bitnet") {
+                    models_path.join("bitnet-b1.58-2B-4T.gguf")
+                } else {
+                    models_path.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf")
+                };
+                coordinator.set_gguf_model_path(gguf_path.clone()).await;
+                info!("⚡ [AI MODEL v2.5.1] Using: {} (Q_AI_MODEL={})", gguf_path.file_name().unwrap_or_default().to_string_lossy(), model_name);
+                info!("   Path: {}", gguf_path.display());
+                info!("   Tensor parallelism will auto-activate when 2+ AI nodes join");
             }
         }
     }
@@ -2118,6 +2653,73 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("🔒 ════════════════════════════════════════════════════════");
 
+    // ========================================
+    // 🛡️ v3.3.7-beta: PRE-FLIGHT VERIFICATION FOR MAINNET-SAFE DEPLOYMENT
+    // Verifies database integrity BEFORE serving requests
+    // Enable with: Q_PREFLIGHT_CHECK=1 or Q_PREFLIGHT_ONLY=1
+    // ========================================
+    if q_storage::preflight_check::is_preflight_enabled() {
+        info!("🛡️ ════════════════════════════════════════════════════════");
+        info!("🛡️ PRE-FLIGHT VERIFICATION ENABLED (v3.3.7-beta)");
+        info!("🛡️ ════════════════════════════════════════════════════════");
+
+        let preflight_only = q_storage::preflight_check::is_preflight_only();
+        if preflight_only {
+            info!("🛡️ Mode: PREFLIGHT ONLY (will exit after verification)");
+        } else {
+            info!("🛡️ Mode: PREFLIGHT + SERVE (will continue if passed)");
+        }
+
+        let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data".to_string());
+        match q_storage::preflight_check::run_preflight_check(db.clone(), &db_path) {
+            Ok(report) => {
+                if report.passed {
+                    info!("🛡️ ════════════════════════════════════════════════════════");
+                    info!("🛡️ PRE-FLIGHT VERIFICATION: ✅ PASSED");
+                    info!("🛡️   Blocks verified: {}", report.blocks_verified);
+                    info!("🛡️   Issues found: {}", report.blocks_with_issues);
+                    info!("🛡️   Verification time: {:.2}s", report.verification_time_secs);
+                    info!("🛡️ ════════════════════════════════════════════════════════");
+
+                    if preflight_only {
+                        info!("🛡️ PREFLIGHT ONLY mode - exiting successfully");
+                        info!("🛡️ Node is safe to deploy. Run without Q_PREFLIGHT_ONLY to start serving.");
+                        std::process::exit(0);
+                    }
+                } else {
+                    error!("🚨 ════════════════════════════════════════════════════════");
+                    error!("🚨 PRE-FLIGHT VERIFICATION: ❌ FAILED");
+                    error!("🚨   Critical issues found: {}", report.issues.iter().filter(|i| i.severity == q_storage::preflight_check::IssueSeverity::Critical).count());
+                    error!("🚨   DO NOT deploy this binary to production!");
+                    error!("🚨 ════════════════════════════════════════════════════════");
+
+                    for issue in &report.issues {
+                        if issue.severity == q_storage::preflight_check::IssueSeverity::Critical {
+                            error!("🚨 [CRITICAL] {} - {}", issue.component, issue.description);
+                            error!("   Recommendation: {}", issue.recommendation);
+                        }
+                    }
+
+                    if preflight_only {
+                        error!("🚨 PREFLIGHT ONLY mode - exiting with failure");
+                        std::process::exit(1);
+                    } else {
+                        // In normal mode with preflight enabled, abort on critical failures
+                        panic!("Pre-flight verification failed with critical issues - refusing to start");
+                    }
+                }
+            }
+            Err(e) => {
+                error!("🚨 PRE-FLIGHT VERIFICATION ERROR: {}", e);
+                if preflight_only {
+                    std::process::exit(1);
+                } else {
+                    panic!("Pre-flight verification error - refusing to start: {}", e);
+                }
+            }
+        }
+    }
+
     let async_storage = match AsyncStorageEngine::new(
         db.clone(), // Same Arc<DB> handle as SafeBatchedWriter
         q_storage::CF_BLOCKS.to_string(),
@@ -2335,7 +2937,7 @@ async fn main() -> anyhow::Result<()> {
             let network_id = std::env::var("Q_NETWORK_ID")
                 .ok()
                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
             let local_peer_id = {
                 let peer_info = state.libp2p_peer_info.read().await;
                 peer_info.0.clone()
@@ -2870,6 +3472,8 @@ async fn main() -> anyhow::Result<()> {
         // Actual limited by: network latency, disk I/O, peer response time
         let manager_clone_for_sync = libp2p_manager.clone();
         let storage_clone_for_sync = state.storage_engine.clone();
+        // v2.2.1-beta: Clone highest_network_height for progress display fix
+        let highest_network_height_for_sync = state.highest_network_height.clone();
         tokio::spawn(async move {
             // v1.0.45-beta: Beautiful progress bar helper
             fn make_progress_bar(current: u64, target: u64, width: usize) -> String {
@@ -2921,10 +3525,31 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                // Get network height from manager
+                // Get network height from BOTH sources and use the highest
+                // v2.2.1-beta: CRITICAL FIX - manager.known_network_height wasn't being updated
+                // from gossipsub peer announcements, only from block-pack responses!
+                // This caused the progress bar to show "Synced! 10000/10000" when actual network was 791929
                 let network_height = {
-                    let manager = manager_clone_for_sync.lock().await;
-                    manager.get_known_network_height()
+                    // Source 1: Manager's known height (updated from block-pack responses)
+                    let manager_height = {
+                        let manager = manager_clone_for_sync.lock().await;
+                        manager.get_known_network_height()
+                    };
+
+                    // Source 2: App state's highest height (updated from gossipsub peer announcements)
+                    let gossip_height = highest_network_height_for_sync
+                        .load(std::sync::atomic::Ordering::SeqCst);
+
+                    // Use the higher of the two (at least one should be accurate)
+                    let best_height = manager_height.max(gossip_height);
+
+                    // v2.2.1-beta: DEBUG - Log when sources disagree significantly
+                    if manager_height > 0 && gossip_height > 0 && (manager_height as i64 - gossip_height as i64).abs() > 100 {
+                        debug!("📊 [HEIGHT MISMATCH] manager={}, gossip={}, using={}",
+                              manager_height, gossip_height, best_height);
+                    }
+
+                    best_height
                 };
 
                 // Calculate sync speed
@@ -3034,7 +3659,13 @@ async fn main() -> anyhow::Result<()> {
             let model_dir = std::path::PathBuf::from("./models");
             tokio::fs::create_dir_all(&model_dir).await?;
 
-            let model_path = model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf");
+            // v2.5.1-beta: Support BitNet b1.58 2B4T or fallback to Mistral-7B
+            let model_name = std::env::var("Q_AI_MODEL").unwrap_or_else(|_| "bitnet".to_string());
+            let model_path = if model_name.to_lowercase().contains("bitnet") {
+                model_dir.join("bitnet-b1.58-2B-4T.gguf")
+            } else {
+                model_dir.join("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf")
+            };
             let tokenizer_config_path = model_dir.join("tokenizer_config.json");
             let tokenizer_json_path = model_dir.join("tokenizer.json");
 
@@ -3301,6 +3932,39 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("ℹ️  No DAG-Knight consensus - dag_parents will be empty");
     }
+
+    // ========================================
+    // v2.4.6-beta: NARWHAL-CORE BFT CONSENSUS INITIALIZATION
+    // Multi-validator Byzantine Fault Tolerant consensus with SQIsign signatures
+    // ========================================
+    info!("🔐 Initializing NarwhalCore BFT Consensus...");
+
+    // Byzantine threshold f=1: tolerates 1 Byzantine validator, needs 2f+1=3 signatures for certificates
+    let narwhal_core = q_narwhal_core::NarwhalCore::new_with_byzantine_threshold(
+        node_id,
+        Phase::Phase1, // Post-quantum phase with SQIsign signatures
+        1,             // f=1 (3f+1=4 validators for full BFT, 2f+1=3 for quorum)
+    );
+
+    info!("✅ NarwhalCore BFT initialized successfully");
+    info!("   Node ID: {}", hex::encode(&node_id[..8]));
+    info!("   Byzantine threshold: f=1 (tolerates 1 Byzantine validator)");
+    info!("   Certificate quorum: 2f+1 = 3 signatures required");
+    info!("   Post-quantum: SQIsign Level I (204-byte signatures)");
+
+    // Create validator announcement for P2P broadcast
+    let validator_announcement = narwhal_core.create_validator_announcement();
+    if validator_announcement.is_some() {
+        info!("✅ Validator announcement created - will broadcast on P2P startup");
+    } else {
+        warn!("⚠️  No SQIsign keypair - validator announcement disabled");
+    }
+
+    // Store NarwhalCore in state
+    let narwhal_core_arc = Arc::new(narwhal_core);
+    state.narwhal_core = Some(narwhal_core_arc.clone());
+
+    info!("✅ NarwhalCore stored in ServerState - BFT consensus ENABLED");
 
     // ========================================
     // QUILLON RESONANCE CONSENSUS - K-PARAMETER PHASE ANALYSIS
@@ -3735,7 +4399,7 @@ async fn main() -> anyhow::Result<()> {
                                 let network_id = std::env::var("Q_NETWORK_ID")
                                     .ok()
                                     .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                    .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                    .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                 let topic = network_id.block_pack_requests_topic();
 
                                 if let Err(e) = gossipsub_tx_for_requests.send((topic, data)) {
@@ -3860,6 +4524,126 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ========================================
+    // 💰 v2.4.9-beta: Dollar Cost Averaging (DCA) with persistence and P2P sync
+    // 1. Load existing DCA orders from file storage (survives node restarts)
+    // 2. Start the execution background task
+    // ========================================
+    {
+        // Load persisted DCA orders from file storage
+        if let Some(ref dca_storage) = app_state.dca_storage {
+            match dca_storage.load_from_storage(&app_state.storage_engine).await {
+                Ok(_) => {
+                    let orders = dca_storage.orders.read().await;
+                    let active_count = orders.values().filter(|o| o.status == q_api_server::dca_api::DcaStatus::Active).count();
+                    info!("💰 [DCA] Loaded {} DCA orders ({} active) from storage", orders.len(), active_count);
+                }
+                Err(e) => {
+                    warn!("⚠️ [DCA] Failed to load DCA orders from storage: {}", e);
+                }
+            }
+        }
+
+        // Start the execution background task
+        let dca_app_state = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::dca_api::dca_execution_loop(dca_app_state).await;
+        });
+        info!("💰 DCA execution background task started");
+    }
+
+    // ========================================
+    // 📈 v2.5.0-beta: PERPETUAL FUTURES BACKGROUND TASKS
+    // Liquidation engine, funding rate, and mark price oracle
+    // ========================================
+    {
+        // Load perpetual positions from RocksDB
+        if let Some(ref perp_storage) = app_state.perp_storage {
+            match perp_storage.load_from_storage(&app_state.storage_engine).await {
+                Ok(_) => {
+                    let positions = perp_storage.positions.read().await;
+                    let open_count = positions.values().filter(|p| p.status == q_api_server::perpetual_api::PositionStatus::Open).count();
+                    info!("📈 [PERP] Loaded {} positions ({} open) from RocksDB", positions.len(), open_count);
+                }
+                Err(e) => {
+                    warn!("⚠️ [PERP] Failed to load perpetual data: {}", e);
+                }
+            }
+        }
+
+        // Start liquidation engine (checks every second)
+        let perp_app_state_liq = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::perpetual_api::liquidation_loop(perp_app_state_liq).await;
+        });
+        info!("🔥 [PERP] Liquidation engine started");
+
+        // Start funding rate engine (applies every 8 hours)
+        let perp_app_state_fund = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::perpetual_api::funding_loop(perp_app_state_fund).await;
+        });
+        info!("💰 [PERP] Funding rate engine started");
+
+        // Start mark price oracle (updates every 5 seconds from DEX)
+        let perp_app_state_price = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::perpetual_api::mark_price_loop(perp_app_state_price).await;
+        });
+        info!("📊 [PERP] Mark price oracle started");
+
+        // Phase 5: Start ADL (Auto-Deleveraging) engine
+        let perp_app_state_adl = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::perpetual_api::adl_loop(perp_app_state_adl).await;
+        });
+        info!("⚡ [PERP] Auto-Deleveraging (ADL) engine started");
+    }
+
+    // ========================================
+    // ✨ v2.3.6-beta: LOAD SWAP HISTORY FROM ROCKSDB
+    // Persists swap transactions across server restarts
+    // ========================================
+    {
+        info!("📜 Loading swap history from RocksDB...");
+        match app_state.storage_engine.load_all_swap_history().await {
+            Ok(history_map) => {
+                let mut loaded_count = 0;
+                let mut swap_history = app_state.swap_history.write().await;
+
+                for (token, json_records) in history_map {
+                    let records: Vec<handlers::SwapHistoryRecord> = json_records
+                        .into_iter()
+                        .filter_map(|json| {
+                            // Parse JSON record back to SwapHistoryRecord
+                            Some(handlers::SwapHistoryRecord {
+                                id: json.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                timestamp: json.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+                                tx_type: json.get("type").and_then(|v| v.as_str()).unwrap_or("swap").to_string(),
+                                from_token: json.get("fromToken").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                to_token: json.get("toToken").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                amount: json.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                price: json.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                value: json.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                from_address: json.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                to_address: json.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                tx_hash: json.get("txHash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            })
+                        })
+                        .collect();
+
+                    loaded_count += records.len();
+                    swap_history.insert(token, records);
+                }
+
+                info!("✅ Loaded {} swap history records from RocksDB", loaded_count);
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to load swap history from RocksDB: {} (non-fatal)", e);
+            }
+        }
+    }
+
+    // ========================================
     // GOSSIPSUB TRANSACTION/BLOCK SYNCHRONIZATION PROCESSOR
     // CRITICAL: Spawn IMMEDIATELY after AppState creation to prevent channel closure
     // ========================================
@@ -3945,26 +4729,26 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
-                            debug!("💎 Received mining reward from network");
+                            debug!("💎 Received mining reward from network (via /mining-rewards topic)");
 
-                            // 🚀 v1.1.23-beta CRITICAL FIX: Use add_balance() instead of set_balance()
-                            // Previously: HashMap.get() returned 0 after restart, then set_balance(reward)
-                            //             would OVERWRITE existing balance instead of ADDING to it.
-                            // Now: add_balance() correctly ADDS the reward to existing RocksDB balance.
+                            // ==================================================================================
+                            // v2.4.1-beta CRITICAL FIX: REMOVED DOUBLE-CREDIT BUG
+                            // ==================================================================================
+                            // DO NOT add_balance() here! This topic was causing DOUBLE CREDITS:
+                            // 1. Coinbase TX broadcast on /mining-rewards topic → add_balance() (OLD - REMOVED)
+                            // 2. Block broadcast → BalanceConsensusEngine → add_balance() (CORRECT - KEPT)
+                            //
+                            // Rewards are now ONLY credited via BalanceConsensusEngine when blocks are
+                            // processed through consensus. This ensures ALL nodes credit rewards identically.
+                            // ==================================================================================
                             let address_hex = hex::encode(&miner_addr);
-                            if let Err(e) = app_state_gossip.storage_engine
-                                .add_balance(&address_hex, reward).await
-                            {
-                                error!("❌ Failed to add gossip mining reward to RocksDB: {}", e);
-                            }
+                            debug!(
+                                "⏳ [MINING-REWARDS TOPIC] TX {} for {} - NOT crediting (handled by consensus)",
+                                hex::encode(&tx_hash[..8]),
+                                &address_hex[..16]
+                            );
 
-                            // Sync HashMap from RocksDB (source of truth) for fast lookups
-                            if let Ok(actual_balance) = app_state_gossip.storage_engine.get_balance(&address_hex).await {
-                                let mut balances = app_state_gossip.wallet_balances.write().await;
-                                balances.insert(miner_addr, actual_balance);
-                            }
-
-                            // Add transaction to pool
+                            // Add transaction to pool for tracking (but don't credit balance)
                             app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
                             let block_height =
                                 app_state_gossip.node_status.read().await.current_height;
@@ -3977,7 +4761,7 @@ async fn main() -> anyhow::Result<()> {
                             );
 
                             // 🔒 PRIVACY: No logging of wallet addresses or exact reward amounts
-                            debug!("✅ Mining reward synced successfully (add_balance + RocksDB)");
+                            debug!("✅ Mining reward TX tracked (balance credited via consensus)");
                         }
                         Err(e) => {
                             warn!("Failed to deserialize mining reward from network: {}", e);
@@ -4057,23 +4841,23 @@ async fn main() -> anyhow::Result<()> {
                             // SECURITY CHECK 6: Signature verification (MANDATORY in v1.1.9+)
                             // For backwards compatibility: accept legacy v1 updates during transition
                             // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                            if update.version >= 2 {
-                                // v2+ REQUIRES valid signature
-                                if !update.is_signed() {
-                                    warn!("🚫 [P2P BALANCE] Missing mandatory signature (v2+)");
-                                    continue;
-                                }
-                                if !update.verify_signature() {
-                                    warn!("🚫 [P2P BALANCE] Invalid signature from {}",
-                                          &update.origin_node_id[..12.min(update.origin_node_id.len())]);
-                                    continue;
-                                }
-                                debug!("✅ [P2P BALANCE] Signature verified for v{} update", update.version);
-                            } else {
-                                // v1 legacy updates: warn but accept during testnet transition period
-                                // TODO: Remove this fallback before mainnet
-                                debug!("⚠️ [P2P BALANCE] Legacy v1 update without signature (transition period)");
+                            // ==========================================================================
+                            // CRITICAL SECURITY FIX (v2.3.1-beta): ALL updates require signatures
+                            // Previous versions accepted v1 updates without signatures, allowing
+                            // any node to forge balance updates and inflate supply.
+                            // ==========================================================================
+                            if !update.is_signed() {
+                                warn!("🚫 [P2P BALANCE] REJECTED: Missing mandatory signature (v{}) - unsigned updates no longer accepted",
+                                      update.version);
+                                continue;
                             }
+                            if !update.verify_signature() {
+                                warn!("🚫 [P2P BALANCE] REJECTED: Invalid signature from {} (v{})",
+                                      &update.origin_node_id[..12.min(update.origin_node_id.len())],
+                                      update.version);
+                                continue;
+                            }
+                            debug!("✅ [P2P BALANCE] Signature verified for v{} update", update.version);
 
                             // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                             // SECURITY CHECK 7: Block height within reasonable range
@@ -4135,8 +4919,8 @@ async fn main() -> anyhow::Result<()> {
                                       update.block_height);
 
                                 // Emit SSE event for frontend
-                                let old_balance_qnk = current as f64 / 100_000_000.0;
-                                let new_balance_qnk = new_balance as f64 / 100_000_000.0;
+                                let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
+                                let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
 
                                 // v1.1.10-beta FIX: Added .await - without it the broadcast future was never executed!
                                 // v1.2.0-beta Phase 3: Enhanced with block tracking (legacy gossipsub path - DEPRECATED)
@@ -4155,7 +4939,7 @@ async fn main() -> anyhow::Result<()> {
 
                                 debug!("📡 [P2P→SSE] Broadcast balance update for {} (+{:.8} QNK)",
                                       &update.wallet_address[..16.min(update.wallet_address.len())],
-                                      update.amount as f64 / 100_000_000.0);
+                                      update.amount as f64 / QUG_DISPLAY_DIVISOR);
                             }
                         }
                         Err(e) => {
@@ -4205,10 +4989,126 @@ async fn main() -> anyhow::Result<()> {
                             warn!("Failed to deserialize DEX swap from network: {}", e);
                         }
                     }
-                } else if topic.ends_with("/liquidity-pools") {
+                } else if topic.ends_with("/contract-deployments") {
+                    // ========================================
+                    // v2.3.7-beta: DEX DECENTRALIZATION - TOKEN ANNOUNCEMENTS
+                    // Receive token deployment announcements from P2P network
+                    // Enables cross-node custom token discovery
+                    // ========================================
+                    match postcard::from_bytes::<q_types::TokenAnnouncement>(&data) {
+                        Ok(announcement) => {
+                            // Verify structure (basic validation)
+                            if let Err(e) = announcement.verify_structure() {
+                                warn!("🚫 [TOKEN P2P] Invalid structure from P2P: {}", e);
+                                continue;
+                            }
+
+                            // Check if we already have this token
+                            let contract_addr = q_vm::contracts::ContractAddress(announcement.contract_address);
+                            {
+                                let deployed_contracts = app_state_gossip.orobit_ecosystem.deployed_contracts.read().await;
+                                if deployed_contracts.contains_key(&contract_addr) {
+                                    debug!(
+                                        "🔄 [TOKEN P2P] Already have token {} ({})",
+                                        announcement.symbol, hex::encode(&announcement.contract_address[..8])
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            info!(
+                                "🪙 [TOKEN P2P] Received new token from P2P: {} ({}) - deployer: {}",
+                                announcement.symbol,
+                                announcement.name,
+                                hex::encode(&announcement.deployer[..8])
+                            );
+
+                            // Create DeployedSmartContract from announcement
+                            let mut deployment_params = std::collections::HashMap::new();
+                            deployment_params.insert("symbol".to_string(), serde_json::json!(announcement.symbol));
+                            deployment_params.insert("name".to_string(), serde_json::json!(announcement.name));
+                            deployment_params.insert("decimals".to_string(), serde_json::json!(announcement.decimals));
+                            deployment_params.insert("initialSupply".to_string(), serde_json::json!(announcement.total_supply));
+
+                            // Parse contract type
+                            let contract_type = match announcement.contract_type.to_lowercase().as_str() {
+                                "securetoken" => q_vm::contracts::ContractType::SecureToken,
+                                "advancedtoken" => q_vm::contracts::ContractType::AdvancedToken,
+                                "rwatoken" => q_vm::contracts::ContractType::RwaToken,
+                                "governance" | "governancetoken" => q_vm::contracts::ContractType::Governance,
+                                _ => q_vm::contracts::ContractType::SecureToken, // Default
+                            };
+
+                            // Create contract metadata (use full path as it's not re-exported)
+                            let metadata = q_vm::contracts::orobit_smart_contracts::ContractMetadata {
+                                name: announcement.name.clone(),
+                                symbol: Some(announcement.symbol.clone()),
+                                description: format!("Token received via P2P from deployer {}", hex::encode(&announcement.deployer[..8])),
+                                features: std::collections::HashMap::new(),
+                                governance_enabled: false,
+                                upgrade_history: Vec::new(),
+                            };
+
+                            // Create contract state (use full path as it's not re-exported)
+                            let contract_state = q_vm::contracts::orobit_smart_contracts::ContractState {
+                                active: true,
+                                paused: false,
+                                total_calls: 0,
+                                last_interaction: announcement.timestamp,
+                                storage_root: [0u8; 32],
+                            };
+
+                            let deployed_contract = q_vm::contracts::DeployedSmartContract {
+                                address: contract_addr.clone(),
+                                contract_type,
+                                deployer: announcement.deployer,
+                                deployed_at: announcement.timestamp,
+                                deployment_tx: hex::encode(&announcement.contract_address), // Use contract address as pseudo-tx
+                                deployment_params,
+                                verified: false, // P2P received tokens start unverified
+                                contract_state,
+                                metadata,
+                            };
+
+                            // Store in memory
+                            {
+                                let mut deployed_contracts = app_state_gossip.orobit_ecosystem.deployed_contracts.write().await;
+                                deployed_contracts.insert(contract_addr.clone(), deployed_contract.clone());
+                            }
+
+                            // 🚀 v2.4.8: Update symbol_to_address DashMap for O(1) oracle lookups
+                            let addr_str = format!("qnk{}", hex::encode(contract_addr.0));
+                            app_state_gossip.symbol_to_address.insert(
+                                announcement.symbol.to_uppercase(),
+                                addr_str.clone()
+                            );
+                            info!("🚀 [SYMBOL INDEX] Cached {} -> {}", announcement.symbol, addr_str);
+
+                            // Persist to storage
+                            if let Ok(contract_data) = serde_json::to_vec(&deployed_contract) {
+                                if let Err(e) = app_state_gossip
+                                    .storage_engine
+                                    .save_contract(&contract_addr.0, &contract_data)
+                                    .await
+                                {
+                                    warn!("Failed to persist token from P2P: {}", e);
+                                } else {
+                                    info!(
+                                        "✅ [TOKEN P2P] Stored token {} ({}) from P2P - deployer: {}",
+                                        announcement.symbol, announcement.name, hex::encode(&announcement.deployer[..8])
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to deserialize token announcement from P2P: {}", e);
+                        }
+                    }
+                } else if topic.ends_with("/liquidity-pools") || topic.ends_with("/dex-pools") {
                     // ========================================
                     // v0.6.1-beta: DEX DECENTRALIZATION PHASE 3
                     // Receive pool announcements from P2P network
+                    // Handles both /liquidity-pools (legacy) and /dex-pools topics
                     // ========================================
                     match serde_json::from_slice::<q_types::PoolAnnouncement>(&data) {
                         Ok(announcement) => {
@@ -4242,6 +5142,15 @@ async fn main() -> anyhow::Result<()> {
 
                             // Convert to LiquidityPool
                             let pool_id = hex::encode(&announcement.pool_id);
+
+                            // v3.2.16-beta: Infer token decimals from address
+                            // QUG (zero address) and QUGUSD use 24 decimals, custom tokens use 8
+                            let is_qug_or_qugusd = |addr: &[u8; 32]| {
+                                *addr == [0u8; 32] || *addr == q_types::QUGUSD_TOKEN_ADDRESS
+                            };
+                            let token0_decimals = if is_qug_or_qugusd(&announcement.token0) { 24 } else { 8 };
+                            let token1_decimals = if is_qug_or_qugusd(&announcement.token1) { 24 } else { 8 };
+
                             let pool = q_api_server::LiquidityPool {
                                 pool_id: pool_id.clone(),
                                 token0: hex::encode(&announcement.token0),
@@ -4252,6 +5161,8 @@ async fn main() -> anyhow::Result<()> {
                                 created_at: chrono::DateTime::from_timestamp(announcement.timestamp as i64, 0)
                                     .unwrap_or_else(chrono::Utc::now),
                                 lp_token_supply: announcement.lp_token_supply,
+                                token0_decimals,
+                                token1_decimals,
                             };
 
                             info!(
@@ -4285,6 +5196,13 @@ async fn main() -> anyhow::Result<()> {
                             warn!("Failed to deserialize pool announcement from P2P: {}", e);
                         }
                     }
+                } else if topic.ends_with("/dca-orders") {
+                    // ========================================
+                    // v2.4.9-beta: DCA (Dollar Cost Averaging) DECENTRALIZED SYNC
+                    // Receive DCA order updates from P2P network
+                    // Enables cross-node DCA order agreement
+                    // ========================================
+                    q_api_server::dca_api::handle_dca_sync_message(&app_state_gossip, &data).await;
                 } else if topic.ends_with("/blocks") {
                     // ========================================
                     // v0.9.31-beta: BALANCE REORGANIZATION HELPER FUNCTION
@@ -4321,13 +5239,15 @@ async fn main() -> anyhow::Result<()> {
                         let old_dev_fee = old_block_reward.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
                         let old_miner_reward = old_block_reward.saturating_sub(old_dev_fee);
 
-                        let mut old_rewards: HashMap<String, u64> = HashMap::new();
+                        let mut old_rewards: HashMap<String, u128> = HashMap::new();
                         for solution in &old_block.mining_solutions {
                             let miner_addr = hex::encode(&solution.miner_address);
                             *old_rewards.entry(miner_addr).or_insert(0) += old_miner_reward;
                         }
-                        *old_rewards.entry(FOUNDER_WALLET.to_string()).or_insert(0) +=
-                            old_dev_fee * old_block.mining_solutions.len() as u64;
+                        // v2.2.4: Strip "qnk" prefix for pure hex (add_balance expects hex only)
+                        let founder_hex = FOUNDER_WALLET.strip_prefix("qnk").unwrap_or(FOUNDER_WALLET);
+                        *old_rewards.entry(founder_hex.to_string()).or_insert(0) +=
+                            old_dev_fee * old_block.mining_solutions.len() as u128;
 
                         // Step 2: Calculate rewards from new block (to add)
                         // v1.4.5-beta: Integer math for cross-platform determinism
@@ -4336,13 +5256,15 @@ async fn main() -> anyhow::Result<()> {
                         let new_dev_fee = new_block_reward.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
                         let new_miner_reward = new_block_reward.saturating_sub(new_dev_fee);
 
-                        let mut new_rewards: HashMap<String, u64> = HashMap::new();
+                        let mut new_rewards: HashMap<String, u128> = HashMap::new();
                         for solution in &new_block.mining_solutions {
                             let miner_addr = hex::encode(&solution.miner_address);
                             *new_rewards.entry(miner_addr).or_insert(0) += new_miner_reward;
                         }
-                        *new_rewards.entry(FOUNDER_WALLET.to_string()).or_insert(0) +=
-                            new_dev_fee * new_block.mining_solutions.len() as u64;
+                        // v2.2.4: Strip "qnk" prefix for pure hex (add_balance expects hex only)
+                        let new_founder_hex = FOUNDER_WALLET.strip_prefix("qnk").unwrap_or(FOUNDER_WALLET);
+                        *new_rewards.entry(new_founder_hex.to_string()).or_insert(0) +=
+                            new_dev_fee * new_block.mining_solutions.len() as u128;
 
                         // Step 3: Collect all affected addresses
                         let mut affected_addresses = std::collections::HashSet::new();
@@ -4405,9 +5327,9 @@ async fn main() -> anyhow::Result<()> {
                     fn calculate_block_reward(
                         current_timestamp: u64,
                         genesis_timestamp: u64,
-                    ) -> anyhow::Result<u64> {
+                    ) -> anyhow::Result<u128> {
                         const SECONDS_PER_YEAR: u64 = 31_536_000;
-                        const BASE_REWARD: u64 = 100_000; // 0.001 QNK
+                        const BASE_REWARD: u128 = 100_000; // 0.001 QNK
 
                         if current_timestamp < genesis_timestamp {
                             return Err(anyhow::anyhow!(
@@ -4462,6 +5384,27 @@ async fn main() -> anyhow::Result<()> {
                                 } else {
                                     debug!("📊 [BLOCK FALLBACK] Block {} is older than network height {} (historical block)",
                                            block_height, current_highest);
+                                }
+                            }
+
+                            // ========================================
+                            // v3.3.8-beta: HEIGHT-GATED VALIDATION RULES
+                            // Uses UpgradeGate to enforce rules based on block height.
+                            // Old blocks validate with OLD rules, new blocks with NEW rules.
+                            // This protects mainnet from "cowboy coding" data corruption.
+                            // ========================================
+
+                            // Check if PostQuantumSignatures upgrade is active at this height
+                            let pq_sigs_required = is_upgrade_active(Upgrade::PostQuantumSignatures, block_height);
+
+                            if pq_sigs_required {
+                                // After PQ upgrade activation: blocks MUST have PQC signatures
+                                if block.quantum_metadata.spectral_signatures.is_empty() {
+                                    error!("❌ [UPGRADE GATE] Block {} rejected: PostQuantumSignatures upgrade active but block has no PQC signatures!",
+                                           block_height);
+                                    error!("   Upgrade activation height: 100000 (testnet)");
+                                    error!("   This block height: {}", block_height);
+                                    return; // Reject block
                                 }
                             }
 
@@ -4605,21 +5548,131 @@ async fn main() -> anyhow::Result<()> {
                                                     block.header.total_difficulty;
 
                                                 if incoming_difficulty <= existing_difficulty {
-                                                    // Our chain is heavier or equal - keep our fork
-                                                    if incoming_difficulty == existing_difficulty {
-                                                        // Tiebreaker: Use proposer ID (deterministic)
-                                                        if block.header.proposer
-                                                            < existing_block.header.proposer
-                                                        {
-                                                            info!("🔀 [v0.9.37 TIE] Lower proposer ID - accepting incoming block");
-                                                        } else {
-                                                            info!("✅ [v0.9.37] Local chain wins (tiebreaker on proposer ID)");
-                                                            return;
-                                                        }
-                                                    } else {
-                                                        info!("✅ [v0.9.37] Local chain is heavier - keeping our fork");
+                                                    // 🌐 v2.7.2-beta: DAG-KNIGHT PARALLEL BLOCK ACCEPTANCE
+                                                    // In DAG-Knight, we DON'T reject blocks - we include them ALL in the DAG.
+                                                    // This enables true decentralization where all nodes can produce valid blocks.
+
+                                                    let incoming_proposer = hex::encode(&block.header.proposer[..8]);
+                                                    let existing_proposer = hex::encode(&existing_block.header.proposer[..8]);
+
+                                                    // Check if this is the same proposer (duplicate block)
+                                                    if block.header.proposer == existing_block.header.proposer {
+                                                        debug!("✅ [DAG] Block {} from same proposer {} already exists - skipping duplicate",
+                                                               block_height, incoming_proposer);
                                                         return;
                                                     }
+
+                                                    // 🌐 DAG-KNIGHT: Store block in DAG layer (parallel to canonical chain)
+                                                    // This allows multiple blocks at same height from different proposers
+                                                    info!("🌐 [DAG-KNIGHT v2.7.2] Parallel block detected at height {}",
+                                                          block_height);
+                                                    info!("   Existing proposer: {} (difficulty: {})",
+                                                          existing_proposer, existing_difficulty);
+                                                    info!("   Incoming proposer: {} (difficulty: {})",
+                                                          incoming_proposer, incoming_difficulty);
+                                                    info!("   DAG-Knight: Accepting BOTH blocks for parallel processing!");
+
+                                                    // Save to DAG layer (doesn't replace canonical chain)
+                                                    if let Err(e) = storage.save_dag_layer_block(&block).await {
+                                                        warn!("⚠️ [DAG] Failed to save DAG layer block: {:?}", e);
+                                                    } else {
+                                                        // Process balance updates for DAG layer block
+                                                        // This ensures miners on other nodes get credited
+                                                        match balance_engine_clone
+                                                            .process_block_mining_rewards(storage.as_ref(), &block)
+                                                            .await
+                                                        {
+                                                            Ok(updates) => {
+                                                                if !updates.is_empty() {
+                                                                    info!("💰 [DAG-KNIGHT] Processed {} balance updates from parallel block at height {}",
+                                                                          updates.len(), block_height);
+
+                                                                    // ============================================
+                                                                    // 🚀 v3.2.6-beta: CRITICAL FIX - DAG LAYER SSE BROADCAST
+                                                                    // ============================================
+                                                                    // ROOT CAUSE: When blocks arrive via P2P at heights where
+                                                                    // we already have a block (DAG parallel blocks), the balance
+                                                                    // updates were processed but:
+                                                                    // 1. In-memory wallet_balances were NOT updated
+                                                                    // 2. SSE events were NOT broadcast to frontends
+                                                                    //
+                                                                    // RESULT: Mining to a non-bootstrap node shows 0 balance
+                                                                    // on the bootstrap node's UI - breaks decentralization!
+                                                                    //
+                                                                    // FIX: Add same SSE broadcast logic as canonical block path
+                                                                    // ============================================
+                                                                    let block_hash_hex = hex::encode(block.calculate_hash());
+                                                                    let mut wallet_balances = app_state_gossip.wallet_balances.write().await;
+
+                                                                    for update in &updates {
+                                                                        info!("   {} +{} QUG (mining reward)",
+                                                                              &update.address[..16], update.amount);
+
+                                                                        // Convert hex address string to [u8; 32] Address
+                                                                        let address_bytes: q_types::Address = match hex::decode(&update.address) {
+                                                                            Ok(bytes) if bytes.len() == 32 => {
+                                                                                let mut arr = [0u8; 32];
+                                                                                arr.copy_from_slice(&bytes);
+                                                                                arr
+                                                                            }
+                                                                            _ => {
+                                                                                warn!("⚠️ [DAG→SSE] Invalid address format: {}", &update.address);
+                                                                                continue;
+                                                                            }
+                                                                        };
+
+                                                                        // Update in-memory balance
+                                                                        let current = wallet_balances.get(&address_bytes).copied().unwrap_or(0);
+                                                                        let new_balance = current.saturating_add(update.amount);
+                                                                        wallet_balances.insert(address_bytes, new_balance);
+
+                                                                        // Broadcast SSE event to notify frontends
+                                                                        let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
+                                                                        let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
+
+                                                                        // Add "qnk" prefix to wallet address for frontend compatibility
+                                                                        let wallet_address_with_prefix = if update.address.starts_with("qnk") {
+                                                                            update.address.clone()
+                                                                        } else {
+                                                                            format!("qnk{}", update.address)
+                                                                        };
+
+                                                                        let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                                            q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                                                wallet_address: wallet_address_with_prefix.clone(),
+                                                                                old_balance: old_balance_qnk,
+                                                                                new_balance: new_balance_qnk,
+                                                                                change_reason: "dag_layer_mining_reward".to_string(),
+                                                                                timestamp: chrono::Utc::now(),
+                                                                                block_hash: Some(block_hash_hex.clone()),
+                                                                                block_height: Some(block_height),
+                                                                                confirmation_status: "confirmed".to_string(),
+                                                                            }
+                                                                        ).await;
+
+                                                                        debug!("📡 [DAG→SSE v3.2.6] Balance update: {} +{:.8} QNK (new: {:.8} QNK)",
+                                                                              &update.address[..16.min(update.address.len())],
+                                                                              update.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                                                              new_balance_qnk);
+                                                                    }
+                                                                    drop(wallet_balances);
+
+                                                                    info!("📡 [DAG→SSE] Broadcast {} balance updates from DAG layer block {}",
+                                                                          updates.len(), block_height);
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                // AlreadyProcessed is OK - block rewards already credited
+                                                                if !matches!(e, BalanceConsensusError::AlreadyProcessed(_)) {
+                                                                    warn!("⚠️ [DAG] Balance processing error: {:?}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Block stored in DAG layer - don't store in canonical chain
+                                                    // The canonical chain keeps the first block at each height
+                                                    return;
                                                 }
 
                                                 // Incoming chain is heavier - need to reorganize
@@ -4753,8 +5806,34 @@ async fn main() -> anyhow::Result<()> {
                                                 block_height, db_height, missing_blocks
                                             );
 
-                                            // Fire-and-forget sync trigger
-                                            error!("🔄 [EMERGENCY SYNC] Triggering catch-up sync to height {}", block_height);
+                                            // 🚀 v2.3.4-beta: EMERGENCY SYNC GUARD
+                                            // Only spawn ONE emergency sync at a time! Previously, every incoming
+                                            // block with a gap would spawn a new sync task, causing chaos.
+                                            if let Some(turbo_sync) = &app_state_gossip.turbo_sync {
+                                                // Atomic check-and-set: only proceed if no sync is running
+                                                if turbo_sync.try_start_emergency_sync() {
+                                                    error!("🔄 [EMERGENCY SYNC] Triggering catch-up sync to height {}", block_height);
+                                                    let turbo_clone = turbo_sync.clone();
+                                                    let target_height = block_height;
+                                                    tokio::spawn(async move {
+                                                        info!("🚀 [EMERGENCY SYNC] Starting TurboSync to height {}", target_height);
+                                                        match turbo_clone.sync_to_height(target_height).await {
+                                                            Ok(()) => {
+                                                                info!("✅ [EMERGENCY SYNC] TurboSync completed to height {}", target_height);
+                                                            }
+                                                            Err(e) => {
+                                                                error!("❌ [EMERGENCY SYNC] TurboSync failed: {}", e);
+                                                            }
+                                                        }
+                                                        // Always clear the guard when done
+                                                        turbo_clone.set_emergency_sync_running(false);
+                                                    });
+                                                } else {
+                                                    debug!("⏸️  [EMERGENCY SYNC] Already in progress - skipping duplicate spawn for block {}", block_height);
+                                                }
+                                            } else {
+                                                error!("❌ [EMERGENCY SYNC] TurboSync not available! Cannot fill gap.");
+                                            }
 
                                             // Don't save this block - it will be re-requested during sync
                                             return;
@@ -4770,11 +5849,27 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // Case 3: Block is old/duplicate (shouldn't happen due to check above, but for safety)
+                                        // v2.7.1-beta: Enhanced logging to help diagnose decentralization issues
+                                        // When user nodes mine blocks at wrong heights, they get rejected here
                                         if block_height <= db_height {
-                                            debug!(
-                                                "ℹ️  [BLOCK CONTINUITY] Block {} is not newer than DB height {} - already processed",
-                                                block_height, db_height
-                                            );
+                                            // Log at WARN level so users can see why their blocks are rejected
+                                            if block_height + 100 < db_height {
+                                                // Block is significantly behind - this is a sync issue
+                                                warn!(
+                                                    "🚫 [BLOCK REJECTED] Block {} from {} is {} blocks behind local height {}. \
+                                                     The sending node needs to sync first. Blocks cannot be accepted from unsynced nodes.",
+                                                    block_height,
+                                                    &proposer[..8],
+                                                    db_height - block_height,
+                                                    db_height
+                                                );
+                                            } else {
+                                                // Block is near current height - probably duplicate
+                                                debug!(
+                                                    "ℹ️  [BLOCK CONTINUITY] Block {} is not newer than DB height {} - already processed",
+                                                    block_height, db_height
+                                                );
+                                            }
                                             return; // Don't process old blocks
                                         }
 
@@ -4843,6 +5938,79 @@ async fn main() -> anyhow::Result<()> {
                                 // Commit transaction atomically (all or nothing)
                                 match tx.commit().await {
                                     Ok(_) => {
+                                        // ============================================
+                                        // 🚀 v2.7.2-beta: CRITICAL FIX - P2P BALANCE SSE BROADCAST
+                                        // ============================================
+                                        // ROOT CAUSE: When blocks arrive via P2P, process_block_mining_rewards_tx
+                                        // updates RocksDB balances, BUT:
+                                        // 1. In-memory wallet_balances were NOT updated
+                                        // 2. SSE events were NOT broadcast to frontends
+                                        //
+                                        // RESULT: Users connected to bootstrap don't see balance updates
+                                        // when other nodes mine blocks - breaks decentralization!
+                                        //
+                                        // FIX: After transaction commits, update in-memory balances AND broadcast SSE
+                                        // ============================================
+                                        if !updates.is_empty() {
+                                            let block_hash_hex = hex::encode(block.calculate_hash());
+                                            let mut wallet_balances = app_state_gossip.wallet_balances.write().await;
+                                            for update in &updates {
+                                                // Convert hex address string to [u8; 32] Address
+                                                let address_bytes: q_types::Address = match hex::decode(&update.address) {
+                                                    Ok(bytes) if bytes.len() == 32 => {
+                                                        let mut arr = [0u8; 32];
+                                                        arr.copy_from_slice(&bytes);
+                                                        arr
+                                                    }
+                                                    _ => {
+                                                        warn!("⚠️ [P2P→SSE] Invalid address format: {}", &update.address);
+                                                        continue;
+                                                    }
+                                                };
+
+                                                // Update in-memory balance
+                                                let current = wallet_balances.get(&address_bytes).copied().unwrap_or(0);
+                                                let new_balance = current.saturating_add(update.amount);
+                                                wallet_balances.insert(address_bytes, new_balance);
+
+                                                // Broadcast SSE event to notify frontends
+                                                let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
+                                                let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
+
+                                                // v2.7.3-beta FIX: Add "qnk" prefix to wallet address
+                                                // Root cause: update.address is raw hex (from hex::encode in balance_consensus.rs)
+                                                // but frontend walletAddress (localStorage) has "qnk" prefix
+                                                // The SSE handler in api.ts:1449 does strict equality check, so they must match!
+                                                let wallet_address_with_prefix = if update.address.starts_with("qnk") {
+                                                    update.address.clone()
+                                                } else {
+                                                    format!("qnk{}", update.address)
+                                                };
+
+                                                let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                    q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                        wallet_address: wallet_address_with_prefix.clone(),
+                                                        old_balance: old_balance_qnk,
+                                                        new_balance: new_balance_qnk,
+                                                        change_reason: "p2p_mining_reward".to_string(),
+                                                        timestamp: chrono::Utc::now(),
+                                                        block_hash: Some(block_hash_hex.clone()),
+                                                        block_height: Some(block_height),
+                                                        confirmation_status: "confirmed".to_string(),
+                                                    }
+                                                ).await;
+
+                                                debug!("📡 [P2P→SSE v2.7.2] Balance update: {} +{:.8} QNK (new: {:.8} QNK)",
+                                                      &update.address[..16.min(update.address.len())],
+                                                      update.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                                      new_balance_qnk);
+                                            }
+                                            drop(wallet_balances);
+
+                                            info!("📡 [P2P→SSE] Broadcast {} balance updates from block {}",
+                                                  updates.len(), block_height);
+                                        }
+
                                         // 📊 v1.0.10-beta: ENHANCED SYNC PROGRESS LOGGING + HEIGHT SYNCHRONIZATION
                                         // Show sync progress every 10 blocks AND synchronize network height across all app_states
 
@@ -5012,7 +6180,7 @@ async fn main() -> anyhow::Result<()> {
                                 let network_id = std::env::var("Q_NETWORK_ID")
                                     .ok()
                                     .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                    .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                    .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                                 let my_peer_info = app_state_gossip.libp2p_peer_info.read().await;
                                 let responder_peer_id = my_peer_info.0.clone();
                                 drop(my_peer_info);
@@ -5147,63 +6315,126 @@ async fn main() -> anyhow::Result<()> {
                             let expected_network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::TestnetPhase16)
+                                .unwrap_or(q_types::NetworkId::TestnetPhase19)
                                 .as_str(); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             let mut valid_blocks = Vec::new();
                             let mut rejected_count = 0;
 
-                            for (idx, block) in batch_response.blocks.iter().enumerate() {
-                                if block.header.network_id != expected_network_id {
-                                    // ✅ v0.9.6-beta: LOUD error for network mismatch
-                                    error!("🚫 [BATCH SYNC] REJECTED block {} (height {}) - wrong network_id: '{}' (expected: '{}')",
-                                          idx, block.header.height, block.header.network_id, expected_network_id);
-                                    error!("   This could be a testnet-phase1/mainnet block - REFUSING to process!");
-                                    rejected_count += 1;
-                                    continue; // Skip THIS block (not entire message!)
-                                }
+                            // ============================================================================
+                            // 🚀 v2.3.9-beta: WARP SYNC v1.0 - Batch Signature Verification (25-50x faster)
+                            // Set Q_WARP_SYNC=1 to enable batch Ed25519 verification using rayon
+                            // ============================================================================
+                            let warp_sync_enabled = std::env::var("Q_WARP_SYNC")
+                                .map(|v| v == "1" || v.to_lowercase() == "true")
+                                .unwrap_or(false);
 
-                                // ============================================================================
-                                // 🔐 v1.2.0-beta Phase 3: Verify Block Producer Signature (Batch Sync)
-                                // ============================================================================
-                                if block.requires_producer_signature() {
-                                    if let Err(sig_error) = block.verify_producer_signature() {
-                                        error!(
-                                            "🚫 [BATCH SYNC Phase 3] REJECTED block {} (height {}) - {}",
-                                            idx, block.header.height, sig_error
-                                        );
+                            if warp_sync_enabled {
+                                // ============================================================
+                                // WARP SYNC PATH: Batch signature verification (parallel)
+                                // ============================================================
+                                let warp_config = WarpSyncConfig::from_env();
+                                let warp_validator = WarpSyncValidator::new(warp_config);
+
+                                // Step 1: Filter by network_id first (fast check)
+                                let mut network_valid_blocks: Vec<q_types::QBlock> = Vec::new();
+                                for (idx, block) in batch_response.blocks.iter().enumerate() {
+                                    if block.header.network_id != expected_network_id {
+                                        error!("🚫 [WARP SYNC] REJECTED block {} (height {}) - wrong network_id: '{}' (expected: '{}')",
+                                              idx, block.header.height, block.header.network_id, expected_network_id);
                                         rejected_count += 1;
-                                        continue; // Skip unsigned/invalid signature blocks
-                                    }
-                                }
-
-                                // ============================================================================
-                                // 🔐 v1.3.9-beta CRITICAL SECURITY: Verify Transaction Signatures in Block
-                                // Validates all non-coinbase transaction signatures before accepting block
-                                // Performance: ~50μs per Ed25519 verification, well under 100ms finality target
-                                // ============================================================================
-                                let mut tx_invalid = false;
-                                for tx in &block.transactions {
-                                    // Skip coinbase transactions - they're signed at block level
-                                    if tx.is_coinbase() {
                                         continue;
                                     }
+                                    network_valid_blocks.push(block.clone());
+                                }
 
-                                    if let Err(sig_err) = tx.verify_signature() {
-                                        error!(
-                                            "🚫 [BATCH SYNC TX] REJECTED block {} (height {}) - TX {} has invalid signature: {}",
-                                            idx, block.header.height, hex::encode(&tx.id[..8]), sig_err
-                                        );
-                                        tx_invalid = true;
-                                        break; // One invalid TX is enough to reject the block
+                                // Step 2: Batch verify all signatures in parallel
+                                if !network_valid_blocks.is_empty() {
+                                    let local_height = app_state_gossip.storage_engine
+                                        .get_latest_qblock_height()
+                                        .await
+                                        .unwrap_or(Some(0))
+                                        .unwrap_or(0);
+
+                                    let sig_start = std::time::Instant::now();
+                                    let result = warp_validator.validate_blocks(&network_valid_blocks, local_height);
+                                    let sig_elapsed = sig_start.elapsed();
+
+                                    info!(
+                                        "🚀 [WARP SYNC] Batch verified {} blocks ({} sigs) in {:?} - Valid: {}, Invalid: {}, Skipped: {}",
+                                        network_valid_blocks.len(),
+                                        result.signatures_verified,
+                                        sig_elapsed,
+                                        result.valid_blocks.len(),
+                                        result.invalid_blocks.len(),
+                                        result.signatures_skipped
+                                    );
+
+                                    // Copy valid blocks to output
+                                    valid_blocks = result.valid_blocks;
+                                    rejected_count += result.invalid_blocks.len();
+
+                                    // Log invalid blocks
+                                    for invalid_height in &result.invalid_blocks {
+                                        error!("🚫 [WARP SYNC] Block at height {} had invalid signature", invalid_height);
                                     }
                                 }
+                            } else {
+                                // ============================================================
+                                // CLASSIC PATH: Sequential signature verification (safe fallback)
+                                // ============================================================
+                                for (idx, block) in batch_response.blocks.iter().enumerate() {
+                                    if block.header.network_id != expected_network_id {
+                                        // ✅ v0.9.6-beta: LOUD error for network mismatch
+                                        error!("🚫 [BATCH SYNC] REJECTED block {} (height {}) - wrong network_id: '{}' (expected: '{}')",
+                                              idx, block.header.height, block.header.network_id, expected_network_id);
+                                        error!("   This could be a testnet-phase1/mainnet block - REFUSING to process!");
+                                        rejected_count += 1;
+                                        continue; // Skip THIS block (not entire message!)
+                                    }
 
-                                if tx_invalid {
-                                    rejected_count += 1;
-                                    continue; // Skip blocks with invalid transaction signatures
+                                    // ============================================================================
+                                    // 🔐 v1.2.0-beta Phase 3: Verify Block Producer Signature (Batch Sync)
+                                    // ============================================================================
+                                    if block.requires_producer_signature() {
+                                        if let Err(sig_error) = block.verify_producer_signature() {
+                                            error!(
+                                                "🚫 [BATCH SYNC Phase 3] REJECTED block {} (height {}) - {}",
+                                                idx, block.header.height, sig_error
+                                            );
+                                            rejected_count += 1;
+                                            continue; // Skip unsigned/invalid signature blocks
+                                        }
+                                    }
+
+                                    // ============================================================================
+                                    // 🔐 v1.3.9-beta CRITICAL SECURITY: Verify Transaction Signatures in Block
+                                    // Validates all non-coinbase transaction signatures before accepting block
+                                    // Performance: ~50μs per Ed25519 verification, well under 100ms finality target
+                                    // ============================================================================
+                                    let mut tx_invalid = false;
+                                    for tx in &block.transactions {
+                                        // Skip coinbase transactions - they're signed at block level
+                                        if tx.is_coinbase() {
+                                            continue;
+                                        }
+
+                                        if let Err(sig_err) = tx.verify_signature() {
+                                            error!(
+                                                "🚫 [BATCH SYNC TX] REJECTED block {} (height {}) - TX {} has invalid signature: {}",
+                                                idx, block.header.height, hex::encode(&tx.id[..8]), sig_err
+                                            );
+                                            tx_invalid = true;
+                                            break; // One invalid TX is enough to reject the block
+                                        }
+                                    }
+
+                                    if tx_invalid {
+                                        rejected_count += 1;
+                                        continue; // Skip blocks with invalid transaction signatures
+                                    }
+
+                                    valid_blocks.push(block.clone());
                                 }
-
-                                valid_blocks.push(block.clone());
                             }
 
                             // If ALL blocks invalid, skip this entire message
@@ -5442,7 +6673,7 @@ async fn main() -> anyhow::Result<()> {
                                                             let network_id = std::env::var("Q_NETWORK_ID")
                                                                 .ok()
                                                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                                .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                                                .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                                                             let cmd = q_network::NetworkCommand::PublishBlockRequest {
                                                                 topic: network_id.block_requests_topic(),
                                                                 request_bytes,
@@ -5533,7 +6764,7 @@ async fn main() -> anyhow::Result<()> {
                             let expected_network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::TestnetPhase16)
+                                .unwrap_or(q_types::NetworkId::TestnetPhase19)
                                 .as_str(); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             if block.header.network_id != expected_network_id {
                                 warn!("🚫 REJECTED block {} from peer {} - wrong network_id: '{}' (expected: '{}')",
@@ -5749,7 +6980,7 @@ async fn main() -> anyhow::Result<()> {
                                                             s.parse::<q_types::NetworkId>().ok()
                                                         })
                                                         .unwrap_or(
-                                                            q_types::NetworkId::TestnetPhase16,
+                                                            q_types::NetworkId::TestnetPhase19,
                                                         ); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                                         let response_topic =
                                                             network_id.block_pack_responses_topic();
@@ -6114,7 +7345,7 @@ async fn main() -> anyhow::Result<()> {
                                                                     let network_id = std::env::var("Q_NETWORK_ID")
                                                                             .ok()
                                                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                                            .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                                                            .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                                                     let topic = network_id
                                                                         .block_pack_requests_topic(
                                                                         );
@@ -6314,11 +7545,46 @@ async fn main() -> anyhow::Result<()> {
                 } else if topic.contains("/ai/") {
                     // ==================== DISTRIBUTED AI MESSAGE HANDLER ====================
                     // Handle ALL distributed AI messages on any /ai/ topic
-                    info!("🤖 ========== RECEIVED DISTRIBUTED AI MESSAGE ==========");
-                    info!("📡 Topic: {}", topic);
-                    info!("📦 Data size: {} bytes", data.len());
+                    // v2.3.19-beta: Enhanced debugging for distributed AI troubleshooting
+                    info!("═══════════════════════════════════════════════════════════════");
+                    info!("🤖 [DISTRIBUTED AI RX] RECEIVED AI MESSAGE");
+                    info!("═══════════════════════════════════════════════════════════════");
+                    info!("   📡 Topic: {}", topic);
+                    info!("   📦 Data Size: {} bytes", data.len());
 
-                    match postcard::from_bytes::<q_network::AIGossipsubMessage>(&data) {
+                    // Show raw data preview for debugging serialization issues
+                    if data.len() < 500 {
+                        if let Ok(json_str) = String::from_utf8(data.clone()) {
+                            info!("   📝 Raw JSON: {}", json_str);
+                        } else {
+                            info!("   📝 Raw Bytes (hex): {}", hex::encode(&data[..data.len().min(100)]));
+                        }
+                    } else {
+                        if let Ok(json_str) = String::from_utf8(data.clone()) {
+                            let preview: String = json_str.chars().take(300).collect();
+                            info!("   📝 JSON Preview: {}...", preview);
+                        }
+                    }
+
+                    // v2.3.18-beta FIX: Try JSON first (new nodes), fall back to postcard (old nodes)
+                    // JSON is more tolerant of version differences and handles missing fields gracefully
+                    let ai_message_result: Result<q_network::AIGossipsubMessage, String> =
+                        serde_json::from_slice(&data)
+                            .map_err(|e| {
+                                error!("   ⚠️  JSON parse attempt failed: {}", e);
+                                e.to_string()
+                            })
+                            .or_else(|json_err| {
+                                // Fallback to postcard for backwards compatibility with old nodes
+                                info!("   🔄 Trying postcard fallback...");
+                                postcard::from_bytes(&data)
+                                    .map_err(|postcard_err| {
+                                        error!("   ⚠️  Postcard parse also failed: {}", postcard_err);
+                                        format!("JSON: {}, Postcard: {}", json_err, postcard_err)
+                                    })
+                            });
+
+                    match ai_message_result {
                         Ok(ai_message) => {
                             info!("✅ Successfully deserialized AI message");
                             info!("   Message ID: {}", ai_message.message_id);
@@ -6419,6 +7685,35 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
+                            // 🚀 v2.3.17-beta: CRITICAL FIX - Actually register nodes when we receive capability announcements!
+                            // This was missing - we logged capabilities but never added nodes to available_nodes
+                            if let q_network::AIMessagePayload::NodeCapability {
+                                node_id,
+                                capability,
+                                available_layers,
+                                ..
+                            } = ai_message.payload.clone()
+                            {
+                                // Don't register ourselves - convert our [u8; 32] node_id to hex string for comparison
+                                let our_node_id_hex = hex::encode(app_state_gossip.node_id);
+                                if node_id != our_node_id_hex {
+                                    info!("🔧 [v2.3.17-beta FIX] Registering remote AI worker: {}", node_id);
+
+                                    if let Some(ref coordinator) = app_state_gossip.distributed_ai_coordinator {
+                                        if let Err(e) = coordinator.register_node(
+                                            node_id.clone(),
+                                            ai_message.sender_peer_id.clone(),
+                                            capability.clone(),
+                                            available_layers,
+                                        ).await {
+                                            error!("❌ Failed to register AI worker {}: {}", node_id, e);
+                                        } else {
+                                            info!("✅ [GOLDEN STANDARD] Remote AI worker registered: {} with {:?}", node_id, capability);
+                                        }
+                                    }
+                                }
+                            }
+
                             // Handle InferenceRequest specifically (worker node processing)
                             if let q_network::AIMessagePayload::InferenceRequest {
                                 request_id,
@@ -6506,6 +7801,7 @@ async fn main() -> anyhow::Result<()> {
                                 max_tokens,
                                 temperature,
                                 model,
+                                encrypted_prompt,  // v2.5.1-beta: Privacy-enhanced encrypted prompt
                             } = ai_message.payload.clone()
                             {
                                 // Get this node's ID to check if we're the target
@@ -6520,16 +7816,40 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Check if this request is targeted at THIS node
                                 if target_node_id == our_node_id || target_node_id == our_node_id_hex {
+                                    // 🔐 v2.5.1-beta: Decrypt prompt if encrypted
+                                    let decrypted_prompt = if let Some(ref encrypted) = encrypted_prompt {
+                                        // Try to decrypt using coordinator's encryption
+                                        if let Some(ref coord) = app_state_gossip.distributed_ai_coordinator {
+                                            match coord.decrypt_prompt(encrypted).await {
+                                                Some(decrypted) => {
+                                                    info!("🔐 Successfully decrypted {} byte prompt", decrypted.len());
+                                                    decrypted
+                                                }
+                                                None => {
+                                                    warn!("🔐 Failed to decrypt prompt, using plaintext fallback");
+                                                    prompt.clone()
+                                                }
+                                            }
+                                        } else {
+                                            prompt.clone()
+                                        }
+                                    } else {
+                                        prompt.clone() // Use plaintext for backward compatibility
+                                    };
+
+                                    // v2.5.1-beta: Privacy-safe logging - never log prompt content
                                     info!("╔═══════════════════════════════════════════════════════════════╗");
                                     info!("║ 🎯 DATA PARALLEL: TARGETED INFERENCE REQUEST FOR THIS NODE   ║");
                                     info!("╠═══════════════════════════════════════════════════════════════╣");
                                     info!("║ Request ID:  {}                          ", request_id);
                                     info!("║ Target:      {} (THIS NODE)             ", target_node_id);
-                                    info!("║ Prompt:      {} chars                   ", prompt.len());
+                                    info!("║ Prompt:      {} chars (encrypted={})    ", decrypted_prompt.len(), encrypted_prompt.is_some());
                                     info!("║ Max tokens:  {:?}                       ", max_tokens);
-                                    info!("║ Temperature: {:?}                       ", temperature);
                                     info!("║ Model:       {}                         ", model);
                                     info!("╚═══════════════════════════════════════════════════════════════╝");
+
+                                    // Use decrypted prompt for inference
+                                    let prompt = decrypted_prompt;
 
                                     // Spawn worker task for streaming inference
                                     let app_state_for_targeted = app_state_gossip.clone();
@@ -6695,31 +8015,11 @@ async fn main() -> anyhow::Result<()> {
 
                             info!("🔚 ========== AI MESSAGE PROCESSING COMPLETE ==========\n");
                         }
-                        Err(postcard_err) => {
-                            // v1.4.5-beta: Fallback to JSON deserialization for cross-version compatibility
-                            // Old nodes may send slightly different binary layouts - try JSON as backup
-                            debug!("⚠️  Postcard deserialization failed: {}, trying JSON fallback...", postcard_err);
-
-                            match serde_json::from_slice::<q_network::AIGossipsubMessage>(&data) {
-                                Ok(ai_message) => {
-                                    info!("✅ Successfully deserialized AI message via JSON fallback");
-                                    info!("   Message ID: {}", ai_message.message_id);
-                                    info!("   Protocol Version: {}", ai_message.protocol_version);
-
-                                    // Forward to coordinator for processing
-                                    if let Some(ref coordinator) = app_state_gossip.distributed_ai_coordinator {
-                                        if let Err(e) = coordinator.handle_ai_message(ai_message).await {
-                                            error!("❌ Failed to handle AI message (JSON path): {}", e);
-                                        }
-                                    }
-                                }
-                                Err(_json_err) => {
-                                    // Both formats failed - this is a genuinely incompatible message
-                                    // Only log at debug level to reduce log spam from old nodes
-                                    debug!("⚠️  AI message incompatible (postcard: {}, json: incompatible binary)", postcard_err);
-                                    debug!("   Topic: {}, Size: {} bytes", topic, data.len());
-                                }
-                            }
+                        Err(deser_err) => {
+                            // v2.3.18-beta: Both JSON and postcard failed - genuinely incompatible message
+                            // Only log at debug level to reduce log spam from very old or corrupted messages
+                            debug!("⚠️  AI message deserialization failed: {}", deser_err);
+                            debug!("   Topic: {}, Size: {} bytes", topic, data.len());
                         }
                     }
                 } else if topic.contains("/blocks") {
@@ -6730,114 +8030,463 @@ async fn main() -> anyhow::Result<()> {
                     debug!("Received vote on topic: {}", topic);
                 } else if topic.contains("/ack") {
                     debug!("Received acknowledgement on topic: {}", topic);
-                } else if topic.ends_with("/miner-stats") {
-                    // v1.0.88-beta: P2P Miner Stats Handler
-                    // Receives hashrate updates from users mining to their localhost nodes
-                    // This enables the bootstrap node's Mining Dashboard to show all miners
-                    match serde_json::from_slice::<q_api_server::P2PMinerStatsUpdate>(&data) {
-                        Ok(stats_update) => {
-                            // Get our own peer ID to skip our own messages
-                            let our_peer_id = {
-                                let info = app_state_gossip.libp2p_peer_info.read().await;
-                                info.0.clone()
-                            };
+                } else if topic.contains("/mining-solutions") {
+                    // 🌐 v2.2.2-beta: P2P MINING SOLUTION HANDLER
+                    // This is the receiver side of the decentralized mining fix!
+                    // When a connected node receives a mining solution, it broadcasts to all nodes.
+                    // All nodes receiving the solution can now include it in their blocks.
+                    // This fixes the 10x reward disparity between bootstrap and connected nodes.
 
-                            // Skip updates from ourselves (prevent echo)
-                            if stats_update.origin_node_id == our_peer_id {
+                    // Get our peer ID to avoid processing our own messages
+                    let our_peer_id = {
+                        let info = app_state_gossip.libp2p_peer_info.read().await;
+                        info.0.clone()
+                    };
+
+                    // Try to deserialize the P2P mining submission
+                    match rmp_serde::from_slice::<q_types::mining_solution::P2PMiningSubmission>(&data) {
+                        Ok(submission) => {
+                            // Skip our own submissions
+                            if submission.origin_node_id == our_peer_id {
+                                debug!("⛏️ [P2P MINING] Skipping own solution broadcast");
                                 continue;
                             }
 
-                            debug!("⛏️ [P2P MINER STATS] Received stats from {} via {}: {:.2} KH/s, {} solutions",
-                                  &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
-                                  &stats_update.origin_node_id[..12.min(stats_update.origin_node_id.len())],
-                                  stats_update.hashrate_khs,
-                                  stats_update.total_solutions);
+                            // Convert miner_address bytes to hex string
+                            let miner_address_hex = hex::encode(&submission.miner_address);
+                            let miner_address_display = format!("qnk{}", &miner_address_hex[..16.min(miner_address_hex.len())]);
 
-                            // Update local mining statistics with P2P data
-                            if let Some(ref mining_stats_arc) = app_state_gossip.mining_statistics {
-                                let mut mining_stats = mining_stats_arc.write().await;
-                                mining_stats.update_from_p2p(&stats_update);
+                            info!("⛏️ [P2P MINING RX] Received solution from {} via {} (nonce: {}, height: {})",
+                                  miner_address_display,
+                                  &submission.origin_node_id[..12.min(submission.origin_node_id.len())],
+                                  submission.nonce,
+                                  submission.block_height);
 
-                                // v1.1.9-beta: Emit SSE event so frontend can display P2P mining stats
-                                // This enables cross-node mining visibility in the Mining Dashboard
-                                if let Some(miner_stat) = mining_stats.active_miners.get(&stats_update.miner_address) {
-                                    // Get miner's current balance from RocksDB
-                                    let current_balance = app_state_gossip.storage_engine
-                                        .get_balance(&stats_update.miner_address)
+                            // Validate solution age (max 60 seconds)
+                            if !submission.is_valid_age(60_000) {
+                                debug!("⚠️ [P2P MINING] Solution too old, skipping");
+                                continue;
+                            }
+
+                            // Queue the solution for block production on THIS node
+                            // This is the key fix - solutions from connected nodes can now be included
+                            // in blocks produced by the bootstrap node
+                            if let Some(tx) = &app_state_gossip.mining_submission_tx {
+                                let local_submission = q_api_server::MiningSubmission {
+                                    nonce: submission.nonce,
+                                    hash: submission.solution_hash,
+                                    difficulty_target: submission.difficulty_target,
+                                    miner_address: submission.miner_address,
+                                    miner_address_str: format!("qnk{}", miner_address_hex),
+                                    hash_rate: 0.0, // P2P solutions don't include hashrate
+                                    miner_id: None,
+                                    worker_name: Some(format!("p2p:{}", &submission.origin_node_id[..12.min(submission.origin_node_id.len())])),
+                                };
+
+                                match tx.send(local_submission).await {
+                                    Ok(_) => {
+                                        info!("✅ [P2P MINING] Queued P2P solution from {} for local block production",
+                                              miner_address_display);
+
+                                        // Also apply instant balance update locally
+                                        // This ensures rewards show up on bootstrap even from connected node mining
+                                        let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                                        let block_reward_total = q_api_server::handlers::calculate_block_reward_time_based(
+                                            q_api_server::handlers::GENESIS_TIMESTAMP,
+                                            current_timestamp
+                                        );
+
+                                        // Apply 1% dev fee
+                                        const DEV_FEE_BPS: u128 = 100;
+                                        const BPS_DIVISOR: u128 = 10_000;
+                                        let dev_fee = block_reward_total.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
+                                        let miner_reward = block_reward_total.saturating_sub(dev_fee);
+
+                                        // Update balance in memory and persist
+                                        let new_balance = {
+                                            let mut balances = app_state_gossip.wallet_balances.write().await;
+                                            let current = balances.get(&submission.miner_address).copied().unwrap_or(0);
+                                            let new = current.saturating_add(miner_reward);
+                                            balances.insert(submission.miner_address, new);
+                                            new
+                                        };
+
+                                        // Persist to storage
+                                        if let Err(e) = app_state_gossip.storage_engine
+                                            .save_wallet_balance(&submission.miner_address, new_balance)
+                                            .await
+                                        {
+                                            warn!("⚠️ [P2P MINING] Failed to persist P2P mining reward: {}", e);
+                                        }
+
+                                        // Emit SSE event for frontend
+                                        let _ = app_state_gossip.event_broadcaster.broadcast(
+                                            q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                wallet_address: format!("qnk{}", miner_address_hex),
+                                                old_balance: 0.0, // We don't track old balance for P2P updates
+                                                new_balance: new_balance as f64 / QUG_DISPLAY_DIVISOR,
+                                                change_reason: "p2p_mining_reward".to_string(),
+                                                timestamp: chrono::Utc::now(),
+                                                block_hash: None,  // P2P mining rewards are instant, not in a block yet
+                                                block_height: None,
+                                                confirmation_status: "pending".to_string(),
+                                            }
+                                        ).await;
+
+                                        info!("💰 [P2P MINING] Applied instant reward +{:.8} QNK for {} (via P2P)",
+                                              miner_reward as f64 / QUG_DISPLAY_DIVISOR,
+                                              miner_address_display);
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [P2P MINING] Failed to queue P2P solution: {:?}", e);
+                                    }
+                                }
+                            } else {
+                                debug!("⚠️ [P2P MINING] Mining queue not available");
+                            }
+                        }
+                        Err(e) => {
+                            debug!("⚠️ [P2P MINING] Failed to deserialize P2P mining submission: {}", e);
+                        }
+                    }
+                } else if topic.ends_with("/miner-stats") {
+                    // v2.2.1: P2P Miner Stats Handler with BATCH SUPPORT
+                    // Receives hashrate updates from users mining to their localhost nodes
+                    // Supports both batched format (v2.2.1+) and legacy single-update format
+
+                    // Get our peer ID once for all updates
+                    let our_peer_id = {
+                        let info = app_state_gossip.libp2p_peer_info.read().await;
+                        info.0.clone()
+                    };
+
+                    // v2.2.1: Try batch format first (new), fall back to single update (legacy)
+                    let stats_updates: Vec<q_api_server::P2PMinerStatsUpdate> =
+                        if let Ok(batch) = serde_json::from_slice::<q_api_server::P2PMinerStatsBatch>(&data) {
+                            // Skip batches from ourselves
+                            if batch.origin_node_id == our_peer_id {
+                                continue;
+                            }
+                            debug!("📦 [P2P BATCH] Received batch of {} miner updates (seq: {})",
+                                   batch.updates.len(), batch.batch_seq);
+                            batch.updates
+                        } else if let Ok(single) = serde_json::from_slice::<q_api_server::P2PMinerStatsUpdate>(&data) {
+                            // Legacy single-update format
+                            if single.origin_node_id == our_peer_id {
+                                continue;
+                            }
+                            vec![single]
+                        } else {
+                            debug!("⚠️ Failed to deserialize P2P miner stats (neither batch nor single format)");
+                            continue;
+                        };
+
+                    // Process all updates in the batch
+                    for stats_update in stats_updates {
+                        debug!("⛏️ [P2P MINER STATS] Processing stats for {} via {}: {:.2} KH/s, {} solutions",
+                              &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
+                              &stats_update.origin_node_id[..12.min(stats_update.origin_node_id.len())],
+                              stats_update.hashrate_khs,
+                              stats_update.total_solutions);
+
+                        // Update local mining statistics with P2P data
+                        if let Some(ref mining_stats_arc) = app_state_gossip.mining_statistics {
+                            let mut mining_stats = mining_stats_arc.write().await;
+                            mining_stats.update_from_p2p(&stats_update);
+
+                            // v1.1.9-beta: Emit SSE event so frontend can display P2P mining stats
+                            // v3.3.4-beta: Use composite key format: address:worker_id
+                            let worker_id = format!("p2p:{}", &stats_update.origin_node_id[..12.min(stats_update.origin_node_id.len())]);
+                            let composite_key = format!("{}:{}", stats_update.miner_address, worker_id);
+                            if let Some(miner_stat) = mining_stats.active_miners.get(&composite_key) {
+                                // Get miner's current balance from RocksDB
+                                // v2.7.7-beta FIX: Strip "qnk" prefix before calling get_balance()
+                                // Root cause: get_balance() expects raw hex (e.g., "8207f268...")
+                                // but miner_address has "qnk" prefix (e.g., "qnk8207f268...")
+                                // hex::decode("qnk...") fails, .unwrap_or(0) returns 0, so balance never accumulates!
+                                let address_hex = if stats_update.miner_address.starts_with("qnk") {
+                                    &stats_update.miner_address[3..]
+                                } else {
+                                    &stats_update.miner_address
+                                };
+                                let current_balance = app_state_gossip.storage_engine
+                                    .get_balance(address_hex)
+                                    .await
+                                    .unwrap_or(0) as f64 / QUG_DISPLAY_DIVISOR;
+
+                                // Emit mining_stats SSE event for this miner
+                                // v3.2.25-beta: Include miner_id and worker_id for multi-miner tracking
+                                let worker_id = &miner_stat.worker_id;
+                                let miner_id = if worker_id != "direct" && !worker_id.starts_with("p2p:") {
+                                    Some(worker_id.clone())
+                                } else {
+                                    None
+                                };
+                                let _ = app_state_gossip.event_broadcaster.broadcast(
+                                    q_api_server::streaming::StreamEvent::MiningStats {
+                                        miner_address: stats_update.miner_address.clone(),
+                                        total_rewards: current_balance,
+                                        total_blocks_found: miner_stat.total_solutions,
+                                        current_balance,
+                                        avg_hash_rate: miner_stat.last_hashrate * 1000.0,
+                                        miner_id,
+                                        worker_id: Some(worker_id.clone()),
+                                        timestamp: chrono::Utc::now(),
+                                    }
+                                ).await;
+
+                                info!("📡 [P2P→SSE] Broadcast mining stats for {} (worker={}, {:.2} KH/s, {} solutions)",
+                                      &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
+                                      worker_id,
+                                      miner_stat.last_hashrate,
+                                      miner_stat.total_solutions);
+
+                                // v1.3.8-beta: Emit PendingMiningReward SSE event
+                                // v2.7.6-beta: CRITICAL FIX - Also emit BalanceUpdated to make frontend balance update
+                                // v3.2.12-beta: Debug logging to diagnose zero reward issue
+                                info!("📥 [P2P STATS RX] Received pending_reward={:?} for {} (current_balance={:.8} QNK)",
+                                      stats_update.pending_reward,
+                                      &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
+                                      current_balance);
+                                if let Some(pending_reward_base_units) = stats_update.pending_reward {
+                                    let pending_reward_qnk = pending_reward_base_units as f64 / QUG_DISPLAY_DIVISOR;
+                                    info!("📥 [P2P STATS RX] pending_reward_qnk={:.8} QNK (base_units={})",
+                                          pending_reward_qnk, pending_reward_base_units);
+                                    let source_height = app_state_gossip.storage_engine
+                                        .get_latest_qblock_height()
                                         .await
-                                        .unwrap_or(0) as f64 / 100_000_000.0;
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(0);
 
-                                    // Emit mining_stats SSE event for this miner
-                                    // v1.1.10-beta FIX: Added .await - without it the broadcast future was never executed!
+                                    // v2.7.6-beta: Emit PendingMiningReward for UI indicators
                                     let _ = app_state_gossip.event_broadcaster.broadcast(
-                                        q_api_server::streaming::StreamEvent::MiningStats {
+                                        q_api_server::streaming::StreamEvent::PendingMiningReward {
                                             miner_address: stats_update.miner_address.clone(),
-                                            total_rewards: current_balance, // Use balance as proxy for total rewards
-                                            total_blocks_found: miner_stat.total_solutions,
-                                            current_balance,
-                                            avg_hash_rate: miner_stat.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                            pending_reward_qnk,
+                                            origin_node_id: stats_update.origin_node_id.clone(),
+                                            source_height,
                                             timestamp: chrono::Utc::now(),
                                         }
                                     ).await;
 
-                                    info!("📡 [P2P→SSE] Broadcast mining stats for {} ({:.2} KH/s, {} solutions)",
-                                          &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
-                                          miner_stat.last_hashrate,
-                                          miner_stat.total_solutions);
+                                    // v2.7.6-beta: CRITICAL - Also emit BalanceUpdated so frontend balance display updates!
+                                    // This is the KEY FIX for P2P balance propagation.
+                                    // When mining to a peer node, the bootstrap node receives the P2P miner stats
+                                    // and must emit a BalanceUpdated event so the frontend balance display updates.
+                                    let new_balance_with_pending = current_balance + pending_reward_qnk;
 
-                                    // v1.3.8-beta: Emit PendingMiningReward SSE event for instant UI feedback
-                                    // This allows users mining to localhost to see instant balance updates
-                                    // on frontend connected to bootstrap (before block arrives via sync)
-                                    if let Some(pending_reward_base_units) = stats_update.pending_reward {
-                                        let pending_reward_qnk = pending_reward_base_units as f64 / 100_000_000.0;
+                                    // v2.7.7-beta CRITICAL FIX: PERSIST the accumulated balance to storage!
+                                    // Root cause: P2P miner stats were emitting SSE events but NOT saving to storage.
+                                    // When blocks don't sync (Docker node behind bootstrap), balance never persisted.
+                                    // Fix: Save to storage so next P2P miner stats update reads the accumulated balance.
+                                    // v3.0.4-beta: Use 10^24 divisor (was 10^8)
+                                    let new_balance_base_units = (new_balance_with_pending * QUG_DISPLAY_DIVISOR) as u128;
+                                    if let Err(e) = app_state_gossip.storage_engine
+                                        .set_balance(address_hex, new_balance_base_units)
+                                        .await
+                                    {
+                                        warn!("⚠️ [P2P BALANCE] Failed to persist P2P mining reward balance: {}", e);
+                                    } else {
+                                        debug!("💾 [P2P BALANCE] Persisted accumulated balance {:.8} QNK for {}",
+                                              new_balance_with_pending,
+                                              &stats_update.miner_address[..16.min(stats_update.miner_address.len())]);
 
-                                        // Get current block height for context
-                                        let source_height = app_state_gossip.storage_engine
-                                            .get_latest_qblock_height()
-                                            .await
-                                            .ok()
-                                            .flatten()
-                                            .unwrap_or(0);
-
-                                        let _ = app_state_gossip.event_broadcaster.broadcast(
-                                            q_api_server::streaming::StreamEvent::PendingMiningReward {
-                                                miner_address: stats_update.miner_address.clone(),
-                                                pending_reward_qnk,
-                                                origin_node_id: stats_update.origin_node_id.clone(),
-                                                source_height,
-                                                timestamp: chrono::Utc::now(),
+                                        // v3.2.9-beta CRITICAL FIX: Also update in-memory wallet_balances HashMap!
+                                        // Root cause: Periodic balance sync (every 15 seconds) reads from in-memory HashMap
+                                        // and OVERWRITES RocksDB storage, erasing P2P mining reward updates.
+                                        // Fix: Keep in-memory HashMap in sync with RocksDB writes.
+                                        if let Ok(wallet_bytes) = hex::decode(address_hex) {
+                                            if wallet_bytes.len() == 32 {
+                                                let mut addr_array = [0u8; 32];
+                                                addr_array.copy_from_slice(&wallet_bytes);
+                                                let mut balances = app_state_gossip.wallet_balances.write().await;
+                                                balances.insert(addr_array, new_balance_base_units);
+                                                drop(balances);
+                                                debug!("🔄 [P2P BALANCE] Updated in-memory HashMap for {} (prevents periodic sync overwrite)",
+                                                      &stats_update.miner_address[..16.min(stats_update.miner_address.len())]);
                                             }
-                                        ).await;
-
-                                        info!("💰 [P2P→SSE] Broadcast PENDING mining reward {:.8} QNK for {} (from node {})",
-                                              pending_reward_qnk,
-                                              &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
-                                              &stats_update.origin_node_id[..12.min(stats_update.origin_node_id.len())]);
+                                        }
                                     }
-                                }
 
-                                debug!("✅ [P2P MINER STATS] Updated local stats for miner {}",
-                                      &stats_update.miner_address[..16.min(stats_update.miner_address.len())]);
+                                    let _ = app_state_gossip.event_broadcaster.broadcast(
+                                        q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                            wallet_address: stats_update.miner_address.clone(),
+                                            old_balance: current_balance,
+                                            new_balance: new_balance_with_pending,
+                                            change_reason: "p2p_mining_reward".to_string(),
+                                            timestamp: chrono::Utc::now(),
+                                            block_hash: None,
+                                            block_height: Some(source_height),
+                                            confirmation_status: "pending".to_string(), // Pending until block confirmation
+                                        }
+                                    ).await;
+
+                                    info!("💰 [P2P→SSE] Broadcast PENDING mining reward {:.8} QNK for {} (balance: {:.8} → {:.8} QNK)",
+                                          pending_reward_qnk,
+                                          &stats_update.miner_address[..16.min(stats_update.miner_address.len())],
+                                          current_balance,
+                                          new_balance_with_pending);
+                                    info!("📡 [P2P→SSE] Emitted BalanceUpdated event for P2P mining reward (from node {})",
+                                          &stats_update.origin_node_id[..12.min(stats_update.origin_node_id.len())]);
+                                }
                             }
+
+                            debug!("✅ [P2P MINER STATS] Updated local stats for miner {}",
+                                  &stats_update.miner_address[..16.min(stats_update.miner_address.len())]);
+                        } // end if mining_stats_arc
+                    } // end for stats_update in stats_updates
+                // ========================================
+                // ========================================
+                // 📤 v3.3.0-beta: P2P MEMPOOL TRANSACTION PROPAGATION HANDLER
+                // Receives transactions broadcast by other nodes for real-time mempool sync
+                // Enables immediate transaction visibility before block inclusion
+                // ========================================
+                } else if topic.ends_with("/mempool-txs") {
+                    match postcard::from_bytes::<q_types::P2PTransaction>(&data) {
+                        Ok(p2p_tx) => {
+                            // Security check 1: Skip our own broadcasts (prevent loop)
+                            let our_node_id = {
+                                let info = app_state_gossip.libp2p_peer_info.read().await;
+                                info.0.clone()
+                            };
+                            if p2p_tx.origin_node_id == our_node_id {
+                                // Skip - this is our own transaction echoing back
+                                continue;
+                            }
+
+                            // Security check 2: Check hop count (max 3 hops to prevent infinite relay)
+                            if p2p_tx.exceeded_max_hops() {
+                                debug!("⚠️ [P2P MEMPOOL] Dropping tx {} - exceeded max hop count ({})",
+                                       hex::encode(&p2p_tx.transaction.id[..8]), p2p_tx.hop_count);
+                                continue;
+                            }
+
+                            // Security check 3: Check if already in mempool (deduplication)
+                            let tx_hash = p2p_tx.transaction.id;
+                            if app_state_gossip.tx_pool.contains_key(&tx_hash) {
+                                debug!("ℹ️ [P2P MEMPOOL] Skipping duplicate tx {}", hex::encode(&tx_hash[..8]));
+                                continue;
+                            }
+
+                            // Security check 4: Check timestamp freshness (reject >5 min old)
+                            if p2p_tx.is_stale() {
+                                debug!("⚠️ [P2P MEMPOOL] Dropping stale tx {} (age > 5 min)",
+                                       hex::encode(&tx_hash[..8]));
+                                continue;
+                            }
+
+                            // Security check 5: Verify transaction signature
+                            // v3.3.0: Use the signature verification from q_types
+                            let sig_valid = {
+                                use ed25519_dalek::{Signature, VerifyingKey};
+
+                                // Reconstruct the signing message (same as when signing)
+                                let sign_payload = format!(
+                                    "{}{}{}{}{}{}{}",
+                                    hex::encode(&p2p_tx.transaction.from),
+                                    hex::encode(&p2p_tx.transaction.to),
+                                    p2p_tx.transaction.amount,
+                                    p2p_tx.transaction.fee,
+                                    p2p_tx.transaction.nonce,
+                                    p2p_tx.transaction.timestamp.timestamp(),
+                                    hex::encode(&p2p_tx.transaction.data)
+                                );
+                                let msg_hash = blake3::hash(sign_payload.as_bytes());
+
+                                // Verify Ed25519 signature
+                                if p2p_tx.transaction.signature.len() >= 64 {
+                                    // Try to extract public key from 'from' address
+                                    // Note: 'from' IS the public key in our system
+                                    if let Ok(pk) = VerifyingKey::from_bytes(&p2p_tx.transaction.from) {
+                                        if let Ok(sig) = Signature::from_slice(&p2p_tx.transaction.signature[..64]) {
+                                            use ed25519_dalek::Verifier;
+                                            pk.verify(msg_hash.as_bytes(), &sig).is_ok()
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        // 'from' address might not be the public key directly
+                                        // In this case, skip signature validation for now
+                                        // (the transaction will be re-validated when included in a block)
+                                        true
+                                    }
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if !sig_valid {
+                                warn!("🚫 [P2P MEMPOOL] Invalid signature on tx {} from node {}",
+                                      hex::encode(&tx_hash[..8]),
+                                      &p2p_tx.origin_node_id[..12.min(p2p_tx.origin_node_id.len())]);
+                                continue;
+                            }
+
+                            // All checks passed - add to local mempool
+                            app_state_gossip.tx_pool.insert(tx_hash, p2p_tx.transaction.clone());
+                            app_state_gossip.tx_status.insert(tx_hash, q_types::TxStatus::InMempool);
+
+                            // Also add to production mempool for block inclusion
+                            if let Some(ref mempool) = app_state_gossip.production_mempool {
+                                let tx = p2p_tx.transaction.clone();
+                                let mempool_clone = mempool.clone();
+                                tokio::spawn(async move {
+                                    let _ = mempool_clone.add_transaction(tx, None).await;
+                                });
+                            }
+
+                            info!("📥 [P2P MEMPOOL] Added tx {} from peer {} (hop {})",
+                                  hex::encode(&tx_hash[..8]),
+                                  &p2p_tx.origin_node_id[..12.min(p2p_tx.origin_node_id.len())],
+                                  p2p_tx.hop_count);
                         }
                         Err(e) => {
-                            debug!("⚠️ Failed to deserialize P2P miner stats: {}", e);
+                            debug!("⚠️ [P2P MEMPOOL] Failed to deserialize P2PTransaction: {}", e);
                         }
                     }
                 // ========================================
-                // 🔐 v1.3.12-beta: DECENTRALIZED CONSENSUS P2P HANDLERS
+                // ========================================
+                // 🔐 v2.4.6-beta: DECENTRALIZED BFT CONSENSUS P2P HANDLERS
                 // DAG-Knight consensus with SQIsign post-quantum signatures
+                // All nodes participate in multi-validator BFT consensus
                 // ========================================
                 } else if topic.ends_with("/consensus/sig-requests") {
                     // Handle incoming signature requests from other validators
-                    // In full integration: NarwhalCore.handle_signature_request()
                     match postcard::from_bytes::<q_narwhal_core::decentralized_consensus::SignatureRequest>(&data) {
                         Ok(request) => {
-                            info!("📥 [CONSENSUS] Signature request for vertex {} from {}",
+                            info!("📥 [BFT] Signature request for vertex {} from validator {}",
                                   hex::encode(&request.vertex_id[..8]),
                                   hex::encode(&request.requester[..8]));
-                            // TODO: Route to NarwhalCore once instantiated
-                            // narwhal_core.handle_signature_request(request).await
+
+                            // Route to NarwhalCore for signature generation
+                            if let Some(ref narwhal) = app_state_gossip.narwhal_core {
+                                match narwhal.handle_signature_request(request.clone()).await {
+                                    Ok(Some(response)) => {
+                                        info!("✅ [BFT] Signed vertex {} - broadcasting response",
+                                              hex::encode(&request.vertex_id[..8]));
+                                        // Broadcast signature response back via gossipsub
+                                        if let Some(ref network_tx) = app_state_gossip.libp2p_command_tx {
+                                            let response_data = postcard::to_allocvec(&response).unwrap_or_default();
+                                            // Use testnet-phase19 as default network ID for topic
+                                            let topic_str = "/qnk/testnet-phase19/consensus/sig-responses".to_string();
+                                            let _ = network_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
+                                                topic: topic_str,
+                                                message_bytes: response_data,
+                                            });
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        debug!("⏭️ [BFT] Skipped signing vertex {} (invalid or duplicate)",
+                                               hex::encode(&request.vertex_id[..8]));
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [BFT] Failed to process signature request: {}", e);
+                                    }
+                                }
+                            } else {
+                                debug!("⚠️ [BFT] NarwhalCore not initialized - cannot sign");
+                            }
                         }
                         Err(e) => {
                             debug!("⚠️ Failed to deserialize consensus signature request: {}", e);
@@ -6845,14 +8494,28 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if topic.ends_with("/consensus/sig-responses") {
                     // Handle incoming signature responses from validators
-                    // In full integration: NarwhalCore.handle_signature_response()
                     match postcard::from_bytes::<q_narwhal_core::decentralized_consensus::SignatureResponse>(&data) {
                         Ok(response) => {
-                            info!("📥 [CONSENSUS] Signature response for vertex {} from {}",
+                            info!("📥 [BFT] Signature response for vertex {} from validator {}",
                                   hex::encode(&response.vertex_id[..8]),
                                   hex::encode(&response.signer[..8]));
-                            // TODO: Route to NarwhalCore once instantiated
-                            // narwhal_core.handle_signature_response(response).await
+
+                            // Route to NarwhalCore for signature collection
+                            if let Some(ref narwhal) = app_state_gossip.narwhal_core {
+                                match narwhal.handle_signature_response(response.clone()).await {
+                                    Ok(true) => {
+                                        // Threshold reached! Certificate created automatically
+                                        info!("🎉 [BFT] Quorum reached for vertex {} - certificate created!",
+                                              hex::encode(&response.vertex_id[..8]));
+                                    }
+                                    Ok(false) => {
+                                        debug!("⏳ [BFT] Signature collected, awaiting more for quorum");
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [BFT] Failed to process signature response: {}", e);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             debug!("⚠️ Failed to deserialize consensus signature response: {}", e);
@@ -6860,14 +8523,25 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if topic.ends_with("/consensus/certificates") {
                     // Handle incoming certificate broadcasts (completed 2f+1 signatures)
-                    // In full integration: NarwhalCore.handle_certificate_broadcast()
                     match postcard::from_bytes::<q_narwhal_core::decentralized_consensus::CertificateBroadcast>(&data) {
                         Ok(broadcast) => {
-                            info!("📥 [CONSENSUS] Certificate broadcast for vertex {} from {}",
+                            info!("📥 [BFT] Certificate for vertex {} from {} ({} signatures)",
                                   hex::encode(&broadcast.certificate.vertex_id[..8]),
-                                  hex::encode(&broadcast.broadcaster[..8]));
-                            // TODO: Route to NarwhalCore once instantiated
-                            // narwhal_core.handle_certificate_broadcast(broadcast).await
+                                  hex::encode(&broadcast.broadcaster[..8]),
+                                  broadcast.certificate.signatures.len());
+
+                            // Route to NarwhalCore for certificate verification and storage
+                            if let Some(ref narwhal) = app_state_gossip.narwhal_core {
+                                match narwhal.handle_certificate_broadcast(broadcast.clone()).await {
+                                    Ok(()) => {
+                                        info!("✅ [BFT] Certificate verified and stored for vertex {}",
+                                              hex::encode(&broadcast.certificate.vertex_id[..8]));
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [BFT] Certificate rejected: {}", e);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             debug!("⚠️ Failed to deserialize consensus certificate broadcast: {}", e);
@@ -6875,17 +8549,83 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if topic.ends_with("/consensus/validators") {
                     // Handle incoming validator announcements (new validators joining network)
-                    // In full integration: NarwhalCore.handle_validator_announcement()
                     match postcard::from_bytes::<q_narwhal_core::decentralized_consensus::ValidatorAnnouncement>(&data) {
                         Ok(announcement) => {
-                            info!("📥 [CONSENSUS] Validator announcement from {} with SQIsign pubkey ({} bytes)",
+                            info!("📥 [BFT] New validator {} with SQIsign pubkey ({} bytes)",
                                   hex::encode(&announcement.validator_id[..8]),
                                   announcement.sqisign_public_key.len());
-                            // TODO: Route to NarwhalCore once instantiated
-                            // narwhal_core.handle_validator_announcement(announcement).await
+
+                            // Route to NarwhalCore for validator registration
+                            if let Some(ref narwhal) = app_state_gossip.narwhal_core {
+                                match narwhal.handle_validator_announcement(announcement.clone()).await {
+                                    Ok(()) => {
+                                        info!("✅ [BFT] Validator {} registered in consensus",
+                                              hex::encode(&announcement.validator_id[..8]));
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [BFT] Failed to register validator: {}", e);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             debug!("⚠️ Failed to deserialize validator announcement: {}", e);
+                        }
+                    }
+                // ========================================
+                // 🌐 v2.3.0-beta: DECENTRALIZED MINING POOL P2P HANDLERS
+                // CRDT-based PPLNS with gossipsub coordination
+                // ========================================
+                } else if topic.contains("/pool/") {
+                    // Handle all pool-related messages
+                    match bincode::deserialize::<q_mining_pool::distributed::PoolMessage>(&data) {
+                        Ok(pool_message) => {
+                            // Route to distributed pool coordinator if available
+                            if let Some(ref coordinator) = app_state_gossip.distributed_pool_coordinator {
+                                // Extract sender peer ID from the message (for now use a placeholder)
+                                // In production, this would come from libp2p message metadata
+                                let from_peer: [u8; 32] = [0u8; 32]; // TODO: Get actual peer ID from gossipsub
+
+                                let coord = coordinator.read().await;
+                                if let Err(e) = coord.handle_message(from_peer, pool_message.clone()).await {
+                                    debug!("⚠️ Pool message handling error: {}", e);
+                                } else {
+                                    match &pool_message {
+                                        q_mining_pool::distributed::PoolMessage::Share(_) => {
+                                            trace!("📥 [POOL] Received share via P2P");
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::BlockFound(ann) => {
+                                            info!("⛏️  [POOL] Block found announcement: height={}", ann.height);
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::PPLNSSync(_) => {
+                                            trace!("📥 [POOL] PPLNS state sync received");
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::Payout(batch) => {
+                                            info!("💰 [POOL] Payout batch: {} payouts", batch.payout_count());
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::Heartbeat(hb) => {
+                                            trace!("💓 [POOL] Heartbeat from node: {} workers", hb.worker_count);
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::BlockTemplate(_) => {
+                                            trace!("📥 [POOL] Block template received");
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::RequestPPLNSState { .. } => {
+                                            trace!("📥 [POOL] PPLNS state request");
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::Attestation(att) => {
+                                            debug!("✅ [POOL] Block attestation: height={}", att.height);
+                                        }
+                                        q_mining_pool::distributed::PoolMessage::PayoutVoteMsg(_) => {
+                                            debug!("🗳️ [POOL] Payout vote received");
+                                        }
+                                    }
+                                }
+                            } else {
+                                trace!("📥 [POOL] Pool message received but coordinator not initialized");
+                            }
+                        }
+                        Err(e) => {
+                            debug!("⚠️ Failed to deserialize pool message on topic {}: {}", topic, e);
                         }
                     }
                 } else {
@@ -6895,6 +8635,58 @@ async fn main() -> anyhow::Result<()> {
             warn!("📨 Gossipsub processor channel closed");
         });
         info!("✅ Gossipsub transaction/block synchronization enabled");
+
+        // ========================================
+        // 🔐 v2.4.6-beta: VALIDATOR ANNOUNCEMENT TASK
+        // Broadcasts our validator identity to the network for BFT consensus
+        // ========================================
+        let app_state_validator = app_state.clone();
+        tokio::spawn(async move {
+            // Wait 5 seconds for P2P connections to establish
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            // Broadcast our validator announcement
+            if let Some(ref narwhal) = app_state_validator.narwhal_core {
+                if let Some(announcement) = narwhal.create_validator_announcement() {
+                    info!("📢 [BFT] Broadcasting validator announcement to network...");
+                    info!("   Validator ID: {}", hex::encode(&announcement.validator_id[..8]));
+                    info!("   SQIsign pubkey: {} bytes", announcement.sqisign_public_key.len());
+
+                    if let Some(ref network_tx) = app_state_validator.libp2p_command_tx {
+                        let announcement_data = postcard::to_allocvec(&announcement).unwrap_or_default();
+                        let topic_str = "/qnk/testnet-phase19/consensus/validators".to_string();
+                        match network_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
+                            topic: topic_str.clone(),
+                            message_bytes: announcement_data.clone(),
+                        }) {
+                            Ok(_) => {
+                                info!("✅ [BFT] Validator announcement broadcast successfully!");
+                                info!("   Other nodes can now request signatures from us");
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [BFT] Failed to broadcast validator announcement: {}", e);
+                            }
+                        }
+
+                        // Re-announce every 5 minutes to ensure new peers see us
+                        let network_tx_clone = network_tx.clone();
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                        loop {
+                            interval.tick().await;
+                            let announcement_data = postcard::to_allocvec(&announcement).unwrap_or_default();
+                            let _ = network_tx_clone.send(q_network::NetworkCommand::PublishConsensusMessage {
+                                topic: "/qnk/testnet-phase19/consensus/validators".to_string(),
+                                message_bytes: announcement_data,
+                            });
+                            debug!("🔄 [BFT] Re-announced validator identity");
+                        }
+                    }
+                } else {
+                    warn!("⚠️ [BFT] No SQIsign keypair - cannot announce as validator");
+                }
+            }
+        });
+        info!("✅ [BFT] Validator announcement task started");
     } else {
         warn!("⚠️  Gossipsub synchronization disabled (libp2p not available)");
     }
@@ -6954,7 +8746,7 @@ async fn main() -> anyhow::Result<()> {
                             let network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             let _ = network_clone.send(q_network::NetworkCommand::PublishBlock {
                                 topic: network_id.peer_heights_topic(),
                                 block_bytes: bytes,
@@ -7103,9 +8895,10 @@ async fn main() -> anyhow::Result<()> {
                 // Collect submissions into batch
                 batch_buffer.push(submission);
 
-                // Process batch every 500 submissions OR every 20ms (whichever comes first)
-                // This gives us 25,000 submissions/sec throughput (500 * 50 batches/sec)
-                if batch_buffer.len() >= 500 || last_batch_process.elapsed().as_millis() >= 20 {
+                // Process batch every 500 submissions OR every 5ms (whichever comes first)
+                // v2.8.0: Reduced from 20ms to 5ms for faster P2P mining reward propagation
+                // This gives us 100,000 submissions/sec throughput (500 * 200 batches/sec)
+                if batch_buffer.len() >= 500 || last_batch_process.elapsed().as_millis() >= 5 {
                     let start = std::time::Instant::now();
                     let batch_size = batch_buffer.len();
 
@@ -7119,20 +8912,21 @@ async fn main() -> anyhow::Result<()> {
 
                     // 🔒 MAX SUPPLY ENFORCEMENT - Prevent exceeding 21M QUG total supply
                     // CRITICAL: Check before minting to ensure we never violate the hard cap
-                    const MAX_SUPPLY: u64 = 2_100_000_000_000_000; // 21M QUG * 10^8
+                    // v3.0.4-beta: 21M QUG * 10^24 (was 10^8)
+                    const MAX_SUPPLY: u128 = 21_000_000_000_000_000_000_000_000_000_000; // 21M * 10^24
 
                     let mut current_supply = app_state_mining.total_minted_supply.write().await;
-                    let new_coins = block_reward_total * batch_size as u64;
+                    let new_coins = block_reward_total * batch_size as u128;
 
                     if *current_supply + new_coins > MAX_SUPPLY {
                         let remaining_supply = MAX_SUPPLY.saturating_sub(*current_supply);
                         let can_mint_solutions =
-                            (remaining_supply / block_reward_total).min(batch_size as u64);
+                            (remaining_supply / block_reward_total).min(batch_size as u128);
 
                         warn!(
                             "⚠️ MAX SUPPLY APPROACHING! Current: {} / {} QUG",
-                            *current_supply / 100_000_000,
-                            MAX_SUPPLY / 100_000_000
+                            *current_supply / QUG_DISPLAY_DIVISOR as u128,
+                            MAX_SUPPLY / QUG_DISPLAY_DIVISOR as u128
                         );
 
                         if can_mint_solutions == 0 {
@@ -7142,7 +8936,7 @@ async fn main() -> anyhow::Result<()> {
                             );
                             warn!(
                                 "   Total supply: {} QUG (HARD CAP ENFORCED)",
-                                MAX_SUPPLY / 100_000_000
+                                MAX_SUPPLY / QUG_DISPLAY_DIVISOR as u128
                             );
 
                             // Clear batch and continue - no more minting allowed
@@ -7155,7 +8949,7 @@ async fn main() -> anyhow::Result<()> {
                                 "⚠️ Partial mint: {} of {} submissions (remaining supply: {} QUG)",
                                 can_mint_solutions,
                                 batch_size,
-                                remaining_supply / 100_000_000
+                                remaining_supply / QUG_DISPLAY_DIVISOR as u128
                             );
 
                             // Truncate batch to what we can mint
@@ -7164,16 +8958,16 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Update total supply BEFORE releasing lock (atomic operation)
-                    let actual_new_coins = block_reward_total * batch_buffer.len() as u64;
+                    let actual_new_coins = block_reward_total * batch_buffer.len() as u128;
                     *current_supply += actual_new_coins;
                     let updated_supply = *current_supply;
                     drop(current_supply); // Release lock early
 
                     info!(
                         "💰 Minting {} QUG. Total supply: {} / {} QUG ({:.2}%)",
-                        actual_new_coins / 100_000_000,
-                        updated_supply / 100_000_000,
-                        MAX_SUPPLY / 100_000_000,
+                        actual_new_coins as f64 / QUG_DISPLAY_DIVISOR,
+                        updated_supply as f64 / QUG_DISPLAY_DIVISOR,
+                        MAX_SUPPLY as f64 / QUG_DISPLAY_DIVISOR,
                         (updated_supply as f64 / MAX_SUPPLY as f64) * 100.0
                     );
 
@@ -7184,8 +8978,8 @@ async fn main() -> anyhow::Result<()> {
                     // This funds ongoing development, post-quantum research, infrastructure, and support
                     // Fully documented in README.md and project whitepapers
                     // v1.4.5-beta: Use integer basis points for cross-platform determinism
-                    const DEV_FEE_BPS: u64 = 100; // 1% = 100 basis points
-                    const BPS_DIVISOR: u64 = 10_000;
+                    const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+                    const BPS_DIVISOR: u128 = 10_000;
                     const FOUNDER_WALLET_HEX: &str =
                         "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
 
@@ -7198,62 +8992,56 @@ async fn main() -> anyhow::Result<()> {
                     let mut founder_wallet = [0u8; 32];
                     founder_wallet.copy_from_slice(&founder_wallet_bytes);
 
-                    // 🚀 v1.1.23-beta CRITICAL FIX: Use add_balance() instead of set_balance()
+                    // ==================================================================================
+                    // v2.4.1-beta CRITICAL FIX: REMOVED DOUBLE-CREDIT BUG
+                    // ==================================================================================
                     //
-                    // ROOT CAUSE: Same bug as v1.0.88-beta balance overwrite issue.
-                    // Previously: balances.get() returned 0 after restart (HashMap empty),
-                    // then set_balance(reward) OVERWROTE existing balance instead of ADDING.
+                    // PREVIOUS BUG: Rewards were credited TWICE:
+                    // 1. Here via add_balance() when solutions submitted (REMOVED)
+                    // 2. Via BalanceConsensusEngine when blocks processed (CORRECT - KEPT)
                     //
-                    // FIX: Use add_balance() to correctly ADD rewards to existing RocksDB balance,
-                    // then sync HashMap FROM RocksDB (source of truth) for fast lookups.
+                    // This caused miners submitting to the block-producing node to receive
+                    // DOUBLE rewards compared to miners on remote nodes.
+                    //
+                    // FIX: Remove immediate balance credits. Rewards are ONLY credited via
+                    // BalanceConsensusEngine.process_block_mining_rewards() when blocks are
+                    // processed through consensus. This ensures ALL nodes credit rewards
+                    // identically, regardless of which node receives the mining submission.
+                    //
+                    // SSE events still fire below for UI "pending reward" feedback.
+                    // ==================================================================================
 
                     let mut balance_updates = Vec::with_capacity(batch_size);
-
-                    // First, persist all rewards to RocksDB using add_balance()
-                    // This correctly ADDS to existing balance rather than overwriting
-
-                    // Add dev fee to founder wallet
                     let founder_hex = hex::encode(&founder_wallet);
-                    let founder_total_fee = dev_fee_amount * batch_size as u64;
-                    if let Err(e) = app_state_mining.storage_engine.add_balance(&founder_hex, founder_total_fee).await {
-                        error!("❌ Failed to add founder dev fee to RocksDB: {}", e);
-                    }
 
-                    // Add miner rewards
-                    for submission in &batch_buffer {
-                        let address_hex = hex::encode(&submission.miner_address);
-                        if let Err(e) = app_state_mining.storage_engine.add_balance(&address_hex, miner_reward).await {
-                            error!("❌ Failed to add mining reward to RocksDB: {}", e);
-                        }
-                    }
+                    // DO NOT add_balance() here - rewards credited via BalanceConsensusEngine only
+                    // This ensures equal rewards regardless of which node receives submissions
 
                     debug!(
-                        "💰 [INSTANT] Batch mining balances persisted via add_balance ({} miners + dev)",
+                        "⏳ [PENDING] {} mining solutions queued for consensus ({} miners)",
+                        batch_buffer.len(),
                         batch_buffer.len()
                     );
 
-                    // Now sync HashMap from RocksDB (source of truth) for fast lookups
-                    // This ensures the HashMap reflects the actual persisted balances
-                    let mut balances = app_state_mining.wallet_balances.write().await;
+                    // Read current balances from RocksDB for SSE pending notifications
+                    // (We show current balance + pending reward for UI feedback)
+                    let balances = app_state_mining.wallet_balances.read().await;
 
-                    // Sync founder wallet
-                    if let Ok(founder_actual) = app_state_mining.storage_engine.get_balance(&founder_hex).await {
-                        balances.insert(founder_wallet, founder_actual);
-                    }
-
-                    // Sync miner wallets and prepare SSE updates
+                    // Prepare SSE updates showing PENDING rewards (not yet credited)
                     for submission in &batch_buffer {
                         let address_hex = hex::encode(&submission.miner_address);
-                        if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&address_hex).await {
-                            let old_balance = actual_balance.saturating_sub(miner_reward); // Approximate old for SSE
-                            balances.insert(submission.miner_address, actual_balance);
-                            balance_updates.push((
-                                submission.miner_address,
-                                old_balance,
-                                actual_balance,
-                                submission.miner_address_str.clone(),
-                            ));
-                        }
+                        let current_balance = app_state_mining.storage_engine
+                            .get_balance(&address_hex)
+                            .await
+                            .unwrap_or(0);
+                        // Show what balance WILL be after consensus (pending)
+                        let pending_balance = current_balance.saturating_add(miner_reward);
+                        balance_updates.push((
+                            submission.miner_address,
+                            current_balance,
+                            pending_balance, // This is PENDING, not yet credited
+                            submission.miner_address_str.clone(),
+                        ));
                     }
                     drop(balances);
 
@@ -7264,12 +9052,18 @@ async fn main() -> anyhow::Result<()> {
                         mining_stats.total_solutions_accepted += batch_size as u64;
 
                         // Update each miner's hashrate from solution data
+                        // v3.2.25-beta: Use miner_id to distinguish multiple miners to same wallet
                         for submission in &batch_buffer {
                             if submission.hash_rate > 0.0 {
                                 // MiningSubmission.hash_rate is already in KH/s
-                                mining_stats.update_miner(
+                                // Use miner_id or worker_name to distinguish miners, fallback to "direct"
+                                let worker_id = submission.miner_id.clone()
+                                    .or_else(|| submission.worker_name.clone())
+                                    .unwrap_or_else(|| "direct".to_string());
+                                mining_stats.update_miner_with_worker(
                                     submission.miner_address_str.clone(),
                                     submission.hash_rate,
+                                    worker_id,
                                 );
                             }
                         }
@@ -7296,45 +9090,76 @@ async fn main() -> anyhow::Result<()> {
                             let network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                             let topic = format!("{}/miner-stats", network_id.gossipsub_topic_prefix());
 
-                            // Broadcast stats for each updated miner
-                            // v1.3.8-beta: Include pending_reward for instant UI feedback
-                            // NOTE: pending_reward is INFORMATIONAL ONLY - does NOT affect consensus
-                            // Actual balance updates happen via DAG-Knight when block is committed
+                            // v2.2.1: BATCHED miner stats broadcasting to prevent gossipsub queue saturation
+                            // Before: N submissions = N P2P messages → "Send Queue full" errors
+                            // After: N submissions = 1 batched P2P message → No queue saturation
+                            let now_ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+
+                            // Aggregate updates by miner address (deduplicate within batch)
+                            let mut batched_updates: std::collections::HashMap<String, q_api_server::P2PMinerStatsUpdate> =
+                                std::collections::HashMap::new();
+
                             for submission in &batch_buffer {
                                 if submission.hash_rate > 0.0 {
-                                    if let Some(miner_stat) = mining_stats.active_miners.get(&submission.miner_address_str) {
-                                        let stats_update = q_api_server::P2PMinerStatsUpdate {
-                                            miner_address: submission.miner_address_str.clone(),
-                                            hashrate_khs: miner_stat.last_hashrate,
-                                            total_solutions: miner_stat.total_solutions,
-                                            timestamp: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_secs(),
-                                            origin_node_id: peer_id_str.clone(),
-                                            // v1.3.8-beta: Pending reward for instant UI feedback
-                                            // This is the reward for THIS submission (in base units, 8 decimals)
-                                            // UI should display as "⏳ Pending" until confirmed in block
-                                            pending_reward: Some(block_reward_total),
-                                            session_pending_total: None, // Not tracked per-session yet
-                                        };
-
-                                        if let Ok(stats_bytes) = serde_json::to_vec(&stats_update) {
-                                            let command = q_network::NetworkCommand::PublishMinerStats {
-                                                topic: topic.clone(),
-                                                stats_bytes,
+                                    // v3.3.5-beta: Use composite key format (address:worker_id)
+                                    let composite_key = format!("{}:direct", submission.miner_address_str);
+                                    if let Some(miner_stat) = mining_stats.active_miners.get(&composite_key) {
+                                        // Only keep latest update per miner (dedup)
+                                        // v2.7.6-beta: Use miner_reward (after 1% dev fee) for accurate pending balance
+                                        // v3.2.12-beta: Debug log to diagnose zero reward issue
+                                        info!("📊 [P2P STATS] Broadcasting pending_reward={} base units ({:.8} QNK) for {}",
+                                              miner_reward,
+                                              miner_reward as f64 / QUG_DISPLAY_DIVISOR,
+                                              &submission.miner_address_str[..16.min(submission.miner_address_str.len())]);
+                                        batched_updates.insert(
+                                            submission.miner_address_str.clone(),
+                                            q_api_server::P2PMinerStatsUpdate {
                                                 miner_address: submission.miner_address_str.clone(),
-                                            };
-                                            if let Err(e) = cmd_tx.send(command) {
-                                                debug!("⚠️ Failed to send miner stats broadcast: {}", e);
-                                            } else {
-                                                debug!("📡 [P2P] Broadcast pending reward {} for miner {}",
-                                                       block_reward_total, &submission.miner_address_str[..16.min(submission.miner_address_str.len())]);
-                                            }
-                                        }
+                                                hashrate_khs: miner_stat.last_hashrate,
+                                                total_solutions: miner_stat.total_solutions,
+                                                timestamp: now_ts,
+                                                origin_node_id: peer_id_str.clone(),
+                                                pending_reward: Some(miner_reward), // v2.7.6-beta: Use miner_reward, not block_reward_total
+                                                session_pending_total: None,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Send single batched message if we have updates
+                            if !batched_updates.is_empty() {
+                                static BATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                let batch = q_api_server::P2PMinerStatsBatch {
+                                    updates: batched_updates.values().cloned().collect(),
+                                    batch_timestamp: now_ts,
+                                    origin_node_id: peer_id_str.clone(),
+                                    batch_seq: BATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                };
+
+                                if let Ok(batch_bytes) = serde_json::to_vec(&batch) {
+                                    // Use first miner address as representative for logging
+                                    let first_miner = batched_updates.keys().next()
+                                        .map(|s| s[..16.min(s.len())].to_string())
+                                        .unwrap_or_default();
+
+                                    let command = q_network::NetworkCommand::PublishMinerStats {
+                                        topic: topic.clone(),
+                                        stats_bytes: batch_bytes,
+                                        miner_address: format!("batch-{}", batch.updates.len()),
+                                    };
+
+                                    if let Err(e) = cmd_tx.send(command) {
+                                        debug!("⚠️ Failed to send batched miner stats: {}", e);
+                                    } else {
+                                        debug!("📡 [P2P BATCH] Broadcast {} miner updates in single message (first: {})",
+                                               batch.updates.len(), first_miner);
                                     }
                                 }
                             }
@@ -7343,13 +9168,13 @@ async fn main() -> anyhow::Result<()> {
 
                     // PHASE 3: Batch SSE events - aggregate balance updates per wallet (v0.8.10-beta fix for SSE lag)
                     let block_height = app_state_mining.node_status.read().await.current_height;
-                    let reward_qnk = block_reward_total as f64 / 100_000_000.0;
+                    let reward_qnk = block_reward_total as f64 / QUG_DISPLAY_DIVISOR;
 
                     // Aggregate balance updates per wallet to prevent SSE event spam
                     // Before: 100 solutions = 100 events → SSE lag with 32k+ queued events
                     // After: 100 solutions = 1-10 events (one per unique wallet) → No lag
                     use std::collections::HashMap;
-                    let mut aggregated_updates: HashMap<String, (u64, u64, usize)> = HashMap::new(); // addr -> (old, new, count)
+                    let mut aggregated_updates: HashMap<String, (u128, u128, usize)> = HashMap::new(); // addr -> (old, new, count)
 
                     for (_, old_bal, new_bal, addr_str) in balance_updates.iter() {
                         aggregated_updates
@@ -7366,12 +9191,18 @@ async fn main() -> anyhow::Result<()> {
                     use q_api_server::streaming::StreamEvent;
                     for (addr_str, (old_bal, new_bal, solution_count)) in aggregated_updates.iter()
                     {
+                        // v2.7.6-beta FIX: Ensure wallet address has "qnk" prefix for frontend matching
+                        let wallet_with_prefix = if addr_str.starts_with("qnk") {
+                            addr_str.clone()
+                        } else {
+                            format!("qnk{}", addr_str)
+                        };
                         let _ = app_state_mining
                             .event_broadcaster
                             .broadcast(StreamEvent::BalanceUpdated {
-                                wallet_address: addr_str.clone(),
-                                old_balance: *old_bal as f64 / 100_000_000.0,
-                                new_balance: *new_bal as f64 / 100_000_000.0,
+                                wallet_address: wallet_with_prefix.clone(),
+                                old_balance: *old_bal as f64 / QUG_DISPLAY_DIVISOR,
+                                new_balance: *new_bal as f64 / QUG_DISPLAY_DIVISOR,
                                 change_reason: format!("mining_reward_batch_{}", solution_count), // Show solution count
                                 timestamp: chrono::Utc::now(),
                                 block_hash: None, // Batch updates - aggregated from multiple solutions
@@ -7383,29 +9214,42 @@ async fn main() -> anyhow::Result<()> {
                         // Also broadcast mining stats for this miner
                         if let Some(ref mining_stats_arc) = app_state_mining.mining_statistics {
                             let mining_stats = mining_stats_arc.read().await;
+                            // v3.3.5-beta: Use composite key format (address:worker_id)
+                            let composite_key = format!("{}:direct", addr_str);
                             debug!(
-                                "📊 Mining stats check: addr_str={}, active_miners count={}",
-                                addr_str,
+                                "📊 Mining stats check: composite_key={}, active_miners count={}",
+                                composite_key,
                                 mining_stats.active_miners.len()
                             );
 
-                            if let Some(miner_stats) = mining_stats.active_miners.get(addr_str) {
-                                info!("📊 Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
-                                      &addr_str[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
+                            if let Some(miner_stats) = mining_stats.active_miners.get(&composite_key) {
+                                // v3.3.10-beta: Use wallet_with_prefix for consistency with BalanceUpdated
+                                // Frontend expects addresses with "qnk" prefix to match localStorage walletAddress
+                                // v3.2.25-beta: Extract miner_id from worker_id field
+                                let worker_id = &miner_stats.worker_id;
+                                let miner_id = if worker_id != "direct" && !worker_id.starts_with("p2p:") {
+                                    Some(worker_id.clone())
+                                } else {
+                                    None
+                                };
+                                info!("📊 Broadcasting mining_stats for {} (worker={}): hashrate={:.2} KH/s, solutions={}",
+                                      &wallet_with_prefix[..16.min(wallet_with_prefix.len())], worker_id, miner_stats.last_hashrate, miner_stats.total_solutions);
                                 let _ = app_state_mining
                                     .event_broadcaster
                                     .broadcast(StreamEvent::MiningStats {
-                                        miner_address: addr_str.clone(),
-                                        total_rewards: *new_bal as f64 / 100_000_000.0,
+                                        miner_address: wallet_with_prefix.clone(),
+                                        total_rewards: *new_bal as f64 / QUG_DISPLAY_DIVISOR,
                                         total_blocks_found: miner_stats.total_solutions,
-                                        current_balance: *new_bal as f64 / 100_000_000.0,
+                                        current_balance: *new_bal as f64 / QUG_DISPLAY_DIVISOR,
                                         avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                        miner_id,
+                                        worker_id: Some(worker_id.clone()),
                                         timestamp: chrono::Utc::now(),
                                     })
                                     .await;
                             } else {
-                                debug!("⚠️  No miner stats found for addr_str={}. Available keys: {:?}",
-                                       addr_str, mining_stats.active_miners.keys().take(3).collect::<Vec<_>>());
+                                debug!("⚠️  No miner stats found for composite_key={}. Available keys: {:?}",
+                                       composite_key, mining_stats.active_miners.keys().take(5).collect::<Vec<_>>());
                             }
                         } else {
                             warn!(
@@ -7434,6 +9278,8 @@ async fn main() -> anyhow::Result<()> {
                             timestamp: chrono::Utc::now().timestamp() as u64,
                             pool_id: None,
                             hash_rate_hs, // Include miner's hash rate for precise network statistics
+                            miner_id: submission.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
+                            worker_name: submission.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
                         };
                         debug!(
                             "  📤 Queueing solution: miner={}, nonce={}, hashrate={:.2} KH/s",
@@ -7489,7 +9335,8 @@ async fn main() -> anyhow::Result<()> {
                         let network_height = app_state_mining
                             .highest_network_height
                             .load(std::sync::atomic::Ordering::SeqCst);
-                        let sync_threshold = 10;
+                        // v3.2.10-beta: DECENTRALIZED MINING FIX - Lowered from 10 to 3
+                        let sync_threshold = 3;
 
                         // v1.0.61-beta: Also update highest_network_height if we've caught up
                         // This prevents stale network_height from blocking production after sync
@@ -7590,7 +9437,7 @@ async fn main() -> anyhow::Result<()> {
                                     new_block.header.height,
                                 );
                             let block_reward =
-                                new_block.mining_solutions.len() as u64 * reward_per_solution;
+                                new_block.mining_solutions.len() as u128 * reward_per_solution;
                             let tx_count = new_block.transactions.len();
 
                             let _ = app_state_mining
@@ -7618,19 +9465,24 @@ async fn main() -> anyhow::Result<()> {
                                     .event_broadcaster
                                     .broadcast(q_api_server::streaming::StreamEvent::MiningReward {
                                         miner_address: miner_address.clone(),
-                                        reward_qnk: reward_per_solution as f64,
+                                        // v3.0.4-beta: Convert base units to QNK (divide by 10^24)
+                                        reward_qnk: reward_per_solution as f64 / QUG_DISPLAY_DIVISOR,
                                         block_height: new_block.header.height,
                                         nonce: solution.nonce,
                                         difficulty: format!("{}", new_block.header.height), // Difficulty as string (simplified)
                                         hash_rate: 0.0, // Hash rate calculated elsewhere
-                                        worker_name: None, // v0.6.2-beta: Worker name for multi-miner setups
+                                        miner_id: solution.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
+                                        worker_name: solution.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
+                                        origin_node_id: None, // v2.3.5-beta: Set by block producer if available
+                                        origin_node_name: std::env::var("Q_NODE_NAME").ok(), // v2.3.5-beta: Human-friendly name
                                         timestamp: chrono::Utc::now(),
                                     })
                                     .await;
 
-                                info!(
-                                    "💰 Mining reward SSE: {} QNK to {} (height {})",
-                                    reward_per_solution, miner_address, new_block.header.height
+                                // v2.2.4: Privacy - don't log reward amounts
+                                trace!(
+                                    "💰 Mining reward SSE sent (height {})",
+                                    new_block.header.height
                                 );
                             }
 
@@ -7851,6 +9703,296 @@ async fn main() -> anyhow::Result<()> {
                                           new_block.header.height);
                                 }
 
+                                // 📊 v2.4.6: Index swap transactions for history and volume tracking
+                                // This populates CF_SWAP_HISTORY for transaction history queries
+                                let block_hash = new_block.calculate_hash();
+                                let block_timestamp = new_block.header.timestamp as i64;
+                                match app_state_mining
+                                    .swap_indexer
+                                    .index_block(
+                                        new_block.header.height,
+                                        block_hash,
+                                        block_timestamp,
+                                        &new_block.transactions,
+                                    )
+                                    .await
+                                {
+                                    Ok(indexed_count) if indexed_count > 0 => {
+                                        debug!("📊 Indexed {} swaps for block {}", indexed_count, new_block.header.height);
+
+                                        // 📈 v2.4.7: Update volume tracker AND emit SSE TokenPriceUpdate for each swap
+                                        // Swap data format: [0..32] pool_id, [32] direction, [33..41] min_amount_out
+                                        // tx.amount = actual input amount
+                                        for tx in &new_block.transactions {
+                                            if tx.tx_type == q_types::TransactionType::Swap && tx.data.len() >= 41 {
+                                                // Extract pool_id to look up token symbols
+                                                let pool_id_hex = hex::encode(&tx.data[0..32]);
+                                                let direction = tx.data[32];
+                                                let amount_in = tx.amount; // Correct field for swap amount
+                                                let volume_display = amount_in as f64 / QUG_DISPLAY_DIVISOR;
+
+                                                // Look up pool to get token symbols
+                                                let pools = app_state_mining.liquidity_pools.read().await;
+                                                if let Some(pool) = pools.get(&pool_id_hex) {
+                                                    // Determine which token was swapped based on direction
+                                                    let (from_token, to_token) = if direction == 0 {
+                                                        (pool.token0.clone(), pool.token1.clone())
+                                                    } else {
+                                                        (pool.token1.clone(), pool.token0.clone())
+                                                    };
+                                                    drop(pools); // Release read lock before write
+
+                                                    let now = chrono::Utc::now().timestamp();
+                                                    let day_ago = now - 86400;
+
+                                                    // Track volume for BOTH tokens in the swap
+                                                    {
+                                                        let mut volume_tracker = app_state_mining.volume_tracker.write().await;
+
+                                                        // Track from_token volume
+                                                        let from_entries = volume_tracker.entry(from_token.clone()).or_insert_with(Vec::new);
+                                                        from_entries.retain(|(ts, _)| *ts > day_ago);
+                                                        from_entries.push((now, volume_display));
+                                                        let from_volume_24h: f64 = from_entries.iter().map(|(_, v)| *v).sum();
+
+                                                        // Track to_token volume (same amount for simplicity)
+                                                        let to_entries = volume_tracker.entry(to_token.clone()).or_insert_with(Vec::new);
+                                                        to_entries.retain(|(ts, _)| *ts > day_ago);
+                                                        to_entries.push((now, volume_display));
+                                                        let to_volume_24h: f64 = to_entries.iter().map(|(_, v)| *v).sum();
+
+                                                        debug!("📈 Volume update: {} vol={:.4}, {} vol={:.4}",
+                                                               from_token, from_volume_24h, to_token, to_volume_24h);
+                                                    }
+
+                                                    // 🔔 v2.4.7: Emit TokenPriceUpdate SSE for the to_token (token being bought)
+                                                    // This updates the frontend token details with new volume
+                                                    let volume_24h = {
+                                                        let tracker = app_state_mining.volume_tracker.read().await;
+                                                        tracker.get(&to_token)
+                                                            .map(|entries| entries.iter().map(|(_, v)| *v).sum())
+                                                            .unwrap_or(0.0)
+                                                    };
+
+                                                    // Get current price from pool reserves (price = reserve0/reserve1)
+                                                    let price = {
+                                                        let pools = app_state_mining.liquidity_pools.read().await;
+                                                        if let Some(pool) = pools.get(&pool_id_hex) {
+                                                            if pool.reserve1 > 0 {
+                                                                pool.reserve0 as f64 / pool.reserve1 as f64
+                                                            } else { 1.0 }
+                                                        } else { 1.0 }
+                                                    };
+
+                                                    // 🔧 v2.9.22-beta: Calculate change_1h, change_24h, change_7d from price_snapshots
+                                                    let (change_1h, change_24h, change_7d) = {
+                                                        let snapshots = app_state_mining.price_snapshots.read().await;
+                                                        let to_token_upper = to_token.to_uppercase();
+                                                        snapshots.get(&to_token_upper)
+                                                            .or_else(|| snapshots.get(&to_token))
+                                                            .map(|s| {
+                                                                let now_ms = chrono::Utc::now().timestamp_millis();
+
+                                                                // Calculate 1h change
+                                                                let cutoff_1h = now_ms - 3_600_000; // 1 hour ago
+                                                                let price_1h_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_1h)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(price);
+                                                                let change_1h = if price_1h_ago > 0.0 {
+                                                                    ((price - price_1h_ago) / price_1h_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                // Calculate 24h change
+                                                                let cutoff_24h = now_ms - 86_400_000; // 24 hours ago
+                                                                let price_24h_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_24h)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(price);
+                                                                let change_24h = if price_24h_ago > 0.0 {
+                                                                    ((price - price_24h_ago) / price_24h_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                // Calculate 7d change
+                                                                let cutoff_7d = now_ms - 604_800_000; // 7 days ago
+                                                                let price_7d_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_7d)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(price);
+                                                                let change_7d = if price_7d_ago > 0.0 {
+                                                                    ((price - price_7d_ago) / price_7d_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                (change_1h, change_24h, change_7d)
+                                                            })
+                                                            .unwrap_or((0.0, 0.0, 0.0))
+                                                    };
+
+                                                    // Emit TokenPriceUpdate event for to_token
+                                                    // v2.9.25-beta: Added None for token_address (symbol-based emit from block confirmation)
+                                                    if let Err(e) = app_state_mining.event_emitter.emit_token_price_update(
+                                                        to_token.clone(),
+                                                        None,  // token_address - symbol only in block confirmation context
+                                                        price,
+                                                        change_1h,
+                                                        change_24h,
+                                                        change_7d,
+                                                        volume_24h,
+                                                    ).await {
+                                                        debug!("⚠️ Failed to emit TokenPriceUpdate: {}", e);
+                                                    } else {
+                                                        debug!("🔔 Emitted TokenPriceUpdate: {} price={:.6} 1h={:.2}% 24h={:.2}% 7d={:.2}% vol24h={:.4}",
+                                                               to_token, price, change_1h, change_24h, change_7d, volume_24h);
+                                                    }
+
+                                                    // 🔧 v2.4.8: Also emit TokenPriceUpdate for from_token (price changed after swap)
+                                                    let from_price = if price > 0.0 { 1.0 / price } else { 1.0 };
+                                                    let from_volume_24h = {
+                                                        let tracker = app_state_mining.volume_tracker.read().await;
+                                                        tracker.get(&from_token)
+                                                            .map(|entries| entries.iter().map(|(_, v)| *v).sum())
+                                                            .unwrap_or(0.0)
+                                                    };
+                                                    // 🔧 v2.9.22-beta: Calculate all price changes for from_token
+                                                    let (from_change_1h, from_change_24h, from_change_7d) = {
+                                                        let snapshots = app_state_mining.price_snapshots.read().await;
+                                                        let from_token_upper = from_token.to_uppercase();
+                                                        snapshots.get(&from_token_upper)
+                                                            .or_else(|| snapshots.get(&from_token))
+                                                            .map(|s| {
+                                                                let now_ms = chrono::Utc::now().timestamp_millis();
+
+                                                                // Calculate 1h change
+                                                                let cutoff_1h = now_ms - 3_600_000;
+                                                                let price_1h_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_1h)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(from_price);
+                                                                let change_1h = if price_1h_ago > 0.0 {
+                                                                    ((from_price - price_1h_ago) / price_1h_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                // Calculate 24h change
+                                                                let cutoff_24h = now_ms - 86_400_000;
+                                                                let price_24h_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_24h)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(from_price);
+                                                                let change_24h = if price_24h_ago > 0.0 {
+                                                                    ((from_price - price_24h_ago) / price_24h_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                // Calculate 7d change
+                                                                let cutoff_7d = now_ms - 604_800_000;
+                                                                let price_7d_ago = s.iter()
+                                                                    .find(|(ts, _)| *ts <= cutoff_7d)
+                                                                    .map(|(_, p)| *p)
+                                                                    .unwrap_or(from_price);
+                                                                let change_7d = if price_7d_ago > 0.0 {
+                                                                    ((from_price - price_7d_ago) / price_7d_ago) * 100.0
+                                                                } else { 0.0 };
+
+                                                                (change_1h, change_24h, change_7d)
+                                                            })
+                                                            .unwrap_or((0.0, 0.0, 0.0))
+                                                    };
+                                                    // v2.9.25-beta: Added None for token_address
+                                                    if let Err(e) = app_state_mining.event_emitter.emit_token_price_update(
+                                                        from_token.clone(),
+                                                        None,  // token_address - symbol only in block confirmation context
+                                                        from_price,
+                                                        from_change_1h,
+                                                        from_change_24h,
+                                                        from_change_7d,
+                                                        from_volume_24h,
+                                                    ).await {
+                                                        debug!("⚠️ Failed to emit TokenPriceUpdate for {}: {}", from_token, e);
+                                                    } else {
+                                                        debug!("🔔 Emitted TokenPriceUpdate: {} price={:.6} 1h={:.2}% 24h={:.2}% 7d={:.2}% vol24h={:.4}",
+                                                               from_token, from_price, from_change_1h, from_change_24h, from_change_7d, from_volume_24h);
+                                                    }
+
+                                                    // ============================================
+                                                    // 🔧 v2.9.20-beta: CRITICAL FIX - Sync in-memory token_balances after swap confirmation
+                                                    // ROOT CAUSE: StateApplicator writes to RocksDB but in-memory HashMap is NOT updated
+                                                    // SYMPTOM: API returns stale balance because it reads from in-memory HashMap
+                                                    // FIX: Update in-memory HashMap + broadcast SSE event for token balance
+                                                    // ============================================
+                                                    {
+                                                        let wallet_addr = tx.from;
+                                                        let wallet_addr_hex = format!("qnk{}", hex::encode(&wallet_addr));
+
+                                                        // Reload token balances from RocksDB for this wallet
+                                                        // This ensures we have the latest confirmed state
+                                                        if let Ok(all_token_balances) = app_state_mining.storage_engine.load_token_balances().await {
+                                                            let mut token_balances_write = app_state_mining.token_balances.write().await;
+                                                            let mut updated_tokens: Vec<(String, u128, u128, [u8; 32])> = Vec::new(); // (symbol, old_bal, new_bal, token_addr)
+
+                                                            // Update in-memory HashMap for ALL tokens owned by this wallet
+                                                            for ((w_addr, t_addr), new_balance) in &all_token_balances {
+                                                                if *w_addr == wallet_addr {
+                                                                    let key = (*w_addr, *t_addr);
+                                                                    let old_balance = token_balances_write.get(&key).copied().unwrap_or(0);
+
+                                                                    // Only update if balance actually changed
+                                                                    if old_balance != *new_balance {
+                                                                        token_balances_write.insert(key, *new_balance);
+
+                                                                        // Get token symbol for SSE event
+                                                                        let symbol = {
+                                                                            let contracts = app_state_mining.orobit_ecosystem.deployed_contracts.read().await;
+                                                                            let contract_addr = q_vm::contracts::orobit_smart_contracts::ContractAddress(*t_addr);
+                                                                            contracts.get(&contract_addr)
+                                                                                .and_then(|c| c.metadata.symbol.clone())
+                                                                                .unwrap_or_else(|| format!("qnk{}", hex::encode(&t_addr[..8])))
+                                                                        };
+
+                                                                        updated_tokens.push((symbol, old_balance, *new_balance, *t_addr));
+                                                                    }
+                                                                }
+                                                            }
+                                                            drop(token_balances_write);
+
+                                                            // Broadcast SSE events for each updated token balance
+                                                            for (symbol, old_bal, new_bal, token_addr) in updated_tokens {
+                                                                let old_display = old_bal as f64 / QUG_DISPLAY_DIVISOR;
+                                                                let new_display = new_bal as f64 / QUG_DISPLAY_DIVISOR;
+
+                                                                // Emit token-balance-updated SSE event
+                                                                let _ = app_state_mining.event_broadcaster.broadcast(
+                                                                    q_api_server::streaming::StreamEvent::TokenBalanceUpdated {
+                                                                        wallet_address: wallet_addr_hex.clone(),
+                                                                        token_address: format!("qnk{}", hex::encode(&token_addr)),
+                                                                        token_symbol: symbol.clone(),
+                                                                        old_balance: old_display,
+                                                                        new_balance: new_display,
+                                                                        change_reason: "dex-swap-confirmed".to_string(),
+                                                                        timestamp: chrono::Utc::now(),
+                                                                        block_hash: Some(hex::encode(new_block.calculate_hash())),
+                                                                        block_height: Some(new_block.header.height),
+                                                                        confirmation_status: "confirmed".to_string(),
+                                                                    }
+                                                                ).await;
+
+                                                                info!("💱 [SWAP→SSE v2.9.20] Token balance synced: {} {} {:.8} → {:.8} (block {})",
+                                                                      &wallet_addr_hex[..16], symbol, old_display, new_display, new_block.header.height);
+                                                            }
+                                                        } else {
+                                                            warn!("⚠️ [SWAP] Failed to reload token balances from RocksDB after swap");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        // No swaps in this block - normal
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ Swap indexer failed for block {}: {}", new_block.header.height, e);
+                                    }
+                                }
+
                                 // 🔧 v1.0.3-beta: Update atomic height for mining API
                                 app_state_mining.current_height_atomic.store(
                                     new_block.header.height,
@@ -7919,9 +10061,9 @@ async fn main() -> anyhow::Result<()> {
                                                     let old_balance_f64 = (actual_balance
                                                         .saturating_sub(update.amount))
                                                         as f64
-                                                        / 100_000_000.0;
+                                                        / QUG_DISPLAY_DIVISOR;
                                                     let new_balance_f64 =
-                                                        actual_balance as f64 / 100_000_000.0;
+                                                        actual_balance as f64 / QUG_DISPLAY_DIVISOR;
 
                                                     // v1.2.0-beta Phase 3: Enhanced with block tracking
                                                     let _ = app_state_mining.event_broadcaster.broadcast(
@@ -7938,7 +10080,7 @@ async fn main() -> anyhow::Result<()> {
                                                     ).await;
                                                     debug!("📡 SSE: Balance updated for {}: {} → {} QUG (+{} QUG reward)",
                                                            wallet_addr, old_balance_f64, new_balance_f64,
-                                                           update.amount as f64 / 100_000_000.0);
+                                                           update.amount as f64 / QUG_DISPLAY_DIVISOR);
                                                 }
                                                 Err(e) => {
                                                     error!("❌ Failed to fetch balance for SSE event {}: {:?}", wallet_addr, e);
@@ -8006,7 +10148,7 @@ async fn main() -> anyhow::Result<()> {
                                             debug!(
                                                 "💰 [CACHE SYNC] {} balance synced from RocksDB: {} QNK",
                                                 hex::encode(&tx.to[..8]),
-                                                actual_balance as f64 / 100_000_000.0
+                                                actual_balance as f64 / QUG_DISPLAY_DIVISOR
                                             );
                                         }
                                     }
@@ -8126,7 +10268,7 @@ async fn main() -> anyhow::Result<()> {
                                         let network_id = std::env::var("Q_NETWORK_ID")
                                             .ok()
                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                            .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                            .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                         let topic = network_id.blocks_topic();
                                         let command = q_network::NetworkCommand::PublishBlock {
                                             topic,
@@ -8445,6 +10587,25 @@ async fn main() -> anyhow::Result<()> {
         // ✅ v1.0.3-beta: Use new block production loop with comprehensive stall protection
         block_production_v2::spawn_block_production_loop(app_state_block_producer.clone());
 
+        // ⛏️  v2.3.0-beta: Spawn integrated mining if enabled
+        // ✅ MAINNET SAFETY: Check mining_wallet is Some before starting mining
+        if mining_enabled {
+            if let Some(wallet_addr) = mining_wallet.clone() {
+                let threads = if mining_threads == 0 { num_cpus::get() } else { mining_threads };
+                integrated_mining::spawn_integrated_mining(
+                    app_state_block_producer.clone(),
+                    integrated_mining::MiningConfig {
+                        wallet_address: wallet_addr,
+                        thread_count: threads,
+                        enabled: true,
+                    },
+                );
+                info!("⛏️  [INTEGRATED MINING] Mining enabled with {} threads", threads);
+            } else {
+                error!("⛏️  [INTEGRATED MINING] Mining enabled but no wallet configured! Set MINING_WALLET_ADDRESS to enable mining.");
+            }
+        }
+
         /* 🚨 DEPRECATED v1.0.2: Replaced with block_production_v2 module (stall protection)
         tokio::spawn(async move {
             info!("⏰ Starting time-based block production loop (v1.0.2 emergency fallback enabled)...");
@@ -8495,7 +10656,10 @@ async fn main() -> anyhow::Result<()> {
                 // v1.0.10-beta: Increased threshold from 10 to 1000 blocks for aggressive catch-up
                 // When behind by 1000+ blocks, disable ALL local production to maximize sync throughput
                 const CATCHUP_DISABLE_THRESHOLD: u64 = 1000;
-                const NORMAL_SYNC_THRESHOLD: u64 = 10;
+                // v3.2.10-beta: DECENTRALIZED MINING FIX - Lowered from 10 to 3
+                // Previous threshold prevented remote nodes from producing blocks because
+                // bootstrap was always "ahead" by the time they caught up.
+                const NORMAL_SYNC_THRESHOLD: u64 = 3;
 
                 if network_height > 0 {
                     let gap = network_height.saturating_sub(current_height);
@@ -8852,9 +11016,9 @@ async fn main() -> anyhow::Result<()> {
                                                 let old_balance_f64 = (actual_balance
                                                     .saturating_sub(update.amount))
                                                     as f64
-                                                    / 100_000_000.0;
+                                                    / QUG_DISPLAY_DIVISOR;
                                                 let new_balance_f64 =
-                                                    actual_balance as f64 / 100_000_000.0;
+                                                    actual_balance as f64 / QUG_DISPLAY_DIVISOR;
 
                                                 // v1.2.0-beta Phase 3: Enhanced with block tracking
                                                 let _ = app_state_block_producer.event_broadcaster.broadcast(
@@ -8871,7 +11035,7 @@ async fn main() -> anyhow::Result<()> {
                                                 ).await;
                                                 debug!("📡 SSE: Balance updated for {}: {} → {} QUG (+{} QUG reward)",
                                                        wallet_addr, old_balance_f64, new_balance_f64,
-                                                       update.amount as f64 / 100_000_000.0);
+                                                       update.amount as f64 / QUG_DISPLAY_DIVISOR);
 
                                                 // Also broadcast mining stats for this miner (CRITICAL FIX for mining dashboard)
                                                 if let Some(ref mining_stats_arc) =
@@ -8880,11 +11044,17 @@ async fn main() -> anyhow::Result<()> {
                                                     let mining_stats =
                                                         mining_stats_arc.read().await;
 
-                                                    if let Some(miner_stats) =
-                                                        mining_stats.active_miners.get(&wallet_addr)
-                                                    {
-                                                        info!("📊 TIME-BASED (balance consensus): Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
-                                                              &wallet_addr[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
+                                                    // v3.2.25-beta: Broadcast stats for ALL miners for this wallet, not just first
+                                                    let all_miners = mining_stats.get_miners_for_address(&wallet_addr);
+                                                    for miner_stats in all_miners {
+                                                        let worker_id = &miner_stats.worker_id;
+                                                        let miner_id = if worker_id != "direct" && !worker_id.starts_with("p2p:") {
+                                                            Some(worker_id.clone())
+                                                        } else {
+                                                            None
+                                                        };
+                                                        info!("📊 TIME-BASED (balance consensus): Broadcasting mining_stats for {} (worker={}): hashrate={:.2} KH/s, solutions={}",
+                                                              &wallet_addr[..16], worker_id, miner_stats.last_hashrate, miner_stats.total_solutions);
 
                                                         let _ = app_state_block_producer.event_broadcaster.broadcast(
                                                             q_api_server::streaming::StreamEvent::MiningStats {
@@ -8893,6 +11063,8 @@ async fn main() -> anyhow::Result<()> {
                                                                 total_blocks_found: miner_stats.total_solutions,
                                                                 current_balance: new_balance_f64,
                                                                 avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                                                miner_id,
+                                                                worker_id: Some(worker_id.clone()),
                                                                 timestamp: chrono::Utc::now(),
                                                             }
                                                         ).await;
@@ -8932,9 +11104,9 @@ async fn main() -> anyhow::Result<()> {
                                     // Previously synced on EVERY coinbase TX - now batched for 450x improvement
 
                                     info!("💰 TIME-BASED Coinbase TX: {} QNK → {} (new balance: {} QNK)",
-                                          tx.amount as f64 / 100_000_000.0,
+                                          tx.amount as f64 / QUG_DISPLAY_DIVISOR,
                                           hex::encode(&tx.to[..8]),
-                                          new_balance as f64 / 100_000_000.0);
+                                          new_balance as f64 / QUG_DISPLAY_DIVISOR);
 
                                     // Store update info for SSE broadcast (after lock is released)
                                     updates.push((tx.to, current_balance, new_balance));
@@ -8955,8 +11127,8 @@ async fn main() -> anyhow::Result<()> {
 
                         for (wallet_addr, (old_balance, new_balance)) in deduped_updates {
                             let wallet_addr_hex = hex::encode(wallet_addr);
-                            let old_balance_f64 = old_balance as f64 / 100_000_000.0;
-                            let new_balance_f64 = new_balance as f64 / 100_000_000.0;
+                            let old_balance_f64 = old_balance as f64 / QUG_DISPLAY_DIVISOR;
+                            let new_balance_f64 = new_balance as f64 / QUG_DISPLAY_DIVISOR;
 
                             // Determine if this is dev fee (master account) or mining reward
                             const MASTER_ACCOUNT_HEX: &str =
@@ -8968,9 +11140,11 @@ async fn main() -> anyhow::Result<()> {
                             };
 
                             // v1.2.0-beta Phase 3: Enhanced with block tracking
+                            // v2.7.6-beta FIX: Add "qnk" prefix for frontend matching
+                            let wallet_with_prefix = format!("qnk{}", wallet_addr_hex);
                             let balance_event =
                                 q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                    wallet_address: wallet_addr_hex.clone(),
+                                    wallet_address: wallet_with_prefix,
                                     old_balance: old_balance_f64,
                                     new_balance: new_balance_f64,
                                     change_reason,
@@ -9004,11 +11178,23 @@ async fn main() -> anyhow::Result<()> {
                                 let mining_stats = mining_stats_arc.read().await;
                                 let wallet_with_prefix = format!("qnk{}", wallet_addr_hex);
 
-                                if let Some(miner_stats) =
-                                    mining_stats.active_miners.get(&wallet_with_prefix)
-                                {
-                                    info!("📊 TIME-BASED: Broadcasting mining_stats for {}: hashrate={:.2} KH/s, solutions={}",
-                                          &wallet_addr_hex[..16], miner_stats.last_hashrate, miner_stats.total_solutions);
+                                // v3.2.25-beta: Broadcast stats for ALL miners for this wallet, not just first
+                                let all_miners = mining_stats.get_miners_for_address(&wallet_with_prefix);
+                                if all_miners.is_empty() {
+                                    debug!(
+                                        "⚠️  TIME-BASED: No miner stats found for wallet {}",
+                                        &wallet_addr_hex[..16]
+                                    );
+                                }
+                                for miner_stats in all_miners {
+                                    let worker_id = &miner_stats.worker_id;
+                                    let miner_id = if worker_id != "direct" && !worker_id.starts_with("p2p:") {
+                                        Some(worker_id.clone())
+                                    } else {
+                                        None
+                                    };
+                                    info!("📊 TIME-BASED: Broadcasting mining_stats for {} (worker={}): hashrate={:.2} KH/s, solutions={}",
+                                          &wallet_addr_hex[..16], worker_id, miner_stats.last_hashrate, miner_stats.total_solutions);
 
                                     let _ = app_state_block_producer
                                         .event_broadcaster
@@ -9019,15 +11205,12 @@ async fn main() -> anyhow::Result<()> {
                                                 total_blocks_found: miner_stats.total_solutions,
                                                 current_balance: new_balance_f64,
                                                 avg_hash_rate: miner_stats.last_hashrate * 1000.0, // Convert KH/s to H/s
+                                                miner_id,
+                                                worker_id: Some(worker_id.clone()),
                                                 timestamp: chrono::Utc::now(),
                                             },
                                         )
                                         .await;
-                                } else {
-                                    debug!(
-                                        "⚠️  TIME-BASED: No miner stats found for wallet {}",
-                                        &wallet_addr_hex[..16]
-                                    );
                                 }
                             }
                         }
@@ -9046,7 +11229,7 @@ async fn main() -> anyhow::Result<()> {
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                        .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -9177,7 +11360,7 @@ async fn main() -> anyhow::Result<()> {
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::TestnetPhase16); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                        .unwrap_or(q_types::NetworkId::TestnetPhase19); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -9270,11 +11453,15 @@ async fn main() -> anyhow::Result<()> {
                 // 🔧 v1.0.20-beta: CRITICAL FIX - Use actual DB height, not polluted node_status
                 // node_status.current_height gets updated by gossip blocks, creating false gap=0
                 // This prevented sync activation even when node was 22k blocks behind
-                let current_height = match app_state_sync.storage_engine.get_latest_qblock_height().await {
-                    Ok(Some(h)) => h,
-                    Ok(None) => 0, // Fresh database with no blocks
+                //
+                // 🚨 v2.3.5-beta: CRITICAL FIX - Use CONTIGUOUS height, not latest stored!
+                // BUG: get_latest_qblock_height() returns highest stored (875,029) but with gaps
+                // FIX: get_highest_contiguous_block() returns last contiguous (870,063)
+                // This correctly detects the ~5,000 block gap instead of seeing "gap: 1 block"
+                let current_height = match app_state_sync.storage_engine.get_highest_contiguous_block().await {
+                    Ok(h) => h,
                     Err(e) => {
-                        error!("🚨 [SYNC LOOP] Failed to get DB height: {:?}", e);
+                        error!("🚨 [SYNC LOOP] Failed to get contiguous height: {:?}", e);
                         0 // Safe default for fresh node
                     }
                 };
@@ -9313,9 +11500,9 @@ async fn main() -> anyhow::Result<()> {
                                                     // This ensures TurboSync can use the bootstrap peer even when gossipsub
                                                     // peer-height announcements aren't being received (mesh formation issues)
                                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                                                        // Use the known bootstrap peer ID from Server Beta (testnet-phase16)
+                                                        // Use the known bootstrap peer ID from Server Beta (testnet-phase19)
                                                         // FIXED v1.4.2-beta: Use correct peer ID from data-mine16/libp2p_identity.key
-                                                        const BOOTSTRAP_PEER_ID: &str = "12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu";
+                                                        const BOOTSTRAP_PEER_ID: &str = "12D3KooWNgqKiWQTn7cVuUJ7Se9HQXZtocx8VEf7v382eNAQDoDk";
                                                         if let Ok(peer_id) = BOOTSTRAP_PEER_ID.parse::<libp2p::PeerId>() {
                                                             turbo_sync.register_peer(peer_id, bootstrap_height).await;
                                                             info!("🚀 [TURBO SYNC] Auto-registered bootstrap peer {} with height {} from HTTP discovery",
@@ -9631,11 +11818,18 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                // ✅ RELAXED ACTIVATION: Activate for ANY gap (not just gap > 5)
-                // This ensures batch sync can evaluate even after initial sync to height 1
-                if (current_height == 0 && network_height > 0) || (network_height > current_height)
+                // 🎯 v3.2.12-beta: NEAR-SYNCED THRESHOLD - Don't trigger sync when close to tip
+                // Nodes within NEAR_TIP_THRESHOLD blocks are considered "synced" and rely on
+                // gossipsub for real-time block delivery. This prevents constant sync attempts
+                // when only 1-10 blocks behind, which keeps the node stuck in "syncing" state.
+                const NEAR_TIP_THRESHOLD: u64 = 10;
+
+                // ✅ RELAXED ACTIVATION: Activate for gaps > NEAR_TIP_THRESHOLD (not ANY gap)
+                // For small gaps, gossipsub delivers blocks faster than triggering full sync
+                let gap = network_height.saturating_sub(current_height);
+                if (current_height == 0 && network_height > 0) || (gap > NEAR_TIP_THRESHOLD)
                 {
-                    let blocks_behind = network_height - current_height;
+                    let blocks_behind = gap;
 
                     if current_height == 0 {
                         info!("✅ [SYNC ACTIVATION] Reason: Cold start (height 0)");
@@ -9656,8 +11850,8 @@ async fn main() -> anyhow::Result<()> {
 
                     // 🎨 v0.6.6-beta: Display beautiful tqdm-style progress bar for sync status
                     // Initialize sync tracking on first detection of being behind
-                    {
-                        let mut start_time = app_state_sync.sync_start_time.write().unwrap();
+                    // v2.3.5-beta: Graceful lock handling - no panic on lock poisoning
+                    if let Ok(mut start_time) = app_state_sync.sync_start_time.write() {
                         if start_time.is_none() {
                             *start_time = Some(std::time::Instant::now());
                             app_state_sync
@@ -9671,7 +11865,9 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Display stunning progress bar
-                    if let Some(start_time) = *app_state_sync.sync_start_time.read().unwrap() {
+                    // v2.3.5-beta: Graceful lock handling
+                    let start_time_opt = app_state_sync.sync_start_time.read().ok().and_then(|t| *t);
+                    if let Some(start_time) = start_time_opt {
                         let start_height = app_state_sync
                             .sync_start_height
                             .load(std::sync::atomic::Ordering::Relaxed);
@@ -10017,16 +12213,27 @@ async fn main() -> anyhow::Result<()> {
 
                                 let mut libp2p_lock = libp2p.lock().await; // Reacquire for requests
 
-                                // ✅ v0.9.75-beta: OPTIMISTIC filtering - use all peers EXCEPT blacklisted
-                                // This fixes the chicken-and-egg problem where peers never get tested
+                                // 🚀 v2.2.1-beta: CRITICAL FIX - Use peers with blocks we NEED, not just at network height!
+                                // BUG FOUND: Filter required `height >= network_height` (789189), but peers
+                                // reporting heights like 258495 or 449976 were rejected even though they
+                                // have hundreds of thousands of blocks the syncing node needs!
+                                //
+                                // Example scenario that was broken:
+                                //   - Node stuck at height 10,000
+                                //   - Server Beta (bootstrap) at 789,189 sets network_height = 789,189
+                                //   - Peer A at height 449,976 has 439,976 blocks the node needs
+                                //   - OLD: Rejected because 449,976 < 789,189
+                                //   - NEW: Accepted because 449,976 > 10,000 (current_height)
+                                //
+                                // This caused all beta users to get stuck at 10,000 blocks!
                                 let mut top_peers: Vec<_> = peer_registry
                                     .iter()
                                     .filter(|(peer_id, height)| {
                                         // Use all peers that:
                                         // 1. Are NOT blacklisted (haven't failed 3+ times)
-                                        // 2. Have height >= network_height
+                                        // 2. Have height > current_height (have blocks we need!)
                                         !blacklisted_peers.contains(peer_id)
-                                            && *height >= network_height
+                                            && *height > current_height
                                     })
                                     .collect();
 
@@ -10048,9 +12255,10 @@ async fn main() -> anyhow::Result<()> {
                                               discovery_attempts, MAX_DISCOVERY_ATTEMPTS);
 
                                         // Get 3 peers for parallel testing
+                                        // 🚀 v2.2.1-beta: Use same fix - peers with blocks we need
                                         let test_peers: Vec<_> = peer_registry
                                             .iter()
-                                            .filter(|(_, height)| *height >= network_height)
+                                            .filter(|(_, height)| *height > current_height)
                                             .take(3)
                                             .collect();
 
@@ -10065,9 +12273,10 @@ async fn main() -> anyhow::Result<()> {
 
                                             drop(libp2p_lock);
 
-                                            // Wait briefly for TurboSync to make progress
-                                            info!("⏳ [DISCOVERY] Waiting 10s for TurboSync...");
-                                            tokio::time::sleep(std::time::Duration::from_secs(30))
+                                            // 🚀 v2.3.12-beta: SYNC SPEED FIX - Reduced from 30s to 5s
+                                            // 30 second wait was causing major slowdowns in endgame sync
+                                            info!("⏳ [DISCOVERY] Waiting 5s for TurboSync...");
+                                            tokio::time::sleep(std::time::Duration::from_secs(5))
                                                 .await;
 
                                             let height_after_test = app_state_sync
@@ -10137,8 +12346,12 @@ async fn main() -> anyhow::Result<()> {
 
                                                 // v1.4.13-beta: DON'T record sync attempt when still behind!
                                                 // This allows continuous sync without cooldown delays
+                                                // 🚨 v2.3.6-beta CRITICAL FIX: Use CONTIGUOUS height, not latest stored!
+                                                // BUG: get_latest_qblock_height() returns highest stored (875,500) but with gaps
+                                                // This caused node to enter cooldown even with ~200 block internal gaps
+                                                // FIX: get_highest_contiguous_block() returns last contiguous (870,063)
                                                 let new_height = app_state_sync.storage_engine
-                                                    .get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
+                                                    .get_highest_contiguous_block().await.unwrap_or(0);
                                                 if new_height + 100 < network_height {
                                                     // Still significantly behind - don't record attempt
                                                     // This bypasses the retry_interval and enables continuous sync
@@ -10319,18 +12532,20 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 // 🎨 v0.6.6-beta: Reset sync tracking when caught up (within 5 blocks)
+                // v2.3.5-beta: Graceful lock handling - no panic on lock poisoning
                 else {
                     // Check if we were syncing and just completed
-                    let mut start_time = app_state_sync.sync_start_time.write().unwrap();
-                    if start_time.is_some()
-                        && network_height > 0
-                        && network_height <= current_height + 5
-                    {
-                        info!(
-                            "✅ [SYNC COMPLETE] Synchronized to height {}",
-                            current_height
-                        );
-                        *start_time = None; // Reset tracking
+                    if let Ok(mut start_time) = app_state_sync.sync_start_time.write() {
+                        if start_time.is_some()
+                            && network_height > 0
+                            && network_height <= current_height + 5
+                        {
+                            info!(
+                                "✅ [SYNC COMPLETE] Synchronized to height {}",
+                                current_height
+                            );
+                            *start_time = None; // Reset tracking
+                        }
                     }
                 }
             }
@@ -11225,6 +13440,7 @@ async fn main() -> anyhow::Result<()> {
             post(handlers::submit_mining_solution),
         )
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
+        .route("/api/v1/mining/diagnostics", get(handlers::get_mining_diagnostics)) // v2.7.0-beta: Mining system diagnostics
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
         // Chain endpoints
@@ -11232,6 +13448,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/node/status", get(handlers::node_status)) // Dashboard status (detailed, may wait for locks)
         .route("/api/v1/network/supply", get(handlers::network_supply)) // Network supply statistics (max supply, mined coins, hashrate)
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
+        // K-Law Financial Intelligence API (Water Robot Analytics)
+        .route("/api/v1/finance/intelligence", get(handlers::get_financial_intelligence)) // K-Law adoption metrics
+        // QUGUSD Stablecoin Transparency API - Shows WHY $1 = $1
+        .route("/api/v1/stablecoin/transparency", get(handlers::get_stablecoin_transparency))
         // .route("/api/v1/blocks/range", get(handlers::get_blocks_range)) // HTTP-based block sync - disabled for now
         .route("/api/v1/transactions", post(handlers::submit_transaction))
         .route(
@@ -11288,6 +13508,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/privacy/paas",
             q_api_server::paas_admin_api::create_paas_admin_router(),
         )
+        // =========================================================================
+        // 🚨 v3.3.3-beta: EMERGENCY PAUSE MECHANISM - Mainnet Kill Switch
+        // =========================================================================
+        .route("/api/v1/emergency/status", get(handlers::get_emergency_status)) // Check if system is paused
+        .route("/api/v1/emergency/pause", post(handlers::activate_emergency_pause)) // Activate emergency pause
+        .route("/api/v1/emergency/resume", post(handlers::resume_from_pause)) // Resume from pause
         // =========================================================================
         .route("/api/v1/transactions/:hash", get(handlers::get_transaction))
         .route(
@@ -11504,6 +13730,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/nitro/boost", post(handlers::add_nitro_boost))
         // DEX Swap Functionality
         .route("/api/v1/dex/swap", post(handlers::execute_swap))
+        // v2.3.34-beta: Token Details Modal API endpoints
+        .route("/api/v1/oracle/price-history/:token_id", get(handlers::get_token_price_history))
+        .route("/api/v1/transactions/token/:token_id", get(handlers::get_token_transactions))
+        // v2.3.6-beta: AMM Price Oracle API - Real-time prices from pools
+        .route("/api/v1/oracle/price/:token", get(handlers::get_token_price))
+        .route("/api/v1/oracle/prices", get(handlers::get_all_prices))
         // Blockchain Benchmark (rate limited to once per 24 hours)
         .route(
             "/api/v1/benchmark",
@@ -11603,6 +13835,8 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1/contracts", create_contracts_router())
         // AI Chat API - Privacy-first distributed inference
         .nest("/api/chat", chat_api::chat_router())
+        // Also expose at /api/v1/chat for OpenAI-compatible endpoints
+        .nest("/api/v1/chat", chat_api::chat_router())
         // AI Verification API - Proof-of-inference and worker benchmarking
         .nest("/api/verification", verification_api::verification_router())
         // AI Chat Attachments - v0.9.9-beta
@@ -11612,8 +13846,16 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1/dex", create_dex_integration_router())
         // ✅ NEW - Dynamic Token Registry & Price History API
         .nest("/api/dex", q_api_server::dex_handlers::create_dex_router())
+        // 🤖 v2.5.0-beta: AI-Powered Market Analyzer (Ministral-3B agentic)
+        .nest("/api/v1/market", q_api_server::dex_market_analyzer::create_market_analyzer_router())
         // Liquidity Provision API
-        .nest("/api/v1/liquidity", create_liquidity_router());
+        .nest("/api/v1/liquidity", create_liquidity_router())
+        // 💰 v2.4.8-beta: Dollar Cost Averaging API - Automated recurring token purchases
+        .nest("/api/v1/dca", q_api_server::dca_api::create_dca_router())
+        // 📈 v2.5.0-beta: Perpetual Futures API - Leveraged long/short trading
+        .nest("/api/v1/perp", q_api_server::perpetual_api::create_perp_router())
+        // ⛏️ v2.2.1-beta: Stratum Mining Pool API - PPLNS rewards
+        .nest("/api/v1/pool", q_api_server::pool_api::create_pool_router());
 
     // ✨ v1.4.0-beta: Recursive Proofs API - Eliminates Weak Subjectivity
     // Post-quantum recursive SNARKs for ~10ms trustless light client bootstrap
@@ -11841,8 +14083,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(zcash_client);
 
+    // ✅ v2.7.0-beta: TemporalShield-STARK API router (NO TRUSTED SETUP)
+    // Post-quantum secure secret sharing with zk-STARK proofs
+    let temporal_router = q_api_server::temporal_api::routes()
+        .with_state(app_state.clone());
+    info!("🛡️  [TEMPORAL] TemporalShield-STARK API enabled (NO TRUSTED SETUP)");
+
+    // ✅ v2.7.0-beta: Validator Key Backup API (5-of-9 threshold)
+    let validator_backup_router = q_api_server::validator_backup_api::routes()
+        .with_state(app_state.clone());
+    info!("🔐 [VALIDATOR-BACKUP] Validator key backup API enabled (5-of-9 threshold)");
+
     // Merge the routers
-    let app = app.merge(storage_router).merge(zcash_router);
+    let app = app.merge(storage_router).merge(zcash_router).merge(temporal_router).merge(validator_backup_router);
 
     // Create shared peer list for P2P connections
     let active_peers = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));

@@ -96,7 +96,7 @@ const LoanApplicationModal: React.FC<LoanApplicationModalProps> = ({
       console.log('🏦 Submitting loan application to backend...');
 
       // Convert frontend amount (100M base) to backend amount (1T base)
-      const loanAmountBackend = parseFloat(loanAmount) * 1e8;
+      const loanAmountBackend = parseFloat(loanAmount) * 1e24;
 
       const response = await fetch('/api/v1/quillon-bank/lending/apply', {
         method: 'POST',

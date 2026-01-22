@@ -47,3 +47,5 @@ axum = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = { workspace = true }
+tempfile = "3.10"
+rocksdb = { workspace = true }

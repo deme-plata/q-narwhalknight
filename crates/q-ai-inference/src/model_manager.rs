@@ -135,7 +135,22 @@ impl ModelMetadata {
                     8.0,
                     5120, // ~5.1 GB with Q4_K_M quantization
                 )
+            } else if name.contains("Qwen3-0.6B") || name.contains("qwen3-0.6b") {
+                (
+                    "Qwen3-0.6B-Q4_K_M.gguf".to_string(),
+                    28, // 28 layers for Qwen3-0.6B
+                    0.6,
+                    400, // ~379 MB with Q4_K_M quantization
+                )
+            } else if name.contains("Qwen3-4B") || name.contains("qwen3-4b") {
+                (
+                    "Qwen3-4B-Q4_K_M.gguf".to_string(),
+                    36, // 36 layers for Qwen3-4B
+                    4.0,
+                    2500, // ~2.4 GB with Q4_K_M quantization
+                )
             } else if name.contains("Ministral-3B") || name.contains("ministral-3b") {
+                // ⚠️ Ministral-3B has mistral3 architecture NOT supported by mistral.rs GGUF
                 (
                     "Ministral-3B-Instruct-Q4_K_M.gguf".to_string(),
                     32, // 32 layers for 3B model
@@ -143,7 +158,7 @@ impl ModelMetadata {
                     2150, // ~2.15 GB with Q4_K_M quantization
                 )
             } else {
-                return Err(anyhow!("Unknown model: {}. Supported models: Kimi-K2, Mistral-7B, Mistral-Small-3.2-24B, Ministral-3B, Llama-7B, Llama-13B, Llama-70B, Qwen3-VL-8B", name));
+                return Err(anyhow!("Unknown model: {}. Supported models: Qwen3-0.6B (fastest), Qwen3-4B (balanced), Mistral-7B, Mistral-Small-3.2-24B, Qwen3-VL-8B, Kimi-K2, Llama-7B/13B/70B", name));
             };
 
         let download_url = format!("{}/downloads/{}", base_url, gguf_filename);

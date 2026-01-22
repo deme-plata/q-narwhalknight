@@ -226,10 +226,15 @@ pub enum StreamEvent {
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// Token price update from swap or oracle
+    /// v2.9.22-beta: Added change_1h and change_7d for full price metrics
+    /// v2.9.25-beta: Added token_address for frontend matching by address
     TokenPriceUpdate {
         token_symbol: String,
+        token_address: Option<String>,  // 🆕 v2.9.25-beta: Token contract address for matching
         price: f64,
+        change_1h: f64,   // 🆕 v2.9.22-beta: 1-hour price change percentage
         change_24h: f64,
+        change_7d: f64,   // 🆕 v2.9.22-beta: 7-day price change percentage
         volume_24h: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
@@ -247,8 +252,8 @@ pub enum StreamEvent {
     SwapExecuted {
         from_token: String,
         to_token: String,
-        amount_in: u64,
-        amount_out: u64,
+        amount_in: u128,
+        amount_out: u128,
         wallet_address: String,
         price_impact: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
@@ -261,16 +266,24 @@ pub enum StreamEvent {
         block_height: u64,
         difficulty: String,
         hash_rate: f64,
-        worker_name: Option<String>, // 🆕 v0.6.2-beta: Worker identification for multi-miner setups
+        miner_id: Option<String>, // 🆕 v3.3.3-beta: Unique miner instance ID for identification
+        worker_name: Option<String>, // 🆕 v0.6.2-beta: Human-readable miner name (e.g., "Server Alpha")
+        origin_node_id: Option<String>, // 🆕 v2.3.5-beta: Which node mined this reward (peer ID)
+        origin_node_name: Option<String>, // 🆕 v2.3.5-beta: Human-friendly node name (e.g., "Bootstrap", "Alpha")
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// Mining statistics update
+    /// v3.2.25-beta: Added miner_id and worker_id to distinguish multiple miners to same wallet
     MiningStats {
         miner_address: String,
         total_rewards: f64,
         total_blocks_found: u64,
         current_balance: f64,
         avg_hash_rate: f64,
+        /// v3.2.25-beta: Unique miner instance ID (from miner software)
+        miner_id: Option<String>,
+        /// v3.2.25-beta: Worker identifier (miner_id, worker_name, or "direct"/"p2p:NODE")
+        worker_id: Option<String>,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// v1.3.8-beta: Pending mining reward from P2P gossip
@@ -534,13 +547,22 @@ pub async fn sse_events(
             StreamEvent::TransactionStatusUpdate { .. } => true,
 
             // Balance updates - only send if it's for this wallet
-            StreamEvent::BalanceUpdated { wallet_address, .. } => {
+            StreamEvent::BalanceUpdated { wallet_address, change_reason, old_balance, new_balance, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
                     wallet_address[3..].to_string()
                 } else {
                     wallet_address.clone()
                 };
-                normalized_event == normalized_filter
+                let matches = normalized_event == normalized_filter;
+                // v2.7.8-beta: Extensive debugging for P2P balance propagation
+                info!("🔍 [SSE FILTER] BalanceUpdated: reason={}, event_addr={} (first 16), filter={} (first 16), old={:.8}, new={:.8}, matches={}",
+                      change_reason,
+                      &normalized_event[..16.min(normalized_event.len())],
+                      &normalized_filter[..16.min(normalized_filter.len())],
+                      old_balance,
+                      new_balance,
+                      matches);
+                matches
             }
 
             // Faucet events - only send if it's for this wallet
@@ -560,7 +582,15 @@ pub async fn sse_events(
                 } else {
                     miner_address.clone()
                 };
-                normalized_event == normalized_filter
+                let matches = normalized_event == normalized_filter;
+                // v3.3.4-beta: Debug logging for SSE filter to diagnose direct-to-bootstrap mining
+                info!("🔍 [SSE FILTER] MiningReward: event_addr={} (len={}), filter={} (len={}), matches={}",
+                      &normalized_event[..16.min(normalized_event.len())],
+                      normalized_event.len(),
+                      &normalized_filter[..16.min(normalized_filter.len())],
+                      normalized_filter.len(),
+                      matches);
+                matches
             }
 
             // Mining stats - only send if it's for this wallet
@@ -570,7 +600,15 @@ pub async fn sse_events(
                 } else {
                     miner_address.clone()
                 };
-                normalized_event == normalized_filter
+                let matches = normalized_event == normalized_filter;
+                // v2.7.6-beta: Debug logging for SSE filter
+                info!("🔍 [SSE FILTER] MiningStats: event_addr_len={}, filter_len={}, event_prefix={}, filter_prefix={}, matches={}",
+                      normalized_event.len(),
+                      normalized_filter.len(),
+                      &normalized_event[..16.min(normalized_event.len())],
+                      &normalized_filter[..16.min(normalized_filter.len())],
+                      matches);
+                matches
             }
 
             // v1.3.8-beta: Pending mining reward - only send if it's for this wallet
@@ -580,7 +618,13 @@ pub async fn sse_events(
                 } else {
                     miner_address.clone()
                 };
-                normalized_event == normalized_filter
+                let matches = normalized_event == normalized_filter;
+                // v2.7.6-beta: Debug logging for SSE filter
+                info!("🔍 [SSE FILTER] PendingMiningReward: event_addr={} (first 16), filter={} (first 16), matches={}",
+                      &normalized_event[..16.min(normalized_event.len())],
+                      &normalized_filter[..16.min(normalized_filter.len())],
+                      matches);
+                matches
             }
 
             // Swap events - only send if it's for this wallet
@@ -621,43 +665,55 @@ pub async fn sse_events(
             {
                 debug!("📡 SSE: Sending initial balance");
 
-                // Fetch current balance from storage engine
-                // get_balance() expects raw hex (strip "qnk" prefix if present)
+                // v2.4.5-beta FIX: Use in-memory wallet_balances HashMap instead of RocksDB
+                // The HashMap is kept up-to-date with mining rewards in real-time,
+                // while RocksDB may have stale data if persistence is delayed.
+                // This fixes the bug where SSE initial balance was 0 or outdated.
                 let wallet_hex = wallet_filter_value
                     .strip_prefix("qnk")
                     .unwrap_or(wallet_filter_value);
-                match state.storage_engine.get_balance(wallet_hex).await {
-                    Ok(balance) => {
-                        // v0.9.36-beta FIX: Convert base units to QNK (balance / 100_000_000.0)
-                        // This fixes the 10x discrepancy between TopBar and wallet card balances
-                        let balance_qnk = balance as f64 / 100_000_000.0;
-                        // 🔒 PRIVACY: No logging of balances or addresses
-                        debug!("💰 SSE: Initial balance fetched successfully");
 
-                        // Create initial balance event
-                        let initial_balance_event = serde_json::json!({
-                            "type": "BalanceUpdated",
-                            "data": {
-                                "wallet_address": wallet_filter_value.clone(),
-                                "old_balance": balance_qnk,
-                                "new_balance": balance_qnk,
-                                "change_reason": "SSE connection established",
-                                "timestamp": chrono::Utc::now().to_rfc3339()
-                            }
-                        });
+                // Convert hex string to [u8; 32] for HashMap lookup
+                let balance = if let Ok(addr_bytes) = hex::decode(wallet_hex) {
+                    if addr_bytes.len() == 32 {
+                        let mut addr_array = [0u8; 32];
+                        addr_array.copy_from_slice(&addr_bytes);
+                        // Read from in-memory HashMap (most up-to-date source)
+                        let balances = state.wallet_balances.read().await;
+                        balances.get(&addr_array).copied().unwrap_or(0)
+                    } else {
+                        // Fallback to storage engine if address format is wrong
+                        state.storage_engine.get_balance(wallet_hex).await.unwrap_or(0)
+                    }
+                } else {
+                    // Fallback to storage engine if hex decode fails
+                    state.storage_engine.get_balance(wallet_hex).await.unwrap_or(0)
+                };
 
-                        if let Ok(json) = serde_json::to_string(&initial_balance_event) {
-                            // Return initial balance event, then continue with normal stream
-                            // Set state_opt to None so we don't send initial balance again
-                            return Some((
-                                Ok(Event::default().event("balance-updated").data(json)),
-                                (rx, filter, None, None),
-                            ));
-                        }
+                // v3.0.6-beta FIX: Use 1e24 divisor for u128 migration (was 100_000_000.0)
+                let balance_qnk = balance as f64 / 1e24;
+                // 🔒 PRIVACY: No logging of balances or addresses
+                debug!("💰 SSE: Initial balance fetched successfully (from in-memory HashMap)");
+
+                // Create initial balance event
+                let initial_balance_event = serde_json::json!({
+                    "type": "BalanceUpdated",
+                    "data": {
+                        "wallet_address": wallet_filter_value.clone(),
+                        "old_balance": balance_qnk,
+                        "new_balance": balance_qnk,
+                        "change_reason": "SSE connection established",
+                        "timestamp": chrono::Utc::now().to_rfc3339()
                     }
-                    Err(e) => {
-                        warn!("⚠️ SSE: Failed to fetch initial balance: {}", e);
-                    }
+                });
+
+                if let Ok(json) = serde_json::to_string(&initial_balance_event) {
+                    // Return initial balance event, then continue with normal stream
+                    // Set state_opt to None so we don't send initial balance again
+                    return Some((
+                        Ok(Event::default().event("balance-updated").data(json)),
+                        (rx, filter, None, None),
+                    ));
                 }
             }
 
@@ -673,13 +729,15 @@ pub async fn sse_events(
 
                         match serde_json::to_string(&event) {
                             Ok(json) => {
-                                debug!(
-                                    "SSE sending filtered event: {} to wallet: {:?}",
-                                    event_type_name(&event),
-                                    filter
+                                let event_name = event_type_name(&event);
+                                // v2.7.6-beta: Upgrade to info! for visibility
+                                info!(
+                                    "📤 [SSE SEND] Sending {} event to wallet filter (first 16): {:?}",
+                                    event_name,
+                                    filter.as_ref().map(|f| &f[..16.min(f.len())])
                                 );
                                 return Some((
-                                    Ok(Event::default().event(event_type_name(&event)).data(json)),
+                                    Ok(Event::default().event(event_name).data(json)),
                                     (rx, filter, None, None),
                                 ));
                             }
@@ -1139,17 +1197,25 @@ impl HighPerformanceEmitter {
     }
 
     /// Emit token price update
+    /// v2.9.22-beta: Added change_1h and change_7d parameters for full price metrics
+    /// v2.9.25-beta: Added token_address parameter for frontend matching
     pub async fn emit_token_price_update(
         &self,
         token_symbol: String,
+        token_address: Option<String>,  // 🆕 v2.9.25-beta
         price: f64,
+        change_1h: f64,   // 🆕 v2.9.22-beta
         change_24h: f64,
+        change_7d: f64,   // 🆕 v2.9.22-beta
         volume_24h: f64,
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let event = StreamEvent::TokenPriceUpdate {
             token_symbol,
+            token_address,
             price,
+            change_1h,
             change_24h,
+            change_7d,
             volume_24h,
             timestamp: chrono::Utc::now(),
         };
@@ -1183,8 +1249,8 @@ impl HighPerformanceEmitter {
         &self,
         from_token: String,
         to_token: String,
-        amount_in: u64,
-        amount_out: u64,
+        amount_in: u128,
+        amount_out: u128,
         wallet_address: String,
         price_impact: f64,
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
@@ -1209,7 +1275,10 @@ impl HighPerformanceEmitter {
         block_height: u64,
         difficulty: String,
         hash_rate: f64,
-        worker_name: Option<String>, // 🆕 v0.6.2-beta: Worker name for multi-miner tracking
+        miner_id: Option<String>, // 🆕 v3.3.3-beta: Unique miner instance ID
+        worker_name: Option<String>, // 🆕 v0.6.2-beta: Human-readable miner name
+        origin_node_id: Option<String>, // 🆕 v2.3.5-beta: Which node mined this
+        origin_node_name: Option<String>, // 🆕 v2.3.5-beta: Human-friendly node name
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let event = StreamEvent::MiningReward {
             miner_address,
@@ -1218,13 +1287,17 @@ impl HighPerformanceEmitter {
             block_height,
             difficulty,
             hash_rate,
+            miner_id,
             worker_name,
+            origin_node_id,
+            origin_node_name,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await
     }
 
     /// Emit mining statistics update
+    /// v3.2.25-beta: Added miner_id and worker_id parameters
     pub async fn emit_mining_stats(
         &self,
         miner_address: String,
@@ -1232,6 +1305,8 @@ impl HighPerformanceEmitter {
         total_blocks_found: u64,
         current_balance: f64,
         avg_hash_rate: f64,
+        miner_id: Option<String>,
+        worker_id: Option<String>,
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let event = StreamEvent::MiningStats {
             miner_address,
@@ -1239,6 +1314,8 @@ impl HighPerformanceEmitter {
             total_blocks_found,
             current_balance,
             avg_hash_rate,
+            miner_id,
+            worker_id,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await
@@ -1414,6 +1491,12 @@ mod tests {
             signature: vec![],
             timestamp: chrono::Utc::now(),
             data: vec![],
+            token_type: q_types::TokenType::QUG,
+            fee_token_type: q_types::TokenType::QUGUSD,
+            tx_type: q_types::TransactionType::Transfer,
+            pqc_signature: None,
+            signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
         };
 
         let event = StreamEvent::TransactionSubmitted {

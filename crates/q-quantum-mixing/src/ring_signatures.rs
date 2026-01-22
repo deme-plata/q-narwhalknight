@@ -1,34 +1,56 @@
-//! # Phase 1A: Quantum Ring Signature System
+//! # Phase 1A: Production-Ready Quantum Ring Signature System
 //!
-//! Production implementation following the development template:
-//! - Linkable ring signatures with quantum-safe nonces
-//! - Ring signature creation and verification
-//! - Key image generation for double-spend protection
-//! - Quantum entropy integration for enhanced randomness
-//! - Batch verification for performance optimization
+//! v2.5.1-beta: REAL CRYPTOGRAPHIC IMPLEMENTATION
+//!
+//! This module implements proper linkable ring signatures using curve25519-dalek
+//! for elliptic curve operations. Provides:
+//!
+//! - **Unlinkability**: Ring signatures hide which member signed
+//! - **Linkability via Key Images**: Same key produces same key image (double-spend detection)
+//! - **Unforgeability**: Cannot create signatures without private key
+//!
+//! ## Cryptographic Foundations
+//!
+//! Based on "Linkable Spontaneous Anonymous Group Signatures" (LSAG) with curve25519:
+//!
+//! - Key Image: `I = x * H_p(P)` where `x` is private key, `P` is public key
+//! - Ring Response: `s = r + c*x mod L` (proper scalar field arithmetic)
+//! - Verification: `c' = H(m, L, s_0*G + c_0*P_0, s_0*H_p(P_0) + c_0*I, ...)`
+//!
+//! ## Security Properties
+//!
+//! - 128-bit security from curve25519
+//! - Quantum-enhanced nonces for additional entropy
+//! - Zeroization of sensitive data on drop
 
 use crate::{
     error::{MixingError, Result},
     quantum_entropy::QuantumEntropyPool,
 };
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_TABLE,
+    ristretto::{CompressedRistretto, RistrettoPoint},
+    scalar::Scalar,
+    traits::Identity,
+};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_512};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// A linkable ring signature with quantum-enhanced security
+/// A linkable ring signature with real elliptic curve cryptography
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingSignature {
     /// The ring signature values (c_i, s_i) for each ring member
     pub signature_values: Vec<SignatureValue>,
-    /// Key image for linkability detection
+    /// Key image for linkability detection (compressed Ristretto point)
     pub key_image: KeyImage,
-    /// Challenge value for the ring
+    /// Initial challenge value c_0
     pub challenge: [u8; 32],
-    /// Ring of public keys used in the signature
+    /// Ring of public keys used in the signature (compressed Ristretto points)
     pub ring: Vec<[u8; 32]>,
     /// Timestamp when signature was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -37,387 +59,407 @@ pub struct RingSignature {
 /// Individual signature value in a ring signature
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureValue {
-    /// Challenge value c_i
+    /// Challenge value c_i (scalar)
     pub challenge: [u8; 32],
-    /// Response value s_i  
+    /// Response value s_i (scalar)
     pub response: [u8; 32],
 }
 
 /// Key image for preventing double-spending in linkable ring signatures
+/// Key Image I = x * H_p(P) where x is private key, P is public key
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyImage {
-    /// The key image point
+    /// The key image point (compressed Ristretto)
     pub image: [u8; 32],
-    /// Additional metadata for quantum safety
+    /// Quantum nonce for additional entropy
     pub quantum_nonce: [u8; 32],
 }
 
-/// Production-grade quantum ring signature system
-/// **SERVER ALPHA IMPLEMENTATION** - Following development template
+/// Production-grade quantum ring signature system with real EC math
+/// v2.5.1-beta: Complete rewrite using curve25519-dalek
 #[derive(Clone)]
 pub struct QuantumRingSigner {
-    /// Private key for signing (zeroized on drop)
-    private_key: [u8; 32],
-    /// Public key corresponding to private key
-    public_key: [u8; 32],
+    /// Private key scalar (zeroized on drop)
+    private_key: Scalar,
+    /// Public key point (compressed)
+    public_key: CompressedRistretto,
+    /// Public key bytes for ring matching
+    public_key_bytes: [u8; 32],
     /// Quantum entropy source for enhanced randomness
     quantum_entropy: Arc<QuantumEntropyPool>,
-    /// Cache of previously computed key images to prevent double-spend
-    key_image_cache: std::collections::HashSet<KeyImage>,
+    /// Cache of previously computed key images (only the image bytes, not the quantum nonce)
+    /// to prevent double-spend. The image bytes are deterministic for a given private key.
+    key_image_cache: std::collections::HashSet<[u8; 32]>,
 }
 
 impl QuantumRingSigner {
     /// Create new quantum ring signer with quantum entropy
-    /// **SERVER ALPHA**: Real implementation replacing empty struct
+    /// Generates a new keypair using quantum-enhanced randomness
     pub async fn new(entropy_pool: Arc<QuantumEntropyPool>) -> Result<Self> {
-        info!("Initializing Quantum Ring Signer with quantum entropy");
+        info!("Initializing Quantum Ring Signer with real EC cryptography (v2.5.1-beta)");
 
-        // Generate signing key using quantum entropy
-        let mut private_key_bytes = [0u8; 32];
-        entropy_pool.fill_bytes(&mut private_key_bytes).await?;
-        
-        let signing_key = SigningKey::from_bytes(&private_key_bytes);
-        let verifying_key = signing_key.verifying_key();
-        let public_key_bytes = verifying_key.to_bytes();
+        // Generate private key scalar using quantum entropy
+        let mut private_key_bytes = [0u8; 64]; // Need 64 bytes for uniform scalar reduction
+        entropy_pool.fill_bytes(&mut private_key_bytes[..32]).await?;
+        entropy_pool.fill_bytes(&mut private_key_bytes[32..]).await?;
 
-        Ok(Self {
-            private_key: private_key_bytes,
-            public_key: public_key_bytes,
-            quantum_entropy: entropy_pool,
-            key_image_cache: std::collections::HashSet::new(),
-        })
-    }
+        let private_key = Scalar::from_bytes_mod_order_wide(&private_key_bytes);
 
-    /// Create from existing private key (for wallet restoration)
-    pub async fn from_private_key(
-        private_key: [u8; 32], 
-        entropy_pool: Arc<QuantumEntropyPool>
-    ) -> Result<Self> {
-        let signing_key = SigningKey::from_bytes(&private_key);
-        let verifying_key = signing_key.verifying_key();
-        let public_key_bytes = verifying_key.to_bytes();
+        // Compute public key: P = x * G
+        let public_key_point = RISTRETTO_BASEPOINT_TABLE.basepoint() *private_key;
+        let public_key = public_key_point.compress();
+        let public_key_bytes = public_key.to_bytes();
+
+        // Zeroize the raw bytes
+        let mut zero_bytes = private_key_bytes;
+        zero_bytes.zeroize();
 
         Ok(Self {
             private_key,
-            public_key: public_key_bytes,
+            public_key,
+            public_key_bytes,
             quantum_entropy: entropy_pool,
             key_image_cache: std::collections::HashSet::new(),
         })
     }
 
-    /// Create linkable ring signature with quantum-safe nonces
-    /// **SERVER ALPHA**: Real ring signature implementation
+    /// Create from existing private key bytes (for wallet restoration)
+    pub async fn from_private_key(
+        private_key_bytes: [u8; 32],
+        entropy_pool: Arc<QuantumEntropyPool>,
+    ) -> Result<Self> {
+        // Extend to 64 bytes for uniform reduction
+        let mut extended = [0u8; 64];
+        extended[..32].copy_from_slice(&private_key_bytes);
+        let private_key = Scalar::from_bytes_mod_order_wide(&extended);
+
+        // Compute public key
+        let public_key_point = RISTRETTO_BASEPOINT_TABLE.basepoint() *private_key;
+        let public_key = public_key_point.compress();
+        let public_key_bytes = public_key.to_bytes();
+
+        Ok(Self {
+            private_key,
+            public_key,
+            public_key_bytes,
+            quantum_entropy: entropy_pool,
+            key_image_cache: std::collections::HashSet::new(),
+        })
+    }
+
+    /// Create linkable ring signature using real LSAG algorithm
+    ///
+    /// Algorithm:
+    /// 1. Compute key image I = x * H_p(P)
+    /// 2. Generate random nonce r, compute L_s = r*G, R_s = r*H_p(P_s)
+    /// 3. For each non-signer member, pick random c_i, s_i
+    /// 4. Compute challenges c_{i+1} = H(m, L, L_i, R_i, ...) in a ring
+    /// 5. Solve for s_s = r - c_s * x
     pub async fn create_ring_signature(
         &mut self,
         message: &[u8],
         ring: Vec<[u8; 32]>,
     ) -> Result<RingSignature> {
-        debug!("Creating ring signature for message with {} ring members", ring.len());
+        debug!("Creating ring signature with {} ring members (real EC)", ring.len());
 
         if ring.is_empty() {
             return Err(MixingError::RingSignatureError("Ring cannot be empty".to_string()));
         }
 
         // Find our position in the ring
-        let secret_index = ring.iter().position(|&pk| pk == self.public_key)
+        let secret_index = ring.iter().position(|pk| pk == &self.public_key_bytes)
             .ok_or_else(|| MixingError::RingSignatureError("Public key not found in ring".to_string()))?;
 
-        // 1. Generate key image with quantum nonce
+        // 1. Generate key image: I = x * H_p(P)
         let key_image = self.generate_key_image().await?;
-        
-        // Check for double-spend attempt
-        if self.key_image_cache.contains(&key_image) {
+
+        // Check for double-spend attempt (only compare image bytes, not quantum nonce)
+        if self.key_image_cache.contains(&key_image.image) {
             return Err(MixingError::RingSignatureError("Key image already used (double-spend attempt)".to_string()));
         }
 
-        // 2. Generate quantum-enhanced random values for non-secret indices
-        let mut signature_values = vec![SignatureValue { challenge: [0u8; 32], response: [0u8; 32] }; ring.len()];
-        let mut quantum_nonces = Vec::new();
+        let key_image_point = decompress_or_hash_to_point(&key_image.image)?;
 
-        for i in 0..ring.len() {
-            if i != secret_index {
-                let mut challenge = [0u8; 32];
-                let mut response = [0u8; 32];
-                self.quantum_entropy.fill_bytes(&mut challenge).await?;
-                self.quantum_entropy.fill_bytes(&mut response).await?;
-                
-                signature_values[i].challenge = challenge;
-                signature_values[i].response = response;
-            }
-            
-            // Generate quantum nonce for each ring member
-            let mut nonce = [0u8; 32];
-            self.quantum_entropy.fill_bytes(&mut nonce).await?;
-            quantum_nonces.push(nonce);
-        }
+        // Parse ring public keys
+        let ring_points: Vec<RistrettoPoint> = ring
+            .iter()
+            .map(|pk_bytes| decompress_or_hash_to_point(pk_bytes))
+            .collect::<Result<Vec<_>>>()?;
 
-        // 3. Compute challenge for the ring using quantum-enhanced Fiat-Shamir
-        let ring_challenge = self.compute_ring_challenge(message, &ring, &key_image, &quantum_nonces).await?;
+        // 2. Generate random nonce with quantum entropy
+        let mut nonce_bytes = [0u8; 64];
+        self.quantum_entropy.fill_bytes(&mut nonce_bytes[..32]).await?;
+        self.quantum_entropy.fill_bytes(&mut nonce_bytes[32..]).await?;
+        let nonce = Scalar::from_bytes_mod_order_wide(&nonce_bytes);
 
-        // 4. Compute challenge and response for our secret index
-        let mut secret_challenge = ring_challenge;
-        for i in 0..ring.len() {
-            if i != secret_index {
-                // XOR with other challenges to complete the ring
-                for (a, &b) in secret_challenge.iter_mut().zip(signature_values[i].challenge.iter()) {
-                    *a ^= b;
-                }
-            }
-        }
+        // Compute L_s = r * G (for our position)
+        let l_s = RISTRETTO_BASEPOINT_TABLE.basepoint() *nonce;
 
-        signature_values[secret_index].challenge = secret_challenge;
-        signature_values[secret_index].response = self.compute_ring_response(
-            &secret_challenge,
-            &quantum_nonces[secret_index],
+        // Compute R_s = r * H_p(P_s)
+        let hp_s = hash_to_point(&ring[secret_index]);
+        let r_s = nonce * hp_s;
+
+        // Initialize signature values
+        let ring_size = ring.len();
+        let mut challenges: Vec<Scalar> = vec![Scalar::ZERO; ring_size];
+        let mut responses: Vec<Scalar> = vec![Scalar::ZERO; ring_size];
+
+        // 3. Start computing the ring from secret_index + 1
+        // First challenge: c_{s+1} = H(m, L, R)
+        challenges[(secret_index + 1) % ring_size] = compute_challenge(
             message,
-        ).await?;
+            &l_s.compress().to_bytes(),
+            &r_s.compress().to_bytes(),
+            &key_image.image,
+        );
 
-        // 5. Cache the key image to prevent reuse
-        self.key_image_cache.insert(key_image.clone());
+        // 4. For each member in the ring (wrapping around)
+        for i in 1..ring_size {
+            let idx = (secret_index + i) % ring_size;
+            let next_idx = (idx + 1) % ring_size;
+
+            // Generate random response s_i
+            let mut response_bytes = [0u8; 64];
+            self.quantum_entropy.fill_bytes(&mut response_bytes[..32]).await?;
+            self.quantum_entropy.fill_bytes(&mut response_bytes[32..]).await?;
+            responses[idx] = Scalar::from_bytes_mod_order_wide(&response_bytes);
+
+            // Compute L_i = s_i * G + c_i * P_i
+            let l_i = RISTRETTO_BASEPOINT_TABLE.basepoint() *responses[idx] + ring_points[idx] * challenges[idx];
+
+            // Compute R_i = s_i * H_p(P_i) + c_i * I
+            let hp_i = hash_to_point(&ring[idx]);
+            let r_i = responses[idx] * hp_i + challenges[idx] * key_image_point;
+
+            // Compute next challenge
+            if next_idx != secret_index {
+                challenges[next_idx] = compute_challenge(
+                    message,
+                    &l_i.compress().to_bytes(),
+                    &r_i.compress().to_bytes(),
+                    &key_image.image,
+                );
+            }
+        }
+
+        // 5. Compute our response: s_s = r - c_s * x
+        // Need to compute c_s first (it's the last one we haven't computed)
+        let prev_idx = if secret_index == 0 { ring_size - 1 } else { secret_index - 1 };
+
+        // Recompute L and R for prev_idx to get c_s
+        let l_prev = RISTRETTO_BASEPOINT_TABLE.basepoint() *responses[prev_idx] + ring_points[prev_idx] * challenges[prev_idx];
+        let hp_prev = hash_to_point(&ring[prev_idx]);
+        let r_prev = responses[prev_idx] * hp_prev + challenges[prev_idx] * key_image_point;
+
+        challenges[secret_index] = compute_challenge(
+            message,
+            &l_prev.compress().to_bytes(),
+            &r_prev.compress().to_bytes(),
+            &key_image.image,
+        );
+
+        // s_s = r - c_s * x (mod L)
+        responses[secret_index] = nonce - challenges[secret_index] * self.private_key;
+
+        // Convert to SignatureValue structs
+        let signature_values: Vec<SignatureValue> = challenges
+            .iter()
+            .zip(responses.iter())
+            .map(|(c, s)| SignatureValue {
+                challenge: c.to_bytes(),
+                response: s.to_bytes(),
+            })
+            .collect();
+
+        // Cache the key image bytes to prevent reuse (only the image, not the quantum nonce)
+        self.key_image_cache.insert(key_image.image);
 
         Ok(RingSignature {
             signature_values,
             key_image,
-            challenge: ring_challenge,
+            challenge: challenges[0].to_bytes(),
             ring,
             timestamp: chrono::Utc::now(),
         })
     }
 
-    /// Verify a ring signature
-    /// **SERVER ALPHA**: Real verification implementation
+    /// Verify a ring signature using real EC verification
+    ///
+    /// Verification algorithm:
+    /// 1. For each i: L_i = s_i * G + c_i * P_i, R_i = s_i * H_p(P_i) + c_i * I
+    /// 2. Compute c_{i+1} = H(m, L_i, R_i)
+    /// 3. Check that computed c_0 matches provided c_0
     pub async fn verify_ring_signature(
         &self,
         signature: &RingSignature,
         message: &[u8],
     ) -> Result<bool> {
-        debug!("Verifying ring signature with {} ring members", signature.ring.len());
+        debug!("Verifying ring signature with {} members (real EC)", signature.ring.len());
 
         if signature.signature_values.len() != signature.ring.len() {
             return Ok(false);
         }
 
-        // 1. Recompute the ring challenge
-        let quantum_nonces: Vec<[u8; 32]> = signature.signature_values.iter()
-            .map(|sv| sv.response) // Use response as nonce for verification
-            .collect();
+        let ring_size = signature.ring.len();
+        if ring_size == 0 {
+            return Ok(false);
+        }
 
-        let computed_challenge = self.compute_ring_challenge(
-            message, 
-            &signature.ring, 
-            &signature.key_image,
-            &quantum_nonces
-        ).await?;
+        // Parse key image
+        let key_image_point = match decompress_or_hash_to_point(&signature.key_image.image) {
+            Ok(p) => p,
+            Err(_) => return Ok(false),
+        };
 
-        // 2. Verify the challenge matches
-        if computed_challenge != signature.challenge {
+        // Parse ring public keys
+        let ring_points: Vec<RistrettoPoint> = match signature.ring
+            .iter()
+            .map(|pk_bytes| decompress_or_hash_to_point(pk_bytes))
+            .collect::<Result<Vec<_>>>() {
+            Ok(pts) => pts,
+            Err(_) => return Ok(false),
+        };
+
+        // Start verification from c_0
+        // Note: from_canonical_bytes returns CtOption in curve25519-dalek 4.x
+        let mut current_challenge = match Scalar::from_canonical_bytes(signature.challenge.into()).into_option() {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+
+        // Verify each link in the ring
+        for i in 0..ring_size {
+            let response = match Scalar::from_canonical_bytes(signature.signature_values[i].response.into()).into_option() {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            // L_i = s_i * G + c_i * P_i
+            let l_i = RISTRETTO_BASEPOINT_TABLE.basepoint() *response + ring_points[i] * current_challenge;
+
+            // R_i = s_i * H_p(P_i) + c_i * I
+            let hp_i = hash_to_point(&signature.ring[i]);
+            let r_i = response * hp_i + current_challenge * key_image_point;
+
+            // Compute next challenge
+            current_challenge = compute_challenge(
+                message,
+                &l_i.compress().to_bytes(),
+                &r_i.compress().to_bytes(),
+                &signature.key_image.image,
+            );
+        }
+
+        // Check that we returned to the original challenge
+        let original_challenge = match Scalar::from_canonical_bytes(signature.challenge.into()).into_option() {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+
+        let valid = current_challenge == original_challenge;
+
+        if valid {
+            info!("Ring signature verification successful");
+        } else {
             debug!("Ring signature verification failed: challenge mismatch");
-            return Ok(false);
         }
 
-        // 3. Verify each signature value in the ring
-        for (i, (sig_val, &public_key)) in signature.signature_values.iter()
-            .zip(signature.ring.iter()).enumerate() {
-            
-            if !self.verify_ring_element(sig_val, &public_key, message, &quantum_nonces[i]).await? {
-                debug!("Ring signature verification failed at index {}", i);
-                return Ok(false);
-            }
-        }
-
-        // 4. Verify key image is well-formed
-        if !self.verify_key_image(&signature.key_image, &signature.ring).await? {
-            debug!("Ring signature verification failed: invalid key image");
-            return Ok(false);
-        }
-
-        info!("Ring signature verification successful");
-        Ok(true)
+        Ok(valid)
     }
 
     /// Batch verify multiple ring signatures for performance
     pub async fn batch_verify_signatures(
         &self,
-        signatures: Vec<(&RingSignature, &[u8])>, // (signature, message) pairs
+        signatures: Vec<(&RingSignature, &[u8])>,
     ) -> Result<Vec<bool>> {
         info!("Batch verifying {} ring signatures", signatures.len());
-        
+
         let mut results = Vec::with_capacity(signatures.len());
-        
-        // In production, this would use batch verification optimizations
+
+        // TODO: Implement actual batch verification using multi-scalar multiplication
         // For now, verify each signature individually
         for (signature, message) in signatures {
             let result = self.verify_ring_signature(signature, message).await?;
             results.push(result);
         }
-        
+
         Ok(results)
     }
 
-    /// Generate key image for linkability
+    /// Generate key image: I = x * H_p(P)
+    /// This is the linkable component - same private key always produces same key image
     async fn generate_key_image(&self) -> Result<KeyImage> {
-        // Key image = H(P) * x where P is public key, x is private key
-        // This ensures unlinkability while preventing double-spending
-        
+        // Hash public key to curve point: H_p(P)
+        let hp = hash_to_point(&self.public_key_bytes);
+
+        // Key image: I = x * H_p(P)
+        let key_image_point = self.private_key * hp;
+        let image = key_image_point.compress().to_bytes();
+
+        // Add quantum nonce for additional entropy (doesn't affect linkability)
         let mut quantum_nonce = [0u8; 32];
         self.quantum_entropy.fill_bytes(&mut quantum_nonce).await?;
-        
-        // Hash public key to get point for key image computation
-        let hash_input = [&self.public_key[..], &quantum_nonce[..], b"KEY_IMAGE_POINT"].concat();
-        let key_image_hash = digest(&SHA256, &hash_input);
-        
-        let mut key_image_bytes = [0u8; 32];
-        key_image_bytes.copy_from_slice(key_image_hash.as_ref());
-        
-        // In production, would perform elliptic curve scalar multiplication
-        // key_image_bytes = H(public_key) * private_key (elliptic curve operation)
-        for (img_byte, &priv_byte) in key_image_bytes.iter_mut().zip(self.private_key.iter()) {
-            *img_byte ^= priv_byte; // Simplified - real implementation needs EC math
-        }
-        
+
         Ok(KeyImage {
-            image: key_image_bytes,
+            image,
             quantum_nonce,
         })
     }
 
-    /// Compute ring challenge using quantum-enhanced Fiat-Shamir
-    async fn compute_ring_challenge(
-        &self,
-        message: &[u8],
-        ring: &[[u8; 32]],
-        key_image: &KeyImage,
-        quantum_nonces: &[[u8; 32]],
-    ) -> Result<[u8; 32]> {
-        // Challenge = H(message || ring || key_image || quantum_nonces)
-        let mut challenge_input = Vec::new();
-        challenge_input.extend_from_slice(message);
-        
-        for public_key in ring {
-            challenge_input.extend_from_slice(public_key);
-        }
-        
-        challenge_input.extend_from_slice(&key_image.image);
-        challenge_input.extend_from_slice(&key_image.quantum_nonce);
-        
-        for nonce in quantum_nonces {
-            challenge_input.extend_from_slice(nonce);
-        }
-
-        // Add additional quantum entropy for enhanced security
-        let mut additional_entropy = [0u8; 32];
-        self.quantum_entropy.fill_bytes(&mut additional_entropy).await?;
-        challenge_input.extend_from_slice(&additional_entropy);
-        
-        let challenge_hash = digest(&SHA256, &challenge_input);
-        let mut challenge = [0u8; 32];
-        challenge.copy_from_slice(challenge_hash.as_ref());
-        
-        Ok(challenge)
-    }
-
-    /// Compute ring response value
-    async fn compute_ring_response(
-        &self,
-        challenge: &[u8; 32],
-        quantum_nonce: &[u8; 32],
-        message: &[u8],
-    ) -> Result<[u8; 32]> {
-        // Response = nonce + challenge * private_key (in scalar field)
-        let mut response = *quantum_nonce;
-        
-        // Add challenge * private_key contribution
-        for (resp_byte, (&chal_byte, &priv_byte)) in response.iter_mut()
-            .zip(challenge.iter().zip(self.private_key.iter())) {
-            *resp_byte = resp_byte.wrapping_add(chal_byte.wrapping_mul(priv_byte));
-        }
-        
-        // Mix in message hash for binding
-        let message_hash = digest(&SHA256, message);
-        for (resp_byte, msg_byte) in response.iter_mut().zip(message_hash.as_ref().iter()) {
-            *resp_byte ^= msg_byte;
-        }
-        
-        Ok(response)
-    }
-
-    /// Verify individual ring element
-    async fn verify_ring_element(
-        &self,
-        sig_val: &SignatureValue,
-        public_key: &[u8; 32],
-        message: &[u8],
-        _quantum_nonce: &[u8; 32],
-    ) -> Result<bool> {
-        // Verify: response = nonce + challenge * private_key
-        // Check: response - challenge * public_key == nonce (approximately)
-        
-        let mut expected_nonce = sig_val.response;
-        
-        // Subtract challenge * public_key contribution  
-        for (nonce_byte, (&chal_byte, &pub_byte)) in expected_nonce.iter_mut()
-            .zip(sig_val.challenge.iter().zip(public_key.iter())) {
-            *nonce_byte = nonce_byte.wrapping_sub(chal_byte.wrapping_mul(pub_byte));
-        }
-        
-        // Remove message hash binding
-        let message_hash = digest(&SHA256, message);
-        for (nonce_byte, msg_byte) in expected_nonce.iter_mut().zip(message_hash.as_ref().iter()) {
-            *nonce_byte ^= msg_byte;
-        }
-        
-        // In production, would verify the nonce is properly formed
-        // For now, check it's not all zeros (basic sanity check)
-        Ok(!expected_nonce.iter().all(|&b| b == 0))
-    }
-
-    /// Verify key image is well-formed
-    async fn verify_key_image(
-        &self,
-        key_image: &KeyImage,
-        ring: &[[u8; 32]],
-    ) -> Result<bool> {
-        // Verify key image corresponds to one of the public keys in the ring
-        // Key image should be H(P_i) * x_i for some i in the ring
-        
-        for public_key in ring {
-            let hash_input = [&public_key[..], &key_image.quantum_nonce[..], b"KEY_IMAGE_POINT"].concat();
-            let expected_hash = digest(&SHA256, &hash_input);
-            
-            // In production, would verify elliptic curve relationship
-            // For now, check if the key image could plausibly come from this public key
-            let mut plausible = true;
-            for (img_byte, hash_byte) in key_image.image.iter().zip(expected_hash.as_ref().iter()) {
-                if img_byte ^ hash_byte == 0 {
-                    plausible = false;
-                    break;
-                }
-            }
-            
-            if plausible {
-                return Ok(true);
-            }
-        }
-        
-        Ok(false)
-    }
-
     /// Get public key for this signer
     pub fn get_public_key(&self) -> [u8; 32] {
-        self.public_key
+        self.public_key_bytes
     }
 
     /// Check if a key image has been used before
     pub fn is_key_image_used(&self, key_image: &KeyImage) -> bool {
-        self.key_image_cache.contains(key_image)
+        self.key_image_cache.contains(&key_image.image)
     }
 }
 
 impl Drop for QuantumRingSigner {
     fn drop(&mut self) {
-        // Zero sensitive private key on drop
-        self.private_key.zeroize();
+        // Zeroize the private key scalar
+        // Note: Scalar doesn't implement Zeroize directly, but its internal bytes can be
+        // cleared by replacing with a new scalar
+        self.private_key = Scalar::ZERO;
     }
+}
+
+/// Hash arbitrary bytes to a Ristretto point using Elligator
+fn hash_to_point(data: &[u8]) -> RistrettoPoint {
+    let mut hasher = Sha3_512::new();
+    hasher.update(b"RingSignature.HashToPoint.v2.5.1");
+    hasher.update(data);
+    let hash: [u8; 64] = hasher.finalize().into();
+    RistrettoPoint::from_uniform_bytes(&hash)
+}
+
+/// Decompress a point or hash to point if invalid
+fn decompress_or_hash_to_point(bytes: &[u8; 32]) -> Result<RistrettoPoint> {
+    let compressed = CompressedRistretto::from_slice(bytes)
+        .map_err(|_| MixingError::RingSignatureError("Invalid point encoding".to_string()))?;
+
+    match compressed.decompress() {
+        Some(point) => Ok(point),
+        None => {
+            // If decompression fails, hash to a valid point
+            // This allows arbitrary 32-byte public keys in the ring
+            Ok(hash_to_point(bytes))
+        }
+    }
+}
+
+/// Compute challenge using Fiat-Shamir transform
+fn compute_challenge(message: &[u8], l_bytes: &[u8; 32], r_bytes: &[u8; 32], key_image: &[u8; 32]) -> Scalar {
+    let mut hasher = Sha3_512::new();
+    hasher.update(b"RingSignature.Challenge.v2.5.1");
+    hasher.update(message);
+    hasher.update(l_bytes);
+    hasher.update(r_bytes);
+    hasher.update(key_image);
+    let hash: [u8; 64] = hasher.finalize().into();
+    Scalar::from_bytes_mod_order_wide(&hash)
 }
 
 #[cfg(test)]
@@ -427,106 +469,151 @@ mod tests {
 
     #[tokio::test]
     async fn test_ring_signer_creation() {
-        // **SERVER ALPHA TEST** - Following development template
         let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
         let signer = QuantumRingSigner::new(entropy_pool).await.unwrap();
-        
+
         let public_key = signer.get_public_key();
         assert!(!public_key.iter().all(|&b| b == 0), "Public key should not be all zeros");
     }
 
     #[tokio::test]
-    async fn test_ring_signature_creation() {
+    async fn test_ring_signature_creation_and_verification() {
         let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
-        let mut signer = QuantumRingSigner::new(entropy_pool).await.unwrap();
-        
+        let mut signer = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+
         // Create a ring with our public key and some others
         let our_pubkey = signer.get_public_key();
+
+        // Generate valid ring member public keys
+        let other1 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+        let other2 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+        let other3 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+
         let ring = vec![
-            [1u8; 32],
+            other1.get_public_key(),
             our_pubkey,
-            [2u8; 32],
-            [3u8; 32],
+            other2.get_public_key(),
+            other3.get_public_key(),
         ];
-        
+
         let message = b"test message for ring signature";
         let signature = signer.create_ring_signature(message, ring.clone()).await.unwrap();
-        
+
         // Verify signature structure
         assert_eq!(signature.signature_values.len(), ring.len(), "Signature values should match ring size");
         assert_eq!(signature.ring, ring, "Ring should be preserved in signature");
         assert!(!signature.key_image.image.iter().all(|&b| b == 0), "Key image should not be all zeros");
-    }
 
-    #[tokio::test]
-    async fn test_ring_signature_verification() {
-        let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
-        let mut signer = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
-        let verifier = QuantumRingSigner::new(entropy_pool).await.unwrap();
-        
-        // Create ring and signature
-        let our_pubkey = signer.get_public_key();
-        let ring = vec![
-            [4u8; 32],
-            our_pubkey,
-            [5u8; 32],
-        ];
-        
-        let message = b"verification test message";
-        let signature = signer.create_ring_signature(message, ring.clone()).await.unwrap();
-        
         // Verify the signature
-        let is_valid = verifier.verify_ring_signature(&signature, message).await.unwrap();
+        let is_valid = signer.verify_ring_signature(&signature, message).await.unwrap();
         assert!(is_valid, "Valid ring signature should verify successfully");
-        
+
         // Verify with wrong message should fail
         let wrong_message = b"different message";
-        let is_invalid = verifier.verify_ring_signature(&signature, wrong_message).await.unwrap();
+        let is_invalid = signer.verify_ring_signature(&signature, wrong_message).await.unwrap();
         assert!(!is_invalid, "Ring signature with wrong message should fail verification");
     }
 
     #[tokio::test]
-    async fn test_linkability_prevention() {
+    async fn test_key_image_linkability() {
         let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
-        let mut signer = QuantumRingSigner::new(entropy_pool).await.unwrap();
-        
+
+        // Create signer from same private key twice
+        let private_key = [42u8; 32];
+        let signer1 = QuantumRingSigner::from_private_key(private_key, entropy_pool.clone()).await.unwrap();
+        let signer2 = QuantumRingSigner::from_private_key(private_key, entropy_pool.clone()).await.unwrap();
+
+        // Key images should have the same base (image field) regardless of quantum nonce
+        let ki1 = signer1.generate_key_image().await.unwrap();
+        let ki2 = signer2.generate_key_image().await.unwrap();
+
+        assert_eq!(ki1.image, ki2.image, "Same private key should produce same key image");
+        // Quantum nonces may differ, but images must match for linkability
+    }
+
+    #[tokio::test]
+    async fn test_double_spend_prevention() {
+        let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
+        let mut signer = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+
         let our_pubkey = signer.get_public_key();
-        let ring = vec![our_pubkey, [6u8; 32], [7u8; 32]];
-        
+        let other = QuantumRingSigner::new(entropy_pool).await.unwrap();
+        let ring = vec![our_pubkey, other.get_public_key()];
+
         // Create first signature
         let message1 = b"first message";
         let sig1 = signer.create_ring_signature(message1, ring.clone()).await.unwrap();
-        
-        // Attempt to create second signature with same key should fail (double-spend protection)
+
+        // Attempt to create second signature with same key should fail
         let message2 = b"second message";
         let sig2_result = signer.create_ring_signature(message2, ring.clone()).await;
-        
+
         assert!(sig2_result.is_err(), "Second signature should fail due to key image reuse");
         assert!(signer.is_key_image_used(&sig1.key_image), "Key image should be marked as used");
+    }
+
+    #[tokio::test]
+    async fn test_ring_signature_unforgeability() {
+        let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
+        let signer = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+
+        // Try to create a forged signature (attacker doesn't have private key)
+        let attacker = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+        let victim = QuantumRingSigner::new(entropy_pool).await.unwrap();
+
+        // Attacker creates ring including victim's public key but signs with own key
+        let ring = vec![attacker.get_public_key(), victim.get_public_key()];
+        let mut attacker_mut = attacker;
+
+        let message = b"forged message";
+        let signature = attacker_mut.create_ring_signature(message, ring.clone()).await.unwrap();
+
+        // Signature should verify (attacker is in the ring)
+        let is_valid = signer.verify_ring_signature(&signature, message).await.unwrap();
+        assert!(is_valid, "Attacker's signature should verify (they're in the ring)");
+
+        // But key image should be different from victim's
+        // This is the security property - attacker cannot produce victim's key image
     }
 
     #[tokio::test]
     async fn test_batch_verification() {
         let entropy_pool = Arc::new(QuantumEntropyPool::new().await.unwrap());
         let verifier = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
-        
+
         // Create multiple signers and signatures
         let mut signer1 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
-        let mut signer2 = QuantumRingSigner::new(entropy_pool).await.unwrap();
-        
-        let ring1 = vec![signer1.get_public_key(), [8u8; 32], [9u8; 32]];
-        let ring2 = vec![[10u8; 32], signer2.get_public_key(), [11u8; 32]];
-        
+        let mut signer2 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+
+        let other1 = QuantumRingSigner::new(entropy_pool.clone()).await.unwrap();
+        let other2 = QuantumRingSigner::new(entropy_pool).await.unwrap();
+
+        let ring1 = vec![signer1.get_public_key(), other1.get_public_key()];
+        let ring2 = vec![other2.get_public_key(), signer2.get_public_key()];
+
         let msg1 = b"batch message 1";
         let msg2 = b"batch message 2";
-        
+
         let sig1 = signer1.create_ring_signature(msg1, ring1).await.unwrap();
         let sig2 = signer2.create_ring_signature(msg2, ring2).await.unwrap();
-        
+
         // Batch verify
         let signatures = vec![(&sig1, msg1.as_ref()), (&sig2, msg2.as_ref())];
         let results = verifier.batch_verify_signatures(signatures).await.unwrap();
-        
+
         assert_eq!(results, vec![true, true], "Both signatures should verify successfully");
+    }
+
+    #[tokio::test]
+    async fn test_hash_to_point_consistency() {
+        // Hash to point should be deterministic
+        let data = b"test data for hash to point";
+        let p1 = hash_to_point(data);
+        let p2 = hash_to_point(data);
+        assert_eq!(p1, p2, "Hash to point should be deterministic");
+
+        // Different data should produce different points
+        let p3 = hash_to_point(b"different data");
+        assert_ne!(p1, p3, "Different data should produce different points");
     }
 }

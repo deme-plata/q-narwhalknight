@@ -240,8 +240,9 @@ pub async fn reorganize_chain(
     info!("✅ Chain reorganization complete!");
     info!("   New chain height: {}", final_height);
     info!("   Total accounts: {}", final_balances.len());
+    // v2.10.0: Updated to u128 for 24 decimal precision (10^24 divisor)
     info!("   Total supply: {} QNK",
-          final_balances.values().sum::<u64>() / 1_000_000_000);
+          final_balances.values().sum::<u128>() / 1_000_000_000_000_000_000_000_000);
 
     let stats = ReorgStats {
         fork_point,

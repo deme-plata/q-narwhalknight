@@ -317,6 +317,8 @@ pub struct OracleAggregator {
     min_sources: usize,
     /// Whether to use simulated oracle as fallback
     use_simulated_fallback: bool,
+    /// v2.4.9-beta: Ed25519 signing key for oracle attestations
+    signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 impl OracleAggregator {
@@ -325,7 +327,14 @@ impl OracleAggregator {
             providers: vec![],
             min_sources: 1,
             use_simulated_fallback: true,
+            signing_key: None,
         }
+    }
+
+    /// v2.4.9-beta: Set signing key for oracle attestations
+    pub fn with_signing_key(mut self, key: Arc<ed25519_dalek::SigningKey>) -> Self {
+        self.signing_key = Some(key);
+        self
     }
 
     /// Create with default providers (simulated for dev, production for mainnet)
@@ -436,18 +445,38 @@ impl OracleAggregator {
     }
 
     /// Create a PredictionOutcome from aggregated oracle data
+    /// v2.4.9-beta: Now signs oracle outcomes with Ed25519 for cryptographic attestation
     pub async fn create_outcome(&self, domain: &str, outcome_type: OutcomeType) -> Result<PredictionOutcome> {
+        use ed25519_dalek::Signer;
+
         let aggregated = self.fetch_aggregated(domain, &outcome_type).await?;
+        let outcome_id = uuid::Uuid::new_v4().to_string();
+
+        // v2.4.9-beta: Create canonical data to sign (id + domain + value + timestamp)
+        let oracle_signature = if let Some(ref signing_key) = self.signing_key {
+            let mut sign_data = Vec::with_capacity(128);
+            sign_data.extend_from_slice(outcome_id.as_bytes());
+            sign_data.extend_from_slice(domain.as_bytes());
+            sign_data.extend_from_slice(&aggregated.value.to_le_bytes());
+            sign_data.extend_from_slice(&aggregated.timestamp.to_le_bytes());
+            let signature = signing_key.sign(&sign_data);
+            debug!("🔐 Signed oracle outcome {} with Ed25519 ({} bytes)",
+                   outcome_id, signature.to_bytes().len());
+            signature.to_bytes().to_vec()
+        } else {
+            warn!("⚠️ No signing key set - oracle outcome {} unsigned", outcome_id);
+            vec![]
+        };
 
         Ok(PredictionOutcome {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: outcome_id,
             domain: domain.to_string(),
             outcome_type,
             predicted_value: 0.0,  // Not applicable for oracle
             actual_value: aggregated.value,
             timestamp: aggregated.timestamp,
             confidence_threshold: aggregated.confidence,
-            oracle_signature: vec![],  // TODO: Add signature
+            oracle_signature,
         })
     }
 }

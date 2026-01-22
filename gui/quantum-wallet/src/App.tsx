@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
 import TransactionScreenV2 from './components/TransactionScreenV2';
@@ -14,12 +14,45 @@ import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
 import AIWorkerDemo from './components/AIWorkerDemo';
+import AnimatedBorder from './components/AnimatedBorder';
 import './App.css';
 
 type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
+
+  // v2.4.0: Performance mode state - disables heavy effects (DEFAULT: ON for better UX)
+  const [performanceMode, setPerformanceMode] = useState(() => {
+    const saved = localStorage.getItem('performanceMode');
+    // Default to true if not set
+    return saved === null ? true : saved === 'true';
+  });
+
+  // v2.4.0: Apply performance mode on initial load and listen for changes
+  useEffect(() => {
+    if (performanceMode) {
+      document.documentElement.classList.add('performance-mode');
+    } else {
+      document.documentElement.classList.remove('performance-mode');
+    }
+  }, [performanceMode]);
+
+  // Listen for performance mode changes from Settings
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const newMode = localStorage.getItem('performanceMode') === 'true';
+      setPerformanceMode(newMode);
+    };
+    window.addEventListener('storage', handleStorageChange);
+    // Also listen for custom event from same tab
+    const handlePerfChange = () => handleStorageChange();
+    window.addEventListener('performance-mode-changed', handlePerfChange);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('performance-mode-changed', handlePerfChange);
+    };
+  }, []);
 
   // Load authentication state from localStorage on mount
   const [authenticated, setAuthenticated] = useState(() => {
@@ -33,9 +66,14 @@ function App() {
   });
   // CRITICAL FIX v0.9.44-beta: Initialize balance from cached value for instant display
   // This prevents balance showing as zero while waiting for API/SSE
+  // 🚨 v2.3.7-beta: Handle NaN from parseFloat and ensure valid number
   const [nodeData, setNodeData] = useState(() => {
     const cachedBalance = localStorage.getItem('cachedBalance');
-    const initialBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
+    let initialBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
+    // Guard against NaN - parseFloat returns NaN for invalid strings
+    if (isNaN(initialBalance) || !isFinite(initialBalance)) {
+      initialBalance = 0;
+    }
     console.log('⚡ App.tsx: Initializing balance from cache:', {
       raw: cachedBalance,
       parsed: initialBalance,
@@ -54,6 +92,10 @@ function App() {
 
   // Debounce balance updates to prevent flickering
   const [pendingBalanceUpdate, setPendingBalanceUpdate] = useState<number | null>(null);
+
+  // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
+  // SSE balance updates from server can be stale and overwrite correct DEX swap balance
+  const dexSwapInProgressRef = useRef(false);
 
   // Debug: Log whenever currentScreen changes
   useEffect(() => {
@@ -74,26 +116,61 @@ function App() {
     localStorage.setItem('authenticated', String(authenticated));
   }, [authenticated]);
 
-  // Debounce balance updates - only apply after 300ms of stability
+  // v2.9.24-beta: FAST balance updates for better UX when receiving coins
+  // Balance INCREASES: Apply immediately (instant feedback when receiving)
+  // Balance DECREASES: Small 50ms debounce to prevent flickering
   useEffect(() => {
     if (pendingBalanceUpdate === null) return;
 
-    console.log('⏱️ [BALANCE DEBUG] Pending balance update queued:', {
-      pendingValue: pendingBalanceUpdate,
-      currentValue: nodeData.balance,
-      willUpdateIn: '300ms'
-    });
+    // v2.3.31-beta: Check BOTH local ref AND global localStorage cooldown
+    const globalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+    const globalCooldownActive = Date.now() < globalCooldownUntil;
+    if (dexSwapInProgressRef.current || globalCooldownActive) {
+      console.log('🚫 [BALANCE DEBUG] Ignoring debounced update during DEX cooldown (global:', globalCooldownActive, ')');
+      setPendingBalanceUpdate(null);
+      return;
+    }
 
-    const timer = setTimeout(() => {
-      console.log('✅ [BALANCE DEBUG] Applying debounced balance update:', {
+    const isBalanceIncrease = pendingBalanceUpdate > nodeData.balance;
+
+    // v2.9.24-beta: INSTANT updates for receiving coins (balance increases)
+    if (isBalanceIncrease) {
+      console.log('⚡ [BALANCE DEBUG] INSTANT balance increase (receiving coins):', {
         oldBalance: nodeData.balance,
         newBalance: pendingBalanceUpdate,
-        source: 'debounced'
+        increase: pendingBalanceUpdate - nodeData.balance
       });
       setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
       localStorage.setItem('cachedBalance', pendingBalanceUpdate.toString());
       setPendingBalanceUpdate(null);
-    }, 300);
+      return;
+    }
+
+    // v2.9.24-beta: Fast 50ms debounce for balance decreases (sending coins)
+    console.log('⏱️ [BALANCE DEBUG] Pending balance decrease queued:', {
+      pendingValue: pendingBalanceUpdate,
+      currentValue: nodeData.balance,
+      willUpdateIn: '50ms'
+    });
+
+    const timer = setTimeout(() => {
+      // v2.3.31-beta: Double-check cooldown before applying (both local and global)
+      const timerGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+      const timerGlobalCooldownActive = Date.now() < timerGlobalCooldownUntil;
+      if (dexSwapInProgressRef.current || timerGlobalCooldownActive) {
+        console.log('🚫 [BALANCE DEBUG] Skipping debounced update - DEX cooldown active (global:', timerGlobalCooldownActive, ')');
+        setPendingBalanceUpdate(null);
+        return;
+      }
+      console.log('✅ [BALANCE DEBUG] Applying debounced balance update:', {
+        oldBalance: nodeData.balance,
+        newBalance: pendingBalanceUpdate,
+        source: 'debounced-50ms'
+      });
+      setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
+      localStorage.setItem('cachedBalance', pendingBalanceUpdate.toString());
+      setPendingBalanceUpdate(null);
+    }, 50);  // v2.9.24-beta: Reduced from 300ms to 50ms for faster UX
 
     return () => clearTimeout(timer);
   }, [pendingBalanceUpdate, nodeData.balance]);
@@ -107,6 +184,14 @@ function App() {
     let mounted = true;
 
     const fetchNodeStatus = async () => {
+      // v2.3.31-beta: Check BOTH local ref AND global cooldown
+      const fetchGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+      const fetchGlobalCooldownActive = Date.now() < fetchGlobalCooldownUntil;
+      if (dexSwapInProgressRef.current || fetchGlobalCooldownActive) {
+        console.log('🚫 App.tsx fetchNodeStatus: SKIPPING during DEX cooldown (global:', fetchGlobalCooldownActive, ')');
+        return;
+      }
+
       try {
         const response = await fetch('/api/v1/node/status');
         if (!response.ok) throw new Error('Failed to fetch node status');
@@ -114,12 +199,22 @@ function App() {
         const data = await response.json();
         if (!mounted) return;
 
+        // v2.3.31-beta: Double-check cooldown after async call (both local and global)
+        const postFetchGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+        const postFetchGlobalCooldownActive = Date.now() < postFetchGlobalCooldownUntil;
+        if (dexSwapInProgressRef.current || postFetchGlobalCooldownActive) {
+          console.log('🚫 App.tsx fetchNodeStatus: SKIPPING after fetch - DEX cooldown (global:', postFetchGlobalCooldownActive, ')');
+          return;
+        }
+
         if (data.success && data.data) {
-          // Don't fetch balance here - SSE will provide it
-          // Using cached balance prevents flickering between API (RocksDB) and SSE (in-memory) values
+          // 🚨 v2.3.7-beta FIX: Use cached balance for instant display
+          // Dashboard handles authenticated API calls and dispatches balance-update events
+          // App.tsx cannot call balance API directly - requires auth session which may not be ready
           const cachedBalance = localStorage.getItem('cachedBalance');
           let walletBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
-          console.log('💰 App.tsx: Using cached balance (SSE will update):', walletBalance);
+          if (isNaN(walletBalance) || !isFinite(walletBalance)) walletBalance = 0;
+          console.log('💰 App.tsx: Using cached balance:', walletBalance, '(Dashboard will update via events)');
 
           if (mounted) {
             // Calculate dynamic Quantum Coherence Index (QCI)
@@ -172,16 +267,58 @@ function App() {
 
       if (customEvent.detail?.balance !== undefined) {
         const newBalance = customEvent.detail.balance;
+        const source = customEvent.detail?.source || '';
+
+        // v2.3.13-beta: Track DEX swaps to block SSE from overwriting
+        const isDexSwap = source.includes('DexScreen.swap');
+        if (isDexSwap) {
+          dexSwapInProgressRef.current = true;
+          console.log('🔒 App.tsx: DEX swap detected, blocking SSE balance updates for 10 seconds');
+
+          // v2.3.13-beta: For DEX swaps, update IMMEDIATELY without debounce
+          console.log('🔥 App.tsx: DEX SWAP - Force updating TopBar balance to:', newBalance);
+          setNodeData(prev => ({ ...prev, balance: newBalance }));
+          localStorage.setItem('cachedBalance', newBalance.toString());
+
+          // Clear the flag after 10 seconds
+          setTimeout(() => {
+            dexSwapInProgressRef.current = false;
+            console.log('🔓 App.tsx: DEX swap cooldown ended, SSE balance updates re-enabled');
+          }, 10000);
+
+          return; // Skip debounce for DEX swaps
+        }
+
+        // v2.3.31-beta: Check BOTH local ref AND global cooldown
+        const nonDexGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+        const nonDexGlobalCooldownActive = Date.now() < nonDexGlobalCooldownUntil;
+        if (dexSwapInProgressRef.current || nonDexGlobalCooldownActive) {
+          console.log('🚫 App.tsx: IGNORING non-DEX balance-update during cooldown (global:', nonDexGlobalCooldownActive, '):', {
+            staleBalance: newBalance,
+            source: source
+          });
+          return;
+        }
+
         console.log('🟡 [BALANCE DEBUG] Custom balance-update event:', {
           newBalance: newBalance,
           currentBalance: nodeData.balance,
-          source: 'custom-event'
+          source: source,
+          isDexSwap: isDexSwap
         });
 
-        // Use debounced update to prevent flickering
+        // Use debounced update for non-DEX updates to prevent flickering
         setPendingBalanceUpdate(newBalance);
         console.log('⏱️ [BALANCE DEBUG] Balance update queued from custom event (debounced):', newBalance);
       } else {
+        // v2.3.31-beta: Block API refresh during cooldown (both local and global)
+        const apiGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+        const apiGlobalCooldownActive = Date.now() < apiGlobalCooldownUntil;
+        if (dexSwapInProgressRef.current || apiGlobalCooldownActive) {
+          console.log('🚫 App.tsx: IGNORING API balance refresh during cooldown (global:', apiGlobalCooldownActive, ')');
+          return;
+        }
+
         // If no balance in event, refresh from API (will fetch and cache fresh balance)
         console.log('🔄 App.tsx: No balance in event, fetching from API');
 
@@ -220,6 +357,24 @@ function App() {
     };
 
     window.addEventListener('balance-update', handleBalanceUpdate);
+
+    // v2.3.33-beta: Listen for dex-cooldown-expired to clear refs and update balance
+    const handleDexCooldownExpired = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { qugBalance, source } = customEvent.detail;
+      console.log('🔄 App.tsx: Received dex-cooldown-expired from', source, 'balance:', qugBalance);
+
+      // Clear the DEX swap in progress flag
+      dexSwapInProgressRef.current = false;
+
+      // Update nodeData with correct balance from cache
+      if (typeof qugBalance === 'number' && !isNaN(qugBalance)) {
+        console.log('🔄 App.tsx: Syncing nodeData balance after cooldown:', qugBalance);
+        setNodeData(prev => ({ ...prev, balance: qugBalance }));
+      }
+    };
+
+    window.addEventListener('dex-cooldown-expired', handleDexCooldownExpired);
 
     // Set up authenticated SSE for real-time updates with privacy filtering
     // Using custom fetch-based SSE to support X-Wallet-Auth authentication header
@@ -330,25 +485,65 @@ function App() {
 
               // Only update if this balance event is for the current wallet
               if (currentHex && eventHex === currentHex) {
+                const changeReason = balanceData.change_reason || '';
+                const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
+
+                // v2.3.31-beta: Check BOTH local ref AND global cooldown for SSE updates
+                const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+                const sseGlobalCooldownActive = Date.now() < sseGlobalCooldownUntil;
+                if (dexSwapInProgressRef.current || sseGlobalCooldownActive) {
+                  console.log('🚫 App.tsx: IGNORING SSE balance update - DEX cooldown (global:', sseGlobalCooldownActive, ')', {
+                    staleBalance: balanceData.new_balance,
+                    reason: changeReason
+                  });
+                  return; // Skip this SSE update entirely
+                }
+
                 console.log('🟢 [BALANCE DEBUG] SSE balance-updated event:', {
                   oldBalance: balanceData.old_balance,
                   newBalance: balanceData.new_balance,
                   currentNodeDataBalance: nodeData.balance,
                   reason: balanceData.change_reason,
+                  isP2PMiningReward,
                   source: 'SSE'
                 });
-                // Use debounced update to prevent flickering
-                setPendingBalanceUpdate(balanceData.new_balance);
-                console.log('⏱️ [BALANCE DEBUG] Balance update queued (debounced):', balanceData.new_balance);
 
-                // Dispatch custom event for Dashboard to update wallet balances
-                window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-                  detail: {
-                    symbol: 'QUG',
-                    balance: balanceData.new_balance,
-                    reason: balanceData.change_reason
-                  }
-                }));
+                if (isP2PMiningReward) {
+                  // v3.2.9-beta: Backend now correctly tracks accumulated balance!
+                  // The in-memory HashMap sync fix means new_balance is ACCURATE.
+                  // Just use new_balance directly - no more manual accumulation needed.
+                  const rewardAmount = (balanceData.new_balance || 0) - (balanceData.old_balance || 0);
+                  console.log('💰 App.tsx: P2P mining reward - using backend balance:', {
+                    rewardAmount,
+                    backendNewBalance: balanceData.new_balance,
+                    backendOldBalance: balanceData.old_balance
+                  });
+                  setPendingBalanceUpdate(balanceData.new_balance);
+                  console.log('⏱️ [BALANCE DEBUG] P2P balance from backend:', balanceData.new_balance);
+
+                  // Dispatch with backend's accumulated balance
+                  window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                    detail: {
+                      symbol: 'QUG',
+                      balance: balanceData.new_balance,
+                      reason: balanceData.change_reason,
+                      rewardAmount
+                    }
+                  }));
+                } else {
+                  // Local mining rewards: use new_balance directly
+                  setPendingBalanceUpdate(balanceData.new_balance);
+                  console.log('⏱️ [BALANCE DEBUG] Balance update queued (debounced):', balanceData.new_balance);
+
+                  // Dispatch custom event for Dashboard to update wallet balances
+                  window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                    detail: {
+                      symbol: 'QUG',
+                      balance: balanceData.new_balance,
+                      reason: balanceData.change_reason
+                    }
+                  }));
+                }
                 console.log('📢 App.tsx: Dispatched wallet-balance-updated event for Dashboard');
               } else {
                 console.log('❌ App.tsx: Balance update IGNORED (not for current wallet)', {
@@ -358,7 +553,18 @@ function App() {
               }
             } else if (type === 'token-balance-updated') {
               // v1.4.10-beta: Handle custom token balance updates for instant DEX updates
+              // v2.9.16-beta: Check cooldown BEFORE dispatching - this is the root cause fix!
               const tokenData = parsedData.data || parsedData;
+              const tokenSymbol = tokenData.token_symbol || '';
+              const tokenUpper = tokenSymbol.toUpperCase();
+
+              // v2.9.16-beta: Check if we're in cooldown - if so, DON'T dispatch stale SSE events
+              const now = Date.now();
+              const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
+              if (now < globalCooldownUntil) {
+                console.log(`🛡️ [App.tsx v2.9.16] BLOCKED SSE token-balance-updated for ${tokenUpper} - cooldown active for ${Math.round((globalCooldownUntil - now) / 1000)}s more`);
+                return; // Don't dispatch during cooldown - this prevents stale data from reaching ANY component
+              }
 
               const currentWalletAddress = localStorage.getItem('walletAddress');
               const currentHex = currentWalletAddress?.startsWith('qnk')
@@ -392,11 +598,40 @@ function App() {
                     newBalance: tokenData.new_balance,
                     reason: tokenData.change_reason,
                     blockHeight: tokenData.block_height,
-                    confirmationStatus: tokenData.confirmation_status
+                    confirmationStatus: tokenData.confirmation_status,
+                    source: 'backend-sse' // v2.9.16: Mark source for debugging
                   }
                 }));
                 console.log('📢 App.tsx: Dispatched token-balance-updated event for DEX');
               }
+            } else if (type === 'token_price_update') {
+              // v2.9.25-beta: Forward token_price_update to DexScreen via CustomEvent
+              // This ensures price updates are received even when DexScreen's own EventSource disconnects
+              const priceData = parsedData.data || parsedData;
+              console.log('📈 App.tsx: Token price update SSE received!', {
+                symbol: priceData.token_symbol,
+                address: priceData.token_address,
+                price: priceData.price,
+                change1h: priceData.change_1h,
+                change24h: priceData.change_24h,
+                change7d: priceData.change_7d,
+                volume24h: priceData.volume_24h
+              });
+
+              // Dispatch to window for DexScreen to catch
+              window.dispatchEvent(new CustomEvent('token-price-updated', {
+                detail: {
+                  token_symbol: priceData.token_symbol,
+                  token_address: priceData.token_address,
+                  price: priceData.price,
+                  change_1h: priceData.change_1h,
+                  change_24h: priceData.change_24h,
+                  change_7d: priceData.change_7d,
+                  volume_24h: priceData.volume_24h,
+                  source: 'app-sse-forward'
+                }
+              }));
+              console.log('📢 App.tsx: Dispatched token-price-updated event for DexScreen');
             } else if (type === 'faucet-dispensed') {
               console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
               fetchNodeStatus();
@@ -419,6 +654,79 @@ function App() {
                 }
               }));
               console.log('📢 App.tsx: Dispatched loan-approved event for Dashboard');
+            } else if (type === 'pending_mining_reward') {
+              // v2.3.31-beta: Check BOTH local ref AND global cooldown
+              const miningGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+              const miningGlobalCooldownActive = Date.now() < miningGlobalCooldownUntil;
+              if (dexSwapInProgressRef.current || miningGlobalCooldownActive) {
+                console.log('🚫 App.tsx: IGNORING pending_mining_reward SSE - DEX cooldown (global:', miningGlobalCooldownActive, ')');
+                return;
+              }
+
+              // v2.7.5-beta: Handle P2P pending mining rewards for instant balance updates
+              // When mining to a peer node, bootstrap receives mining stats via P2P gossipsub
+              // This provides instant feedback even before the block is confirmed
+              const rewardData = parsedData.data || parsedData;
+
+              const currentWalletAddress = localStorage.getItem('walletAddress');
+              const currentHex = currentWalletAddress?.startsWith('qnk')
+                ? currentWalletAddress.substring(3)
+                : currentWalletAddress;
+
+              // Handle address matching (with or without "qnk" prefix)
+              let eventHex = rewardData.miner_address;
+              if (eventHex?.startsWith('qnk')) {
+                eventHex = eventHex.substring(3);
+              }
+
+              console.log('💎 App.tsx: Pending mining reward SSE event!', {
+                minerAddress: eventHex,
+                currentWallet: currentHex,
+                match: eventHex === currentHex,
+                pendingReward: rewardData.pending_reward_qnk,
+                fromNode: rewardData.from_node_id
+              });
+
+              // Only update if this reward is for the current wallet
+              if (currentHex && eventHex === currentHex) {
+                // ADD the pending reward to the current balance (don't replace!)
+                const currentBalance = nodeData.balance;
+                const rewardQnk = rewardData.pending_reward_qnk || 0;
+                const newBalance = currentBalance + rewardQnk;
+
+                console.log('🟢 [PENDING REWARD] Adding to balance:', {
+                  currentBalance,
+                  pendingReward: rewardQnk,
+                  newBalance,
+                  source: 'P2P_SSE'
+                });
+
+                // Update balance with the new total (current + pending reward)
+                setPendingBalanceUpdate(newBalance);
+
+                // Also dispatch event for Dashboard to update wallet balances
+                window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                  detail: {
+                    symbol: 'QUG',
+                    balance: newBalance,
+                    reason: 'pending_mining_reward'
+                  }
+                }));
+                console.log('📢 App.tsx: Dispatched wallet-balance-updated for pending mining reward');
+              }
+            } else if (type === 'mining_stats') {
+              // v2.7.5-beta: Handle P2P mining stats (hash rate, solutions count)
+              // These are informational - no balance update needed
+              const statsData = parsedData.data || parsedData;
+              console.log('📊 App.tsx: Mining stats SSE event:', {
+                minerAddress: statsData.miner_address,
+                hashRate: statsData.hash_rate_khs,
+                solutionsCount: statsData.solutions_count
+              });
+              // Dispatch for MiningScreen to update stats display
+              window.dispatchEvent(new CustomEvent('mining-stats-updated', {
+                detail: statsData
+              }));
             } else {
               console.log(`📨 App.tsx: SSE event type '${type}' received:`, parsedData);
             }
@@ -498,6 +806,7 @@ function App() {
       console.log('🎬 App.tsx: useEffect cleanup - closing SSE');
       mounted = false;
       window.removeEventListener('balance-update', handleBalanceUpdate);
+      window.removeEventListener('dex-cooldown-expired', handleDexCooldownExpired);
       // SSE stream will automatically stop when mounted = false
     };
   }, [authenticated]);
@@ -527,10 +836,13 @@ function App() {
   if (!authenticated) {
     console.log('🔓 Rendering LoginScreen');
     return (
-      <div className="min-h-screen bg-quantum-dark relative overflow-hidden">
-        <QuantumBackground />
-        <LoginScreen onAuthenticate={() => setAuthenticated(true)} />
-      </div>
+      <AnimatedBorder>
+        <div className="min-h-full relative overflow-hidden" style={{ background: 'transparent' }}>
+          {/* v2.4.0: Skip QuantumBackground in performance mode */}
+          {!performanceMode && <QuantumBackground />}
+          <LoginScreen onAuthenticate={() => setAuthenticated(true)} />
+        </div>
+      </AnimatedBorder>
     );
   }
 
@@ -553,52 +865,63 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-quantum-dark relative overflow-hidden">
-      <QuantumBackground />
-
-      <div className="relative z-10 flex flex-col min-h-screen">
-        {/* Global TopBar */}
-        <TopBar
-          currentBalance={nodeData.balance}
-          nodeId={nodeData.nodeId}
-          blockHeight={nodeData.blockHeight}
-          peers={nodeData.peers}
-          isOnline={nodeData.isOnline}
-          qci={nodeData.qci}
-        />
-
-        {/* Token Bar - Below TopBar */}
-        <TokenBar onTokenClick={handleTokenClick} />
-
-        <div className="flex flex-1 lg:flex-row">
-          <Navigation
-            currentScreen={currentScreen}
-            onNavigate={setCurrentScreen}
-            className="lg:w-20 xl:w-64"
+    <AnimatedBorder>
+      {/* Background and content are INSIDE the border so they don't cover the ornate frame */}
+      <div className="min-h-full relative overflow-hidden" style={{ background: 'transparent' }}>
+        {/* v2.4.0: Skip QuantumBackground in performance mode for better frame rates */}
+        {!performanceMode && <QuantumBackground />}
+        <div className="relative z-10 flex flex-col min-h-full">
+          {/* Global TopBar */}
+          <TopBar
+            currentBalance={nodeData.balance}
+            nodeId={nodeData.nodeId}
+            blockHeight={nodeData.blockHeight}
+            peers={nodeData.peers}
+            isOnline={nodeData.isOnline}
+            qci={nodeData.qci}
           />
 
-          <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
-            {currentScreen === 'dashboard' && <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} />}
-            {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
-            {currentScreen === 'dex' && <DexScreen />}
-            {currentScreen === 'explorer' && <ExplorerScreen />}
-            {currentScreen === 'mining' && <MiningScreen />}
-            {currentScreen === 'vm' && <VittuaVMScreen />}
-            {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
-            <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
-              <AIChatScreen />
-            </div>
-            {currentScreen === 'download' && <DownloadNodeScreen />}
-            {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
-        </main>
+          {/* Token Bar - Below TopBar */}
+          <TokenBar onTokenClick={handleTokenClick} />
 
-        {/* AI Worker Panel - Floating bottom-right */}
-        <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 1000 }}>
-          <AIWorkerDemo />
-        </div>
+          <div className="flex flex-1 lg:flex-row">
+            <Navigation
+              currentScreen={currentScreen}
+              onNavigate={setCurrentScreen}
+              className="lg:w-20 xl:w-64"
+            />
+
+            <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
+              {/* v2.3.12-beta: Keep Dashboard mounted to receive wallet-balance-updated events while on DEX */}
+              {/* Without this, Dashboard unmounts when on DEX, misses balance update events, */}
+              {/* then refetches stale data from API when remounted - causing "two balances" bug */}
+              <div style={{ display: currentScreen === 'dashboard' ? 'block' : 'none' }}>
+                <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} />
+              </div>
+              {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
+              {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}
+              <div style={{ display: currentScreen === 'dex' ? 'block' : 'none' }}>
+                <DexScreen />
+              </div>
+              {currentScreen === 'explorer' && <ExplorerScreen />}
+              {currentScreen === 'mining' && <MiningScreen />}
+              {currentScreen === 'vm' && <VittuaVMScreen />}
+              {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
+              <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
+                <AIChatScreen />
+              </div>
+              {currentScreen === 'download' && <DownloadNodeScreen />}
+              {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
+            </main>
+
+            {/* AI Worker Panel - Floating bottom-right */}
+            <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 1000 }}>
+              <AIWorkerDemo />
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+    </AnimatedBorder>
   );
 }
 

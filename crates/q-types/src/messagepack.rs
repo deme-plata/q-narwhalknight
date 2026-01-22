@@ -155,8 +155,9 @@ impl VersionedTransaction {
 
     /**
      * Get the transaction amount
+     * v2.5.0: Returns u128 for full precision
      */
-    pub fn amount(&self) -> u64 {
+    pub fn amount(&self) -> u128 {
         self.tx.amount
     }
 }

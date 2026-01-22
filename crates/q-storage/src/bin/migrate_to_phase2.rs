@@ -19,10 +19,11 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use q_storage::RocksDBKV;
+use q_storage::{RocksDBKV, KVStore};
 use q_types::Block;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn, error, debug};
 
@@ -189,22 +190,23 @@ async fn migrate_blocks(
             continue;
         }
 
-        // Extract block-vertex mappings
-        let mut mappings = Vec::new();
+        // Extract block-vertex mappings from vertices list
+        // Phase 2: Block.vertices contains VertexId ([u8; 32])
+        // We convert to u64 by taking first 8 bytes for database storage
+        let mut mappings: Vec<(String, u64)> = Vec::new();
         for block in &blocks {
-            // Get vertex ID from block metadata (stored during Phase 1)
-            if let Some(vertex_id_str) = block.metadata.get("vertex_id") {
-                if let Ok(vertex_id) = vertex_id_str.parse::<u64>() {
-                    mappings.push((block.hash.clone(), vertex_id));
-                    stats.mappings_created += 1;
-                } else {
-                    let err = format!("Invalid vertex_id for block {}: {}", block.hash, vertex_id_str);
-                    warn!("⚠️  {}", err);
-                    stats.errors.push(err);
-                }
+            // Get vertex ID from block's vertices list (Phase 2 DAG-aware blocks)
+            if !block.vertices.is_empty() {
+                // Use first vertex as primary mapping
+                // Convert VertexId ([u8; 32]) to u64 using first 8 bytes
+                let vertex_bytes = &block.vertices[0][..8];
+                let vertex_id = u64::from_le_bytes(vertex_bytes.try_into().unwrap_or([0u8; 8]));
+                let block_hash_hex = hex::encode(&block.hash);
+                mappings.push((block_hash_hex, vertex_id));
+                stats.mappings_created += 1;
             } else {
-                // Block doesn't have vertex_id metadata (pre-Phase 1 block)
-                debug!("Block {} (height {}) has no vertex_id metadata", block.hash, block.height);
+                // Block doesn't have vertices (pre-Phase 2 block)
+                debug!("Block {:?} (height {}) has no vertices", hex::encode(&block.hash[..8]), block.height);
             }
         }
 
@@ -288,43 +290,45 @@ async fn verify_mappings(
 
     for height in start_height..=end_height {
         if let Some(block) = fetch_block_by_height(&kv, height).await? {
-            // Check if block has vertex_id metadata
-            if let Some(vertex_id_str) = block.metadata.get("vertex_id") {
-                if let Ok(expected_vertex_id) = vertex_id_str.parse::<u64>() {
-                    // Verify block → vertex mapping
-                    match kv.get_vertex_for_block(&block.hash).await? {
-                        Some(actual_vertex_id) => {
-                            if actual_vertex_id == expected_vertex_id {
-                                verified += 1;
+            // Check if block has vertices (Phase 2 blocks)
+            if !block.vertices.is_empty() {
+                // Convert VertexId ([u8; 32]) to u64 using first 8 bytes
+                let vertex_bytes = &block.vertices[0][..8];
+                let expected_vertex_id = u64::from_le_bytes(vertex_bytes.try_into().unwrap_or([0u8; 8]));
+                let block_hash_hex = hex::encode(&block.hash);
+                // Verify block → vertex mapping
+                match kv.get_vertex_for_block(&block_hash_hex).await? {
+                    Some(actual_vertex_id) => {
+                        if actual_vertex_id == expected_vertex_id {
+                            verified += 1;
 
-                                // Also verify reverse mapping
-                                match kv.get_block_for_vertex(actual_vertex_id).await? {
-                                    Some(actual_hash) => {
-                                        if actual_hash != block.hash {
-                                            error!(
-                                                "❌ Reverse mapping mismatch: vertex {} → block {} (expected {})",
-                                                actual_vertex_id, actual_hash, block.hash
-                                            );
-                                            corrupted += 1;
-                                        }
-                                    }
-                                    None => {
-                                        error!("❌ Reverse mapping missing: vertex {} → ?", actual_vertex_id);
+                            // Also verify reverse mapping
+                            match kv.get_block_for_vertex(actual_vertex_id).await? {
+                                Some(actual_hash_hex) => {
+                                    if actual_hash_hex != block_hash_hex {
+                                        error!(
+                                            "❌ Reverse mapping mismatch: vertex {} → block {} (expected {})",
+                                            actual_vertex_id, &actual_hash_hex[..16], &block_hash_hex[..16]
+                                        );
                                         corrupted += 1;
                                     }
                                 }
-                            } else {
-                                error!(
-                                    "❌ Vertex ID mismatch for block {}: expected {}, got {}",
-                                    block.hash, expected_vertex_id, actual_vertex_id
-                                );
-                                corrupted += 1;
+                                None => {
+                                    error!("❌ Reverse mapping missing: vertex {} → ?", actual_vertex_id);
+                                    corrupted += 1;
+                                }
                             }
+                        } else {
+                            error!(
+                                "❌ Vertex ID mismatch for block {}: expected {}, got {}",
+                                &block_hash_hex[..16], expected_vertex_id, actual_vertex_id
+                            );
+                            corrupted += 1;
                         }
-                        None => {
-                            warn!("⚠️  Mapping missing for block {} (vertex {})", block.hash, expected_vertex_id);
-                            missing += 1;
-                        }
+                    }
+                    None => {
+                        warn!("⚠️  Mapping missing for block {} (vertex {})", &block_hash_hex[..16], expected_vertex_id);
+                        missing += 1;
                     }
                 }
             }

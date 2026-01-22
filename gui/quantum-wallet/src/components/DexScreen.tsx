@@ -1,13 +1,123 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import TokenDetailsModal from './TokenDetailsModal';
+import IndexFundModal from './IndexFundModal';
 import LiquidityModal from './LiquidityModal';
 import TokenSelectorModal from './TokenSelectorModal';
 import NitroSuccessModal from './NitroSuccessModal';
 import MintQUGUSDModal from './MintQUGUSDModal';
 import SwapSuccessModal from './SwapSuccessModal';
+import MarketAnalyzerPanel from './MarketAnalyzerPanel';
 import { qnkAPI } from '../services/api';
+
+// v3.1.1: Helper to safely parse u128 values that may come as strings from the API
+const parseU128 = (value: string | number | undefined): number => {
+  if (value === undefined || value === null) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
+
+// v2.9.27-beta: Helper to format prices, especially very small ones
+const formatPrice = (price: number): string => {
+  if (price === 0) return '0';
+  if (price >= 1) {
+    // Normal prices: $42.50
+    return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } else if (price >= 0.01) {
+    // Small prices: $0.0382
+    return price.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  } else if (price >= 0.0001) {
+    // Very small: $0.000038
+    return price.toFixed(6);
+  } else {
+    // Tiny prices: show in scientific notation or as "< $0.0001"
+    // Use toExponential for very small numbers
+    if (price < 0.00000001) {
+      return price.toExponential(2);
+    }
+    // Show up to 8 decimal places for micro-prices
+    return price.toFixed(8).replace(/\.?0+$/, '');
+  }
+};
+
+// v3.2.22-beta: BigInt helpers for handling large token amounts without precision loss
+// JavaScript Number.MAX_SAFE_INTEGER is ~9e15, but tokens can have 1e28+ amounts with 24 decimals
+
+// Expand scientific notation strings to full numeric strings for BigInt parsing
+const expandScientificNotation = (numStr: string): string => {
+  if (!numStr.includes('e') && !numStr.includes('E')) {
+    return numStr;
+  }
+  const num = parseFloat(numStr);
+  if (!isFinite(num)) return '0';
+
+  // For very large numbers, manually construct the string
+  const match = numStr.match(/^([+-]?)(\d+\.?\d*)[eE]([+-]?\d+)$/);
+  if (!match) return String(Math.floor(num)); // Fallback
+
+  const [, sign, mantissa, expStr] = match;
+  const exp = parseInt(expStr, 10);
+  const mantissaClean = mantissa.replace('.', '');
+  const mantissaDecimalPos = mantissa.indexOf('.');
+  const decimalShift = mantissaDecimalPos >= 0 ? mantissa.length - mantissaDecimalPos - 1 : 0;
+  const totalExp = exp - decimalShift;
+
+  if (totalExp >= 0) {
+    // Positive exponent: add zeros to the right
+    return (sign === '-' ? '-' : '') + mantissaClean + '0'.repeat(totalExp);
+  } else {
+    // Negative exponent: would be a decimal, just return 0 for whole part
+    return '0';
+  }
+};
+
+// Parse a string amount to BigInt with specified decimals (for API calls)
+const parseAmountToBigInt = (amount: string, decimals: number): bigint => {
+  // Handle scientific notation like "1e+30"
+  const str = expandScientificNotation(amount);
+
+  // Remove commas that might be in the input (e.g., "99,999,999,999.9999")
+  const cleanStr = str.replace(/,/g, '');
+
+  const parts = cleanStr.split('.');
+  const wholePart = parts[0] || '0';
+  const fracPart = (parts[1] || '').slice(0, decimals).padEnd(decimals, '0');
+
+  return BigInt(wholePart) * (10n ** BigInt(decimals)) + BigInt(fracPart);
+};
+
+// Maximum u128 value for validation
+const U128_MAX = BigInt('340282366920938463463374607431768211455');
+
+// v3.2.23-beta: Get decimals for a token symbol
+// Native tokens (QUG, QUGUSD) use 24 decimals, custom tokens typically use 7-8
+const getTokenDecimals = (symbol: string, tokenList?: Array<{symbol: string, decimals?: number}>): number => {
+  const upperSymbol = symbol.toUpperCase();
+  if (upperSymbol === 'QUG' || upperSymbol === 'QUGUSD') {
+    return 24;
+  }
+  // Try to find decimals from token list
+  if (tokenList) {
+    const token = tokenList.find(t => t.symbol.toUpperCase() === upperSymbol);
+    if (token?.decimals) {
+      return token.decimals;
+    }
+  }
+  // Default for custom tokens
+  return 8;
+};
+
+// v3.2.23-beta: Convert raw reserve to display amount using token decimals
+const reserveToDisplay = (rawReserve: number | string, tokenSymbol: string, tokenList?: Array<{symbol: string, decimals?: number}>): number => {
+  const raw = typeof rawReserve === 'string' ? parseFloat(rawReserve) : rawReserve;
+  const decimals = getTokenDecimals(tokenSymbol, tokenList);
+  return raw / Math.pow(10, decimals);
+};
 
 // DEX Settings Interface
 interface DexSettings {
@@ -30,10 +140,13 @@ interface Token {
   volume24h: number;
   liquidity: number;
   icon: string;
-  marketCap: number;
+  logoUrl?: string;  // v2.4.8: Custom logo URL (data URL or IPFS URL)
+  marketCap: number;              // Circulating supply * price
+  fullyDilutedMarketCap?: number;  // Total supply * price (FDV) - optional for compatibility
   totalSupply: number;
   circulatingSupply: number;
   holders: number;
+  decimals?: number;  // v3.2.15-beta: Token decimals (default 8 for custom tokens, 24 for QUG)
   features: {
     reflection: boolean;
     autoLiquidity: boolean;
@@ -49,6 +162,41 @@ interface Token {
   description: string;
   website?: string;
   whitepaper?: string;
+  // Index fund specific properties
+  isIndexToken?: boolean;
+  indexData?: {
+    methodology: 'market_cap_weighted' | 'equal_weighted' | 'custom';
+    rebalanceFrequency: string;
+    managementFee: number;
+    performanceFee: number;
+    navPerShare: number;
+    totalAUM: number;
+    components: Array<{
+      symbol: string;
+      name: string;
+      weight: number;
+      price: number;
+      change24h: number;
+    }>;
+    lastRebalance: string;
+    nextRebalance: string;
+    inceptionDate: string;
+    ytdReturn: number;
+    allTimeReturn: number;
+  };
+  // v2.9.27-beta: Perpetual contract properties
+  isPerp?: boolean;
+  perpData?: {
+    market: string;           // e.g., "QUG-PERP"
+    markPrice: number;        // Mark price in USD
+    indexPrice: number;       // Index/spot price in USD
+    fundingRate: number;      // Current funding rate
+    openInterest: number;     // Total open interest
+    maxLeverage: number;      // Maximum allowed leverage
+    maintenanceMargin: number;
+    takerFee: number;
+    makerFee: number;
+  };
 }
 
 export default function DexScreen() {
@@ -86,6 +234,470 @@ export default function DexScreen() {
     transactionHash?: string;
   } | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Trigger for refetching tokens
+
+  // v2.3.7-beta: Ref to track when a swap just completed - prevents SSE from overwriting correct local state
+  const swapJustCompletedRef = useRef(false);
+
+  // v2.9.6-beta: Ref to always have the latest tokens for swap balance calculation
+  // This avoids stale closure issues where the callback captures old token values
+  const tokensRef = useRef<Token[]>([]);
+
+  // 💰 v2.4.8-beta: DCA (Dollar Cost Averaging) State
+  const [showDcaModal, setShowDcaModal] = useState(false);
+  const [dcaInterval, setDcaInterval] = useState<'hourly' | 'daily' | 'weekly' | 'monthly'>('daily');
+  const [dcaAmount, setDcaAmount] = useState('');
+  const [dcaMaxExecutions, setDcaMaxExecutions] = useState<string>(''); // Empty = unlimited
+  const [dcaOrders, setDcaOrders] = useState<any[]>([]);
+  const [loadingDca, setLoadingDca] = useState(false);
+  const [showDcaOrdersPanel, setShowDcaOrdersPanel] = useState(false);
+
+  // 💰 v2.4.9-beta: DCA Orders Management Functions
+  const fetchDcaOrders = useCallback(async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders/${walletAddr}`);
+      if (response.ok) {
+        const data = await response.json();
+        setDcaOrders(data.orders || []);
+        console.log('💰 [DCA] Loaded orders:', data.orders?.length || 0);
+      }
+    } catch (error) {
+      console.error('Failed to fetch DCA orders:', error);
+    }
+  }, []);
+
+  const pauseDcaOrder = async (orderId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders/${walletAddr}/${orderId}/pause`, {
+        method: 'PUT',
+      });
+      if (response.ok) {
+        fetchDcaOrders();
+        alert('DCA order paused');
+      }
+    } catch (error) {
+      console.error('Failed to pause DCA order:', error);
+      alert('Failed to pause DCA order');
+    }
+  };
+
+  const resumeDcaOrder = async (orderId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders/${walletAddr}/${orderId}/resume`, {
+        method: 'PUT',
+      });
+      if (response.ok) {
+        fetchDcaOrders();
+        alert('DCA order resumed');
+      }
+    } catch (error) {
+      console.error('Failed to resume DCA order:', error);
+      alert('Failed to resume DCA order');
+    }
+  };
+
+  const cancelDcaOrder = async (orderId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    if (!confirm('Are you sure you want to cancel this DCA order?')) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders/${walletAddr}/${orderId}`, {
+        method: 'DELETE',
+      });
+      if (response.ok) {
+        fetchDcaOrders();
+        alert('DCA order cancelled');
+      }
+    } catch (error) {
+      console.error('Failed to cancel DCA order:', error);
+      alert('Failed to cancel DCA order');
+    }
+  };
+
+  // 📊 v2.5.0-beta: Perpetual Futures Trading State
+  const [dexMode, setDexMode] = useState<'spot' | 'perpetual'>('spot');
+  const [perpSide, setPerpSide] = useState<'long' | 'short'>('long');
+  const [perpLeverage, setPerpLeverage] = useState(2);
+  const [perpSize, setPerpSize] = useState('');
+  const [perpCollateral, setPerpCollateral] = useState('');
+  const [perpPositions, setPerpPositions] = useState<any[]>([]);
+  const [perpMarket, setPerpMarket] = useState<any>(null);
+  const [loadingPerp, setLoadingPerp] = useState(false);
+  const [perpError, setPerpError] = useState<string | null>(null);
+
+  // 📈 v2.6.0-beta: Order Book & Limit Orders State
+  const [perpOrderType, setPerpOrderType] = useState<'market' | 'limit'>('market');
+  const [limitPrice, setLimitPrice] = useState('');
+  const [orderBook, setOrderBook] = useState<{
+    bids: Array<{ price: number; size: number; order_count: number }>;
+    asks: Array<{ price: number; size: number; order_count: number }>;
+    best_bid: number | null;
+    best_ask: number | null;
+    spread: number | null;
+  } | null>(null);
+  const [limitOrders, setLimitOrders] = useState<any[]>([]);
+  const [timeInForce, setTimeInForce] = useState<'gtc' | 'ioc' | 'fok' | 'post_only'>('gtc');
+
+  // 📝 v2.7.8-beta: Position Editing State
+  const [editingPosition, setEditingPosition] = useState<any | null>(null);
+  const [editMode, setEditMode] = useState<'addMargin' | 'removeMargin' | 'adjustLeverage' | null>(null);
+  const [editAmount, setEditAmount] = useState('');
+  const [newLeverage, setNewLeverage] = useState(2);
+
+  // Fetch perpetual market data
+  const fetchPerpMarket = useCallback(async () => {
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/markets/QUG-PERP`);
+      if (response.ok) {
+        const data = await response.json();
+        // v2.6.1-beta: Extract market from response (API returns { success, market })
+        if (data.success && data.market) {
+          setPerpMarket(data.market);
+        } else {
+          setPerpMarket(data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch perp market:', error);
+    }
+  }, []);
+
+  // Fetch user's perpetual positions
+  const fetchPerpPositions = useCallback(async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/${walletAddr}`);
+      if (response.ok) {
+        const data = await response.json();
+        setPerpPositions(data.positions || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch perp positions:', error);
+    }
+  }, []);
+
+  // Open perpetual position
+  const openPerpPosition = async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) {
+      setPerpError('Please connect wallet first');
+      return;
+    }
+
+    if (!perpSize || !perpCollateral) {
+      setPerpError('Please enter size and collateral');
+      return;
+    }
+
+    setLoadingPerp(true);
+    setPerpError(null);
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          market: 'QUG-PERP',
+          side: perpSide,
+          size: Math.floor(parseFloat(perpSize) * 1e24),
+          collateral: Math.floor(parseFloat(perpCollateral) * 1e24),
+          leverage: perpLeverage,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setPerpSize('');
+        setPerpCollateral('');
+        fetchPerpPositions();
+        alert(`Position opened at ${(data.entry_price / 1e24).toFixed(4)} QUGUSD`);
+      } else {
+        setPerpError(data.message || 'Failed to open position');
+      }
+    } catch (error) {
+      console.error('Failed to open position:', error);
+      setPerpError('Failed to open position');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // Close perpetual position
+  const closePerpPosition = async (positionId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    setLoadingPerp(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/${positionId}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        fetchPerpPositions();
+        alert(`Position closed. PnL: ${(data.realized_pnl / 1e24).toFixed(4)} QUGUSD`);
+      } else {
+        alert(data.message || 'Failed to close position');
+      }
+    } catch (error) {
+      console.error('Failed to close position:', error);
+      alert('Failed to close position');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // 📝 v2.7.8-beta: Add margin to position
+  const addMarginToPosition = async (positionId: string, amount: number) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    setLoadingPerp(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/${positionId}/margin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          amount: Math.floor(amount * 1e24),
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        fetchPerpPositions();
+        setEditingPosition(null);
+        setEditMode(null);
+        setEditAmount('');
+        alert(`Added ${amount.toFixed(4)} QUGUSD margin. New liquidation price: $${(data.new_liquidation_price / 1e24).toFixed(4)}`);
+      } else {
+        alert(data.message || 'Failed to add margin');
+      }
+    } catch (error) {
+      console.error('Failed to add margin:', error);
+      alert('Failed to add margin');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // 📝 v2.7.8-beta: Remove margin from position
+  const removeMarginFromPosition = async (positionId: string, amount: number) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    setLoadingPerp(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/${positionId}/margin/remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          amount: Math.floor(amount * 1e24),
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        fetchPerpPositions();
+        setEditingPosition(null);
+        setEditMode(null);
+        setEditAmount('');
+        alert(`Removed ${(data.returned_amount / 1e24).toFixed(4)} QUGUSD margin. New liquidation price: $${(data.new_liquidation_price / 1e24).toFixed(4)}`);
+      } else {
+        alert(data.message || 'Failed to remove margin');
+      }
+    } catch (error) {
+      console.error('Failed to remove margin:', error);
+      alert('Failed to remove margin');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // 📝 v2.7.8-beta: Adjust position leverage
+  const adjustPositionLeverage = async (positionId: string, newLev: number) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    setLoadingPerp(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/positions/${positionId}/leverage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          new_leverage: newLev,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        fetchPerpPositions();
+        setEditingPosition(null);
+        setEditMode(null);
+        const collateralMsg = data.collateral_change > 0
+          ? `Required additional ${(data.collateral_change / 1e24).toFixed(4)} QUGUSD`
+          : data.collateral_change < 0
+            ? `Returned ${(Math.abs(data.collateral_change) / 1e24).toFixed(4)} QUGUSD`
+            : '';
+        alert(`Leverage changed from ${data.old_leverage}x to ${data.new_leverage}x. ${collateralMsg}`);
+      } else {
+        alert(data.message || 'Failed to adjust leverage');
+      }
+    } catch (error) {
+      console.error('Failed to adjust leverage:', error);
+      alert('Failed to adjust leverage');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // 📈 Fetch order book depth
+  const fetchOrderBook = useCallback(async () => {
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/orderbook/QUG-PERP`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setOrderBook(data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch order book:', error);
+    }
+  }, []);
+
+  // 📈 Fetch user's limit orders
+  const fetchLimitOrders = useCallback(async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/limit-orders/${walletAddr}`);
+      if (response.ok) {
+        const data = await response.json();
+        setLimitOrders(data.orders || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch limit orders:', error);
+    }
+  }, []);
+
+  // 📈 Place limit order
+  const placeLimitOrder = async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) {
+      setPerpError('Please connect wallet first');
+      return;
+    }
+
+    if (!perpSize || !limitPrice) {
+      setPerpError('Please enter size and price');
+      return;
+    }
+
+    setLoadingPerp(true);
+    setPerpError(null);
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/limit-orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          market: 'QUG-PERP',
+          side: perpSide === 'long' ? 'buy' : 'sell',
+          price: Math.floor(parseFloat(limitPrice) * 1e24),
+          size: Math.floor(parseFloat(perpSize) * 1e24),
+          leverage: perpLeverage,
+          time_in_force: timeInForce,
+          reduce_only: false,
+          post_only: timeInForce === 'post_only',
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setPerpSize('');
+        setLimitPrice('');
+        fetchLimitOrders();
+        fetchOrderBook();
+        fetchPerpPositions();
+        alert(`Order ${data.status}: ${data.message}`);
+      } else {
+        setPerpError(data.message || 'Failed to place order');
+      }
+    } catch (error) {
+      console.error('Failed to place limit order:', error);
+      setPerpError('Failed to place limit order');
+    } finally {
+      setLoadingPerp(false);
+    }
+  };
+
+  // 📈 Cancel limit order
+  const cancelLimitOrder = async (orderId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/limit-orders/${walletAddr}/${orderId}`, {
+        method: 'DELETE',
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        fetchLimitOrders();
+        fetchOrderBook();
+        alert('Order cancelled');
+      } else {
+        alert(data.message || 'Failed to cancel order');
+      }
+    } catch (error) {
+      console.error('Failed to cancel order:', error);
+      alert('Failed to cancel order');
+    }
+  };
+
+  // Load perp data when switching to perpetual mode
+  useEffect(() => {
+    if (dexMode === 'perpetual') {
+      fetchPerpMarket();
+      fetchPerpPositions();
+      fetchOrderBook();
+      fetchLimitOrders();
+      // Refresh every 2 seconds for order book, 5 seconds for rest
+      const bookInterval = setInterval(fetchOrderBook, 2000);
+      const dataInterval = setInterval(() => {
+        fetchPerpMarket();
+        fetchPerpPositions();
+        fetchLimitOrders();
+      }, 5000);
+      return () => {
+        clearInterval(bookInterval);
+        clearInterval(dataInterval);
+      };
+    }
+  }, [dexMode, fetchPerpMarket, fetchPerpPositions, fetchOrderBook, fetchLimitOrders]);
 
   // DEX Settings Modal State
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -130,6 +742,17 @@ export default function DexScreen() {
     localStorage.setItem('dexSettings', JSON.stringify(dexSettings));
   }, [dexSettings]);
 
+  // v2.9.6-beta: Keep tokensRef in sync with tokens state
+  // This ensures swap handlers always have access to the latest token balances
+  useEffect(() => {
+    tokensRef.current = tokens;
+  }, [tokens]);
+
+  // 💰 v2.4.9-beta: Load DCA orders on mount
+  useEffect(() => {
+    fetchDcaOrders();
+  }, [fetchDcaOrders]);
+
   // Load Nitro points from localStorage and boosted tokens from backend with SSE real-time updates
   useEffect(() => {
     let mounted = true;
@@ -165,8 +788,8 @@ export default function DexScreen() {
       // Update the token balance in the tokens state
       setTokens(prev => prev.map(token => {
         // Match by token address (with or without qnk prefix)
-        const tokenId = token.id.startsWith('qnk') ? token.id.substring(3) : token.id;
-        const eventAddr = tokenAddress.startsWith('qnk') ? tokenAddress.substring(3) : tokenAddress;
+        const tokenId = token.id?.startsWith('qnk') ? token.id.substring(3) : (token.id || '');
+        const eventAddr = tokenAddress?.startsWith('qnk') ? tokenAddress.substring(3) : (tokenAddress || '');
 
         if (tokenId === eventAddr) {
           console.log(`✅ [DEX] Updated ${token.symbol} balance: ${token.balance} → ${newBalance}`);
@@ -282,6 +905,9 @@ export default function DexScreen() {
       });
 
       // Listen for token price updates
+      // v2.4.7: Handle both token_symbol (from backend) and token_id for compatibility
+      // v2.9.22-beta: Updated handler to apply change_1h and change_7d from SSE
+      // v2.9.25-beta: Added token_address matching for when symbols aren't resolved
       eventSource.addEventListener('token_price_update', (event) => {
         if (!mounted) return;
         try {
@@ -290,13 +916,33 @@ export default function DexScreen() {
 
           // Extract data from wrapper
           const data = parsed.data || parsed;
+          const tokenSymbol = data.token_symbol || data.token_id || '';
+          const tokenAddress = data.token_address || '';  // v2.9.25-beta: Address for fallback matching
 
-          // Update token in list
-          setTokens(prev => prev.map(token =>
-            token.id === data.token_id
-              ? { ...token, price: data.price, change24h: data.change_24h || token.change24h, volume24h: data.volume_24h || token.volume24h }
-              : token
-          ));
+          // Update token in list - match by symbol (case-insensitive), id, or address
+          setTokens(prev => prev.map(token => {
+            // v2.9.25-beta: Extended matching to include address comparison
+            const symbolMatch = token.symbol.toUpperCase() === tokenSymbol.toUpperCase();
+            const idMatch = token.id === tokenSymbol || token.id === data.token_id;
+            const addressMatch = tokenAddress && (
+              token.id === tokenAddress ||
+              token.id.toLowerCase() === tokenAddress.toLowerCase()
+            );
+            const matches = symbolMatch || idMatch || addressMatch;
+
+            if (matches) {
+              console.log(`✅ Updating ${token.symbol}: price=${data.price}, 1h=${data.change_1h}, 24h=${data.change_24h}, 7d=${data.change_7d}, vol24h=${data.volume_24h} (matched by: ${symbolMatch ? 'symbol' : idMatch ? 'id' : 'address'})`);
+              return {
+                ...token,
+                price: data.price !== undefined ? data.price : token.price,
+                change1h: data.change_1h !== undefined ? data.change_1h : token.change1h,
+                change24h: data.change_24h !== undefined ? data.change_24h : token.change24h,
+                change7d: data.change_7d !== undefined ? data.change_7d : token.change7d,
+                volume24h: data.volume_24h !== undefined ? data.volume_24h : token.volume24h
+              };
+            }
+            return token;
+          }));
         } catch (err) {
           console.error('Failed to parse token price update:', err);
         }
@@ -333,19 +979,54 @@ export default function DexScreen() {
       };
 
     } catch (error) {
-      console.error('Failed to establish SSE connection for Nitro boosts:', error);
+      console.error('Failed to set up SSE for Nitro boosts:', error);
     }
+
+    // v2.9.25-beta: ALSO listen for token-price-updated CustomEvent from App.tsx
+    // This is a backup path since App.tsx's authenticated SSE connection is more reliable
+    const handleTokenPriceUpdated = (event: CustomEvent) => {
+      if (!mounted) return;
+      const data = event.detail;
+      console.log('📈 [DexScreen] Received token-price-updated from App.tsx:', data);
+
+      const tokenSymbol = data.token_symbol || '';
+      const tokenAddress = data.token_address || '';
+
+      setTokens(prev => prev.map(token => {
+        const symbolMatch = token.symbol.toUpperCase() === tokenSymbol.toUpperCase();
+        const idMatch = token.id === tokenSymbol;
+        const addressMatch = tokenAddress && (
+          token.id === tokenAddress ||
+          token.id.toLowerCase() === tokenAddress.toLowerCase()
+        );
+        const matches = symbolMatch || idMatch || addressMatch;
+
+        if (matches) {
+          console.log(`✅ [DexScreen v2.9.25] Updating ${token.symbol} from App.tsx forward: price=${data.price}, 1h=${data.change_1h}%, 24h=${data.change_24h}%, 7d=${data.change_7d}%`);
+          return {
+            ...token,
+            price: data.price !== undefined ? data.price : token.price,
+            change1h: data.change_1h !== undefined ? data.change_1h : token.change1h,
+            change24h: data.change_24h !== undefined ? data.change_24h : token.change24h,
+            change7d: data.change_7d !== undefined ? data.change_7d : token.change7d,
+            volume24h: data.volume_24h !== undefined ? data.volume_24h : token.volume24h
+          };
+        }
+        return token;
+      }));
+    };
+
+    window.addEventListener('token-price-updated', handleTokenPriceUpdated as EventListener);
 
     return () => {
       mounted = false;
-      window.removeEventListener('nitroPointsUpdated', handleNitroPointsUpdate);
-      window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
       if (eventSource) {
-        console.log('🔌 Closing SSE connection for Nitro boosts');
         eventSource.close();
       }
+      window.removeEventListener('token-price-updated', handleTokenPriceUpdated as EventListener);
     };
   }, []);
+
 
   // Fetch real tokens from API with SSE real-time updates
   useEffect(() => {
@@ -466,42 +1147,49 @@ export default function DexScreen() {
             poolsResponse.data.forEach((pool: any) => {
               // Resolve token0 to address key
               let token0Key: string;
-              if (pool.token0 === 'QUG' || pool.token0.toUpperCase() === 'QUG') {
+              const t0 = pool.token0 || '';
+              if (t0 === 'QUG' || t0.toUpperCase() === 'QUG') {
                 token0Key = 'native-qug';
-              } else if (pool.token0 === 'QUGUSD' || pool.token0.toUpperCase() === 'QUGUSD') {
+              } else if (t0 === 'QUGUSD' || t0.toUpperCase() === 'QUGUSD') {
                 token0Key = 'qugusd-stable';
-              } else if (pool.token0.startsWith('qnk') || pool.token0.startsWith('0x')) {
+              } else if (t0.startsWith('qnk') || t0.startsWith('0x')) {
                 // Already an address - use directly (v1.0.49-beta: pools now use canonical addresses)
-                token0Key = pool.token0;
+                token0Key = t0;
               } else {
                 // It's a symbol, resolve to address
-                token0Key = symbolToAddress.get(pool.token0.toUpperCase()) || pool.token0;
-                if (token0Key !== pool.token0) {
-                  console.log(`🔍 Resolved pool.token0 "${pool.token0}" => "${token0Key}"`);
+                token0Key = symbolToAddress.get(t0.toUpperCase()) || t0;
+                if (token0Key !== t0) {
+                  console.log(`🔍 Resolved pool.token0 "${t0}" => "${token0Key}"`);
                 }
               }
-              poolsByToken.set(token0Key, (poolsByToken.get(token0Key) || 0) + (pool.reserve0 || 0));
+              // v2.6.1-beta: Backend already returns reserves in human-readable format
+              // Pool API response has reserves pre-divided by 1e8 (see dex_integration_api.rs:506-507)
+              const reserve0Display = parseFloat(pool.reserve0) || 0;
+              poolsByToken.set(token0Key, (poolsByToken.get(token0Key) || 0) + reserve0Display);
 
               // Resolve token1 to address key
               let token1Key: string;
-              if (pool.token1 === 'QUG' || pool.token1.toUpperCase() === 'QUG') {
+              const t1 = pool.token1 || '';
+              if (t1 === 'QUG' || t1.toUpperCase() === 'QUG') {
                 token1Key = 'native-qug';
-              } else if (pool.token1 === 'QUGUSD' || pool.token1.toUpperCase() === 'QUGUSD') {
+              } else if (t1 === 'QUGUSD' || t1.toUpperCase() === 'QUGUSD') {
                 token1Key = 'qugusd-stable';
-              } else if (pool.token1.startsWith('qnk') || pool.token1.startsWith('0x')) {
+              } else if (t1.startsWith('qnk') || t1.startsWith('0x')) {
                 // Already an address - use directly (v1.0.49-beta: pools now use canonical addresses)
-                token1Key = pool.token1;
+                token1Key = t1;
               } else {
                 // It's a symbol, resolve to address
-                token1Key = symbolToAddress.get(pool.token1.toUpperCase()) || pool.token1;
-                if (token1Key !== pool.token1) {
-                  console.log(`🔍 Resolved pool.token1 "${pool.token1}" => "${token1Key}"`);
+                token1Key = symbolToAddress.get(t1.toUpperCase()) || t1;
+                if (token1Key !== t1) {
+                  console.log(`🔍 Resolved pool.token1 "${t1}" => "${token1Key}"`);
                 }
               }
-              poolsByToken.set(token1Key, (poolsByToken.get(token1Key) || 0) + (pool.reserve1 || 0));
+              // v2.6.1-beta: Backend already returns reserves in human-readable format
+              const reserve1Display = parseFloat(pool.reserve1) || 0;
+              poolsByToken.set(token1Key, (poolsByToken.get(token1Key) || 0) + reserve1Display);
             });
 
-            console.log('✅ Calculated liquidity from pools (by address):', Object.fromEntries(poolsByToken));
+            console.log('✅ Calculated liquidity from pools (display units):', Object.fromEntries(poolsByToken));
           }
         } catch (error) {
           console.error('Failed to fetch liquidity pools:', error);
@@ -547,6 +1235,45 @@ export default function DexScreen() {
           console.error('Failed to fetch QUGUSD price from oracle:', error);
         }
 
+        // v2.3.8-beta: Fetch REAL network supply stats (circulating supply + holders count)
+        let qugCirculatingSupply = 77000; // Fallback estimate
+        let qugTotalSupply = 21000000; // Max supply
+        let qugHolders = 66; // Fallback estimate
+        try {
+          const supplyResponse = await qnkAPI.getNetworkSupply();
+          if (supplyResponse.success && supplyResponse.data) {
+            qugCirculatingSupply = supplyResponse.data.total_mined || qugCirculatingSupply;
+            qugTotalSupply = supplyResponse.data.max_supply || qugTotalSupply;
+            qugHolders = supplyResponse.data.holders || qugHolders;
+            console.log('✅ Fetched REAL network supply:', { circulating: qugCirculatingSupply, total: qugTotalSupply, holders: qugHolders });
+          }
+        } catch (error) {
+          console.error('Failed to fetch network supply:', error);
+        }
+
+        // v2.3.8-beta: Fetch REAL QUGUSD vault stats (circulating supply + holders count)
+        let qugusdCirculatingSupply = 0; // Fallback: no QUGUSD minted yet
+        let qugusdTotalSupply = 0; // Total minted = circulating for stablecoin
+        let qugusdHolders = 0; // Fallback
+        let qugusdCollateralRatio = 150; // Default collateralization %
+        try {
+          const vaultResponse = await qnkAPI.getVaultStats();
+          if (vaultResponse.success && vaultResponse.data) {
+            // Convert from base units (1e8) to human-readable
+            qugusdCirculatingSupply = (vaultResponse.data.total_qugusd_minted || 0) / 1e8;
+            qugusdTotalSupply = qugusdCirculatingSupply; // Stablecoin: minted = supply
+            qugusdHolders = vaultResponse.data.num_positions || 0;
+            qugusdCollateralRatio = (vaultResponse.data.global_collateral_ratio || 1.5) * 100;
+            console.log('✅ Fetched REAL vault stats:', {
+              circulating: qugusdCirculatingSupply,
+              holders: qugusdHolders,
+              collateralRatio: qugusdCollateralRatio.toFixed(2) + '%'
+            });
+          }
+        } catch (error) {
+          console.error('Failed to fetch vault stats:', error);
+        }
+
         // Fetch USD balance from payment API
         if (walletAddress) {
           try {
@@ -581,11 +1308,14 @@ export default function DexScreen() {
             change24h: qugChange24h,
             change7d: qugChange7d,
             volume24h: qugVolume,
-            liquidity: poolsByToken.get('native-qug') || 0,
-            marketCap: 625000000,
-            totalSupply: 21000000,
-            circulatingSupply: 14700000,
-            holders: 18432,
+            // v2.3.7-beta: Convert liquidity to USD (token amount * price)
+            liquidity: (poolsByToken.get('native-qug') || 0) * qugPrice,
+            // v2.3.8-beta: Use REAL supply data from /api/v1/network/supply
+            marketCap: qugCirculatingSupply * qugPrice,
+            fullyDilutedMarketCap: qugTotalSupply * qugPrice, // FDV = total supply * price
+            totalSupply: qugTotalSupply,
+            circulatingSupply: qugCirculatingSupply,
+            holders: qugHolders,
             icon: 'qug-logo',
             features: {
               reflection: true,
@@ -613,11 +1343,14 @@ export default function DexScreen() {
             change24h: qugusdChange24h,
             change7d: qugusdChange7d,
             volume24h: qugusdVolume,
-            liquidity: poolsByToken.get('qugusd-stable') || 0,
-            marketCap: 125000000,
-            totalSupply: 125000000,
-            circulatingSupply: 125000000,
-            holders: 5600,
+            // v2.3.7-beta: QUGUSD liquidity in USD (amount * $1 price)
+            liquidity: (poolsByToken.get('qugusd-stable') || 0) * qugusdPrice,
+            // v2.3.8-beta: Use REAL vault stats from /api/v1/stablecoin/vault/stats
+            marketCap: qugusdCirculatingSupply * qugusdPrice,
+            fullyDilutedMarketCap: qugusdCirculatingSupply * qugusdPrice, // For stablecoin, FDV = current supply
+            totalSupply: qugusdTotalSupply,
+            circulatingSupply: qugusdCirculatingSupply,
+            holders: qugusdHolders,
             icon: 'qugusd-logo',
             features: {
               reflection: false,
@@ -647,6 +1380,7 @@ export default function DexScreen() {
             volume24h: 0,
             liquidity: poolsByToken.get('fiat-usd') || 0,
             marketCap: 0,
+            fullyDilutedMarketCap: 0, // N/A for fiat
             totalSupply: 0,
             circulatingSupply: 0,
             holders: 0,
@@ -696,8 +1430,12 @@ export default function DexScreen() {
               // Calculate actual supply using decimals from API
               // ✅ FIX: Backend defaults to 8 decimals, not 18!
               const decimals = apiToken.decimals || 8;
-              const rawSupply = apiToken.total_supply || 0;
-              const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+              // v3.2.14-beta: Use BigInt to prevent precision loss for large supplies
+              const rawSupply = apiToken.total_supply || '0';
+              const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+              const supplyBigInt = BigInt(supplyStr);
+              const divisorBigInt = BigInt(10 ** decimals);
+              const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
 
               // Fetch balance for this token if wallet is available
               let tokenBalance = 0;
@@ -708,9 +1446,11 @@ export default function DexScreen() {
                   console.log(`📊 [API Token] Balance response for ${apiToken.symbol}:`, balanceResponse);
 
                   if (balanceResponse.success && balanceResponse.data) {
-                    // Backend returns balance in base units, convert to human-readable
-                    const rawBalance = balanceResponse.data.balance || 0;
-                    tokenBalance = rawBalance / Math.pow(10, decimals);
+                    // v3.2.14-beta: Use BigInt for precision with large balances
+                    const rawBalance = balanceResponse.data.balance || '0';
+                    const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+                    const balanceBigInt = BigInt(balanceStr);
+                    tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
                     console.log(`✅ [API Token] Converted ${apiToken.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
                   } else {
                     console.warn(`⚠️ [API Token] Balance fetch unsuccessful for ${apiToken.symbol}:`, balanceResponse.error || balanceResponse);
@@ -752,11 +1492,15 @@ export default function DexScreen() {
                 console.log(`ℹ️ No oracle data for ${apiToken.symbol}, using defaults`);
               }
 
-              // Get real liquidity from pools for this token
-              const tokenLiquidity = poolsByToken.get(apiToken.address) || 0;
+              // v2.3.7-beta: Get real liquidity from pools and convert to USD
+              const tokenAmountInPool = poolsByToken.get(apiToken.address) || 0;
+              const tokenLiquidity = tokenAmountInPool * customPrice;
 
               // Calculate market cap if not provided by oracle
               const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
+
+              // Calculate FDV (Fully Diluted Valuation) = total supply * price
+              const fullyDilutedMC = (actualSupply || 10000000) * customPrice;
 
               return {
                 id: apiToken.address,
@@ -770,10 +1514,12 @@ export default function DexScreen() {
                 volume24h: customVolume,
                 liquidity: tokenLiquidity,
                 marketCap: calculatedMarketCap,
+                fullyDilutedMarketCap: fullyDilutedMC,
                 totalSupply: actualSupply || 10000000,
                 circulatingSupply: actualSupply || 10000000,
                 holders: customHolders,
                 icon: '🪙',
+                logoUrl: apiToken.logo_url || localStorage.getItem(`token_logo_${apiToken.address}`) || undefined,
                 features: {
                   reflection: false,
                   autoLiquidity: false,
@@ -822,8 +1568,12 @@ export default function DexScreen() {
             // Calculate actual supply using decimals
             // ✅ FIX: Backend defaults to 8 decimals, not 18!
             const decimals = contract.decimals || 8;
-            const rawSupply = contract.total_supply || 0;
-            const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+            // v3.2.14-beta: Use BigInt to prevent precision loss for large supplies
+            const rawSupply = contract.total_supply || '0';
+            const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+            const supplyBigInt = BigInt(supplyStr);
+            const divisorBigInt = BigInt(10 ** decimals);
+            const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
 
             // Fetch balance for this token if wallet is available
             let tokenBalance = 0;
@@ -832,9 +1582,11 @@ export default function DexScreen() {
                 const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, contract.address);
                 console.log(`📊 Balance response for ${contract.symbol}:`, balanceResponse);
                 if (balanceResponse.success && balanceResponse.data) {
-                  // Balance from backend is in smallest units, convert to human-readable
-                  const rawBalance = balanceResponse.data.balance || 0;
-                  tokenBalance = rawBalance / Math.pow(10, decimals);
+                  // v3.2.14-beta: Use BigInt for precision with large balances
+                  const rawBalance = balanceResponse.data.balance || '0';
+                  const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+                  const balanceBigInt = BigInt(balanceStr);
+                  tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
                   console.log(`✅ Converted ${contract.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
                 } else {
                   console.warn(`⚠️ Balance fetch unsuccessful for ${contract.symbol}:`, balanceResponse);
@@ -876,11 +1628,14 @@ export default function DexScreen() {
               console.log(`ℹ️ No oracle data for ${contract.symbol}, using defaults`);
             }
 
-            // Get real liquidity from pools for this token
-            const tokenLiquidity = poolsByToken.get(contract.address) || 0;
+            // v2.3.7-beta: Get real liquidity from pools and convert to USD
+            const tokenAmountInPool = poolsByToken.get(contract.address) || 0;
+            const tokenLiquidity = tokenAmountInPool * customPrice;
 
             // Calculate market cap if not provided by oracle
             const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
+            // Calculate FDV (Fully Diluted Valuation) = total supply * price
+            const fullyDilutedMC = (actualSupply || 0) * customPrice;
 
             return {
               id: contract.address,
@@ -894,6 +1649,7 @@ export default function DexScreen() {
               volume24h: customVolume,
               liquidity: tokenLiquidity,
               marketCap: calculatedMarketCap,
+              fullyDilutedMarketCap: fullyDilutedMC,
               totalSupply: actualSupply || 0,
               circulatingSupply: actualSupply || 0,
               holders: customHolders,
@@ -934,6 +1690,191 @@ export default function DexScreen() {
           console.log(`✅ Adding ${newUserTokens.length} user tokens to Available Tokens (${userTokens.length - newUserTokens.length} filtered: ${userTokens.length - userTokensWithLiquidity.length} no liquidity, ${userTokensWithLiquidity.length - newUserTokens.length} duplicates)`);
           enrichedTokens = [...enrichedTokens, ...newUserTokens];
         }
+
+        // v2.3.8-beta: Index Fund tokens (QNK10, DEFI5) - Coming Soon
+        // These are synthetic index products that track QUG ecosystem tokens
+        // Currently showing projected NAV based on live QUG price
+        // TODO: Integrate with q-index-fund crate when deployed on-chain
+        const qnk10NavPerShare = qugPrice * 3; // Projected NAV: ~3x QUG price
+        const defi5NavPerShare = qugPrice * 2; // Projected NAV: ~2x QUG price
+
+        const indexFundTokens: Token[] = [
+          {
+            id: 'index-fund-qnk10',
+            symbol: 'QNK10',
+            name: 'QNK Top 10 Index',
+            balance: 0,
+            price: qnk10NavPerShare,
+            change1h: qugChange1h,
+            change24h: qugChange24h,
+            change7d: qugChange7d,
+            volume24h: 0, // v2.3.8-beta: Not yet trading
+            // v2.3.7-beta: Convert QUG liquidity to USD
+            liquidity: 0, // v2.3.8-beta: Not yet deployed
+            icon: 'index-fund',
+            marketCap: 0, // v2.3.8-beta: Not yet deployed
+            fullyDilutedMarketCap: 0, // v2.3.8-beta: Not yet deployed
+            totalSupply: 0, // v2.3.8-beta: Not yet minted
+            circulatingSupply: 0, // v2.3.8-beta: Not yet minted
+            holders: 0, // v2.3.8-beta: Not yet deployed
+            features: {
+              reflection: false,
+              autoLiquidity: false,
+              buybackAndBurn: false,
+              antiWhale: true,
+              quantumSecured: true,
+            },
+            fees: {
+              buy: 0.1,
+              sell: 0.1,
+              transfer: 0,
+            },
+            description: 'Market-cap weighted index tracking QUG ecosystem tokens. Automatically rebalances monthly to capture market growth.',
+            website: 'https://quillon.xyz/index',
+            whitepaper: 'https://quillon.xyz/docs/qnk10-whitepaper',
+            isIndexToken: true,
+            indexData: {
+              methodology: 'market_cap_weighted',
+              rebalanceFrequency: 'Monthly',
+              managementFee: 0.5,
+              performanceFee: 10,
+              navPerShare: qnk10NavPerShare, // Projected NAV
+              totalAUM: 0, // v2.3.8-beta: Not yet deployed
+              components: [
+                // Primary component uses live oracle price
+                { symbol: 'QUG', name: 'Quillon', weight: 60, price: qugPrice, change24h: qugChange24h },
+                { symbol: 'QUGUSD', name: 'Quillon USD', weight: 40, price: qugusdPrice, change24h: qugusdChange24h },
+              ],
+              lastRebalance: 'Coming soon', // v2.3.8-beta: Not yet deployed
+              nextRebalance: 'Coming soon', // v2.3.8-beta: Not yet deployed
+              inceptionDate: 'Coming soon', // v2.3.8-beta: Coming soon
+              ytdReturn: 0, // v2.3.8-beta: Not yet deployed
+              allTimeReturn: 0, // v2.3.8-beta: Not yet deployed
+            },
+          },
+          {
+            id: 'index-fund-defi5',
+            symbol: 'DEFI5',
+            name: 'Stable Yield Index',
+            balance: 0,
+            price: defi5NavPerShare,
+            change1h: qugusdChange1h,
+            change24h: qugusdChange24h,
+            change7d: qugusdChange7d,
+            volume24h: 0, // v2.3.8-beta: Not yet trading
+            // v2.3.7-beta: Convert QUGUSD liquidity to USD
+            liquidity: 0, // v2.3.8-beta: Not yet deployed
+            icon: 'defi-index',
+            marketCap: 0, // v2.3.8-beta: Not yet deployed
+            fullyDilutedMarketCap: 0, // v2.3.8-beta: Not yet deployed
+            totalSupply: 0, // v2.3.8-beta: Not yet minted
+            circulatingSupply: 0, // v2.3.8-beta: Not yet minted
+            holders: 0, // v2.3.8-beta: Not yet deployed
+            features: {
+              reflection: false,
+              autoLiquidity: false,
+              buybackAndBurn: false,
+              antiWhale: true,
+              quantumSecured: true,
+            },
+            fees: {
+              buy: 0.1,
+              sell: 0.1,
+              transfer: 0,
+            },
+            description: 'Stable yield index focused on QUGUSD stablecoin and liquidity pool exposure. Designed for lower volatility.',
+            website: 'https://quillon.xyz/index',
+            whitepaper: 'https://quillon.xyz/docs/defi5-whitepaper',
+            isIndexToken: true,
+            indexData: {
+              methodology: 'equal_weighted',
+              rebalanceFrequency: 'Bi-weekly',
+              managementFee: 0.75,
+              performanceFee: 15,
+              navPerShare: defi5NavPerShare, // Projected NAV
+              totalAUM: 0, // v2.3.8-beta: Not yet deployed
+              components: [
+                // Uses live oracle prices
+                { symbol: 'QUGUSD', name: 'Quillon USD', weight: 50, price: qugusdPrice, change24h: qugusdChange24h },
+                { symbol: 'QUG', name: 'Quillon', weight: 50, price: qugPrice, change24h: qugChange24h },
+              ],
+              lastRebalance: 'Coming soon', // v2.3.8-beta: Not yet deployed
+              nextRebalance: 'Coming soon', // v2.3.8-beta: Not yet deployed
+              inceptionDate: 'Coming soon', // v2.3.8-beta: Coming soon
+              ytdReturn: 0, // v2.3.8-beta: Not yet deployed
+              allTimeReturn: 0, // v2.3.8-beta: Not yet deployed
+            },
+          },
+        ];
+
+        console.log('📊 Adding index fund tokens to Available Tokens:', indexFundTokens.map(t => t.symbol).join(', '));
+        enrichedTokens = [...enrichedTokens, ...indexFundTokens];
+
+        // v2.9.27-beta: Add perpetual markets as tokens
+        // Fetch perpetual market data
+        let perpTokens: Token[] = [];
+        try {
+          const perpResponse = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/perp/markets/QUG-PERP`);
+          if (perpResponse.ok) {
+            const perpData = await perpResponse.json();
+            const market = perpData.success && perpData.market ? perpData.market : perpData;
+
+            if (market) {
+              const markPrice = (market.mark_price || 0) / 1e24;
+              const indexPrice = (market.index_price || 0) / 1e24;
+
+              perpTokens = [{
+                id: 'qug-perp',
+                symbol: 'QUG-PERP',
+                name: 'QUG Perpetual',
+                balance: 0, // User positions shown in modal
+                price: markPrice || qugPrice,
+                change1h: 0, // TODO: Track perp price changes
+                change24h: 0,
+                change7d: 0,
+                volume24h: (market.volume_24h || 0) / 1e24,
+                liquidity: (market.open_interest || 0) / 1e24,
+                icon: '📈',
+                marketCap: (market.open_interest || 0) / 1e24 * markPrice,
+                totalSupply: 0,
+                circulatingSupply: 0,
+                holders: 0,
+                features: {
+                  reflection: false,
+                  autoLiquidity: false,
+                  buybackAndBurn: false,
+                  antiWhale: false,
+                  quantumSecured: true,
+                },
+                fees: {
+                  buy: (market.taker_fee || 0.001) * 100,
+                  sell: (market.taker_fee || 0.001) * 100,
+                  transfer: 0,
+                },
+                description: 'Trade QUG with up to 100x leverage. Perpetual contracts allow long and short positions with no expiry date.',
+                website: 'https://quillon.xyz',
+                isPerp: true,
+                perpData: {
+                  market: 'QUG-PERP',
+                  markPrice: markPrice,
+                  indexPrice: indexPrice,
+                  fundingRate: (market.funding_rate || 0) * 100,
+                  openInterest: (market.open_interest || 0) / 1e24,
+                  maxLeverage: market.max_leverage || 100,
+                  maintenanceMargin: market.maintenance_margin || 0.01,
+                  takerFee: market.taker_fee || 0.001,
+                  makerFee: market.maker_fee || 0.0005,
+                },
+              }];
+              console.log('📈 Adding perpetual market to Available Tokens: QUG-PERP');
+            }
+          }
+        } catch (error) {
+          console.log('ℹ️ Could not fetch perpetual market data:', error);
+        }
+
+        enrichedTokens = [...enrichedTokens, ...perpTokens];
+
         if (mounted) {
           setTokens(enrichedTokens);
         }
@@ -967,6 +1908,16 @@ export default function DexScreen() {
       // Listen for balance-updated events from backend (sent after swaps, transfers, etc.)
       sseEventSource.addEventListener('balance-updated', (event: MessageEvent) => {
         if (!mounted) return;
+
+        // v2.3.28-beta: Check BOTH ref AND localStorage cooldown for race condition protection
+        // The ref is set BEFORE API call, but check localStorage too as backup
+        const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+        const cooldownActive = swapJustCompletedRef.current || Date.now() < cooldownUntil;
+
+        if (cooldownActive) {
+          console.log('⏸️ [DEX] Skipping SSE balance refresh - cooldown active (ref:', swapJustCompletedRef.current, ', localStorage:', Date.now() < cooldownUntil, ')');
+          return;
+        }
 
         try {
           const data = JSON.parse(event.data);
@@ -1030,8 +1981,14 @@ export default function DexScreen() {
             }
           });
 
-          // Refresh tokens to update liquidity values
-          fetchTokens();
+          // v2.3.28-beta: Check cooldown before refreshing tokens
+          const lpCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+          if (swapJustCompletedRef.current || Date.now() < lpCooldownUntil) {
+            console.log('⏸️ [DEX] Skipping liquidity pool refresh - cooldown active');
+          } else {
+            // Refresh tokens to update liquidity values
+            fetchTokens();
+          }
         } catch (error) {
           console.error('❌ [DEX] Failed to parse liquidity_pool_update event:', error);
         }
@@ -1046,12 +2003,24 @@ export default function DexScreen() {
 
     // Listen for CDP mint events to refresh QUGUSD balance
     const handleCDPMint = () => {
+      // v2.3.28-beta: Check cooldown before refreshing
+      const cdpCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+      if (swapJustCompletedRef.current || Date.now() < cdpCooldownUntil) {
+        console.log('⏸️ [DEX] Skipping CDP mint refresh - cooldown active');
+        return;
+      }
       console.log('💵 CDP mint detected in DexScreen - refreshing tokens');
       fetchTokens();
     };
 
     // Listen for manual refresh events (from swaps)
     const handleManualRefresh = () => {
+      // v2.3.28-beta: Check cooldown before refreshing
+      const manualCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+      if (swapJustCompletedRef.current || Date.now() < manualCooldownUntil) {
+        console.log('⏸️ [DEX] Skipping manual refresh - cooldown active');
+        return;
+      }
       console.log('🔄 Manual token refresh triggered - refetching balances');
       fetchTokens();
     };
@@ -1155,7 +2124,9 @@ export default function DexScreen() {
     setLiquidityToken(null);
   }, []);
 
-  const handleAddLiquidity = useCallback(async (tokenA: string, tokenB: string, amountA: number, amountB: number) => {
+  // v3.2.20-beta: Accept string amounts to preserve precision for large numbers
+  // JavaScript Number loses precision above ~9×10^15 (Number.MAX_SAFE_INTEGER)
+  const handleAddLiquidity = useCallback(async (tokenA: string, tokenB: string, amountA: string, amountB: string) => {
     console.log(`🔍 Adding liquidity - Raw inputs:`, { tokenA, tokenB, amountA, amountB, typeA: typeof amountA, typeB: typeof amountB });
 
     try {
@@ -1166,17 +2137,51 @@ export default function DexScreen() {
         return;
       }
 
-      // Find token addresses (use "QUG" for native, otherwise use token ID)
-      const token0 = tokenA === 'QUG' ? 'QUG' : tokens.find(t => t.symbol === tokenA)?.id || tokenA;
-      const token1 = tokenB === 'QUG' ? 'QUG' : tokens.find(t => t.symbol === tokenB)?.id || tokenB;
+      // Find token addresses and decimals (use "QUG" for native, otherwise use token ID)
+      const tokenAData = tokens.find(t => t.symbol === tokenA);
+      const tokenBData = tokens.find(t => t.symbol === tokenB);
+      const token0 = tokenA === 'QUG' ? 'QUG' : tokenAData?.id || tokenA;
+      const token1 = tokenB === 'QUG' ? 'QUG' : tokenBData?.id || tokenB;
 
-      // Convert human-readable amounts to smallest units (base units)
-      // QUG and tokens use 8 decimals (like Bitcoin): 1 QUG = 100,000,000 units
-      const DECIMALS = 100_000_000; // 10^8
-      const amount0 = Math.floor(amountA * DECIMALS);
-      const amount1 = Math.floor(amountB * DECIMALS);
+      // v3.2.23-beta: Use TOKEN-NATIVE decimals to prevent u128 overflow
+      // With 24 decimals, max tokens = 3.4e38 / 1e24 = 3.4e14 (~340 trillion)
+      // For tokens with larger supplies (1e28+), we must use their native decimals.
+      //
+      // Decimal rules:
+      // - QUG/QUGUSD: Always 24 decimals (native blockchain tokens)
+      // - Custom tokens: Use their configured decimals (typically 7-8)
+      //
+      // The backend normalizes all values to 24 decimals for AMM calculations,
+      // then de-normalizes the output to the target token's decimals.
+      const isNativeTokenA = tokenA === 'QUG' || tokenA === 'QUGUSD';
+      const isNativeTokenB = tokenB === 'QUG' || tokenB === 'QUGUSD';
+      const decimals0 = isNativeTokenA ? 24 : (tokenAData?.decimals ?? 8);
+      const decimals1 = isNativeTokenB ? 24 : (tokenBData?.decimals ?? 8);
 
-      console.log(`💰 Liquidity amounts after conversion:`, { amount0, amount1, token0, token1 });
+      console.log(`📊 Pool reserve decimals: ${tokenA}=${decimals0}, ${tokenB}=${decimals1}`);
+
+      // v3.2.22-beta: Use shared BigInt helpers (moved to top-level)
+      const amount0 = parseAmountToBigInt(amountA, decimals0);
+      const amount1 = parseAmountToBigInt(amountB, decimals1);
+
+      console.log(`📐 Liquidity: amountA="${amountA}", amountB="${amountB}", decimals0=${decimals0}, decimals1=${decimals1}`);
+
+      // v3.2.25-beta: Validate amounts don't exceed u128 max (~3.4e38)
+      // Max tokens = U128_MAX / 10^decimals
+      if (amount0 > U128_MAX) {
+        const maxTokens0 = Number(U128_MAX / (10n ** BigInt(decimals0)));
+        const maxDisplay0 = maxTokens0.toExponential(2);
+        alert(`❌ Amount of ${tokenA} exceeds maximum supported!\n\nWith ${decimals0} decimals, max amount: ~${maxDisplay0} tokens\n\nPlease reduce the amount or use a token with fewer decimals.`);
+        return;
+      }
+      if (amount1 > U128_MAX) {
+        const maxTokens1 = Number(U128_MAX / (10n ** BigInt(decimals1)));
+        const maxDisplay1 = maxTokens1.toExponential(2);
+        alert(`❌ Amount of ${tokenB} exceeds maximum supported!\n\nWith ${decimals1} decimals, max amount: ~${maxDisplay1} tokens\n\nPlease reduce the amount or use a token with fewer decimals.`);
+        return;
+      }
+
+      console.log(`💰 Liquidity amounts after conversion:`, { amount0: amount0.toString(), amount1: amount1.toString(), token0, token1 });
 
       // Call API to add liquidity
       const response = await qnkAPI.addLiquidity({
@@ -1195,9 +2200,11 @@ export default function DexScreen() {
       } else {
         alert(`❌ Failed to add liquidity: ${response.error || 'Unknown error'}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to add liquidity:', error);
-      alert('❌ Failed to add liquidity. Please try again.');
+      // v3.2.15-beta: Show actual error message to help debug authentication issues
+      const errorMessage = error?.message || error?.error || String(error);
+      alert(`❌ Failed to add liquidity: ${errorMessage}`);
     }
   }, [tokens]);
 
@@ -1226,16 +2233,24 @@ export default function DexScreen() {
       // Calculate actual supply using decimals
       // ✅ FIX: Backend defaults to 8 decimals, not 18!
       const decimals = contract.decimals || 8;
-      const rawSupply = contract.total_supply || 0;
-      const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+      // v3.2.14-beta: Use BigInt to prevent precision loss for large token supplies
+      const rawSupply = contract.total_supply || '0';
+      const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+      const supplyBigInt = BigInt(supplyStr);
+      const divisorBigInt = BigInt(10 ** decimals);
+      // Use floating-point for display calculations but preserve BigInt precision
+      const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
 
       if (walletAddress) {
         // Try to fetch token balance
         const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, customTokenAddress);
         if (balanceResponse.success && balanceResponse.data) {
-          // v1.4.9: Fix - Convert raw balance to human-readable using decimals
-          const rawBalance = balanceResponse.data.balance || 0;
-          tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
+          // v3.2.14-beta: Fix BigInt precision loss for large balances
+          const rawBalance = balanceResponse.data.balance || '0';
+          const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+          const balanceBigInt = BigInt(balanceStr);
+          // Integer division for whole part, float for fractional
+          tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
           console.log(`✅ [Custom Token] Converted balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
         }
       }
@@ -1252,6 +2267,7 @@ export default function DexScreen() {
         volume24h: 0,
         liquidity: actualSupply, // Use calculated supply
         marketCap: 0,
+        fullyDilutedMarketCap: actualSupply * 1.0, // FDV = total supply * price
         totalSupply: actualSupply, // Use calculated supply
         circulatingSupply: actualSupply, // Use calculated supply
         holders: 0,
@@ -1538,10 +2554,137 @@ export default function DexScreen() {
     <>
       {/* Token Details Modal */}
       {selectedToken && (
-        <TokenDetailsModal
-          token={selectedToken}
-          onClose={handleCloseModal}
-        />
+        selectedToken.isIndexToken ? (
+          <IndexFundModal
+            token={selectedToken}
+            onClose={handleCloseModal}
+          />
+        ) : selectedToken.isPerp ? (
+          // v2.9.27-beta: Perpetual Details Modal - Custom UI for perpetual contracts
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={handleCloseModal}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-gradient-to-br from-gray-900 via-purple-900/30 to-gray-900 rounded-2xl border border-purple-500/30 max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="p-6 border-b border-purple-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="w-16 h-16 rounded-full bg-gradient-to-r from-purple-600 to-pink-600 flex items-center justify-center text-2xl">
+                      📈
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold text-white">{selectedToken.symbol}</h2>
+                      <p className="text-gray-400">{selectedToken.name}</p>
+                    </div>
+                  </div>
+                  <button onClick={handleCloseModal} className="p-2 hover:bg-white/10 rounded-lg transition-colors">
+                    <X className="w-6 h-6 text-gray-400" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Price Info */}
+              <div className="p-6 border-b border-purple-500/20">
+                <div className="grid grid-cols-2 gap-6">
+                  <div>
+                    <div className="text-sm text-gray-400 mb-1">Mark Price</div>
+                    <div className="text-3xl font-bold text-white">
+                      ${formatPrice(selectedToken.perpData?.markPrice || selectedToken.price)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-gray-400 mb-1">Index Price</div>
+                    <div className="text-3xl font-bold text-cyan-400">
+                      ${formatPrice(selectedToken.perpData?.indexPrice || selectedToken.price)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Market Stats */}
+              <div className="p-6 border-b border-purple-500/20">
+                <h3 className="text-lg font-semibold text-white mb-4">Market Statistics</h3>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-black/30 rounded-lg p-3">
+                    <div className="text-sm text-gray-400">Funding Rate</div>
+                    <div className={`text-lg font-bold ${(selectedToken.perpData?.fundingRate || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {(selectedToken.perpData?.fundingRate || 0) >= 0 ? '+' : ''}{(selectedToken.perpData?.fundingRate || 0).toFixed(4)}%
+                    </div>
+                  </div>
+                  <div className="bg-black/30 rounded-lg p-3">
+                    <div className="text-sm text-gray-400">Open Interest</div>
+                    <div className="text-lg font-bold text-white">
+                      ${(selectedToken.perpData?.openInterest || 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="bg-black/30 rounded-lg p-3">
+                    <div className="text-sm text-gray-400">24h Volume</div>
+                    <div className="text-lg font-bold text-white">
+                      ${selectedToken.volume24h.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Trading Info */}
+              <div className="p-6 border-b border-purple-500/20">
+                <h3 className="text-lg font-semibold text-white mb-4">Trading Information</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex justify-between items-center p-3 bg-black/30 rounded-lg">
+                    <span className="text-gray-400">Max Leverage</span>
+                    <span className="text-white font-bold">{selectedToken.perpData?.maxLeverage || 100}x</span>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-black/30 rounded-lg">
+                    <span className="text-gray-400">Maintenance Margin</span>
+                    <span className="text-white font-bold">{((selectedToken.perpData?.maintenanceMargin || 0.01) * 100).toFixed(2)}%</span>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-black/30 rounded-lg">
+                    <span className="text-gray-400">Taker Fee</span>
+                    <span className="text-white font-bold">{((selectedToken.perpData?.takerFee || 0.001) * 100).toFixed(3)}%</span>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-black/30 rounded-lg">
+                    <span className="text-gray-400">Maker Fee</span>
+                    <span className="text-white font-bold">{((selectedToken.perpData?.makerFee || 0.0005) * 100).toFixed(3)}%</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Description */}
+              <div className="p-6 border-b border-purple-500/20">
+                <h3 className="text-lg font-semibold text-white mb-2">About</h3>
+                <p className="text-gray-400">{selectedToken.description}</p>
+              </div>
+
+              {/* Trade Button */}
+              <div className="p-6">
+                <button
+                  onClick={() => {
+                    handleCloseModal();
+                    setDexMode('perpetual');
+                  }}
+                  className="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 rounded-xl font-bold text-white text-lg transition-all shadow-lg shadow-purple-500/25"
+                >
+                  Trade {selectedToken.symbol}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : (
+          <TokenDetailsModal
+            token={selectedToken}
+            onClose={handleCloseModal}
+          />
+        )
       )}
 
       {/* Liquidity Modal */}
@@ -1554,22 +2697,22 @@ export default function DexScreen() {
         />
       )}
 
-      {/* Token Selector Modal - From Token */}
+      {/* Token Selector Modal - From Token (exclude index tokens - they can only be minted/redeemed) */}
       <TokenSelectorModal
         isOpen={isFromTokenSelectorOpen}
         onClose={() => setIsFromTokenSelectorOpen(false)}
         onSelectToken={handleSelectFromToken}
-        tokens={tokens}
+        tokens={tokens.filter(t => !t.isIndexToken && !t.isPerp)}
         boostedTokens={boostedTokens}
         currentToken={findToken(swapFrom)}
       />
 
-      {/* Token Selector Modal - To Token */}
+      {/* Token Selector Modal - To Token (exclude index tokens and perps - they can only be traded via their own interfaces) */}
       <TokenSelectorModal
         isOpen={isToTokenSelectorOpen}
         onClose={() => setIsToTokenSelectorOpen(false)}
         onSelectToken={handleSelectToToken}
-        tokens={tokens}
+        tokens={tokens.filter(t => !t.isIndexToken && !t.isPerp)}
         boostedTokens={boostedTokens}
         currentToken={findToken(swapTo)}
       />
@@ -1610,8 +2753,8 @@ export default function DexScreen() {
                     <div className="flex items-center justify-between">
                       <span className="text-gray-400">Your Reserves:</span>
                       <div className="text-right">
-                        <div className="text-white text-sm">{(removingPool.reserve0 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token0}</div>
-                        <div className="text-white text-sm">{(removingPool.reserve1 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token1}</div>
+                        <div className="text-white text-sm">{(parseU128(removingPool.reserve0) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token0}</div>
+                        <div className="text-white text-sm">{(parseU128(removingPool.reserve1) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token1}</div>
                       </div>
                     </div>
                   </div>
@@ -1643,11 +2786,11 @@ export default function DexScreen() {
                     <div className="space-y-1">
                       <div className="flex justify-between">
                         <span className="text-gray-400">{removingPool.token0}:</span>
-                        <span className="text-white font-bold">{((removingPool.reserve0 / 100_000_000) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
+                        <span className="text-white font-bold">{((parseU128(removingPool.reserve0) / 1e24) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-400">{removingPool.token1}:</span>
-                        <span className="text-white font-bold">{((removingPool.reserve1 / 100_000_000) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
+                        <span className="text-white font-bold">{((parseU128(removingPool.reserve1) / 1e24) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
                       </div>
                     </div>
                   </div>
@@ -1870,6 +3013,31 @@ export default function DexScreen() {
           </h1>
           <p className="text-gray-400 mt-1">Decentralized exchange with quantum security</p>
         </div>
+
+        {/* Mode Toggle: Spot / Perpetual */}
+        <div className="flex items-center gap-2 bg-white/5 rounded-xl p-1">
+          <button
+            onClick={() => setDexMode('spot')}
+            className={`px-4 py-2 rounded-lg font-semibold transition-all ${
+              dexMode === 'spot'
+                ? 'bg-quantum-cyan text-black'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Spot
+          </button>
+          <button
+            onClick={() => setDexMode('perpetual')}
+            className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
+              dexMode === 'perpetual'
+                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Perpetual
+            <span className="text-xs bg-red-500/30 px-2 py-0.5 rounded-full">10x</span>
+          </button>
+        </div>
       </motion.div>
 
       {loading ? (
@@ -1879,7 +3047,657 @@ export default function DexScreen() {
             <p className="text-gray-400">Loading tokens...</p>
           </div>
         </div>
+      ) : dexMode === 'perpetual' ? (
+        /* ========== PERPETUAL FUTURES INTERFACE ========== */
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left: Trading Panel */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="lg:col-span-1"
+          >
+            <div className="relative group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
+              <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-orange-500/20 p-6 space-y-4">
+                <h2 className="text-xl font-bold bg-gradient-to-r from-orange-400 to-red-400 bg-clip-text text-transparent">
+                  QUG-PERP
+                </h2>
+
+                {/* Market Info */}
+                <div className="grid grid-cols-2 gap-4 p-4 bg-white/5 rounded-xl text-sm">
+                  <div>
+                    <div className="text-gray-400">Mark Price</div>
+                    <div className="text-white font-bold">
+                      ${perpMarket?.mark_price ? (perpMarket.mark_price / 1e24).toFixed(4) : '0.0000'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Index Price</div>
+                    <div className="text-white font-bold">
+                      ${perpMarket?.index_price ? (perpMarket.index_price / 1e24).toFixed(4) : '0.0000'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Funding Rate</div>
+                    <div className={`font-bold ${(perpMarket?.funding_rate || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {((perpMarket?.funding_rate || 0) * 100).toFixed(4)}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Open Interest</div>
+                    <div className="text-white font-bold">
+                      {((perpMarket?.open_interest_long || 0) + (perpMarket?.open_interest_short || 0)) / 1e24} QUG
+                    </div>
+                  </div>
+                </div>
+
+                {/* Order Type Toggle (Market/Limit) */}
+                <div className="flex gap-2 p-1 bg-white/5 rounded-xl">
+                  <button
+                    onClick={() => setPerpOrderType('market')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${
+                      perpOrderType === 'market'
+                        ? 'bg-orange-500 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Market
+                  </button>
+                  <button
+                    onClick={() => setPerpOrderType('limit')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${
+                      perpOrderType === 'limit'
+                        ? 'bg-blue-500 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Limit
+                  </button>
+                </div>
+
+                {/* Long/Short Toggle */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setPerpSide('long')}
+                    className={`flex-1 py-3 rounded-xl font-bold transition-all ${
+                      perpSide === 'long'
+                        ? 'bg-green-500 text-white'
+                        : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                    }`}
+                  >
+                    Long
+                  </button>
+                  <button
+                    onClick={() => setPerpSide('short')}
+                    className={`flex-1 py-3 rounded-xl font-bold transition-all ${
+                      perpSide === 'short'
+                        ? 'bg-red-500 text-white'
+                        : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                    }`}
+                  >
+                    Short
+                  </button>
+                </div>
+
+                {/* Leverage Slider */}
+                <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Leverage</span>
+                    <span className="text-white font-bold">{perpLeverage}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="10"
+                    value={perpLeverage}
+                    onChange={(e) => setPerpLeverage(parseInt(e.target.value))}
+                    className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                  />
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>1x</span>
+                    <span>5x</span>
+                    <span>10x</span>
+                  </div>
+                </div>
+
+                {/* Size Input */}
+                <div className="space-y-2">
+                  <label className="text-sm text-gray-400">Size (QUG)</label>
+                  <input
+                    type="number"
+                    value={perpSize}
+                    onChange={(e) => setPerpSize(e.target.value)}
+                    placeholder="0.0"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors"
+                  />
+                </div>
+
+                {/* Limit Price Input (for limit orders) */}
+                {perpOrderType === 'limit' && (
+                  <div className="space-y-2">
+                    <label className="text-sm text-gray-400">Limit Price (QUGUSD)</label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        value={limitPrice}
+                        onChange={(e) => setLimitPrice(e.target.value)}
+                        placeholder={perpMarket?.mark_price ? (perpMarket.mark_price / 1e24).toFixed(4) : '0.0'}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                      />
+                      {orderBook && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex gap-2 text-xs">
+                          <button
+                            onClick={() => orderBook.best_bid && setLimitPrice((orderBook.best_bid / 1e24).toFixed(4))}
+                            className="px-2 py-1 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30"
+                          >
+                            Bid
+                          </button>
+                          <button
+                            onClick={() => orderBook.best_ask && setLimitPrice((orderBook.best_ask / 1e24).toFixed(4))}
+                            className="px-2 py-1 bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                          >
+                            Ask
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Time-in-Force (for limit orders) */}
+                {perpOrderType === 'limit' && (
+                  <div className="space-y-2">
+                    <label className="text-sm text-gray-400">Time in Force</label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {(['gtc', 'ioc', 'fok', 'post_only'] as const).map((tif) => (
+                        <button
+                          key={tif}
+                          onClick={() => setTimeInForce(tif)}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                            timeInForce === tif
+                              ? 'bg-blue-500 text-white'
+                              : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                          }`}
+                        >
+                          {tif === 'gtc' ? 'GTC' : tif === 'ioc' ? 'IOC' : tif === 'fok' ? 'FOK' : 'POST'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Collateral Input (for market orders) */}
+                {perpOrderType === 'market' && (
+                  <div className="space-y-2">
+                    <label className="text-sm text-gray-400">Collateral (QUGUSD)</label>
+                    <input
+                      type="number"
+                      value={perpCollateral}
+                      onChange={(e) => setPerpCollateral(e.target.value)}
+                      placeholder="0.0"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors"
+                    />
+                  </div>
+                )}
+
+                {/* Position Info - Market Orders */}
+                {perpOrderType === 'market' && perpSize && perpCollateral && (
+                  <div className="p-4 bg-white/5 rounded-xl text-sm space-y-2">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Position Value</span>
+                      <span className="text-white">
+                        ${(parseFloat(perpSize || '0') * (perpMarket?.mark_price || 0) / 1e24).toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Liquidation Price</span>
+                      <span className="text-red-400">
+                        ${((perpMarket?.mark_price || 0) / 1e24 * (perpSide === 'long' ? (1 - 0.9 / perpLeverage) : (1 + 0.9 / perpLeverage))).toFixed(4)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Order Info - Limit Orders */}
+                {perpOrderType === 'limit' && perpSize && limitPrice && (
+                  <div className="p-4 bg-blue-500/10 rounded-xl text-sm space-y-2 border border-blue-500/20">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Order Value</span>
+                      <span className="text-white">
+                        ${(parseFloat(perpSize || '0') * parseFloat(limitPrice || '0')).toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Required Margin ({perpLeverage}x)</span>
+                      <span className="text-blue-400">
+                        ${(parseFloat(perpSize || '0') * parseFloat(limitPrice || '0') / perpLeverage).toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Est. Liquidation</span>
+                      <span className="text-red-400">
+                        ${(parseFloat(limitPrice || '0') * (perpSide === 'long' ? (1 - 0.9 / perpLeverage) : (1 + 0.9 / perpLeverage))).toFixed(4)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Error Message */}
+                {perpError && (
+                  <div className="p-3 bg-red-500/20 border border-red-500/30 rounded-xl text-red-400 text-sm">
+                    {perpError}
+                  </div>
+                )}
+
+                {/* Submit Button */}
+                {perpOrderType === 'market' ? (
+                  <button
+                    onClick={openPerpPosition}
+                    disabled={loadingPerp || !perpSize || !perpCollateral}
+                    className={`w-full py-4 rounded-xl font-bold text-lg transition-all ${
+                      perpSide === 'long'
+                        ? 'bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 text-white'
+                        : 'bg-gradient-to-r from-red-500 to-rose-500 hover:from-red-400 hover:to-rose-400 text-white'
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {loadingPerp ? (
+                      <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+                    ) : (
+                      `${perpSide === 'long' ? 'Long' : 'Short'} QUG-PERP (Market)`
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    onClick={placeLimitOrder}
+                    disabled={loadingPerp || !perpSize || !limitPrice}
+                    className={`w-full py-4 rounded-xl font-bold text-lg transition-all ${
+                      perpSide === 'long'
+                        ? 'bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-400 hover:to-cyan-400 text-white'
+                        : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-400 hover:to-pink-400 text-white'
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {loadingPerp ? (
+                      <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+                    ) : (
+                      `${perpSide === 'long' ? 'Buy' : 'Sell'} Limit @ ${limitPrice}`
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </motion.div>
+
+          {/* Right: Order Book + Positions Panel */}
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="lg:col-span-2 space-y-6"
+          >
+            {/* Order Book Display */}
+            <div className="relative group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500 to-purple-500 rounded-2xl blur-lg opacity-20" />
+              <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-blue-500/20 p-6">
+                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  Order Book
+                  {orderBook && (
+                    <span className="text-xs text-gray-400 font-normal">
+                      Spread: {orderBook.spread ? `$${(orderBook.spread / 1e24).toFixed(4)}` : 'N/A'}
+                    </span>
+                  )}
+                </h2>
+
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Bids (Buy Orders) */}
+                  <div>
+                    <div className="text-sm text-green-400 font-semibold mb-2">Bids (Buy)</div>
+                    <div className="space-y-1">
+                      {orderBook?.bids && orderBook.bids.length > 0 ? (
+                        orderBook.bids.slice(0, 8).map((level, idx) => (
+                          <div key={idx} className="flex justify-between text-sm py-1 px-2 rounded bg-green-500/10">
+                            <span className="text-green-400">${(level.price / 1e24).toFixed(4)}</span>
+                            <span className="text-gray-300">{(level.size / 1e24).toFixed(4)}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-gray-500 text-sm text-center py-4">No buy orders</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Asks (Sell Orders) */}
+                  <div>
+                    <div className="text-sm text-red-400 font-semibold mb-2">Asks (Sell)</div>
+                    <div className="space-y-1">
+                      {orderBook?.asks && orderBook.asks.length > 0 ? (
+                        orderBook.asks.slice(0, 8).map((level, idx) => (
+                          <div key={idx} className="flex justify-between text-sm py-1 px-2 rounded bg-red-500/10">
+                            <span className="text-red-400">${(level.price / 1e24).toFixed(4)}</span>
+                            <span className="text-gray-300">{(level.size / 1e24).toFixed(4)}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-gray-500 text-sm text-center py-4">No sell orders</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Best Bid/Ask Summary */}
+                {orderBook && (orderBook.best_bid || orderBook.best_ask) && (
+                  <div className="mt-4 pt-4 border-t border-white/10 grid grid-cols-3 gap-4 text-center">
+                    <div>
+                      <div className="text-xs text-gray-400">Best Bid</div>
+                      <div className="text-green-400 font-bold">
+                        {orderBook.best_bid ? `$${(orderBook.best_bid / 1e24).toFixed(4)}` : '-'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">Mid Price</div>
+                      <div className="text-white font-bold">
+                        {orderBook.best_bid && orderBook.best_ask
+                          ? `$${((orderBook.best_bid + orderBook.best_ask) / 2 / 1e24).toFixed(4)}`
+                          : '-'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">Best Ask</div>
+                      <div className="text-red-400 font-bold">
+                        {orderBook.best_ask ? `$${(orderBook.best_ask / 1e24).toFixed(4)}` : '-'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Open Limit Orders */}
+            {limitOrders.length > 0 && (
+              <div className="relative group">
+                <div className="absolute -inset-0.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl blur-lg opacity-20" />
+                <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-purple-500/20 p-6">
+                  <h2 className="text-xl font-bold text-white mb-4">Open Orders ({limitOrders.length})</h2>
+                  <div className="space-y-3">
+                    {limitOrders.map((order: any) => (
+                      <div key={order.id} className="p-3 bg-white/5 rounded-xl border border-white/10 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className={`px-2 py-1 rounded text-xs font-bold ${
+                            order.side === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                          }`}>
+                            {order.side.toUpperCase()}
+                          </span>
+                          <div>
+                            <div className="text-white font-semibold">
+                              {(order.remaining_size / 1e24).toFixed(4)} @ ${(order.price / 1e24).toFixed(4)}
+                            </div>
+                            <div className="text-xs text-gray-400">
+                              {order.time_in_force.toUpperCase()} · {order.leverage}x
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => cancelLimitOrder(order.id)}
+                          className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Positions Panel */}
+            <div className="relative group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl blur-lg opacity-20" />
+              <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-orange-500/20 p-6">
+                <h2 className="text-xl font-bold text-white mb-4">Open Positions</h2>
+
+                {perpPositions.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <div className="text-4xl mb-4">📊</div>
+                    <p>No open positions</p>
+                    <p className="text-sm mt-2">Open a long or short position to start trading</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {perpPositions.map((position: any) => (
+                      <div
+                        key={position.id}
+                        className="p-4 bg-white/5 rounded-xl border border-white/10"
+                      >
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <span className={`px-2 py-1 rounded text-xs font-bold ${
+                              position.side === 'long' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                            }`}>
+                              {position.side.toUpperCase()} {position.leverage}x
+                            </span>
+                            <span className="text-white font-bold">{position.market}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setEditingPosition(position);
+                                setEditMode('addMargin');
+                                setEditAmount('');
+                              }}
+                              className="px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-lg text-xs font-semibold transition-colors"
+                            >
+                              + Margin
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingPosition(position);
+                                setEditMode('removeMargin');
+                                setEditAmount('');
+                              }}
+                              className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded-lg text-xs font-semibold transition-colors"
+                            >
+                              - Margin
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingPosition(position);
+                                setEditMode('adjustLeverage');
+                                setNewLeverage(position.leverage);
+                              }}
+                              className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg text-xs font-semibold transition-colors"
+                            >
+                              Leverage
+                            </button>
+                            <button
+                              onClick={() => closePerpPosition(position.id)}
+                              className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-xs font-semibold transition-colors"
+                            >
+                              Close
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-5 gap-4 text-sm">
+                          <div>
+                            <div className="text-gray-400">Size</div>
+                            <div className="text-white font-semibold">
+                              {(position.size / 1e24).toFixed(4)} QUG
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400">Collateral</div>
+                            <div className="text-cyan-400 font-semibold">
+                              {(position.collateral / 1e24).toFixed(2)} QUGUSD
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400">Entry Price</div>
+                            <div className="text-white font-semibold">
+                              ${(position.entry_price / 1e24).toFixed(4)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400">Liq. Price</div>
+                            <div className="text-red-400 font-semibold">
+                              ${(position.liquidation_price / 1e24).toFixed(4)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400">Unrealized PnL</div>
+                            <div className={`font-bold ${position.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {position.unrealized_pnl >= 0 ? '+' : ''}{(position.unrealized_pnl / 1e24).toFixed(4)} QUGUSD
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Risk Warning */}
+                <div className="mt-6 p-4 bg-orange-500/10 border border-orange-500/20 rounded-xl">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-orange-400 flex-shrink-0 mt-0.5" />
+                    <div className="text-sm text-orange-200/80">
+                      <p className="font-semibold text-orange-400 mb-1">Leverage Trading Risk</p>
+                      Perpetual contracts carry significant risk. Your position may be liquidated if the market moves against you beyond your maintenance margin. Only trade with funds you can afford to lose.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* 📝 Position Edit Modal */}
+          {editingPosition && editMode && (
+            <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-gray-900 rounded-2xl border border-white/10 p-6 max-w-md w-full"
+              >
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-white">
+                    {editMode === 'addMargin' && '➕ Add Margin'}
+                    {editMode === 'removeMargin' && '➖ Remove Margin'}
+                    {editMode === 'adjustLeverage' && '⚡ Adjust Leverage'}
+                  </h3>
+                  <button
+                    onClick={() => {
+                      setEditingPosition(null);
+                      setEditMode(null);
+                    }}
+                    className="text-gray-400 hover:text-white transition-colors"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Position Info */}
+                <div className="bg-white/5 rounded-xl p-4 mb-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`px-2 py-1 rounded text-xs font-bold ${
+                      editingPosition.side === 'long' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                    }`}>
+                      {editingPosition.side.toUpperCase()} {editingPosition.leverage}x
+                    </span>
+                    <span className="text-white font-bold">{editingPosition.market}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 text-sm mt-3">
+                    <div>
+                      <div className="text-gray-400">Current Collateral</div>
+                      <div className="text-cyan-400 font-semibold">{(editingPosition.collateral / 1e24).toFixed(4)} QUGUSD</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-400">Liquidation Price</div>
+                      <div className="text-red-400 font-semibold">${(editingPosition.liquidation_price / 1e24).toFixed(4)}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Add/Remove Margin Input */}
+                {(editMode === 'addMargin' || editMode === 'removeMargin') && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-sm text-gray-400 mb-2 block">
+                        {editMode === 'addMargin' ? 'Amount to Add' : 'Amount to Remove'} (QUGUSD)
+                      </label>
+                      <input
+                        type="number"
+                        value={editAmount}
+                        onChange={(e) => setEditAmount(e.target.value)}
+                        placeholder="0.00"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-cyan-500/50"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        const amount = parseFloat(editAmount);
+                        if (amount > 0) {
+                          if (editMode === 'addMargin') {
+                            addMarginToPosition(editingPosition.id, amount);
+                          } else {
+                            removeMarginFromPosition(editingPosition.id, amount);
+                          }
+                        }
+                      }}
+                      disabled={loadingPerp || !editAmount || parseFloat(editAmount) <= 0}
+                      className={`w-full py-3 rounded-xl font-bold transition-all ${
+                        editMode === 'addMargin'
+                          ? 'bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white'
+                          : 'bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-black'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {loadingPerp ? 'Processing...' : editMode === 'addMargin' ? 'Add Margin' : 'Remove Margin'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Adjust Leverage Input */}
+                {editMode === 'adjustLeverage' && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-sm text-gray-400 mb-2 block">
+                        New Leverage: <span className="text-white font-bold">{newLeverage}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="1"
+                        max="10"
+                        value={newLeverage}
+                        onChange={(e) => setNewLeverage(parseInt(e.target.value))}
+                        className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <div className="flex justify-between text-xs text-gray-500 mt-1">
+                        <span>1x</span>
+                        <span>5x</span>
+                        <span>10x</span>
+                      </div>
+                    </div>
+                    <div className="bg-white/5 rounded-lg p-3 text-sm">
+                      <div className="text-gray-400">
+                        {newLeverage > editingPosition.leverage ? (
+                          <span className="text-yellow-400">⚠️ Increasing leverage requires less collateral but increases liquidation risk</span>
+                        ) : newLeverage < editingPosition.leverage ? (
+                          <span className="text-green-400">✓ Decreasing leverage requires more collateral but reduces liquidation risk</span>
+                        ) : (
+                          <span className="text-gray-400">No change in leverage</span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => adjustPositionLeverage(editingPosition.id, newLeverage)}
+                      disabled={loadingPerp || newLeverage === editingPosition.leverage}
+                      className="w-full py-3 rounded-xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loadingPerp ? 'Processing...' : `Change to ${newLeverage}x Leverage`}
+                    </button>
+                  </div>
+                )}
+              </motion.div>
+            </div>
+          )}
+        </div>
       ) : (
+        /* ========== SPOT TRADING INTERFACE ========== */
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Swap Interface */}
           <motion.div
@@ -2087,10 +3905,48 @@ export default function DexScreen() {
                       const fromToken = findToken(swapFrom);
                       const toToken = findToken(swapTo);
                       if (!fromToken || !toToken) return '';
-                      // Calculate actual exchange rate using oracle prices
-                      // Account for 0.3% DEX fee
-                      const exchangeRate = (fromToken.price / toToken.price) * 0.997;
-                      return (parseFloat(swapAmount) * exchangeRate).toFixed(4);
+
+                      // v2.3.33-beta: FIX - Use pool reserves for accurate estimated output
+                      const formatTokenForBackend = (tokenId: string): string => {
+                        if (tokenId === 'native-qug') return 'QUG';
+                        if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                        return tokenId;
+                      };
+
+                      const fromTokenFormatted = formatTokenForBackend(fromToken.id);
+                      const toTokenFormatted = formatTokenForBackend(toToken.id);
+
+                      // Find matching liquidity pool
+                      const matchingPool = liquidityPools.find(pool => {
+                        const pool0Upper = pool.token0.toUpperCase();
+                        const pool1Upper = pool.token1.toUpperCase();
+                        const fromUpper = fromTokenFormatted.toUpperCase();
+                        const toUpper = toTokenFormatted.toUpperCase();
+                        return (pool0Upper === fromUpper && pool1Upper === toUpper) ||
+                               (pool0Upper === toUpper && pool1Upper === fromUpper);
+                      });
+
+                      if (matchingPool) {
+                        // Use AMM formula: amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
+                        const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
+                        const reserveIn = (isForward ? parseU128(matchingPool.reserve0) : parseU128(matchingPool.reserve1)) / 1e24;
+                        const reserveOut = (isForward ? parseU128(matchingPool.reserve1) : parseU128(matchingPool.reserve0)) / 1e24;
+                        // v2.4.0: Add NaN protection for zero reserves
+                        if (reserveIn <= 0 || reserveOut <= 0) {
+                          return '0.0000';
+                        }
+                        const amountIn = parseFloat(swapAmount) * 0.997; // Apply 0.3% fee
+                        const amountOut = (amountIn * reserveOut) / (reserveIn + amountIn);
+                        return isFinite(amountOut) && !isNaN(amountOut) ? amountOut.toFixed(4) : '0.0000';
+                      }
+
+                      // Fallback to oracle prices for native token pairs (QUG/QUGUSD)
+                      // v2.4.0: Add NaN protection
+                      const fromPrice = fromToken.price || 1;
+                      const toPrice = toToken.price || 1;
+                      const exchangeRate = (fromPrice / toPrice) * 0.997;
+                      const result = parseFloat(swapAmount) * exchangeRate;
+                      return isFinite(result) && !isNaN(result) ? result.toFixed(4) : '0.0000';
                     })()}
                     placeholder="0.0"
                     readOnly
@@ -2158,9 +4014,48 @@ export default function DexScreen() {
                       const fromToken = findToken(swapFrom);
                       const toToken = findToken(swapTo);
                       if (!fromToken || !toToken) return '0.00';
-                      // Calculate actual exchange rate using oracle prices (before fees)
-                      const exchangeRate = fromToken.price / toToken.price;
-                      return exchangeRate.toFixed(2);
+
+                      // v2.3.33-beta: FIX - Use pool reserves for accurate exchange rate
+                      // Oracle prices are in different units (USD vs QUG) which causes wrong rates
+                      const formatTokenForBackend = (tokenId: string): string => {
+                        if (tokenId === 'native-qug') return 'QUG';
+                        if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                        return tokenId;
+                      };
+
+                      const fromTokenFormatted = formatTokenForBackend(fromToken.id);
+                      const toTokenFormatted = formatTokenForBackend(toToken.id);
+
+                      // Find matching liquidity pool
+                      const matchingPool = liquidityPools.find(pool => {
+                        const pool0Upper = pool.token0.toUpperCase();
+                        const pool1Upper = pool.token1.toUpperCase();
+                        const fromUpper = fromTokenFormatted.toUpperCase();
+                        const toUpper = toTokenFormatted.toUpperCase();
+                        return (pool0Upper === fromUpper && pool1Upper === toUpper) ||
+                               (pool0Upper === toUpper && pool1Upper === fromUpper);
+                      });
+
+                      if (matchingPool) {
+                        // Calculate exchange rate from pool reserves (accurate!)
+                        const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
+                        const reserveIn = isForward ? parseU128(matchingPool.reserve0) : parseU128(matchingPool.reserve1);
+                        const reserveOut = isForward ? parseU128(matchingPool.reserve1) : parseU128(matchingPool.reserve0);
+                        // v2.4.0: Add NaN protection for zero reserves
+                        if (reserveIn <= 0 || reserveOut <= 0) {
+                          return '0.00';
+                        }
+                        // Apply 0.3% fee to get realistic rate
+                        const exchangeRate = (reserveOut * 0.997) / reserveIn;
+                        return isFinite(exchangeRate) && !isNaN(exchangeRate) ? exchangeRate.toFixed(2) : '0.00';
+                      }
+
+                      // Fallback to oracle prices for native token pairs (QUG/QUGUSD)
+                      // v2.4.0: Add NaN protection
+                      const fromPrice = fromToken.price || 1;
+                      const toPrice = toToken.price || 1;
+                      const exchangeRate = fromPrice / toPrice;
+                      return isFinite(exchangeRate) && !isNaN(exchangeRate) ? exchangeRate.toFixed(2) : '1.00';
                     })()} {swapTo}
                   </span>
                 </div>
@@ -2172,6 +4067,64 @@ export default function DexScreen() {
                   <span>Fee</span>
                   <span className="text-white">0.3%</span>
                 </div>
+                {/* v2.4.0: Price discrepancy warning when AMM rate differs from oracle */}
+                {(() => {
+                  const fromToken = findToken(swapFrom);
+                  const toToken = findToken(swapTo);
+                  if (!fromToken || !toToken || fromToken.price <= 0 || toToken.price <= 0) return null;
+
+                  // Calculate oracle-implied rate
+                  const oracleRate = fromToken.price / toToken.price;
+
+                  // Calculate AMM rate from pool
+                  const formatTokenForBackend = (tokenId: string): string => {
+                    if (tokenId === 'native-qug') return 'QUG';
+                    if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                    return tokenId;
+                  };
+                  const fromFormatted = formatTokenForBackend(fromToken.id);
+                  const toFormatted = formatTokenForBackend(toToken.id);
+
+                  const pool = liquidityPools.find(p => {
+                    const p0 = p.token0.toUpperCase();
+                    const p1 = p.token1.toUpperCase();
+                    const f = fromFormatted.toUpperCase();
+                    const t = toFormatted.toUpperCase();
+                    return (p0 === f && p1 === t) || (p0 === t && p1 === f);
+                  });
+
+                  if (!pool) return null;
+
+                  const isForward = pool.token0.toUpperCase() === fromFormatted.toUpperCase();
+                  const reserveIn = isForward ? parseU128(pool.reserve0) : parseU128(pool.reserve1);
+                  const reserveOut = isForward ? parseU128(pool.reserve1) : parseU128(pool.reserve0);
+                  if (reserveIn <= 0) return null;
+
+                  const ammRate = reserveOut / reserveIn;
+
+                  // Check if rates differ by more than 20%
+                  const ratioDiff = Math.abs(ammRate - oracleRate) / oracleRate;
+                  if (ratioDiff < 0.2) return null;
+
+                  const isBetterDeal = ammRate > oracleRate;
+
+                  return (
+                    <div className={`mt-2 p-2 rounded-lg text-xs ${isBetterDeal ? 'bg-green-500/20 border border-green-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'}`}>
+                      <div className="flex items-center gap-1">
+                        <span>{isBetterDeal ? '🎉' : '⚠️'}</span>
+                        <span className={isBetterDeal ? 'text-green-400' : 'text-yellow-400'}>
+                          {isBetterDeal
+                            ? `Pool rate is ${((ammRate/oracleRate - 1) * 100).toFixed(0)}% better than market!`
+                            : `Pool rate is ${((1 - ammRate/oracleRate) * 100).toFixed(0)}% worse than market price`
+                          }
+                        </span>
+                      </div>
+                      <div className="text-gray-400 mt-1">
+                        Market: 1 {swapFrom} = {oracleRate.toFixed(2)} {swapTo} | Pool: {ammRate.toFixed(2)} {swapTo}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Swap Button */}
@@ -2251,8 +4204,34 @@ export default function DexScreen() {
                         });
                         setShowSwapSuccess(true);
                         setSwapAmount('');
-                        // Trigger balance refresh
-                        setRefreshTrigger(prev => prev + 1);
+
+                        // v2.3.9-beta: Update cachedQugusdBalance for USD→QUGUSD conversion
+                        const currentQugusd = tokens.find(t => t.symbol === 'QUGUSD');
+                        if (currentQugusd) {
+                          const newQugusdBalance = currentQugusd.balance + qugusdAmount;
+                          localStorage.setItem('cachedQugusdBalance', newQugusdBalance.toString());
+                          console.log(`💾 [DEX] Updated cachedQugusdBalance (USD→QUGUSD): ${currentQugusd.balance} -> ${newQugusdBalance}`);
+                        }
+
+                        // v2.3.6-beta: Update local state for USD→QUGUSD
+                        setTokens(prevTokens => prevTokens.map(token => {
+                          if (token.symbol === 'USD') {
+                            return { ...token, balance: Math.max(0, token.balance - parseFloat(swapAmount)) };
+                          }
+                          if (token.symbol === 'QUGUSD') {
+                            return { ...token, balance: token.balance + qugusdAmount };
+                          }
+                          return token;
+                        }));
+
+                        // v2.3.28-beta: Set cooldown flag
+                        swapJustCompletedRef.current = true;
+                        localStorage.setItem('dexCooldownUntil', (Date.now() + 15000).toString());
+                        console.log('🔒 [DEX] USD→QUGUSD completed - cooldown for 15s');
+                        setTimeout(() => {
+                          swapJustCompletedRef.current = false;
+                          localStorage.removeItem('dexCooldownUntil');
+                        }, 15000);
                         return;
                       }
 
@@ -2274,8 +4253,8 @@ export default function DexScreen() {
                         const fee = 0.003;
                         const amountInWithFee = qugusdAmount * (1 - fee);
                         const isForward = matchingPool.token0.toUpperCase() === 'QUGUSD';
-                        const reserveIn = isForward ? matchingPool.reserve0 / 100_000_000 : matchingPool.reserve1 / 100_000_000;
-                        const reserveOut = isForward ? matchingPool.reserve1 / 100_000_000 : matchingPool.reserve0 / 100_000_000;
+                        const reserveIn = isForward ? parseU128(matchingPool.reserve0) / 1e24 : parseU128(matchingPool.reserve1) / 1e24;
+                        const reserveOut = isForward ? parseU128(matchingPool.reserve1) / 1e24 : parseU128(matchingPool.reserve0) / 1e24;
 
                         expectedOutput = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
                         minOutput = expectedOutput * 0.995;
@@ -2294,30 +4273,79 @@ export default function DexScreen() {
                         console.log('💱 USD->Token swap using oracle pricing');
                       }
 
+                      // v2.3.30-beta: Set cooldown AND preliminary locked balance BEFORE API call
+                      swapJustCompletedRef.current = true;
+                      localStorage.setItem('dexCooldownUntil', (Date.now() + 15000).toString());
+
+                      // Set preliminary locked balance for QUG if that's the target
+                      if (swapTo === 'QUG') {
+                        const currentQug = tokens.find(t => t.symbol === 'QUG');
+                        const preliminaryQugBalance = (currentQug?.balance || 0) + expectedOutput;
+                        localStorage.setItem('dexLockedBalance', preliminaryQugBalance.toString());
+                        console.log('🔒 [DEX] PRE-SWAP (USD→QUG): Set PRELIMINARY locked balance:', preliminaryQugBalance);
+                      }
+
                       const swapResponse = await qnkAPI.executeSwap({
                         from_token: 'QUGUSD',
                         to_token: toTokenFormatted,
-                        amount_in: Math.floor(qugusdAmount * 100_000_000),
-                        min_amount_out: Math.floor(minOutput * 100_000_000),
+                        amount_in: Math.floor(qugusdAmount * 1e24),
+                        min_amount_out: Math.floor(minOutput * 1e24),
                         wallet_address: walletAddress
                       });
 
                       if (swapResponse.success && swapResponse.data) {
+                        const outputAmount = swapResponse.data.amount_out / 1e24;
                         setSwapSuccessData({
                           fromToken: 'USD',
                           toToken: swapTo,
                           fromAmount: parseFloat(swapAmount),
-                          toAmount: swapResponse.data.amount_out / 100_000_000,
+                          toAmount: outputAmount,
                           transactionHash: swapResponse.data.transaction_id
                         });
                         setShowSwapSuccess(true);
                         setSwapAmount('');
-                        // Trigger balance refresh
-                        setRefreshTrigger(prev => prev + 1);
+
+                        // v2.3.30-beta: Update local state and LOCKED balance for USD→Token swap
+                        if (swapTo === 'QUG') {
+                          const currentQug = tokens.find(t => t.symbol === 'QUG');
+                          if (currentQug) {
+                            const newQugBalance = currentQug.balance + outputAmount;
+                            localStorage.setItem('cachedBalance', newQugBalance.toString());
+                            localStorage.setItem('dexLockedBalance', newQugBalance.toString()); // Update with actual amount
+                            console.log(`🔒 [DEX] Updated LOCKED balance (USD→QUG): ${currentQug.balance} -> ${newQugBalance}`);
+                          }
+                        }
+
+                        setTokens(prevTokens => prevTokens.map(token => {
+                          if (token.symbol === 'USD') {
+                            return { ...token, balance: Math.max(0, token.balance - parseFloat(swapAmount)) };
+                          }
+                          if (token.symbol === swapTo) {
+                            return { ...token, balance: token.balance + outputAmount };
+                          }
+                          return token;
+                        }));
+
+                        // v2.3.30-beta: Refresh cooldown
+                        localStorage.setItem('dexCooldownUntil', (Date.now() + 15000).toString());
+                        console.log('🔒 [DEX] USD→Token completed - refreshed cooldown for 15s');
+                        setTimeout(() => {
+                          swapJustCompletedRef.current = false;
+                          localStorage.removeItem('dexCooldownUntil');
+                          localStorage.removeItem('dexLockedBalance');
+                        }, 15000);
                       } else {
+                        // v2.3.30-beta: Clear cooldown on failure
+                        swapJustCompletedRef.current = false;
+                        localStorage.removeItem('dexCooldownUntil');
+                        localStorage.removeItem('dexLockedBalance');
                         alert(`❌ Swap failed after USD conversion: ${swapResponse.error || 'Unknown error'}\n\nYour USD was converted to QUGUSD but the swap failed.`);
                       }
                     } catch (error) {
+                      // v2.3.30-beta: Clear cooldown on exception
+                      swapJustCompletedRef.current = false;
+                      localStorage.removeItem('dexCooldownUntil');
+                      localStorage.removeItem('dexLockedBalance');
                       console.error('USD swap failed:', error);
                       alert('❌ USD swap failed. Please try again.');
                     }
@@ -2376,11 +4404,21 @@ export default function DexScreen() {
 
                       // Determine if we're swapping forward or reverse in the pool
                       const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
-                      const reserveIn = isForward ? matchingPool.reserve0 / 100_000_000 : matchingPool.reserve1 / 100_000_000;
-                      const reserveOut = isForward ? matchingPool.reserve1 / 100_000_000 : matchingPool.reserve0 / 100_000_000;
+                      const reserveIn = isForward ? parseU128(matchingPool.reserve0) / 1e24 : parseU128(matchingPool.reserve1) / 1e24;
+                      const reserveOut = isForward ? parseU128(matchingPool.reserve1) / 1e24 : parseU128(matchingPool.reserve0) / 1e24;
+
+                      // v2.4.0: Add NaN protection for zero reserves
+                      if (reserveIn <= 0 || reserveOut <= 0) {
+                        alert('Pool has insufficient liquidity');
+                        return;
+                      }
 
                       // Constant product formula
                       expectedOutput = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
+                      if (!isFinite(expectedOutput) || isNaN(expectedOutput)) {
+                        alert('Invalid swap calculation - please try a different amount');
+                        return;
+                      }
                       minOutput = expectedOutput * 0.995; // 0.5% slippage tolerance
 
                       console.log('💱 Swap calculation using pool reserves:', {
@@ -2396,56 +4434,320 @@ export default function DexScreen() {
                                (fromTokenFormatted.toUpperCase() === 'QUGUSD' && toTokenFormatted.toUpperCase() === 'QUG')) {
                       // No pool exists - use oracle pricing for QUG<->QUGUSD
                       // The backend will handle this with oracle pricing
-                      expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
+                      // v3.2.22-beta: SAFE pricing fallback - QUGUSD is $1, so use QUG price only
+                      const fromPrice = fromToken.price;
+                      const toPrice = toToken.price;
+
+                      // v3.2.22-beta: CRITICAL - Never use 1:1 fallback which causes massive financial loss
+                      if (!fromPrice || fromPrice <= 0 || !toPrice || toPrice <= 0) {
+                        alert('❌ Cannot determine safe exchange rate. Please try again later.');
+                        return;
+                      }
+
+                      expectedOutput = parseFloat(swapAmount) * (fromPrice / toPrice);
+                      if (!isFinite(expectedOutput) || isNaN(expectedOutput) || expectedOutput <= 0) {
+                        alert('❌ Invalid price calculation. Please refresh prices and try again.');
+                        return;
+                      }
                       minOutput = expectedOutput * 0.95; // More lenient slippage for oracle-based swaps
 
                       console.log('💱 No pool found - using oracle pricing (backend will handle):', {
                         expectedOutput,
-                        minOutput
+                        minOutput,
+                        fromPrice,
+                        toPrice
                       });
                     } else {
                       // No pool and not QUG<->QUGUSD - this will fail but let backend handle the error
-                      expectedOutput = parseFloat(swapAmount) * (fromToken.price / toToken.price);
+                      // v3.2.22-beta: CRITICAL - Require valid prices, never use 1:1 fallback
+                      const fromPrice = fromToken.price;
+                      const toPrice = toToken.price;
+
+                      if (!fromPrice || fromPrice <= 0 || !toPrice || toPrice <= 0) {
+                        alert('❌ Cannot determine safe exchange rate for this pair. Please add liquidity first.');
+                        return;
+                      }
+
+                      expectedOutput = parseFloat(swapAmount) * (fromPrice / toPrice);
+                      if (!isFinite(expectedOutput) || isNaN(expectedOutput) || expectedOutput <= 0) {
+                        alert('❌ Invalid price calculation. This token pair may not be tradeable.');
+                        return;
+                      }
                       minOutput = expectedOutput * 0.995;
 
                       console.warn('⚠️ No pool found for this token pair:', fromTokenFormatted, '<->', toTokenFormatted);
                     }
 
+                    // v2.3.30-beta: Set cooldown AND preliminary locked balance BEFORE the API call
+                    // This prevents the race condition where components render during await
+                    swapJustCompletedRef.current = true;
+                    localStorage.setItem('dexCooldownUntil', (Date.now() + 15000).toString());
+
+                    // Calculate and set PRELIMINARY locked balance before API call
+                    const currentFromToken = tokens.find(t => t.symbol === swapFrom);
+                    const currentToToken = tokens.find(t => t.symbol === swapTo);
+                    const preliminaryFromBalance = Math.max(0, (currentFromToken?.balance || 0) - parseFloat(swapAmount));
+                    const preliminaryToBalance = (currentToToken?.balance || 0) + expectedOutput;
+
+                    if (swapFrom === 'QUG') {
+                      localStorage.setItem('dexLockedBalance', preliminaryFromBalance.toString());
+                      console.log('🔒 [DEX] PRE-SWAP: Set PRELIMINARY locked balance (QUG will be deducted):', preliminaryFromBalance);
+                    } else if (swapTo === 'QUG') {
+                      localStorage.setItem('dexLockedBalance', preliminaryToBalance.toString());
+                      console.log('🔒 [DEX] PRE-SWAP: Set PRELIMINARY locked balance (QUG will be added):', preliminaryToBalance);
+                    }
+
+                    // v3.2.22-beta: Use BigInt for precision-safe amount calculation
+                    // Determine decimals based on token type (QUG/QUGUSD use 24, custom tokens use their decimals)
+                    const fromDecimals = fromToken.decimals ?? 24; // Default to 24 for native tokens
+                    const amountInBigInt = parseAmountToBigInt(swapAmount, fromDecimals);
+                    const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), fromDecimals);
+
+                    // Validate amount doesn't exceed u128 max
+                    if (amountInBigInt > U128_MAX) {
+                      alert('❌ Amount exceeds maximum supported. Please reduce the amount.');
+                      return;
+                    }
+
+                    // Convert BigInt to Number for API (safe for amounts < 2^53)
+                    // For very large amounts, the API will need to support string format in the future
+                    const amountInNum = Number(amountInBigInt);
+                    const minOutputNum = Number(minOutputBigInt);
+
+                    console.log(`🔢 [DEX v3.2.22] Swap amounts: input="${swapAmount}", bigint=${amountInBigInt.toString()}, num=${amountInNum}`);
+
                     const response = await qnkAPI.executeSwap({
                       from_token: fromTokenFormatted,
                       to_token: toTokenFormatted,
-                      amount_in: Math.floor(parseFloat(swapAmount) * 100_000_000), // 8 decimals (1e8)
-                      min_amount_out: Math.floor(minOutput * 100_000_000), // 8 decimals (1e8)
+                      amount_in: amountInNum, // Uses proper decimal scaling via BigInt
+                      min_amount_out: minOutputNum, // Uses proper decimal scaling via BigInt
                       wallet_address: walletAddress
                     });
 
                     if (response.success && response.data) {
+                      // v2.4.0: NaN protection for amount_out
+                      const rawAmountOut = response.data.amount_out;
+                      const amountOut = (rawAmountOut && isFinite(rawAmountOut)) ? rawAmountOut / 1e24 : expectedOutput;
+                      const amountIn = parseFloat(swapAmount) || 0;
+
+                      console.log('📊 [DEX] Swap response:', { rawAmountOut, amountOut, amountIn, expectedOutput });
+
                       setSwapSuccessData({
                         fromToken: swapFrom,
                         toToken: swapTo,
-                        fromAmount: parseFloat(swapAmount),
-                        toAmount: response.data.amount_out / 100_000_000,
+                        fromAmount: amountIn,
+                        toAmount: isFinite(amountOut) ? amountOut : expectedOutput,
                         transactionHash: response.data.transaction_id
                       });
                       setShowSwapSuccess(true);
                       // Reset swap amount
                       setSwapAmount('');
-                      // Trigger balance refresh
-                      setRefreshTrigger(prev => prev + 1);
-                      console.log('🔄 Swap completed - refreshing balances');
+
+                      // v2.9.7-beta: FIX - Use tokensRef for truly current balance (case-insensitive)
+                      // The tokens state in the closure is from when the callback was created
+                      // tokensRef.current is ALWAYS the latest value thanks to useEffect sync
+
+                      // Get TRULY current balances from the ref (case-insensitive lookup)
+                      const swapFromUpper = swapFrom.toUpperCase();
+                      const swapToUpper = swapTo.toUpperCase();
+                      const refFromToken = tokensRef.current.find(t => t.symbol.toUpperCase() === swapFromUpper);
+                      const refToToken = tokensRef.current.find(t => t.symbol.toUpperCase() === swapToUpper);
+
+                      console.log(`🔍 [DEX v2.9.7] Token lookup - swapFrom: "${swapFrom}", swapTo: "${swapTo}"`);
+                      console.log(`🔍 [DEX v2.9.7] refFromToken found: ${!!refFromToken}, refToToken found: ${!!refToToken}`);
+                      console.log(`🔍 [DEX v2.9.7] tokensRef has ${tokensRef.current.length} tokens`);
+
+                      const baseFromBalance = refFromToken?.balance ?? currentFromToken?.balance ?? 0;
+                      const baseToBalance = refToToken?.balance ?? currentToToken?.balance ?? 0;
+
+                      console.log(`🔄 [DEX v2.9.7] CURRENT balances - FROM ${swapFrom}: ${baseFromBalance} (ref: ${refFromToken?.balance}, captured: ${currentFromToken?.balance}), TO ${swapTo}: ${baseToBalance} (ref: ${refToToken?.balance}, captured: ${currentToToken?.balance})`);
+
+                      const newFromBalance = Math.max(0, baseFromBalance - amountIn);
+                      const newToBalance = baseToBalance + amountOut;
+
+                      console.log(`🔄 [DEX v2.9.6] NEW balances - FROM: ${baseFromBalance} - ${amountIn} = ${newFromBalance}, TO: ${baseToBalance} + ${amountOut} = ${newToBalance}`);
+
+                      // v2.3.5-beta: Immediately update local token balances for instant UI feedback
+                      // v2.9.7-beta: Use case-insensitive comparison
+                      setTokens(prevTokens => prevTokens.map(token => {
+                        const tokenSymbolUpper = token.symbol.toUpperCase();
+                        if (tokenSymbolUpper === swapFromUpper) {
+                          console.log(`💸 [DEX] Deducting ${amountIn} from ${token.symbol}: ${token.balance} -> ${newFromBalance}`);
+                          return { ...token, balance: newFromBalance };
+                        }
+                        if (tokenSymbolUpper === swapToUpper) {
+                          console.log(`💰 [DEX] Adding ${amountOut} to ${token.symbol}: ${token.balance} -> ${newToBalance}`);
+                          return { ...token, balance: newToBalance };
+                        }
+                        return token;
+                      }));
+
+                      console.log(`🔥 [DEX] SWAP SUCCESS - Updating balances:`, {
+                        swapFrom, swapTo, amountIn, amountOut,
+                        oldFromBalance: currentFromToken?.balance,
+                        oldToBalance: currentToToken?.balance,
+                        newFromBalance, newToBalance
+                      });
+
+                      // v2.3.29-beta: Set LOCKED balance that cannot be overwritten by other code
+                      // This is the ONLY source of truth during the cooldown period
+                      localStorage.setItem('dexCooldownUntil', (Date.now() + 15000).toString());
+
+                      // v2.3.29-beta: Update localStorage and set LOCKED balance for TopBar
+                      if (swapFrom === 'QUG') {
+                        const newBal = newFromBalance;
+                        // Set both regular and LOCKED balance
+                        localStorage.setItem('cachedBalance', newBal.toString());
+                        localStorage.setItem('dexLockedBalance', newBal.toString()); // LOCKED - TopBar uses this
+                        localStorage.setItem('balanceTimestamp', Date.now().toString());
+                        console.log('🔒 [DEX] SET LOCKED BALANCE (QUG deducted):', newBal);
+                        // Dispatch refresh event
+                        window.dispatchEvent(new CustomEvent('qug-balance-changed', { detail: { balance: newBal } }));
+                      } else if (swapTo === 'QUG') {
+                        const newBal = newToBalance;
+                        // Set both regular and LOCKED balance
+                        localStorage.setItem('cachedBalance', newBal.toString());
+                        localStorage.setItem('dexLockedBalance', newBal.toString()); // LOCKED - TopBar uses this
+                        localStorage.setItem('balanceTimestamp', Date.now().toString());
+                        console.log('🔒 [DEX] SET LOCKED BALANCE (QUG received):', newBal);
+                        // Dispatch refresh event
+                        window.dispatchEvent(new CustomEvent('qug-balance-changed', { detail: { balance: newBal } }));
+                      }
+
+                      // Always dispatch for FROM token (what was spent)
+                      window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                        detail: {
+                          symbol: swapFrom,
+                          balance: newFromBalance,
+                          reason: 'dex-swap-deduct'
+                        }
+                      }));
+                      console.log(`📡 [DEX] Dispatched wallet-balance-updated for ${swapFrom}: ${newFromBalance} (deducted)`);
+
+                      // Always dispatch for TO token (what was received)
+                      window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                        detail: {
+                          symbol: swapTo,
+                          balance: newToBalance,
+                          reason: 'dex-swap-add'
+                        }
+                      }));
+                      console.log(`📡 [DEX] Dispatched wallet-balance-updated for ${swapTo}: ${newToBalance} (added)`);
+
+                      // v2.4.2: Dispatch token-balance-updated for CustomTokensCard (custom tokens only)
+                      // CustomTokensCard listens for 'token-balance-updated' with tokenSymbol property
+                      const nativeTokens = ['QUG', 'QUGUSD'];
+                      console.log(`🔍 [DEX] Checking token dispatch - swapFrom: "${swapFrom}", swapTo: "${swapTo}", nativeTokens:`, nativeTokens);
+                      console.log(`🔍 [DEX] swapFrom.toUpperCase(): "${swapFrom.toUpperCase()}", includes: ${nativeTokens.includes(swapFrom.toUpperCase())}`);
+                      console.log(`🔍 [DEX] swapTo.toUpperCase(): "${swapTo.toUpperCase()}", includes: ${nativeTokens.includes(swapTo.toUpperCase())}`);
+
+                      if (!nativeTokens.includes(swapFrom.toUpperCase())) {
+                        const eventDetail = {
+                          tokenSymbol: swapFrom,
+                          newBalance: newFromBalance,
+                          reason: 'dex-swap-deduct'
+                        };
+                        console.log(`🪙 [DEX] DISPATCHING token-balance-updated for FROM token:`, eventDetail);
+                        window.dispatchEvent(new CustomEvent('token-balance-updated', { detail: eventDetail }));
+                      }
+                      if (!nativeTokens.includes(swapTo.toUpperCase())) {
+                        const eventDetail = {
+                          tokenSymbol: swapTo,
+                          newBalance: newToBalance,
+                          reason: 'dex-swap-add'
+                        };
+                        console.log(`🪙 [DEX] DISPATCHING token-balance-updated for TO token:`, eventDetail);
+                        window.dispatchEvent(new CustomEvent('token-balance-updated', { detail: eventDetail }));
+                      }
+
+                      // Also dispatch balance-update for App.tsx TopBar (only for QUG)
+                      if (swapFrom === 'QUG') {
+                        window.dispatchEvent(new CustomEvent('balance-update', {
+                          detail: { balance: newFromBalance, source: 'DexScreen.swap.deduct' }
+                        }));
+                        console.log(`📡 [DEX] Dispatched balance-update for TopBar: ${newFromBalance}`);
+                      } else if (swapTo === 'QUG') {
+                        window.dispatchEvent(new CustomEvent('balance-update', {
+                          detail: { balance: newToBalance, source: 'DexScreen.swap.add' }
+                        }));
+                        console.log(`📡 [DEX] Dispatched balance-update for TopBar: ${newToBalance}`);
+                      }
+
+                      // Update localStorage for QUG
+                      if (swapFrom === 'QUG') {
+                        localStorage.setItem('cachedBalance', newFromBalance.toString());
+                      } else if (swapTo === 'QUG') {
+                        localStorage.setItem('cachedBalance', newToBalance.toString());
+                      }
+
+                      // Update localStorage for QUGUSD
+                      if (swapFrom === 'QUGUSD') {
+                        localStorage.setItem('cachedQugusdBalance', newFromBalance.toString());
+                      } else if (swapTo === 'QUGUSD') {
+                        localStorage.setItem('cachedQugusdBalance', newToBalance.toString());
+                      }
+
+                      // v2.3.28-beta: swapJustCompletedRef already set BEFORE API call
+                      // Just log the success and keep cooldown active
+                      console.log('🔒 [DEX] Swap completed - cooldown already active from pre-swap');
+                      console.log('✅ [DEX] Local state updated with correct balance - no API refetch needed');
+
+                      // v2.3.33-beta: When cooldown expires, dispatch event to update Dashboard state
+                      setTimeout(() => {
+                        console.log('🔓 [DEX] Clearing swap lock - dispatching state sync event');
+                        swapJustCompletedRef.current = false;
+
+                        // CRITICAL: Before removing locked balance, dispatch event to sync Dashboard state
+                        // This tells Dashboard to update its walletBalances state from cachedBalance
+                        const cachedQug = localStorage.getItem('cachedBalance');
+                        const cachedQugusd = localStorage.getItem('cachedQugusdBalance');
+
+                        console.log('📡 [DEX] Dispatching dex-cooldown-expired with cached balances:', {
+                          qug: cachedQug,
+                          qugusd: cachedQugusd
+                        });
+
+                        window.dispatchEvent(new CustomEvent('dex-cooldown-expired', {
+                          detail: {
+                            qugBalance: cachedQug ? parseFloat(cachedQug) : null,
+                            qugusdBalance: cachedQugusd ? parseFloat(cachedQugusd) : null,
+                            source: 'DexScreen.cooldown.expired'
+                          }
+                        }));
+
+                        // Now safe to remove the locked balance
+                        localStorage.removeItem('dexCooldownUntil');
+                        localStorage.removeItem('dexLockedBalance');
+                        console.log('🔓 [DEX] Cooldown fully cleared');
+
+                        // v2.4.3: Trigger token refresh to get updated prices after swap
+                        // The AMM prices change when reserves change, so we need fresh prices
+                        console.log('🔄 [DEX] Triggering token price refresh after swap');
+                        setRefreshTrigger(prev => prev + 1);
+                      }, 15000);
                     } else {
+                      // v2.3.29-beta: Clear cooldown on API error
                       console.error('❌ Swap API error:', response.error);
                       console.error('❌ Full response:', response);
+                      swapJustCompletedRef.current = false;
+                      localStorage.removeItem('dexCooldownUntil');
+                      localStorage.removeItem('dexLockedBalance');
+                      console.log('🔓 [DEX] Cleared cooldown due to API error');
                       alert(`❌ Swap failed: ${response.error || 'Unknown error'}`);
                     }
                   } catch (error) {
+                    // v2.3.29-beta: Clear cooldown on exception
                     console.error('❌ Swap exception:', error);
                     console.error('❌ Swap request details:', {
                       from_token: formatTokenForBackend(fromToken.id),
                       to_token: formatTokenForBackend(toToken.id),
-                      amount_in: Math.floor(parseFloat(swapAmount) * 100_000_000),
+                      amount_in: Math.floor(parseFloat(swapAmount) * 1e24),
                       wallet_address: walletAddress
                     });
+                    swapJustCompletedRef.current = false;
+                    localStorage.removeItem('dexCooldownUntil');
+                    localStorage.removeItem('dexLockedBalance');
+                    console.log('🔓 [DEX] Cleared cooldown due to exception');
                     alert(`❌ Swap failed: ${error instanceof Error ? error.message : 'Please try again'}`);
                   }
                 }}
@@ -2453,6 +4755,90 @@ export default function DexScreen() {
               >
                 Swap Tokens
               </button>
+
+              {/* 💰 v2.4.8-beta: DCA Button */}
+              <button
+                onClick={() => setShowDcaModal(true)}
+                className="w-full py-3 mt-3 bg-gradient-to-r from-green-500 to-emerald-600 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-green-500/50 transition-all flex items-center justify-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Setup DCA (Auto-Buy)
+              </button>
+
+              {/* 💰 v2.4.9-beta: My DCA Orders Button */}
+              <button
+                onClick={() => {
+                  setShowDcaOrdersPanel(!showDcaOrdersPanel);
+                  if (!showDcaOrdersPanel) fetchDcaOrders();
+                }}
+                className="w-full py-2 mt-2 bg-gray-800/50 border border-green-500/30 rounded-xl text-sm text-green-400 hover:bg-gray-700/50 transition-all flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                My DCA Orders ({dcaOrders.filter(o => o.status !== 'cancelled' && o.status !== 'completed').length})
+                <svg className={`w-4 h-4 transition-transform ${showDcaOrdersPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {/* 💰 v2.4.9-beta: DCA Orders Panel */}
+              {showDcaOrdersPanel && (
+                <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
+                  {dcaOrders.filter(o => o.status !== 'cancelled' && o.status !== 'completed').length === 0 ? (
+                    <p className="text-gray-500 text-sm text-center py-4">No active DCA orders</p>
+                  ) : (
+                    dcaOrders.filter(o => o.status !== 'cancelled' && o.status !== 'completed').map((order) => (
+                      <div key={order.id} className="bg-gray-900/50 border border-gray-700/50 rounded-lg p-3">
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <span className="text-white font-medium">{order.from_token} → {order.to_token}</span>
+                            <p className="text-xs text-gray-400">
+                              {(order.amount_per_execution / 1e24).toFixed(2)} {order.from_token} / {order.interval}
+                            </p>
+                          </div>
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            order.status === 'active' ? 'bg-green-500/20 text-green-400' :
+                            order.status === 'paused' ? 'bg-yellow-500/20 text-yellow-400' :
+                            'bg-gray-500/20 text-gray-400'
+                          }`}>
+                            {order.status}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-2">
+                          Next: {new Date(order.next_execution_at).toLocaleString()}
+                          {order.executions_count > 0 && ` | Executed: ${order.executions_count}x`}
+                        </div>
+                        <div className="flex gap-2">
+                          {order.status === 'active' ? (
+                            <button
+                              onClick={() => pauseDcaOrder(order.id)}
+                              className="flex-1 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30"
+                            >
+                              Pause
+                            </button>
+                          ) : order.status === 'paused' ? (
+                            <button
+                              onClick={() => resumeDcaOrder(order.id)}
+                              className="flex-1 py-1 text-xs bg-green-500/20 text-green-400 rounded hover:bg-green-500/30"
+                            >
+                              Resume
+                            </button>
+                          ) : null}
+                          <button
+                            onClick={() => cancelDcaOrder(order.id)}
+                            className="flex-1 py-1 text-xs bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -2542,13 +4928,13 @@ export default function DexScreen() {
                         <div className="bg-quantum-cyan/10 border border-quantum-cyan/20 rounded-lg p-3">
                           <div className="text-xs text-gray-400 mb-1">Reserve {pool.token0}</div>
                           <div className="text-sm font-bold text-white">
-                            {(pool.reserve0 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
+                            {(parseU128(pool.reserve0) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
                           </div>
                         </div>
                         <div className="bg-quantum-purple/10 border border-quantum-purple/20 rounded-lg p-3">
                           <div className="text-xs text-gray-400 mb-1">Reserve {pool.token1}</div>
                           <div className="text-sm font-bold text-white">
-                            {(pool.reserve1 / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
+                            {(parseU128(pool.reserve1) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
                           </div>
                         </div>
                         <div className="bg-quantum-green/10 border border-quantum-green/20 rounded-lg p-3">
@@ -2588,16 +4974,22 @@ export default function DexScreen() {
                                     const walletAddress = localStorage.getItem('walletAddress') || '';
                                     // ✅ FIX: Backend defaults to 8 decimals, not 18!
                                     const decimals = contract.decimals || 8;
-                                    const rawSupply = contract.total_supply || 0;
-                                    const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+                                    // v3.2.14-beta: Use BigInt to prevent precision loss
+                                    const rawSupply = contract.total_supply || '0';
+                                    const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+                                    const supplyBigInt = BigInt(supplyStr);
+                                    const divisorBigInt = BigInt(10 ** decimals);
+                                    const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
                                     let tokenBalance = 0;
 
                                     if (walletAddress) {
                                       const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, pool.token0);
                                       if (balanceResponse.success && balanceResponse.data) {
-                                        // v1.4.9: Fix - Convert raw balance to human-readable using decimals
-                                        const rawBalance = balanceResponse.data.balance || 0;
-                                        tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
+                                        // v3.2.14-beta: Use BigInt for precision with large balances
+                                        const rawBalance = balanceResponse.data.balance || '0';
+                                        const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+                                        const balanceBigInt = BigInt(balanceStr);
+                                        tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
                                       }
                                     }
 
@@ -2613,6 +5005,7 @@ export default function DexScreen() {
                                       volume24h: 0,
                                       liquidity: actualSupply,
                                       marketCap: 0,
+                                      fullyDilutedMarketCap: actualSupply * 1.0,
                                       totalSupply: actualSupply,
                                       circulatingSupply: actualSupply,
                                       holders: 0,
@@ -2663,16 +5056,22 @@ export default function DexScreen() {
                                         const walletAddress = localStorage.getItem('walletAddress') || '';
                                         // ✅ FIX: Backend defaults to 8 decimals, not 18!
                                         const decimals = contract.decimals || 8;
-                                        const rawSupply = contract.total_supply || 0;
-                                        const actualSupply = Number(rawSupply) / Math.pow(10, decimals);
+                                        // v3.2.14-beta: Use BigInt to prevent precision loss
+                                        const rawSupply = contract.total_supply || '0';
+                                        const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
+                                        const supplyBigInt = BigInt(supplyStr);
+                                        const divisorBigInt = BigInt(10 ** decimals);
+                                        const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
                                         let tokenBalance = 0;
 
                                         if (walletAddress) {
                                           const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, foundToken.address);
                                           if (balanceResponse.success && balanceResponse.data) {
-                                            // v1.4.9: Fix - Convert raw balance to human-readable using decimals
-                                            const rawBalance = balanceResponse.data.balance || 0;
-                                            tokenBalance = Number(rawBalance) / Math.pow(10, decimals);
+                                            // v3.2.14-beta: Use BigInt for precision with large balances
+                                            const rawBalance = balanceResponse.data.balance || '0';
+                                            const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
+                                            const balanceBigInt = BigInt(balanceStr);
+                                            tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
                                           }
                                         }
 
@@ -2688,6 +5087,7 @@ export default function DexScreen() {
                                           volume24h: 0,
                                           liquidity: actualSupply,
                                           marketCap: 0,
+                                          fullyDilutedMarketCap: actualSupply * 1.0,
                                           totalSupply: actualSupply,
                                           circulatingSupply: actualSupply,
                                           holders: 0,
@@ -2884,7 +5284,7 @@ export default function DexScreen() {
                         {/* Token Info */}
                         <td className="py-4 px-4">
                           <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-xl">
+                            <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-xl overflow-hidden">
                               {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
                                 <div className="relative w-7 h-7">
                                   <div className="absolute inset-0 rounded-full" style={{
@@ -2901,6 +5301,27 @@ export default function DexScreen() {
                                     </div>
                                   </div>
                                 </div>
+                              ) : token.isIndexToken ? (
+                                <div className="relative w-7 h-7">
+                                  <div className="absolute inset-0 rounded-full" style={{
+                                    background: 'linear-gradient(135deg, #8B5CF6 0%, #A855F7 50%, #D946EF 100%)',
+                                    padding: '1px'
+                                  }}>
+                                    <div className="w-full h-full bg-gradient-to-b from-purple-950 via-violet-900 to-purple-950 rounded-full flex items-center justify-center">
+                                      <svg className="w-4 h-4 text-purple-300" fill="currentColor" viewBox="0 0 24 24">
+                                        <path d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/>
+                                        <path d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/>
+                                      </svg>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : token.logoUrl ? (
+                                <img
+                                  src={token.logoUrl}
+                                  alt={token.symbol}
+                                  className="w-8 h-8 rounded-full object-cover"
+                                  onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling && ((e.currentTarget.nextElementSibling as HTMLElement).style.display = 'block'); }}
+                                />
                               ) : (
                                 token.icon
                               )}
@@ -2908,6 +5329,21 @@ export default function DexScreen() {
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
                                 <div className="font-bold text-white">{token.symbol}</div>
+                                {token.isIndexToken && (
+                                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-purple-600 to-violet-600 text-xs font-bold text-white">
+                                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                                      <path d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/>
+                                      <path d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/>
+                                    </svg>
+                                    INDEX
+                                  </div>
+                                )}
+                                {token.isPerp && (
+                                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-pink-600 to-purple-600 text-xs font-bold text-white">
+                                    <TrendingUp className="w-3 h-3" />
+                                    PERP
+                                  </div>
+                                )}
                                 {boostedTokens.has(token.id) && (
                                   <motion.div
                                     initial={{ scale: 0 }}
@@ -2924,9 +5360,9 @@ export default function DexScreen() {
                           </div>
                         </td>
 
-                        {/* Price */}
+                        {/* Price - v2.9.27-beta: Fixed small number formatting */}
                         <td className="py-4 px-4 text-right text-white font-medium">
-                          ${token.price.toLocaleString()}
+                          ${formatPrice(token.price)}
                         </td>
 
                         {/* 1h Change - REAL DATA */}
@@ -3068,6 +5504,23 @@ export default function DexScreen() {
             </div>
           </div>
         </motion.div>
+
+        {/* AI Market Analyzer Panel - Full Width Below Token Table */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="lg:col-span-4"
+        >
+          <MarketAnalyzerPanel
+            onOpportunityClick={(tokenSymbol) => {
+              // When user clicks a token, set it as the swap target
+              if (tokenSymbol) {
+                setSwapTo(tokenSymbol);
+              }
+            }}
+          />
+        </motion.div>
       </div>
       )}
       </div>
@@ -3098,6 +5551,10 @@ export default function DexScreen() {
           onClose={() => {
             setShowSwapSuccess(false);
             setSwapSuccessData(null);
+            // v2.4.3: Refresh token prices when modal closes
+            // The AMM prices changed after the swap, show updated prices immediately
+            console.log('🔄 [DEX] SwapSuccessModal closed - triggering price refresh');
+            setRefreshTrigger(prev => prev + 1);
           }}
           fromToken={swapSuccessData.fromToken}
           toToken={swapSuccessData.toToken}
@@ -3481,6 +5938,213 @@ export default function DexScreen() {
                 >
                   Save Settings
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 💰 v2.4.8-beta: DCA (Dollar Cost Averaging) Modal */}
+      <AnimatePresence>
+        {showDcaModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={() => setShowDcaModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-gradient-to-br from-gray-900 to-black border border-green-500/30 rounded-2xl w-full max-w-md overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="p-6 border-b border-white/10 bg-gradient-to-r from-green-500/10 to-emerald-600/10">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-green-500/20 rounded-xl">
+                      <svg className="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-white">Setup DCA</h2>
+                      <p className="text-sm text-gray-400">Dollar Cost Averaging</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowDcaModal(false)}
+                    className="p-2 hover:bg-white/10 rounded-xl transition-colors"
+                  >
+                    <X className="w-5 h-5 text-gray-400" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-5">
+                {/* Token Pair Display */}
+                <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                  <div className="text-sm text-gray-400 mb-2">Auto-buy {swapTo} with {swapFrom}</div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-white/5 rounded-lg">
+                      <span className="text-lg">{findToken(swapFrom)?.icon || '💎'}</span>
+                      <span className="text-white font-medium">{swapFrom}</span>
+                    </div>
+                    <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                    </svg>
+                    <div className="flex items-center gap-2 px-3 py-2 bg-white/5 rounded-lg">
+                      <span className="text-lg">{findToken(swapTo)?.icon || '💎'}</span>
+                      <span className="text-white font-medium">{swapTo}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Amount per Execution */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-300">Amount per Purchase</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      value={dcaAmount}
+                      onChange={(e) => setDcaAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-lg focus:outline-none focus:border-green-500/50 transition-colors"
+                    />
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
+                      {swapFrom}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Frequency Selection */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-300">Purchase Frequency</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(['hourly', 'daily', 'weekly', 'monthly'] as const).map((interval) => (
+                      <button
+                        key={interval}
+                        onClick={() => setDcaInterval(interval)}
+                        className={`py-2 px-3 rounded-lg font-medium text-sm transition-all ${
+                          dcaInterval === interval
+                            ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white'
+                            : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                        }`}
+                      >
+                        {interval.charAt(0).toUpperCase() + interval.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Max Executions (Optional) */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-300">
+                    Number of Purchases <span className="text-gray-500">(optional)</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={dcaMaxExecutions}
+                    onChange={(e) => setDcaMaxExecutions(e.target.value)}
+                    placeholder="Unlimited"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-green-500/50 transition-colors"
+                  />
+                </div>
+
+                {/* Summary */}
+                <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-xl">
+                  <div className="text-sm text-green-300">
+                    {dcaAmount && parseFloat(dcaAmount) > 0 ? (
+                      <>
+                        Will spend <strong>{dcaAmount} {swapFrom}</strong> {dcaInterval} to buy <strong>{swapTo}</strong>
+                        {dcaMaxExecutions && parseInt(dcaMaxExecutions) > 0 ? (
+                          <> for <strong>{dcaMaxExecutions}</strong> times</>
+                        ) : (
+                          <> indefinitely</>
+                        )}
+                      </>
+                    ) : (
+                      'Configure your DCA strategy above'
+                    )}
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowDcaModal(false)}
+                    className="flex-1 py-3 px-6 bg-white/5 rounded-xl text-white font-medium hover:bg-white/10 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!dcaAmount || parseFloat(dcaAmount) <= 0) {
+                        alert('Please enter a valid amount');
+                        return;
+                      }
+
+                      const walletAddress = localStorage.getItem('walletAddress');
+                      if (!walletAddress) {
+                        alert('Please connect your wallet first');
+                        return;
+                      }
+
+                      setLoadingDca(true);
+                      try {
+                        const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            wallet_address: walletAddress,
+                            from_token: swapFrom === 'QUG' ? 'QUG' : findToken(swapFrom)?.id || swapFrom,
+                            to_token: swapTo === 'QUG' ? 'QUG' : findToken(swapTo)?.id || swapTo,
+                            amount_per_execution: Math.floor(parseFloat(dcaAmount) * 1e24),
+                            interval: dcaInterval,
+                            max_slippage: 0.03,
+                            max_executions: dcaMaxExecutions ? parseInt(dcaMaxExecutions) : null,
+                          }),
+                        });
+
+                        const data = await response.json();
+                        if (data.success) {
+                          alert(`✅ DCA order created! First purchase scheduled for ${new Date(data.next_execution_at).toLocaleString()}`);
+                          setShowDcaModal(false);
+                          setDcaAmount('');
+                          setDcaMaxExecutions('');
+                          fetchDcaOrders(); // Refresh the orders list
+                        } else {
+                          alert(`❌ Failed to create DCA order: ${data.message}`);
+                        }
+                      } catch (error) {
+                        console.error('DCA creation error:', error);
+                        alert('❌ Failed to create DCA order. Please try again.');
+                      } finally {
+                        setLoadingDca(false);
+                      }
+                    }}
+                    disabled={loadingDca || !dcaAmount || parseFloat(dcaAmount) <= 0}
+                    className="flex-1 py-3 px-6 bg-gradient-to-r from-green-500 to-emerald-600 rounded-xl text-white font-bold hover:shadow-lg hover:shadow-green-500/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {loadingDca ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Creating...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Start DCA
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </motion.div>
           </motion.div>

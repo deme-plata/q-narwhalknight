@@ -1,0 +1,125 @@
+/* Animated Border Component Styles */
+
+.animated-border-container {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* UI content - positioned inside the frame's center */
+.animated-border-container > .border-content {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 6% 8% 17% 8%;
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+/* Frame on top - decorations visible, transparent center shows content */
+.border-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.border-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  filter: drop-shadow(0 0 20px rgba(147, 51, 234, 0.4));
+  transition: opacity 2s ease-in-out, filter 2s ease-in-out;
+}
+
+/* Current frame - visible by default */
+.border-frame-current {
+  opacity: 1;
+}
+
+.border-frame-current.fading-out {
+  opacity: 0;
+}
+
+/* Next frame - hidden by default, fades in during transition */
+.border-frame-next {
+  opacity: 0;
+}
+
+.border-frame-next.fading-in {
+  opacity: 1;
+}
+
+/* Sparkle/shimmer animation on the frame */
+@keyframes frameGlow {
+  0%, 100% {
+    filter: brightness(1) drop-shadow(0 0 20px rgba(147, 51, 234, 0.4));
+  }
+  50% {
+    filter: brightness(1.15) drop-shadow(0 0 35px rgba(147, 51, 234, 0.6));
+  }
+}
+
+@keyframes frameGlowRed {
+  0%, 100% {
+    filter: brightness(1) drop-shadow(0 0 20px rgba(220, 38, 38, 0.4));
+  }
+  50% {
+    filter: brightness(1.15) drop-shadow(0 0 35px rgba(220, 38, 38, 0.6));
+  }
+}
+
+.border-frame-current img {
+  animation: frameGlow 4s ease-in-out infinite;
+}
+
+/* Performance mode - keep frame beautiful but static */
+.performance-mode .border-frame img {
+  animation: none !important;
+  filter: drop-shadow(0 0 20px rgba(147, 51, 234, 0.35)) !important;
+  transition: none !important;
+}
+
+.performance-mode .border-glow {
+  display: none !important;
+}
+
+/* Subtle hover effect on frame in performance mode */
+.performance-mode .border-frame:hover img {
+  filter: drop-shadow(0 0 25px rgba(147, 51, 234, 0.45)) !important;
+}
+
+/* Glow effect overlay - disabled to prevent blue glow issues */
+.border-glow {
+  display: none;
+}
+
+/* Responsive adjustments - viewport units scale automatically */
+
+/* Tablets - maintain larger top padding */
+@media (max-width: 1024px) {
+  .animated-border-container > .border-content {
+    padding: 12vh 5vw 7vh 5vw;
+  }
+}
+
+/* Mobile landscape */
+@media (max-width: 768px) {
+  .animated-border-container > .border-content {
+    padding: 10vh 4vw 5vh 4vw;
+  }
+}
+
+/* Hide borders on very small screens */
+@media (max-width: 480px) {
+  .border-frame,
+  .border-glow {
+    display: none;
+  }
+
+  .animated-border-container > .border-content {
+    padding: 0;
+  }
+}

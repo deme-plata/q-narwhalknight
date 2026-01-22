@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, DollarSign, Lock, TrendingUp, AlertCircle, CheckCircle } from 'lucide-react';
+import { X, DollarSign, Lock, TrendingUp, AlertCircle, CheckCircle, RefreshCw } from 'lucide-react';
 import { createPortal } from 'react-dom';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { qnkAPI } from '../services/api';
 
 interface MintQUGUSDModalProps {
@@ -20,24 +20,53 @@ export default function MintQUGUSDModal({ isOpen, onClose, userQUGBalance, onSuc
   const [success, setSuccess] = useState(false);
   const [txId, setTxId] = useState<string>('');
 
-  const QUG_PRICE = 42.50; // $42.50 per QUG
+  // v2.3.6-beta: Fetch real QUG price from AMM oracle instead of hardcoded value
+  const [qugPrice, setQugPrice] = useState<number>(42.50); // Default fallback
+  const [priceLoading, setPriceLoading] = useState(false);
+  const [priceSource, setPriceSource] = useState<string>('default');
+
   const MIN_COLLATERAL_RATIO = 150; // Minimum 150% collateralization
+
+  // Fetch real QUG price from AMM oracle
+  const fetchQugPrice = useCallback(async () => {
+    setPriceLoading(true);
+    try {
+      const response = await fetch('/api/v1/oracle/price/QUG');
+      const data = await response.json();
+      if (data.success && data.data) {
+        setQugPrice(data.data.price_usd);
+        setPriceSource(data.data.source);
+        console.log(`📊 QUG price fetched: $${data.data.price_usd} (source: ${data.data.source})`);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch QUG price, using default:', err);
+    } finally {
+      setPriceLoading(false);
+    }
+  }, []);
+
+  // Fetch price when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      fetchQugPrice();
+    }
+  }, [isOpen, fetchQugPrice]);
 
   // Calculate QUGUSD amount when collateral changes
   useEffect(() => {
     if (collateralAmount && !isNaN(parseFloat(collateralAmount))) {
-      const collateralValue = parseFloat(collateralAmount) * QUG_PRICE;
+      const collateralValue = parseFloat(collateralAmount) * qugPrice;
       const maxQugusd = collateralValue / (collateralRatio / 100);
       setQugusdAmount(maxQugusd.toFixed(2));
     } else {
       setQugusdAmount('');
     }
-  }, [collateralAmount, collateralRatio]);
+  }, [collateralAmount, collateralRatio, qugPrice]);
 
   // Calculate collateral ratio when amounts change
   const actualCollateralRatio = (() => {
     if (!collateralAmount || !qugusdAmount) return 0;
-    const collateralValue = parseFloat(collateralAmount) * QUG_PRICE;
+    const collateralValue = parseFloat(collateralAmount) * qugPrice;
     const qugusdValue = parseFloat(qugusdAmount);
     if (qugusdValue === 0) return 0;
     return (collateralValue / qugusdValue) * 100;
@@ -213,8 +242,12 @@ export default function MintQUGUSDModal({ isOpen, onClose, userQUGBalance, onSuc
                         <span className="text-gray-300">Available QUG</span>
                         <span className="text-xl font-bold text-white">{userQUGBalance.toFixed(2)}</span>
                       </div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        ≈ ${(userQUGBalance * QUG_PRICE).toFixed(2)} USD
+                      <div className="text-xs text-gray-400 mt-1 flex items-center gap-1">
+                        ≈ ${(userQUGBalance * qugPrice).toFixed(2)} USD
+                        {priceLoading && <RefreshCw className="w-3 h-3 animate-spin" />}
+                        {priceSource === 'amm_oracle' && (
+                          <span className="text-green-400 ml-1">(live)</span>
+                        )}
                       </div>
                     </div>
 
@@ -302,14 +335,27 @@ export default function MintQUGUSDModal({ isOpen, onClose, userQUGBalance, onSuc
                     {/* Info Box */}
                     <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
                       <div className="text-xs text-blue-300 space-y-1">
-                        <div className="flex justify-between">
+                        <div className="flex justify-between items-center">
                           <span>QUG Price:</span>
-                          <span className="font-medium">${QUG_PRICE.toFixed(2)}</span>
+                          <span className="font-medium flex items-center gap-1">
+                            ${qugPrice.toFixed(2)}
+                            {priceSource === 'amm_oracle' && (
+                              <span className="text-green-400 text-[10px]">LIVE</span>
+                            )}
+                            <button
+                              onClick={fetchQugPrice}
+                              disabled={priceLoading}
+                              className="p-0.5 hover:bg-white/10 rounded"
+                              title="Refresh price"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${priceLoading ? 'animate-spin' : ''}`} />
+                            </button>
+                          </span>
                         </div>
                         <div className="flex justify-between">
                           <span>Collateral Value:</span>
                           <span className="font-medium">
-                            ${collateralAmount ? (parseFloat(collateralAmount) * QUG_PRICE).toFixed(2) : '0.00'}
+                            ${collateralAmount ? (parseFloat(collateralAmount) * qugPrice).toFixed(2) : '0.00'}
                           </span>
                         </div>
                         <div className="flex justify-between">

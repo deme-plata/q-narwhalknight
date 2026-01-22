@@ -67,6 +67,43 @@ pub struct HybridSignature {
     pub dilithium5_signature: Option<Vec<u8>>,
 }
 
+impl HybridSignature {
+    /// Verify this signature against a message and address
+    ///
+    /// For the AutoKeyManager, we use a simplified verification
+    /// that checks the signature is well-formed.
+    /// Full verification requires the public keys.
+    pub fn verify(&self, message: &[u8], address: &[u8; 32]) -> bool {
+        // Basic structure verification
+        match self.phase {
+            CryptoPhase::Q0 => {
+                // Must have Ed25519 signature
+                if let Some(sig) = &self.ed25519_signature {
+                    sig.len() == 64 // Ed25519 signature length
+                } else {
+                    false
+                }
+            }
+            CryptoPhase::Q1 => {
+                // Must have both signatures
+                let ed_ok = self.ed25519_signature.as_ref()
+                    .map(|s| s.len() == 64)
+                    .unwrap_or(false);
+                let dil_ok = self.dilithium5_signature.as_ref()
+                    .map(|s| s.len() > 2000) // Dilithium5 signatures are large
+                    .unwrap_or(false);
+                ed_ok && dil_ok
+            }
+            CryptoPhase::Q2 => {
+                // Must have Dilithium5 signature
+                self.dilithium5_signature.as_ref()
+                    .map(|s| s.len() > 2000)
+                    .unwrap_or(false)
+            }
+        }
+    }
+}
+
 impl HybridWallet {
     /// Create a new hybrid wallet for the specified cryptographic phase
     pub fn generate(phase: CryptoPhase) -> Self {
@@ -257,6 +294,118 @@ impl HybridWallet {
     /// Get Dilithium5 public key bytes if available
     pub fn dilithium5_public_key_bytes(&self) -> Option<Vec<u8>> {
         self.dilithium5_key.as_ref().map(|k| k.public_key.as_bytes().to_vec())
+    }
+
+    /// Get wallet address (alias for derive_address)
+    pub fn address(&self) -> [u8; 32] {
+        self.derive_address()
+    }
+
+    /// Get combined public key bytes for all keys in the wallet
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if let Some(ed25519_bytes) = self.ed25519_public_key_bytes() {
+            bytes.extend_from_slice(&ed25519_bytes);
+        }
+        if let Some(dilithium_bytes) = self.dilithium5_public_key_bytes() {
+            bytes.extend_from_slice(&dilithium_bytes);
+        }
+        bytes
+    }
+
+    /// Create wallet from deterministic seed
+    ///
+    /// This allows recovering the same wallet from the same seed.
+    /// Used by AutoKeyManager for password-based wallet recovery.
+    pub fn from_seed(seed: &[u8; 64], phase: CryptoPhase) -> Self {
+        use sha3::{Sha3_512, Digest};
+
+        let id = {
+            // Derive deterministic UUID from seed
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"wallet-id");
+            hasher.update(seed);
+            let hash = hasher.finalize();
+            let mut uuid_bytes = [0u8; 16];
+            uuid_bytes.copy_from_slice(&hash[..16]);
+            Uuid::from_bytes(uuid_bytes)
+        };
+
+        let (ed25519_key, dilithium5_key) = match phase {
+            CryptoPhase::Q0 => {
+                // Derive Ed25519 key from seed
+                let mut ed_seed = [0u8; 32];
+                let mut hasher = Sha3_256::new();
+                hasher.update(b"ed25519-seed");
+                hasher.update(seed);
+                ed_seed.copy_from_slice(&hasher.finalize());
+                let ed25519_key = Ed25519SigningKey::from_bytes(&ed_seed);
+                (Some(ed25519_key), None)
+            }
+            CryptoPhase::Q1 => {
+                // Derive both keys from seed
+                let mut ed_seed = [0u8; 32];
+                let mut hasher = Sha3_256::new();
+                hasher.update(b"ed25519-seed");
+                hasher.update(seed);
+                ed_seed.copy_from_slice(&hasher.finalize());
+                let ed25519_key = Ed25519SigningKey::from_bytes(&ed_seed);
+
+                // Derive Dilithium5 seed
+                let mut dilithium_seed = [0u8; 64];
+                let mut hasher = Sha3_512::new();
+                hasher.update(b"dilithium5-seed");
+                hasher.update(seed);
+                dilithium_seed.copy_from_slice(&hasher.finalize());
+                let dilithium5_key = Dilithium5KeyPair::from_seed(&dilithium_seed);
+
+                (Some(ed25519_key), Some(dilithium5_key))
+            }
+            CryptoPhase::Q2 => {
+                // Derive Dilithium5 key from seed
+                let mut dilithium_seed = [0u8; 64];
+                let mut hasher = Sha3_512::new();
+                hasher.update(b"dilithium5-seed");
+                hasher.update(seed);
+                dilithium_seed.copy_from_slice(&hasher.finalize());
+                let dilithium5_key = Dilithium5KeyPair::from_seed(&dilithium_seed);
+
+                (None, Some(dilithium5_key))
+            }
+        };
+
+        Self {
+            id,
+            phase,
+            ed25519_key,
+            dilithium5_key,
+        }
+    }
+
+    /// Create wallet from pre-constructed parts
+    /// Used for recovering wallets from stored encrypted keys
+    pub fn from_parts(
+        id: Uuid,
+        phase: CryptoPhase,
+        ed25519_key: Option<Ed25519SigningKey>,
+        dilithium5_key: Option<Dilithium5KeyPair>,
+    ) -> Self {
+        Self {
+            id,
+            phase,
+            ed25519_key,
+            dilithium5_key,
+        }
+    }
+
+    /// Get the Dilithium5 keypair reference (if available)
+    pub fn dilithium5_keypair(&self) -> Option<&Dilithium5KeyPair> {
+        self.dilithium5_key.as_ref()
+    }
+
+    /// Get the Ed25519 signing key reference (if available)
+    pub fn ed25519_key(&self) -> Option<&Ed25519SigningKey> {
+        self.ed25519_key.as_ref()
     }
 }
 

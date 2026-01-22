@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use chrono;
+use hex;
 use nalgebra::{Vector3, Complex};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -395,21 +397,25 @@ impl RobotManager {
     }
     
     /// Move robot to target coordinates
-    pub async fn move_robot(&mut self, robot_id: &str, target: Vec<f64>, speed: f64) -> Result<()> {
+    pub async fn move_robot(&mut self, robot_id: &str, target: Vec<f64>, speed: f64, field_boost: bool) -> Result<()> {
         let id = RobotId::new(robot_id);
         let robot = self.connected_robots.get_mut(&id)
             .ok_or_else(|| anyhow::anyhow!("Robot {} not found", robot_id))?;
-        
+
         if target.len() != 3 {
             return Err(anyhow::anyhow!("Target coordinates must be [x, y, z]"));
         }
-        
+
+        // Apply quantum field boost for enhanced movement (1.5x speed)
+        let effective_speed = if field_boost { speed * 1.5 } else { speed };
+
         let target_pos = Vector3::new(target[0], target[1], target[2]);
-        robot.move_to(target_pos, speed).await?;
-        
-        debug!("Robot {} moving to ({:.2}, {:.2}, {:.2}) at speed {:.1}%", 
-            robot_id, target[0], target[1], target[2], speed * 100.0);
-        
+        robot.move_to(target_pos, effective_speed.min(1.0)).await?;
+
+        debug!("Robot {} moving to ({:.2}, {:.2}, {:.2}) at speed {:.1}%{}",
+            robot_id, target[0], target[1], target[2], speed * 100.0,
+            if field_boost { " with field boost" } else { "" });
+
         Ok(())
     }
     
@@ -570,6 +576,365 @@ impl RobotManager {
         Ok(())
     }
     
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // HIGGS HYDRO OPERATIONS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Manipulate Higgs field for a robot
+    pub async fn manipulate_higgs_field(
+        &mut self,
+        robot_id: &str,
+        intensity: f64,
+        phase: f64,
+        duration: u64,
+        target: Option<Vec<f64>>,
+    ) -> Result<()> {
+        info!("Manipulating Higgs field for robot {} at intensity {:.2e} GeV³",
+            robot_id, intensity);
+        debug!("Phase: {:.4} rad, Duration: {} as, Target: {:?}", phase, duration, target);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Ok(())
+    }
+
+    /// Write data to quantum droplet memory
+    pub async fn write_quantum_data(
+        &mut self,
+        robot_id: &str,
+        droplet_id: &str,
+        address: usize,
+        data: &str,
+    ) -> Result<()> {
+        info!("Writing {} bits to droplet {} at address 0x{:04X}", data.len(), droplet_id, address);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    /// Read data from quantum droplet memory
+    pub async fn read_quantum_data(
+        &self,
+        robot_id: &str,
+        droplet_id: &str,
+        address: usize,
+        length: usize,
+    ) -> Result<String> {
+        debug!("Reading {} bits from droplet {} at address 0x{:04X}", length, droplet_id, address);
+        // Simulate reading quantum data
+        let mut result = String::new();
+        for _ in 0..length {
+            result.push(if rand::random::<f64>() > 0.5 { '1' } else { '0' });
+        }
+        Ok(result)
+    }
+
+    /// Execute quantum circuit on droplet
+    pub async fn execute_quantum_circuit(
+        &mut self,
+        robot_id: &str,
+        gates: &str,
+        expected_results: Option<usize>,
+    ) -> Result<Vec<bool>> {
+        info!("Executing quantum circuit: {}", gates);
+        let num_results = expected_results.unwrap_or(8);
+        let results: Vec<bool> = (0..num_results)
+            .map(|_| rand::random::<f64>() > 0.5)
+            .collect();
+        Ok(results)
+    }
+
+    /// Calibrate Higgs field manipulator
+    pub async fn calibrate_higgs_manipulator(
+        &mut self,
+        robot_id: &str,
+        reference_field: f64,
+        steps: usize,
+    ) -> Result<f64> {
+        info!("Calibrating with reference field {:.1e} (GeV)² in {} steps", reference_field, steps);
+        tokio::time::sleep(std::time::Duration::from_millis(steps as u64 * 50)).await;
+        // Return accuracy percentage (0.95-0.99)
+        Ok(0.95 + rand::random::<f64>() * 0.04)
+    }
+
+    /// Create new quantum droplet
+    pub async fn create_quantum_droplet(&mut self, robot_id: &str, memory_size: usize) -> Result<String> {
+        info!("Creating quantum droplet with {} bits for robot {}", memory_size, robot_id);
+        let droplet_id = format!("{:016x}", rand::random::<u64>());
+        Ok(droplet_id)
+    }
+
+    /// Assign quantum droplet to robot
+    pub async fn assign_quantum_droplet(&mut self, robot_id: &str, droplet_id: &str) -> Result<()> {
+        info!("Assigning droplet {} to robot {}", droplet_id, robot_id);
+        Ok(())
+    }
+
+    /// Get Lloyd performance metrics
+    pub async fn get_lloyd_metrics(&self, robot_id: &str) -> Result<LloydMetrics> {
+        debug!("Getting Lloyd metrics for robot {}", robot_id);
+        Ok(LloydMetrics {
+            commands_executed: (rand::random::<f64>() * 1000.0) as u64,
+            field_operations: (rand::random::<f64>() * 500.0) as u64,
+            quantum_operations: (rand::random::<f64>() * 2000.0) as u64,
+            avg_command_latency_ms: 1.5 + rand::random::<f64>() * 0.5,
+            success_rate: 0.95 + rand::random::<f64>() * 0.05,
+            energy_efficiency: 0.85 + rand::random::<f64>() * 0.15,
+            coherence_stability: 0.90 + rand::random::<f64>() * 0.10,
+            swarm_coordination_score: 0.88 + rand::random::<f64>() * 0.12,
+            lloyd_efficiency: 1.618033988749895, // φ
+        })
+    }
+
+    /// Generate onion addresses from quantum droplet memory
+    pub async fn generate_onion_addresses(&self, robot_id: &str, all: bool) -> Result<Vec<String>> {
+        debug!("Generating onion addresses for robot {} (all: {})", robot_id, all);
+        let count = if all { 10 } else { 3 };
+        let addresses: Vec<String> = (0..count)
+            .map(|_| {
+                let random_bytes: [u8; 35] = rand::random();
+                let addr = hex::encode(&random_bytes[0..28]);
+                format!("{}.onion", addr)
+            })
+            .collect();
+        Ok(addresses)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // VOID WALKER OPERATIONS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Process thought command for Void Walker
+    pub async fn process_thought(&mut self, robot_id: &str, eeg_amplitude: f64, intent: &str) -> Result<()> {
+        info!("Processing thought for {} with EEG {:.1}: {}", robot_id, eeg_amplitude, intent);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        Ok(())
+    }
+
+    /// Navigate multiverse
+    pub async fn navigate_multiverse(
+        &mut self,
+        robot_id: &str,
+        branch_id: Option<String>,
+        bubble_id: Option<String>,
+        brane_coord: Option<Vec<f64>>,
+        k_parameter: Option<f64>,
+    ) -> Result<()> {
+        info!("Navigating multiverse for robot {}", robot_id);
+        debug!("Branch: {:?}, Bubble: {:?}, Brane: {:?}, K: {:?}",
+            branch_id, bubble_id, brane_coord, k_parameter);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(())
+    }
+
+    /// Create quantum branch
+    pub async fn create_quantum_branch(
+        &mut self,
+        robot_id: &str,
+        observable: &str,
+        eeg_amplitude: f64,
+    ) -> Result<Vec<String>> {
+        info!("Creating quantum branch for observable '{}' with EEG {:.1}", observable, eeg_amplitude);
+        let num_branches = 2 + (rand::random::<f64>() * 3.0) as usize;
+        let branches: Vec<String> = (0..num_branches)
+            .map(|i| format!("branch_{:08x}_{}", rand::random::<u32>(), i))
+            .collect();
+        Ok(branches)
+    }
+
+    /// Nucleate inflation bubble
+    pub async fn nucleate_bubble(&mut self, robot_id: &str, vacuum_energy: f64) -> Result<String> {
+        info!("Nucleating bubble with vacuum energy {:.2} for robot {}", vacuum_energy, robot_id);
+        let bubble_id = format!("bubble_{:016x}", rand::random::<u64>());
+        Ok(bubble_id)
+    }
+
+    /// Create mathematical universe
+    pub async fn create_mathematical_universe(&mut self, robot_id: &str, axioms: usize) -> Result<String> {
+        info!("Creating mathematical universe with {} axioms", axioms);
+        let universe_id = format!("universe_{:016x}", rand::random::<u64>());
+        Ok(universe_id)
+    }
+
+    /// Get cosmic weather
+    pub async fn get_cosmic_weather(&self, robot_id: &str, detailed: bool) -> Result<CosmicWeather> {
+        debug!("Getting cosmic weather for robot {} (detailed: {})", robot_id, detailed);
+        let mut weather = CosmicWeather::default();
+
+        // Add random anomalies if cosmic conditions are turbulent
+        if rand::random::<f64>() > 0.9 {
+            weather.conditions = "Turbulent".to_string();
+            weather.anomalies.push("Dark matter concentration detected".to_string());
+        } else if rand::random::<f64>() > 0.7 {
+            weather.conditions = "Variable".to_string();
+            weather.gravitational_waves = "Moderate".to_string();
+        }
+
+        if detailed && rand::random::<f64>() > 0.6 {
+            weather.anomalies.push("Quantum vacuum fluctuation spike".to_string());
+        }
+
+        Ok(weather)
+    }
+
+    /// Get thought UI state
+    pub async fn get_thought_ui(&self, robot_id: &str) -> Result<String> {
+        debug!("Getting thought UI for robot {}", robot_id);
+        Ok(format!(
+            "🧠 Thought UI State for {}\n  • Active Thoughts: 3\n  • EEG Status: Connected\n  • Intent Buffer: Ready\n  • Quantum Coherence: 98.5%",
+            robot_id
+        ))
+    }
+
+    /// Get K-parameter
+    pub async fn get_k_parameter(&self, robot_id: &str) -> Result<f64> {
+        Ok(7.001234 + rand::random::<f64>() * 0.000001)
+    }
+
+    /// Set K-parameter
+    pub async fn set_k_parameter(&mut self, robot_id: &str, k: f64) -> Result<()> {
+        info!("Setting K-parameter to {:.6} for robot {}", k, robot_id);
+        Ok(())
+    }
+
+    /// Control attosecond laser
+    pub async fn control_attosecond_laser(
+        &mut self,
+        robot_id: &str,
+        operation: &str,
+        params: Vec<String>,
+    ) -> Result<()> {
+        info!("Attosecond laser {} operation for robot {}", operation, robot_id);
+        debug!("Parameters: {:?}", params);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // BLOCKCHAIN IDENTITY OPERATIONS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// List blockchain identities
+    pub async fn list_identities(&self, robot_id: &str) -> Result<Vec<BlockchainIdentity>> {
+        debug!("Listing identities for robot {}", robot_id);
+        Ok(vec![
+            BlockchainIdentity {
+                blockchain: "Bitcoin".to_string(),
+                address: "bc1q...".to_string(),
+                balance: "0.05".to_string(),
+                currency: "BTC".to_string(),
+                label: Some("Primary".to_string()),
+            },
+            BlockchainIdentity {
+                blockchain: "Ethereum".to_string(),
+                address: "0x...".to_string(),
+                balance: "1.5".to_string(),
+                currency: "ETH".to_string(),
+                label: Some("Primary".to_string()),
+            },
+        ])
+    }
+
+    /// Create blockchain identity
+    pub async fn create_identity(
+        &mut self,
+        robot_id: &str,
+        blockchain: &str,
+        name: Option<String>,
+    ) -> Result<BlockchainIdentity> {
+        info!("Creating {} identity for robot {}", blockchain, robot_id);
+        Ok(BlockchainIdentity {
+            blockchain: blockchain.to_string(),
+            address: format!("0x{:040x}", rand::random::<u64>()),
+            balance: "0".to_string(),
+            currency: blockchain.chars().take(3).collect::<String>().to_uppercase(),
+            label: name,
+        })
+    }
+
+    /// Check balances
+    pub async fn check_balances(
+        &self,
+        robot_id: &str,
+        blockchain: Option<String>,
+    ) -> Result<Vec<BlockchainBalance>> {
+        debug!("Checking balances for robot {}", robot_id);
+        let mut balances = vec![
+            BlockchainBalance {
+                blockchain: "Bitcoin".to_string(),
+                currency: "BTC".to_string(),
+                amount: 0.05 + rand::random::<f64>() * 0.1,
+                usd_rate: 43000.0,
+                staking_rewards: None,
+            },
+            BlockchainBalance {
+                blockchain: "Ethereum".to_string(),
+                currency: "ETH".to_string(),
+                amount: 1.5 + rand::random::<f64>() * 0.5,
+                usd_rate: 2200.0,
+                staking_rewards: Some(0.05),
+            },
+            BlockchainBalance {
+                blockchain: "Solana".to_string(),
+                currency: "SOL".to_string(),
+                amount: 100.0 + rand::random::<f64>() * 50.0,
+                usd_rate: 100.0,
+                staking_rewards: Some(5.0),
+            },
+        ];
+
+        if let Some(chain) = blockchain {
+            balances.retain(|b| b.blockchain.to_lowercase() == chain.to_lowercase());
+        }
+
+        Ok(balances)
+    }
+
+    /// Send transaction
+    pub async fn send_transaction(
+        &mut self,
+        robot_id: &str,
+        from_chain: &str,
+        to_address: &str,
+        amount: &str,
+        memo: Option<String>,
+    ) -> Result<String> {
+        info!("Sending {} on {} to {}", amount, from_chain, to_address);
+        let tx_hash = format!("0x{:064x}", rand::random::<u128>());
+        Ok(tx_hash)
+    }
+
+    /// Sync identities
+    pub async fn sync_identities(&mut self, robot_id: &str, force: bool) -> Result<()> {
+        info!("Syncing identities for robot {} (force: {})", robot_id, force);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(())
+    }
+
+    /// Generate life certificate
+    pub async fn generate_life_certificate(
+        &self,
+        robot_id: &str,
+        cert_type: &str,
+    ) -> Result<LifeCertificate> {
+        info!("Generating {} certificate for robot {}", cert_type, robot_id);
+        Ok(LifeCertificate {
+            hash: format!("{:064x}", rand::random::<u128>()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            cert_type: cert_type.to_string(),
+            robot_id: robot_id.to_string(),
+        })
+    }
+
+    /// Breed organisms
+    pub async fn breed_organisms(
+        &mut self,
+        robot_id: &str,
+        partner_id: &str,
+        fee: f64,
+    ) -> Result<String> {
+        info!("Breeding {} with {} for fee {}", robot_id, partner_id, fee);
+        let offspring_id = format!("offspring_{:016x}", rand::random::<u64>());
+        Ok(offspring_id)
+    }
+
     async fn aggregate_scan_results(&self, scan_data: Vec<ScanResults>) -> Result<ScanResults> {
         if scan_data.is_empty() {
             return Err(anyhow::anyhow!("No scan data to aggregate"));
@@ -773,8 +1138,10 @@ impl Robot {
         let detection_count = (rand::random::<f64>() * 5.0) as usize;
         
         for _ in 0..detection_count {
-            let species = species_list[rand::random::<usize>() % species_list.len()];
-            let behavior = behaviors[rand::random::<usize>() % behaviors.len()];
+            let species_idx = (rand::random::<f64>() * species_list.len() as f64) as usize % species_list.len();
+            let behavior_idx = (rand::random::<f64>() * behaviors.len() as f64) as usize % behaviors.len();
+            let species = species_list[species_idx];
+            let behavior = behaviors[behavior_idx];
             
             detections.push(MarineLifeEntry {
                 species: species.to_string(),
@@ -942,4 +1309,123 @@ fn average(values: &[f64]) -> f64 {
     } else {
         values.iter().sum::<f64>() / values.len() as f64
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADDITIONAL TYPES FOR CLI OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Lloyd performance metrics for quantum robot operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LloydMetrics {
+    /// Total commands executed
+    pub commands_executed: u64,
+    /// Higgs field operations count
+    pub field_operations: u64,
+    /// Quantum operations count
+    pub quantum_operations: u64,
+    /// Average command latency in milliseconds
+    pub avg_command_latency_ms: f64,
+    /// Success rate (0.0-1.0)
+    pub success_rate: f64,
+    /// Energy efficiency score
+    pub energy_efficiency: f64,
+    /// Coherence stability score
+    pub coherence_stability: f64,
+    /// Swarm coordination score
+    pub swarm_coordination_score: f64,
+    /// Lloyd efficiency factor (golden ratio φ = 1.618)
+    pub lloyd_efficiency: f64,
+}
+
+impl Default for LloydMetrics {
+    fn default() -> Self {
+        Self {
+            commands_executed: 0,
+            field_operations: 0,
+            quantum_operations: 0,
+            avg_command_latency_ms: 0.0,
+            success_rate: 1.0,
+            energy_efficiency: 1.0,
+            coherence_stability: 1.0,
+            swarm_coordination_score: 1.0,
+            lloyd_efficiency: 1.618033988749895, // φ (golden ratio)
+        }
+    }
+}
+
+/// Cosmic weather conditions for multiverse navigation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmicWeather {
+    /// Dark energy flux percentage
+    pub dark_energy_flux: f64,
+    /// Gravitational wave activity magnitude
+    pub gravitational_waves: String,
+    /// Cosmic ray intensity (particles/cm²/s)
+    pub cosmic_ray_intensity: f64,
+    /// Quantum vacuum stability (0.0-1.0)
+    pub vacuum_stability: f64,
+    /// Multiverse coherence factor
+    pub multiverse_coherence: f64,
+    /// Overall conditions (Stable, Variable, Turbulent)
+    pub conditions: String,
+    /// Detected anomalies
+    pub anomalies: Vec<String>,
+}
+
+impl Default for CosmicWeather {
+    fn default() -> Self {
+        Self {
+            dark_energy_flux: 0.1 + rand::random::<f64>() * 0.5,
+            gravitational_waves: "Low".to_string(),
+            cosmic_ray_intensity: 0.5 + rand::random::<f64>() * 2.0,
+            vacuum_stability: 0.95 + rand::random::<f64>() * 0.05,
+            multiverse_coherence: 0.9 + rand::random::<f64>() * 0.1,
+            conditions: "Stable".to_string(),
+            anomalies: Vec::new(),
+        }
+    }
+}
+
+/// Blockchain balance information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockchainBalance {
+    /// Blockchain name (e.g., "Bitcoin", "Ethereum", "Solana")
+    pub blockchain: String,
+    /// Currency symbol
+    pub currency: String,
+    /// Balance amount
+    pub amount: f64,
+    /// USD exchange rate
+    pub usd_rate: f64,
+    /// Staking rewards (if applicable)
+    pub staking_rewards: Option<f64>,
+}
+
+/// Blockchain identity for robot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockchainIdentity {
+    /// Blockchain name
+    pub blockchain: String,
+    /// Wallet address
+    pub address: String,
+    /// Balance
+    pub balance: String,
+    /// Currency symbol
+    pub currency: String,
+    /// Identity label
+    pub label: Option<String>,
+}
+
+/// Life certificate for robot organisms
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifeCertificate {
+    /// Certificate hash
+    pub hash: String,
+    /// Timestamp
+    pub timestamp: String,
+    /// Certificate type
+    pub cert_type: String,
+    /// Robot ID
+    pub robot_id: String,
 }

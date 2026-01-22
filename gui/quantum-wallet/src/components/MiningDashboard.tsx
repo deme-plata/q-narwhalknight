@@ -11,6 +11,16 @@ interface MiningStats {
   networkHashRate: number; // v1.1.9-beta: Network-wide hashrate
 }
 
+// v3.3.4-beta: Individual miner tracking for hash rate breakdown
+interface MinerInfo {
+  minerId: string;
+  workerName: string | null;
+  hashRate: number;
+  lastSeen: Date;
+  blocksFound: number;
+  totalRewards: number;
+}
+
 interface RewardWithAnimation extends MiningRewardEvent {
   id: string;
   isNew: boolean;
@@ -28,6 +38,11 @@ export default function MiningDashboard() {
   const [showRewardPopup, setShowRewardPopup] = useState(false);
   const [latestReward, setLatestReward] = useState<MiningRewardEvent | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  // v3.3.4-beta: Track individual miners for hash rate breakdown tooltip
+  const [miners, setMiners] = useState<Map<string, MinerInfo>>(new Map());
+  const [showMinerTooltip, setShowMinerTooltip] = useState(false);
+  const [showNetworkAnimation, setShowNetworkAnimation] = useState(false);
 
   // Use the same wallet as Dashboard - from localStorage
   const [walletAddress, setWalletAddress] = useState('');
@@ -123,12 +138,54 @@ export default function MiningDashboard() {
     });
 
     // Update stats
-    setStats(prev => ({
-      ...prev,
-      totalRewards: prev.totalRewards + reward.reward_qnk,
-      blocksFound: prev.blocksFound + 1,
-      avgHashRate: reward.hash_rate > 0 ? reward.hash_rate : prev.avgHashRate,
-    }));
+    setStats(prev => {
+      const newTotalRewards = prev.totalRewards + reward.reward_qnk;
+
+      // v2.9.1-beta: CRITICAL FIX - Propagate balance update to TopBar
+      // Update localStorage and dispatch event so TopBar updates in real-time
+      localStorage.setItem('cachedBalance', newTotalRewards.toString());
+      window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+        detail: {
+          symbol: 'QUG',
+          balance: newTotalRewards,
+          reason: 'mining_reward',
+          rewardAmount: reward.reward_qnk
+        }
+      }));
+      console.log('💰 [MiningDashboard] Propagated balance to TopBar:', newTotalRewards);
+
+      return {
+        ...prev,
+        totalRewards: newTotalRewards,
+        blocksFound: prev.blocksFound + 1,
+        avgHashRate: reward.hash_rate > 0 ? reward.hash_rate : prev.avgHashRate,
+      };
+    });
+
+    // v3.3.4-beta: Track individual miners for hash rate breakdown
+    const minerId = reward.miner_id || reward.miner_address.substring(0, 16);
+    setMiners(prev => {
+      const newMiners = new Map(prev);
+      const existing = newMiners.get(minerId);
+
+      newMiners.set(minerId, {
+        minerId,
+        workerName: reward.worker_name || null,
+        hashRate: reward.hash_rate > 0 ? reward.hash_rate : (existing?.hashRate || 0),
+        lastSeen: new Date(),
+        blocksFound: (existing?.blocksFound || 0) + 1,
+        totalRewards: (existing?.totalRewards || 0) + reward.reward_qnk,
+      });
+
+      console.log('⛏️ [MiningDashboard] Updated miner tracking:', {
+        minerId,
+        workerName: reward.worker_name,
+        hashRate: reward.hash_rate,
+        totalMiners: newMiners.size
+      });
+
+      return newMiners;
+    });
 
     // Show reward popup
     setLatestReward(reward);
@@ -153,39 +210,49 @@ export default function MiningDashboard() {
   };
 
   const handleBalanceUpdate = (update: BalanceUpdateEvent) => {
-    console.log('💰 Balance updated:', update);
+    // v2.7.8-beta: EXTENSIVE DEBUGGING for P2P balance propagation
+    console.log('🔔 [MiningDashboard] handleBalanceUpdate CALLED with:', update);
+    console.log('🔔 [MiningDashboard] Current stats BEFORE update:', stats);
     console.log('💰 Balance details:', {
       wallet: update.wallet_address,
       old: update.old_balance,
       new: update.new_balance,
-      reason: update.change_reason
+      reason: update.change_reason,
+      diff: update.new_balance - update.old_balance
     });
 
     // Check if this is a mining reward or development fee
     // Backend sends: "mining_reward", "mining_reward_instant", "mining_reward_batch_X", "development_fee", "p2p_mining_reward", "pending_mining_reward"
-    const isMiningReward = update.change_reason === 'MiningReward' ||
-                           update.change_reason === 'mining_reward' ||
-                           update.change_reason === 'mining_reward_instant' ||
-                           update.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
-                           update.change_reason === 'pending_mining_reward' ||  // v1.3.9-beta: Pending rewards via P2P gossipsub
-                           (update.change_reason && update.change_reason.startsWith('mining_reward_batch_'));
+    // v2.7.6-beta: DON'T add to rewards list for mining_reward/mining_reward_instant - MiningReward event handles that
+    // Only add for P2P rewards which don't have a corresponding MiningReward event
+    const isP2PMiningReward = update.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
+                              update.change_reason === 'pending_mining_reward';  // v1.3.9-beta: Pending rewards via P2P gossipsub
+    const isLocalMiningReward = update.change_reason === 'MiningReward' ||
+                                update.change_reason === 'mining_reward' ||
+                                update.change_reason === 'mining_reward_instant' ||
+                                (update.change_reason && update.change_reason.startsWith('mining_reward_batch_'));
     const isDevFee = update.change_reason === 'DevelopmentFee' ||
                      update.change_reason === 'development_fee';
 
-    if (isMiningReward || isDevFee) {
-      // Calculate reward amount from balance change
+    console.log('🔍 [MiningDashboard] Reason classification:', { isP2PMiningReward, isLocalMiningReward, isDevFee, reason: update.change_reason });
+
+    // v2.7.6-beta FIX: For local mining, MiningReward event already adds to rewards list with proper data (block_height, nonce, etc)
+    // Only add from BalanceUpdated for P2P rewards which don't have a MiningReward event
+    if (isP2PMiningReward) {
+      // P2P mining rewards - add to rewards list (no MiningReward event for these)
       const rewardAmount = update.new_balance - update.old_balance;
-      console.log('⛏️  Mining reward detected! Amount:', rewardAmount);
+      console.log('⛏️  P2P Mining reward detected! Amount:', rewardAmount);
 
       // Add to rewards list (for Recent Mining Rewards display)
+      // v2.7.6-beta: Use block_height from update if available (backend now sends it)
       const rewardWithId: RewardWithAnimation = {
         id: `${update.timestamp}-${Math.random()}`,
         miner_address: update.wallet_address,
         reward_qnk: rewardAmount,
-        nonce: 0, // Not available in balance_updated event
-        block_height: 0, // Not available in balance_updated event
-        difficulty: '0', // Not available in balance_updated event
-        hash_rate: 0, // Not available in balance_updated event
+        nonce: 0, // Not available in P2P balance_updated event
+        block_height: (update as { block_height?: number }).block_height || 0,
+        difficulty: '0', // Not available in P2P balance_updated event
+        hash_rate: 0, // Not available in P2P balance_updated event
         timestamp: update.timestamp,
         isNew: true,
       };
@@ -203,12 +270,115 @@ export default function MiningDashboard() {
       }, 1000);
 
       // Update stats to include this reward
-      setStats(prev => ({
-        ...prev,
-        currentBalance: update.new_balance,
-        totalRewards: prev.totalRewards + rewardAmount,
-        blocksFound: prev.blocksFound + 1,
-      }));
+      // v2.7.7-beta: CRITICAL FIX - Accumulate P2P rewards instead of using backend's stale new_balance!
+      // Backend sends stale database balance + one reward, never accumulating across multiple events
+      // Frontend must accumulate rewards to show correct running total
+      console.log('🚀 [MiningDashboard] UPDATING STATS for P2P reward! rewardAmount:', rewardAmount);
+      setStats(prev => {
+        const newTotalRewards = prev.totalRewards + rewardAmount;
+
+        // v2.9.1-beta: CRITICAL FIX - Propagate P2P balance update to TopBar
+        localStorage.setItem('cachedBalance', newTotalRewards.toString());
+        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+          detail: {
+            symbol: 'QUG',
+            balance: newTotalRewards,
+            reason: 'p2p_mining_reward',
+            rewardAmount: rewardAmount
+          }
+        }));
+        console.log('💰 [MiningDashboard] Propagated P2P balance to TopBar:', newTotalRewards);
+
+        const newStats = {
+          ...prev,
+          currentBalance: prev.currentBalance + rewardAmount, // Accumulate instead of using stale backend value
+          totalRewards: newTotalRewards,
+          blocksFound: prev.blocksFound + 1,
+        };
+        console.log('🚀 [MiningDashboard] Stats AFTER P2P update:', newStats);
+        return newStats;
+      });
+    } else if (isLocalMiningReward || isDevFee) {
+      // v3.3.4-beta: Track miners from balance updates as fallback
+      // If MiningReward event is filtered (wallet mismatch), this ensures we still track miners
+      const rewardAmount = update.new_balance - update.old_balance;
+      console.log('💰 Local mining balance update:', rewardAmount);
+
+      // v3.3.4-beta: Add to rewards list as fallback (in case MiningReward event was filtered)
+      if (rewardAmount > 0 && !isDevFee) {
+        const rewardWithId: RewardWithAnimation = {
+          id: `balance-${update.timestamp}-${Math.random()}`,
+          miner_address: update.wallet_address,
+          reward_qnk: rewardAmount,
+          nonce: 0,
+          block_height: (update as { block_height?: number }).block_height || 0,
+          difficulty: '0',
+          hash_rate: 0,
+          timestamp: update.timestamp,
+          isNew: true,
+        };
+
+        setRewards(prev => {
+          // Check if we already have this reward from MiningReward event (prevent duplicates)
+          const isDuplicate = prev.some(r =>
+            Math.abs(r.reward_qnk - rewardAmount) < 0.00000001 &&
+            new Date(r.timestamp).getTime() > Date.now() - 5000
+          );
+          if (isDuplicate) {
+            console.log('🔄 Skipping duplicate reward entry');
+            return prev;
+          }
+          const updated = [rewardWithId, ...prev].slice(0, 10);
+          return updated;
+        });
+
+        // Remove animation flag after animation completes
+        setTimeout(() => {
+          setRewards(prev =>
+            prev.map(r => (r.id === rewardWithId.id ? { ...r, isNew: false } : r))
+          );
+        }, 1000);
+
+        // v3.3.4-beta: Track miner from balance update
+        const minerId = update.wallet_address.replace(/^qnk/, '').substring(0, 16);
+        setMiners(prev => {
+          const newMiners = new Map(prev);
+          const existing = newMiners.get(minerId);
+          newMiners.set(minerId, {
+            minerId,
+            workerName: null, // No worker name from balance updates
+            hashRate: existing?.hashRate || 0,
+            lastSeen: new Date(),
+            blocksFound: (existing?.blocksFound || 0) + 1,
+            totalRewards: (existing?.totalRewards || 0) + rewardAmount,
+          });
+          console.log('⛏️ [MiningDashboard] Tracked miner from balance update:', minerId);
+          return newMiners;
+        });
+      }
+
+      setStats(prev => {
+        const newTotalRewards = prev.totalRewards + rewardAmount;
+
+        // v2.9.1-beta: CRITICAL FIX - Propagate local mining balance update to TopBar
+        localStorage.setItem('cachedBalance', newTotalRewards.toString());
+        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+          detail: {
+            symbol: 'QUG',
+            balance: newTotalRewards,
+            reason: update.change_reason,
+            rewardAmount: rewardAmount
+          }
+        }));
+        console.log('💰 [MiningDashboard] Propagated local mining balance to TopBar:', newTotalRewards);
+
+        return {
+          ...prev,
+          currentBalance: update.new_balance,
+          totalRewards: newTotalRewards,
+          blocksFound: prev.blocksFound + 1,
+        };
+      });
     } else {
       // Non-mining balance update - just update balance
       setStats(prev => ({
@@ -225,10 +395,24 @@ export default function MiningDashboard() {
       total_rewards: statsUpdate.total_rewards,
       blocks_found: statsUpdate.total_blocks_found,
       balance: statsUpdate.current_balance,
-      hash_rate: statsUpdate.avg_hash_rate
+      hash_rate: statsUpdate.avg_hash_rate,
+      miner_id: statsUpdate.miner_id,
+      worker_id: statsUpdate.worker_id
     });
 
     // Update all stats from backend (preserve network hashrate)
+    // v2.9.1-beta: Also propagate to TopBar for real-time display
+    const newTotalRewards = statsUpdate.total_rewards;
+    localStorage.setItem('cachedBalance', newTotalRewards.toString());
+    window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+      detail: {
+        symbol: 'QUG',
+        balance: newTotalRewards,
+        reason: 'mining_stats_update'
+      }
+    }));
+    console.log('📊 [MiningDashboard] Propagated stats balance to TopBar:', newTotalRewards);
+
     setStats(prev => ({
       totalRewards: statsUpdate.total_rewards,
       blocksFound: statsUpdate.total_blocks_found,
@@ -236,6 +420,34 @@ export default function MiningDashboard() {
       avgHashRate: statsUpdate.avg_hash_rate,
       networkHashRate: prev.networkHashRate, // Keep network hashrate from separate fetch
     }));
+
+    // v3.2.25-beta: Track individual miners using miner_id or worker_id
+    // This enables showing multiple miners with their individual hashrates
+    if (statsUpdate.worker_id || statsUpdate.miner_id) {
+      const minerId = statsUpdate.miner_id || statsUpdate.worker_id || 'unknown';
+      setMiners(prev => {
+        const newMiners = new Map(prev);
+        const existing = newMiners.get(minerId);
+
+        newMiners.set(minerId, {
+          minerId,
+          workerName: statsUpdate.worker_id || null,
+          hashRate: statsUpdate.avg_hash_rate,
+          lastSeen: new Date(),
+          blocksFound: statsUpdate.total_blocks_found,
+          totalRewards: existing?.totalRewards || 0, // Keep accumulated rewards
+        });
+
+        console.log('⛏️ [MiningDashboard] Updated miner from stats:', {
+          minerId,
+          worker_id: statsUpdate.worker_id,
+          hashRate: statsUpdate.avg_hash_rate,
+          totalMiners: newMiners.size
+        });
+
+        return newMiners;
+      });
+    }
   };
 
   // v1.1.9-beta: Fetch network-wide hashrate from /api/v1/network/supply
@@ -276,6 +488,14 @@ export default function MiningDashboard() {
     if (diffHours < 24) return `${diffHours}h ago`;
     return date.toLocaleDateString();
   };
+
+  // v3.3.4-beta: Calculate total hash rate from all tracked miners
+  const totalMinerHashRate = Array.from(miners.values()).reduce(
+    (sum, miner) => sum + miner.hashRate,
+    0
+  );
+  // Use total miner hash rate if we have miners, otherwise fall back to stats.avgHashRate
+  const displayHashRate = miners.size > 0 ? totalMinerHashRate : stats.avgHashRate;
 
   if (!walletAddress) {
     return (
@@ -374,16 +594,79 @@ export default function MiningDashboard() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
-          className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-yellow/30 rounded-xl p-6"
+          className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-yellow/30 rounded-xl p-6 relative cursor-pointer overflow-visible"
+          style={{ zIndex: showMinerTooltip ? 100 : 1 }}
+          onMouseEnter={() => setShowMinerTooltip(true)}
+          onMouseLeave={() => setShowMinerTooltip(false)}
         >
           <div className="flex items-center justify-between mb-3">
             <Zap className="w-6 h-6 text-quantum-yellow" />
             <span className="text-sm text-gray-400">Your Hash Rate</span>
           </div>
           <div className="text-3xl font-bold text-white mb-1">
-            {formatHashRate(stats.avgHashRate)}
+            {formatHashRate(displayHashRate)}
           </div>
-          <div className="text-sm text-quantum-yellow">Personal</div>
+          <div className="text-sm text-quantum-yellow flex items-center gap-2">
+            Personal
+            {miners.size > 0 && (
+              <span className="text-xs bg-quantum-yellow/20 px-2 py-0.5 rounded-full">
+                {miners.size} miner{miners.size !== 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+
+          {/* v3.3.4-beta: Miner List Tooltip */}
+          <AnimatePresence>
+            {showMinerTooltip && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                transition={{ duration: 0.2 }}
+                className="absolute left-0 right-0 top-full mt-2 bg-quantum-dark/95 backdrop-blur-xl border border-quantum-yellow/40 rounded-xl p-4 shadow-2xl"
+                style={{ zIndex: 9999 }}
+              >
+                <div className="text-sm font-semibold text-quantum-yellow mb-3 flex items-center gap-2">
+                  <Zap className="w-4 h-4" />
+                  Active Miners ({miners.size})
+                </div>
+                {miners.size > 0 ? (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {Array.from(miners.values())
+                      .sort((a, b) => b.hashRate - a.hashRate)
+                      .map((miner) => (
+                        <div
+                          key={miner.minerId}
+                          className="flex items-center justify-between bg-quantum-indigo/20 rounded-lg p-3 border border-quantum-purple/20"
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-white font-medium">
+                              {miner.workerName || `Miner ${miner.minerId.substring(0, 8)}...`}
+                            </span>
+                            <span className="text-xs text-gray-400">
+                              ID: {miner.minerId.substring(0, 12)}...
+                            </span>
+                          </div>
+                          <div className="flex flex-col items-end">
+                            <span className="text-quantum-cyan font-bold">
+                              {formatHashRate(miner.hashRate)}
+                            </span>
+                            <span className="text-xs text-gray-400">
+                              {miner.blocksFound} block{miner.blocksFound !== 1 ? 's' : ''} | {miner.totalRewards.toFixed(4)} QUG
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                ) : (
+                  <div className="text-gray-400 text-sm text-center py-4">
+                    <div className="mb-2">No miners detected yet</div>
+                    <div className="text-xs">Mining rewards will appear here as they are received via SSE</div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
       </div>
 
@@ -393,7 +676,10 @@ export default function MiningDashboard() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.35 }}
-          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6"
+          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6 relative cursor-pointer overflow-visible"
+          style={{ zIndex: showNetworkAnimation ? 100 : 1 }}
+          onMouseEnter={() => setShowNetworkAnimation(true)}
+          onMouseLeave={() => setShowNetworkAnimation(false)}
         >
           <div className="flex items-center justify-between mb-3">
             <TrendingUp className="w-6 h-6 text-quantum-cyan" />
@@ -403,6 +689,121 @@ export default function MiningDashboard() {
             {formatHashRate(stats.networkHashRate)}
           </div>
           <div className="text-sm text-quantum-cyan">Total Network Power</div>
+
+          {/* v3.3.4-beta: Epic Mining Animation on Hover */}
+          <AnimatePresence>
+            {showNetworkAnimation && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ duration: 0.3 }}
+                className="absolute inset-0 rounded-xl overflow-hidden pointer-events-none"
+                style={{ zIndex: 9999 }}
+              >
+                {/* Animated Background Glow */}
+                <div className="absolute inset-0 bg-gradient-to-br from-quantum-cyan/30 via-quantum-purple/20 to-quantum-yellow/30 animate-pulse" />
+
+                {/* Mining Sparks */}
+                {[...Array(12)].map((_, i) => (
+                  <motion.div
+                    key={i}
+                    className="absolute w-2 h-2 rounded-full"
+                    style={{
+                      background: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ffd700' : '#ff6b00',
+                      left: `${20 + Math.random() * 60}%`,
+                      top: `${20 + Math.random() * 60}%`,
+                      boxShadow: `0 0 10px ${i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ffd700' : '#ff6b00'}`,
+                    }}
+                    animate={{
+                      y: [-20, -40, -20],
+                      x: [0, (i % 2 === 0 ? 10 : -10), 0],
+                      opacity: [0, 1, 0],
+                      scale: [0.5, 1.2, 0.5],
+                    }}
+                    transition={{
+                      duration: 1 + Math.random() * 0.5,
+                      repeat: Infinity,
+                      delay: i * 0.1,
+                      ease: "easeInOut",
+                    }}
+                  />
+                ))}
+
+                {/* Pickaxe Animation */}
+                <motion.div
+                  className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-4xl"
+                  animate={{
+                    rotate: [-30, 30, -30],
+                    y: [0, -5, 0],
+                  }}
+                  transition={{
+                    duration: 0.4,
+                    repeat: Infinity,
+                    ease: "easeInOut",
+                  }}
+                >
+                  ⛏️
+                </motion.div>
+
+                {/* Hash Rate Pulse Rings */}
+                {[...Array(3)].map((_, i) => (
+                  <motion.div
+                    key={`ring-${i}`}
+                    className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-2 border-quantum-cyan/50 rounded-full"
+                    style={{
+                      width: 60 + i * 40,
+                      height: 60 + i * 40,
+                    }}
+                    animate={{
+                      scale: [1, 1.5, 1],
+                      opacity: [0.5, 0, 0.5],
+                    }}
+                    transition={{
+                      duration: 2,
+                      repeat: Infinity,
+                      delay: i * 0.4,
+                      ease: "easeOut",
+                    }}
+                  />
+                ))}
+
+                {/* Mining Stats Overlay */}
+                <motion.div
+                  className="absolute inset-0 flex flex-col items-center justify-center bg-quantum-dark/80 backdrop-blur-sm"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.2 }}
+                >
+                  <motion.div
+                    className="text-5xl mb-2"
+                    animate={{ scale: [1, 1.1, 1] }}
+                    transition={{ duration: 0.5, repeat: Infinity }}
+                  >
+                    ⚡
+                  </motion.div>
+                  <div className="text-quantum-cyan font-bold text-2xl">
+                    {formatHashRate(stats.networkHashRate)}
+                  </div>
+                  <div className="text-gray-400 text-sm mt-1">Network Mining Power</div>
+                  <div className="flex gap-4 mt-3">
+                    <div className="text-center">
+                      <div className="text-quantum-yellow font-bold">{miners.size}</div>
+                      <div className="text-xs text-gray-500">Your Miners</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-quantum-purple font-bold">
+                        {stats.networkHashRate > 0
+                          ? ((displayHashRate / stats.networkHashRate) * 100).toFixed(1)
+                          : '0.0'}%
+                      </div>
+                      <div className="text-xs text-gray-500">Your Share</div>
+                    </div>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
 
         <motion.div
@@ -477,13 +878,35 @@ export default function MiningDashboard() {
                       <div className="text-sm text-gray-300">
                         Block #{reward.block_height} • Nonce: {reward.nonce}
                       </div>
-                      {reward.worker_name && (
-                        <div className="text-xs text-quantum-cyan mt-1">
-                          Worker: {reward.worker_name}
-                        </div>
-                      )}
+                      <div className="flex flex-wrap gap-2 mt-1">
+                        {reward.origin_node_name && (
+                          <span className="text-xs bg-quantum-purple/20 text-quantum-purple px-2 py-0.5 rounded">
+                            {reward.origin_node_name}
+                          </span>
+                        )}
+                        {reward.worker_name && (
+                          <span className="text-xs bg-quantum-cyan/20 text-quantum-cyan px-2 py-0.5 rounded">
+                            Miner: {reward.worker_name}
+                          </span>
+                        )}
+                        {reward.miner_id && !reward.worker_name && (
+                          <span className="text-xs bg-quantum-yellow/20 text-quantum-yellow px-2 py-0.5 rounded">
+                            ID: {reward.miner_id.substring(0, 8)}...
+                          </span>
+                        )}
+                        {reward.miner_id && reward.worker_name && (
+                          <span className="text-xs bg-quantum-yellow/20 text-quantum-yellow px-2 py-0.5 rounded opacity-70">
+                            [{reward.miner_id.substring(0, 8)}]
+                          </span>
+                        )}
+                      </div>
                       <div className="text-xs text-gray-500 mt-1">
                         Difficulty: {reward.difficulty}
+                        {reward.origin_node_id && (
+                          <span className="ml-2 text-gray-600">
+                            • Node: {reward.origin_node_id.substring(0, 12)}...
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="text-right">
@@ -497,6 +920,46 @@ export default function MiningDashboard() {
             </AnimatePresence>
           </div>
         )}
+
+        {/* Smart Accumulation Tip */}
+        {rewards.length >= 2 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mt-4 bg-quantum-cyan/10 border border-quantum-cyan/30 rounded-lg p-4"
+          >
+            <div className="flex items-center gap-2 text-quantum-cyan text-sm">
+              <TrendingUp className="w-4 h-4" />
+              <span className="font-semibold">Accumulation Rate</span>
+            </div>
+            <div className="text-gray-300 text-sm mt-2">
+              {(() => {
+                // Calculate rewards per hour based on recent activity
+                const recentRewards = rewards.slice(0, Math.min(5, rewards.length));
+                const totalAmount = recentRewards.reduce((sum, r) => sum + r.reward_qnk, 0);
+                const firstTime = new Date(recentRewards[recentRewards.length - 1]?.timestamp || Date.now()).getTime();
+                const lastTime = new Date(recentRewards[0]?.timestamp || Date.now()).getTime();
+                const timeDiffHours = Math.max((lastTime - firstTime) / (1000 * 60 * 60), 0.01);
+                const ratePerHour = totalAmount / timeDiffHours;
+                const ratePerDay = ratePerHour * 24;
+
+                if (ratePerHour > 0.001) {
+                  return (
+                    <>
+                      At your current hashrate, you're earning approximately{' '}
+                      <span className="text-quantum-green font-bold">{ratePerHour.toFixed(4)} QUG/hour</span>
+                      {' '}({ratePerDay.toFixed(2)} QUG/day)
+                    </>
+                  );
+                }
+                return 'Keep mining to calculate your accumulation rate!';
+              })()}
+            </div>
+            <div className="text-gray-500 text-xs mt-2">
+              All mining rewards are credited instantly across the network via P2P propagation
+            </div>
+          </motion.div>
+        )}
       </motion.div>
 
       {/* Download Miner */}
@@ -508,19 +971,19 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v1.3.1
+          Download Optimized Miner v3.3.3
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v1.3.1: Lock-free multi-threading + Hybrid CPU/GPU mining + Hashpower security integration
+          v3.3.3: Miner identification + Lock-free multi-threading + P2P propagation
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a
-            href="/downloads/q-miner-v1.3.1-optimized-linux-x64"
+            href="/downloads/q-miner-v3.3.3-beta"
             download
             className="flex items-center justify-center gap-2 bg-quantum-green/20 hover:bg-quantum-green/30 border border-quantum-green/50 text-quantum-green font-bold py-3 px-4 rounded-lg transition-all"
           >
             <Zap className="w-4 h-4" />
-            Linux x64 (Optimized)
+            Linux x64 (Latest)
           </a>
           <a
             href="/downloads/q-miner-windows-x64.exe"
@@ -549,15 +1012,15 @@ export default function MiningDashboard() {
         </div>
         <div className="mt-4 p-4 bg-black/30 rounded-lg space-y-3">
           <div>
-            <p className="text-xs text-gray-400 mb-1">Connect to Network:</p>
+            <p className="text-xs text-gray-400 mb-1">Connect to Network (with miner name):</p>
             <code className="text-xs text-quantum-cyan block">
-              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://quillon.xyz:8080
+              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://quillon.xyz:8080 --miner-name "My Rig"
             </code>
           </div>
           <div>
             <p className="text-xs text-gray-400 mb-1">Solo Mining (Local Node):</p>
             <code className="text-xs text-quantum-yellow block">
-              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://localhost:8080
+              ./q-miner --wallet {walletAddress.slice(0, 20)}... --server http://localhost:8080 --miner-name "Local"
             </code>
             <p className="text-xs text-gray-500 mt-1">Start node with: Q_ALLOW_SOLO_MINING=true ./q-api-server</p>
           </div>

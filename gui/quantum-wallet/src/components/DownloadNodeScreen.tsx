@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen } from 'lucide-react';
+import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket } from 'lucide-react';
 
 export default function DownloadNodeScreen() {
   return (
@@ -18,28 +18,74 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v1.1.22 Phase 15 • Safe Batched Sync + Genesis Checkpoint</span>
+          <span className="text-sm font-bold text-quantum-cyan">v2.3.12-beta • WarpSync + Instant Endgame</span>
+        </div>
+      </motion.div>
+
+      {/* WarpSync Highlight Banner */}
+      <motion.div
+        className="relative overflow-hidden p-6 bg-gradient-to-r from-quantum-green/30 via-quantum-cyan/20 to-quantum-purple/30 backdrop-blur-xl border border-quantum-green/50 rounded-2xl"
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ delay: 0.1 }}
+      >
+        <div className="absolute top-0 right-0 w-64 h-64 bg-quantum-green/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+        <div className="relative flex items-center gap-6">
+          <div className="flex-shrink-0 w-16 h-16 bg-quantum-green/30 rounded-2xl flex items-center justify-center">
+            <Rocket className="w-8 h-8 text-quantum-green" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center gap-3 mb-2">
+              <h2 className="text-2xl font-bold text-white">WarpSync Technology</h2>
+              <span className="px-3 py-1 bg-quantum-green/30 text-quantum-green text-xs font-bold rounded-full uppercase">New in v2.3</span>
+            </div>
+            <p className="text-gray-300 mb-3">
+              Sync 900,000+ blocks in under 5 minutes. New nodes join the network instantly with parallel block downloads,
+              adaptive timeouts, and scan-forward gap closure.
+            </p>
+            <div className="flex flex-wrap gap-4 text-sm">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-quantum-cyan" />
+                <span className="text-quantum-cyan font-medium">10x Faster Sync</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-quantum-green" />
+                <span className="text-quantum-green font-medium">Instant Endgame</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-quantum-purple" />
+                <span className="text-quantum-purple font-medium">Zero Data Loss</span>
+              </div>
+            </div>
+          </div>
         </div>
       </motion.div>
 
       {/* Feature Cards */}
       <div className="grid md:grid-cols-4 gap-4">
         {[
+          { icon: Rocket, title: 'WarpSync', desc: '900K blocks in 5 min', highlight: true },
           { icon: Shield, title: 'Post-Quantum', desc: 'Dilithium5 + Kyber1024' },
           { icon: Zap, title: '1.2M+ TPS', desc: 'Sub-50ms finality' },
           { icon: Server, title: 'Validator Ready', desc: 'Full node support' },
-          { icon: Terminal, title: 'CLI + API', desc: 'REST & WebSocket' },
         ].map((feature, i) => (
           <motion.div
             key={feature.title}
-            className="p-4 bg-quantum-indigo/20 backdrop-blur-xl border border-quantum-purple/30 rounded-xl"
+            className={`p-4 backdrop-blur-xl rounded-xl ${
+              feature.highlight
+                ? 'bg-gradient-to-br from-quantum-green/30 to-quantum-cyan/20 border-2 border-quantum-green/50'
+                : 'bg-quantum-indigo/20 border border-quantum-purple/30'
+            }`}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.1 }}
           >
-            <feature.icon className="w-8 h-8 text-quantum-cyan mb-2" />
+            <feature.icon className={`w-8 h-8 mb-2 ${feature.highlight ? 'text-quantum-green' : 'text-quantum-cyan'}`} />
             <h3 className="font-bold text-white">{feature.title}</h3>
             <p className="text-sm text-gray-400">{feature.desc}</p>
+            {feature.highlight && (
+              <span className="inline-block mt-2 px-2 py-0.5 bg-quantum-green/20 text-quantum-green text-xs font-bold rounded">NEW</span>
+            )}
           </motion.div>
         ))}
       </div>
@@ -89,15 +135,15 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v1.3.10-beta"
+              href="/downloads/q-api-server-v2.3.4-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v1.3.10-beta)
+              Download Linux Binary (v2.3.4-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 169 MB | P2P Turbo Sync Fixed + Ring-LWE VRF + Genus-2 VDF
+              Size: 178 MB | WarpSync + Instant Endgame + Ring-LWE VRF + Genus-2 VDF
             </p>
           </div>
 
@@ -105,12 +151,12 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v1.3.10-beta
-chmod +x q-api-server-v1.3.10-beta
-./q-api-server-v1.3.10-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v2.3.4-beta
+chmod +x q-api-server-v2.3.4-beta
+./q-api-server-v2.3.4-beta --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
-              Auto-discovers peers via bootstrap node (185.182.185.227:8080)
+              WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
             </p>
           </div>
         </motion.div>

@@ -14,13 +14,19 @@
 //! - **Economic Rationality**: Miners rewarded with governance influence
 //! - **Logarithmic Scaling**: Prevents whale attacks (diminishing returns)
 //! - **No Security Composition**: Doesn't claim to strengthen cryptographic signatures
+//!
+//! ## v2.4.0-beta: Persistence
+//!
+//! Proposals and votes are now persisted to RocksDB via StorageEngine.
+//! On restart, all governance data is restored automatically.
 
 use anyhow::{anyhow, Result};
+use q_storage::StorageEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub mod types;
 pub mod voting;
@@ -33,11 +39,12 @@ pub use mining_contribution::*;
 pub use reputation::*;
 
 /// Governance coordinator managing proposals and votes
+/// v2.4.0-beta: Now persists to RocksDB for crash resilience
 pub struct GovernanceCoordinator {
-    /// Active proposals
+    /// Active proposals (in-memory cache backed by RocksDB)
     proposals: Arc<RwLock<HashMap<String, Proposal>>>,
 
-    /// Vote registry
+    /// Vote registry (in-memory cache backed by RocksDB)
     votes: Arc<RwLock<HashMap<String, Vec<WeightedVote>>>>,
 
     /// Mining contribution tracker
@@ -48,10 +55,13 @@ pub struct GovernanceCoordinator {
 
     /// Voting power calculator
     power_calculator: VotingPowerCalculator,
+
+    /// v2.4.0-beta: Storage engine for persistence
+    storage: Option<Arc<StorageEngine>>,
 }
 
 impl GovernanceCoordinator {
-    /// Create new governance coordinator
+    /// Create new governance coordinator (in-memory only, for testing)
     pub fn new() -> Self {
         Self {
             proposals: Arc::new(RwLock::new(HashMap::new())),
@@ -59,10 +69,70 @@ impl GovernanceCoordinator {
             contribution_tracker: Arc::new(MiningContributionTracker::new()),
             reputation_system: Arc::new(ReputationSystem::new()),
             power_calculator: VotingPowerCalculator::new(),
+            storage: None,
+        }
+    }
+
+    /// Create governance coordinator with RocksDB persistence
+    /// v2.4.0-beta: Loads existing proposals and votes from storage on startup
+    pub async fn with_storage(storage: Arc<StorageEngine>) -> Self {
+        let mut proposals_map = HashMap::new();
+        let mut votes_map: HashMap<String, Vec<WeightedVote>> = HashMap::new();
+
+        // Load existing proposals from RocksDB
+        match storage.load_all_governance_proposals().await {
+            Ok(stored_proposals) => {
+                for (proposal_id, bytes) in stored_proposals {
+                    match bincode::deserialize::<Proposal>(&bytes) {
+                        Ok(proposal) => {
+                            info!("📜 Restored governance proposal: {}", proposal_id);
+                            proposals_map.insert(proposal_id.clone(), proposal);
+
+                            // Load votes for this proposal
+                            match storage.load_governance_votes_for_proposal(&proposal_id).await {
+                                Ok(vote_bytes_list) => {
+                                    let mut proposal_votes = Vec::new();
+                                    for vote_bytes in vote_bytes_list {
+                                        if let Ok(vote) = bincode::deserialize::<WeightedVote>(&vote_bytes) {
+                                            proposal_votes.push(vote);
+                                        }
+                                    }
+                                    if !proposal_votes.is_empty() {
+                                        info!("📜 Restored {} votes for proposal {}", proposal_votes.len(), proposal_id);
+                                        votes_map.insert(proposal_id, proposal_votes);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ Failed to load votes for proposal {}: {}", proposal_id, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("⚠️ Failed to deserialize proposal {}: {}", proposal_id, e);
+                        }
+                    }
+                }
+                if !proposals_map.is_empty() {
+                    info!("✅ Restored {} governance proposals from RocksDB", proposals_map.len());
+                }
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to load governance proposals: {}", e);
+            }
+        }
+
+        Self {
+            proposals: Arc::new(RwLock::new(proposals_map)),
+            votes: Arc::new(RwLock::new(votes_map)),
+            contribution_tracker: Arc::new(MiningContributionTracker::new()),
+            reputation_system: Arc::new(ReputationSystem::new()),
+            power_calculator: VotingPowerCalculator::new(),
+            storage: Some(storage),
         }
     }
 
     /// Create new governance proposal
+    /// v2.4.0-beta: Now persists to RocksDB for crash resilience
     pub async fn create_proposal(
         &self,
         proposal: Proposal,
@@ -72,7 +142,16 @@ impl GovernanceCoordinator {
         // Validate proposal
         self.validate_proposal(&proposal)?;
 
-        // Store proposal
+        // Persist to RocksDB first (if storage available)
+        if let Some(ref storage) = self.storage {
+            let proposal_bytes = bincode::serialize(&proposal)
+                .map_err(|e| anyhow!("Failed to serialize proposal: {}", e))?;
+            storage.save_governance_proposal(&proposal_id, &proposal_bytes).await
+                .map_err(|e| anyhow!("Failed to persist proposal: {}", e))?;
+            debug!("💾 Persisted governance proposal to RocksDB: {}", proposal_id);
+        }
+
+        // Store proposal in memory
         let mut proposals = self.proposals.write().await;
         proposals.insert(proposal_id.clone(), proposal);
 
@@ -82,6 +161,7 @@ impl GovernanceCoordinator {
     }
 
     /// Submit weighted vote with optional mining contribution
+    /// v2.4.0-beta: Now persists to RocksDB for crash resilience
     pub async fn submit_vote(
         &self,
         vote: WeightedVote,
@@ -102,7 +182,17 @@ impl GovernanceCoordinator {
             vote.mining_contribution.as_ref(),
         );
 
-        // Store vote
+        // Persist to RocksDB first (if storage available)
+        if let Some(ref storage) = self.storage {
+            let vote_bytes = bincode::serialize(&vote)
+                .map_err(|e| anyhow!("Failed to serialize vote: {}", e))?;
+            let voter_hex = hex::encode(&vote.voter_address);
+            storage.save_governance_vote(&vote.proposal_id, &voter_hex, &vote_bytes).await
+                .map_err(|e| anyhow!("Failed to persist vote: {}", e))?;
+            debug!("💾 Persisted governance vote to RocksDB: {} from {}", vote.proposal_id, voter_hex);
+        }
+
+        // Store vote in memory
         let mut votes = self.votes.write().await;
         votes
             .entry(vote.proposal_id.clone())

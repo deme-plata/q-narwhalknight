@@ -15,7 +15,26 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::AppState;
-use q_types::{Transaction, TxStatus};
+use crate::ContractEventRecord;
+use crate::transaction_utils::{TransactionBuilder, submit_transaction};
+use q_types::{Transaction, TxStatus, TokenAnnouncement};
+use q_network::unified_network_manager::NetworkCommand;
+
+/// v2.4.8: Token Social Profile - Decentralized social media links for custom tokens
+/// Persisted to RocksDB and synced across nodes via gossipsub
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TokenSocialProfile {
+    pub twitter: Option<String>,
+    pub discord: Option<String>,
+    pub telegram: Option<String>,
+    pub website: Option<String>,
+    pub github: Option<String>,
+    pub medium: Option<String>,
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    pub updated_at: u64,
+    pub owner_signature: Option<String>,
+}
 use q_vm::contracts::{
     ContractAddress, ContractType, DeployedSmartContract, DeploymentOptions, FormDefinition,
     OrobitSmartContractEcosystem, SmartContractTemplate,
@@ -29,6 +48,23 @@ pub struct ApiResponse<T> {
     pub error: Option<String>,
     pub timestamp: u64,
 }
+
+// ============ v2.4.2: TOKEN FEE CONFIGURATION ============
+// Re-export types from q_storage to avoid duplication
+// Implementations are in q_storage/lib.rs to satisfy Rust orphan rules
+pub use q_storage::{TokenFeeConfig, TokenStakePosition, StakingTier};
+
+/// Global storage for token fee configs (keyed by contract address hex)
+pub type TokenFeeConfigStore = Arc<RwLock<HashMap<String, TokenFeeConfig>>>;
+
+/// Global storage for staking positions (keyed by wallet+contract)
+pub type TokenStakingStore = Arc<RwLock<HashMap<String, TokenStakePosition>>>;
+
+/// Global storage for total reflected amounts per token
+pub type TokenReflectionStore = Arc<RwLock<HashMap<String, u64>>>;
+
+/// Global storage for total burned amounts per token
+pub type TokenBurnStore = Arc<RwLock<HashMap<String, u64>>>;
 
 impl<T> ApiResponse<T> {
     pub fn success(data: T) -> Self {
@@ -71,6 +107,7 @@ pub struct FrontendDeploymentOptions {
 
 /// Contract information for frontend display
 #[derive(Debug, Serialize)]
+/// v3.0.4: total_supply migrated to u128 for 24-decimal precision
 pub struct ContractInfo {
     pub address: String,
     pub contract_type: String,
@@ -82,8 +119,20 @@ pub struct ContractInfo {
     pub has_security_features: bool,
     pub features: HashMap<String, bool>,
     pub deployment_tx: String,
-    pub total_supply: Option<u64>, // Add total supply for tokens
+    #[serde(serialize_with = "serialize_option_u128_as_string")]
+    pub total_supply: Option<u128>, // v3.0.4: Migrated from u64 to u128
     pub decimals: Option<u32>,     // Add decimals for display
+}
+
+/// Helper to serialize Option<u128> as string for JSON (avoids JS 2^53 overflow)
+fn serialize_option_u128_as_string<S>(value: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(v) => serializer.serialize_some(&v.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Deployment status response
@@ -134,9 +183,6 @@ pub struct GasEstimateResponse {
     pub estimated_cost_orb: String,
     pub estimated_cost_usd: Option<String>,
 }
-
-// v1.4.10: Re-export ContractEventRecord from lib for use here
-use q_api_server::ContractEventRecord;
 
 /// v1.4.10: Response for contract events
 #[derive(Debug, Serialize)]
@@ -213,6 +259,18 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         // User-specific endpoints
         .route("/user/:address/contracts", get(get_user_contracts))
         .route("/user/:address/deployments", get(get_user_deployments))
+        // v2.4.2: Token staking endpoints
+        .route("/:contract_address/stake", post(stake_tokens))
+        .route("/:contract_address/unstake", post(unstake_tokens))
+        .route("/:contract_address/claim-rewards", post(claim_staking_rewards))
+        .route("/:contract_address/stake-info/:wallet_address", get(get_stake_info))
+        .route("/:contract_address/pending-rewards/:wallet_address", get(get_pending_rewards))
+        .route("/:contract_address/fee-config", get(get_fee_config))
+        .route("/:contract_address/fee-config", post(update_fee_config))
+        .route("/:contract_address/token-stats", get(get_token_stats))
+        // v2.4.8: Social media profile endpoints
+        .route("/:contract_address/social", get(get_social_profile))
+        .route("/:contract_address/social", post(update_social_profile))
 }
 
 /// Get all available contract templates
@@ -379,7 +437,8 @@ pub async fn deploy_contract(
     {
         Ok((request_id, contract_address)) => {
             // Deduct deployment cost from deployer's native QUG balance
-            const DEPLOYMENT_COST: u64 = 100_000_000; // 1 QUG = 100M smallest units
+            // v3.0.6-beta: Updated for 24 decimals (1 QUG = 10^24 base units)
+            const DEPLOYMENT_COST: u128 = 1_000_000_000_000_000_000_000_000; // 1 QUG
             {
                 let mut wallet_balances = state.wallet_balances.write().await;
                 if let Some(balance) = wallet_balances.get_mut(&deployer) {
@@ -387,9 +446,9 @@ pub async fn deploy_contract(
                         *balance -= DEPLOYMENT_COST;
                         tracing::info!(
                             "💸 Deducted {} QUG deployment cost from {}. New balance: {}",
-                            DEPLOYMENT_COST as f64 / 100_000_000.0,
+                            DEPLOYMENT_COST as f64 / 1e24,
                             hex::encode(deployer),
-                            *balance as f64 / 100_000_000.0
+                            *balance as f64 / 1e24
                         );
 
                         // ============================================================================
@@ -405,7 +464,7 @@ pub async fn deploy_contract(
                         let nonce = state.nonce_tracker.get_and_increment(&deployer);
 
                         // Create transaction with proper cryptographic ID using transaction_utils
-                        let transaction = q_api_server::transaction_utils::TransactionBuilder::new()
+                        let transaction = TransactionBuilder::new()
                             .from(deployer)
                             .to(contract_address.0)
                             .amount(DEPLOYMENT_COST)
@@ -420,7 +479,7 @@ pub async fn deploy_contract(
                         // 1. Add to tx_pool with Pending status (not Confirmed!)
                         // 2. Add to production mempool for block inclusion
                         // 3. Broadcast to P2P network via gossipsub
-                        let submission_result = q_api_server::transaction_utils::submit_transaction(
+                        let submission_result = submit_transaction(
                             transaction.clone(),
                             &state.tx_pool,
                             &state.tx_status,
@@ -466,53 +525,32 @@ pub async fn deploy_contract(
                 // User enters "1000000" (1 million tokens)
                 // We store: 1000000 * 10^8 = 100,000,000,000,000 base units
                 // This matches how liquidity and swaps work (8 decimal standard)
-                let decimal_multiplier = 10u64.pow(decimals);
+                // v2.7.9-beta: Changed from u64 to u128 for larger token supplies (up to 10^38)
+                let decimal_multiplier = 10u128.pow(decimals);
 
-                let initial_supply_result: Option<u64> = if let Some(supply_u64) =
+                let initial_supply_result: Option<u128> = if let Some(supply_u64) =
                     initial_supply_val.as_u64()
                 {
                     // Convert to base units: multiply by 10^decimals
-                    let base_units = (supply_u64 as u128) * (decimal_multiplier as u128);
-                    if base_units <= u64::MAX as u128 {
-                        tracing::info!(
-                            "✅ Token supply: {} display tokens × 10^{} = {} base units",
-                            supply_u64,
-                            decimals,
-                            base_units
-                        );
-                        Some(base_units as u64)
-                    } else {
-                        tracing::error!(
-                            "❌ Initial supply {} × 10^{} = {} exceeds u64::MAX",
-                            supply_u64,
-                            decimals,
-                            base_units
-                        );
-                        None
-                    }
+                    let base_units = (supply_u64 as u128) * decimal_multiplier;
+                    tracing::info!(
+                        "✅ Token supply: {} display tokens × 10^{} = {} base units",
+                        supply_u64,
+                        decimals,
+                        base_units
+                    );
+                    Some(base_units)
                 } else if let Some(supply_str) = initial_supply_val.as_str() {
-                    // Parse string and convert to base units
+                    // v3.2.19-beta: String values are ALREADY in base units from frontend
+                    // Frontend does: displayUnits * 10^decimals before sending
+                    // So we should NOT multiply again here
                     match supply_str.parse::<u128>() {
-                        Ok(supply_u128) => {
-                            let base_units = supply_u128 * (decimal_multiplier as u128);
-                            if base_units <= u64::MAX as u128 {
-                                tracing::info!(
-                                    "✅ Token supply: {} display tokens × 10^{} = {} base units",
-                                    supply_str,
-                                    decimals,
-                                    base_units
-                                );
-                                Some(base_units as u64)
-                            } else {
-                                tracing::error!(
-                                    "❌ Initial supply {} × 10^{} = {} exceeds u64::MAX ({})",
-                                    supply_str,
-                                    decimals,
-                                    base_units,
-                                    u64::MAX
-                                );
-                                None
-                            }
+                        Ok(base_units) => {
+                            tracing::info!(
+                                "✅ Token supply received: {} base units (frontend already converted)",
+                                base_units
+                            );
+                            Some(base_units)
                         }
                         Err(_) => {
                             tracing::warn!(
@@ -558,6 +596,72 @@ pub async fn deploy_contract(
                     _ => {
                         // initial_supply is 0, skip minting
                         tracing::debug!("Initial supply is 0, skipping minting");
+                    }
+                }
+            }
+
+            // ============================================================================
+            // v2.3.7-beta: BROADCAST TOKEN DEPLOYMENT TO P2P NETWORK
+            // Enables cross-node token discovery for true DEX decentralization
+            // ============================================================================
+            if let Some(ref libp2p_cmd_tx) = state.libp2p_command_tx {
+                // Extract token metadata from deployment parameters
+                let symbol = request.parameters.get("symbol")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("TOKEN")
+                    .to_string();
+                let name = request.parameters.get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&symbol)
+                    .to_string();
+                let decimals = request.parameters.get("decimals")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(8) as u8;
+                let total_supply = request.parameters.get("initialSupply")
+                    .or_else(|| request.parameters.get("initial_supply"))
+                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .unwrap_or(0);
+
+                // Create token announcement (without signature for now - signing requires Ed25519 key)
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                let announcement = TokenAnnouncement::new(
+                    contract_address.0,
+                    symbol.clone(),
+                    name.clone(),
+                    decimals,
+                    total_supply * 10u64.pow(decimals as u32), // Convert to base units
+                    deployer,
+                    request.contract_type.clone(),
+                    timestamp,
+                );
+
+                // Serialize and broadcast via P2P
+                match postcard::to_allocvec(&announcement) {
+                    Ok(announcement_bytes) => {
+                        // Get network ID from environment (same pattern as main.rs)
+                        let network_id = std::env::var("Q_NETWORK_ID")
+                            .ok()
+                            .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                            .unwrap_or(q_types::NetworkId::TestnetPhase16);
+                        let topic = network_id.contract_deployments_topic();
+                        if let Err(e) = libp2p_cmd_tx.send(NetworkCommand::PublishTokenAnnouncement {
+                            topic: topic.clone(),
+                            announcement_bytes,
+                        }) {
+                            tracing::warn!("⚠️ [TOKEN P2P] Failed to send broadcast command: {}", e);
+                        } else {
+                            tracing::info!(
+                                "🪙 [TOKEN P2P] Broadcast {} ({}) deployment to topic {}",
+                                symbol, name, topic
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️ [TOKEN P2P] Failed to serialize announcement: {}", e);
                     }
                 }
             }
@@ -628,14 +732,15 @@ pub async fn get_user_contracts(
         .map(|contract| {
             // Extract total_supply and decimals from deployment_params
             // v1.4.9: Check both camelCase (initialSupply) and snake_case (initial_supply)
+            // v3.0.4: Migrated to u128 for 24-decimal precision
             let total_supply = contract
                 .deployment_params
                 .get("initialSupply")
                 .or_else(|| contract.deployment_params.get("initial_supply"))
                 .and_then(|v| {
-                    // Handle both number and string formats
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    // Handle both number and string formats (u128 for large values)
+                    v.as_u64().map(|n| n as u128)
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
                 });
 
             // v1.0.49-beta: FIXED - Default to 8 decimals (like Bitcoin satoshis)
@@ -698,14 +803,15 @@ pub async fn get_contract_details(
         Some(contract) => {
             // Extract total_supply and decimals from deployment_params
             // v1.4.9: Check both camelCase (initialSupply) and snake_case (initial_supply)
+            // v3.0.4: Migrated to u128 for 24-decimal precision
             let total_supply = contract
                 .deployment_params
                 .get("initialSupply")
                 .or_else(|| contract.deployment_params.get("initial_supply"))
                 .and_then(|v| {
-                    // Handle both number and string formats
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    // Handle both number and string formats (u128 for large values)
+                    v.as_u64().map(|n| n as u128)
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
                 });
 
             // v1.0.49-beta: FIXED - Default to 8 decimals (like Bitcoin satoshis)
@@ -828,12 +934,14 @@ fn parse_contract_type(contract_type_str: &str) -> Result<ContractType, String> 
 #[derive(Debug, Serialize)]
 pub struct TokenBalanceResponse {
     /// Balance as string to preserve precision for large numbers (JavaScript loses precision above 2^53)
-    #[serde(serialize_with = "serialize_u64_as_string")]
-    pub balance: u64,
+    /// v2.7.9-beta: Changed to u128 for larger token supplies
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    pub balance: u128,
 }
 
-/// Serialize u64 as string to preserve precision in JavaScript
-fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+/// Serialize u128 as string to preserve precision in JavaScript
+/// v2.7.9-beta: Updated from u64 to u128
+fn serialize_u128_as_string<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -1047,7 +1155,7 @@ pub async fn mint_tokens(
             .get(&(owner, contract_addr))
             .copied()
             .unwrap_or(0);
-        let new_balance = current_balance.saturating_add(amount);
+        let new_balance = current_balance.saturating_add(amount as u128);
         token_balances.insert((owner, contract_addr), new_balance);
 
         tracing::info!(
@@ -1164,14 +1272,14 @@ pub async fn burn_tokens(
             .copied()
             .unwrap_or(0);
 
-        if current_balance < amount {
+        if current_balance < amount as u128 {
             return Ok(Json(ApiResponse::error(format!(
                 "Insufficient balance. Available: {}, Requested: {}",
                 current_balance, amount
             ))));
         }
 
-        let new_balance = current_balance - amount;
+        let new_balance = current_balance - amount as u128;
         token_balances.insert((owner, contract_addr), new_balance);
 
         tracing::info!(
@@ -1312,7 +1420,7 @@ pub async fn airdrop_tokens(
             .copied()
             .unwrap_or(0);
 
-        if owner_balance < total_amount {
+        if owner_balance < total_amount as u128 {
             return Ok(Json(ApiResponse::error(format!(
                 "Insufficient balance for airdrop. Required: {}, Available: {}",
                 total_amount, owner_balance
@@ -1320,7 +1428,7 @@ pub async fn airdrop_tokens(
         }
 
         // Deduct from owner
-        let new_owner_balance = owner_balance - total_amount;
+        let new_owner_balance = owner_balance - total_amount as u128;
         token_balances.insert((owner, contract_addr), new_owner_balance);
 
         // Distribute to recipients and collect new balances for persistence
@@ -1330,7 +1438,7 @@ pub async fn airdrop_tokens(
                 .get(&(*recipient_addr, contract_addr))
                 .copied()
                 .unwrap_or(0);
-            let new_balance = current_balance.saturating_add(amount_per_recipient);
+            let new_balance = current_balance.saturating_add(amount_per_recipient as u128);
             token_balances.insert((*recipient_addr, contract_addr), new_balance);
             recipient_balances.push((*recipient_addr, new_balance));
 
@@ -1585,5 +1693,746 @@ pub async fn update_reflection_rate(
         transaction_hash: tx_hash,
         amount: 0,
         message: format!("Reflection rate updated to {}%", rate),
+    })))
+}
+
+// ============ v2.4.2: TOKEN STAKING ENDPOINTS ============
+
+/// Request to stake tokens
+#[derive(Debug, Deserialize)]
+pub struct StakeRequest {
+    pub wallet_address: String,
+    pub amount: String,
+    pub lock_days: u64,
+}
+
+/// Response for staking operations
+#[derive(Debug, Serialize)]
+pub struct StakeResponse {
+    pub success: bool,
+    pub transaction_hash: String,
+    pub stake_position: Option<StakePositionInfo>,
+    pub message: String,
+}
+
+/// Stake position info for responses
+#[derive(Debug, Serialize)]
+pub struct StakePositionInfo {
+    pub amount: f64,
+    pub tier: String,
+    pub apy: f64,
+    pub start_time: u64,
+    pub unlock_time: u64,
+    pub pending_rewards: f64,
+    pub total_rewards_claimed: f64,
+    pub is_locked: bool,
+    pub time_remaining_seconds: u64,
+}
+
+/// Token statistics response
+#[derive(Debug, Serialize)]
+pub struct TokenStatsResponse {
+    pub contract_address: String,
+    pub symbol: String,
+    pub total_supply: f64,
+    pub circulating_supply: f64,
+    pub total_staked: f64,
+    pub total_burned: f64,
+    pub total_reflected: f64,
+    pub holder_count: u64,
+    pub staker_count: u64,
+    pub fee_config: TokenFeeConfig,
+}
+
+/// Request to update fee config (owner only)
+#[derive(Debug, Deserialize)]
+pub struct UpdateFeeConfigRequest {
+    pub wallet_address: String,
+    pub enabled: Option<bool>,
+    pub reflection_fee_bps: Option<u64>,
+    pub burn_fee_bps: Option<u64>,
+    pub liquidity_fee_bps: Option<u64>,
+    pub dev_fee_bps: Option<u64>,
+}
+
+/// Stake tokens in a custom token contract
+pub async fn stake_tokens(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<StakeRequest>,
+) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
+    tracing::info!("🔒 [STAKING] Stake request for contract {}: {} tokens for {} days",
+        contract_address, request.amount, request.lock_days);
+
+    // Parse contract address
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    // Parse wallet address
+    let wallet_addr = match parse_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    // Parse amount
+    let amount_f64: f64 = match request.amount.parse() {
+        Ok(a) => a,
+        Err(_) => return Ok(Json(ApiResponse::error("Invalid amount".to_string()))),
+    };
+    let amount = (amount_f64 * 100_000_000.0) as u64;
+
+    if amount == 0 {
+        return Ok(Json(ApiResponse::error("Amount must be greater than 0".to_string())));
+    }
+
+    // Check token balance
+    let token_balances = state.token_balances.read().await;
+    let balance_key = (wallet_addr, contract_addr);
+    let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+    drop(token_balances);
+
+    if current_balance < amount as u128 {
+        return Ok(Json(ApiResponse::error(format!(
+            "Insufficient balance. Have: {}, Need: {}",
+            current_balance as f64 / 1e24,
+            amount_f64
+        ))));
+    }
+
+    // Calculate tier
+    let tier = StakingTier::from_days(request.lock_days);
+    let current_time = current_timestamp();
+    let unlock_time = current_time + tier.lock_period_seconds();
+
+    // Create stake position
+    let stake_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
+
+    let mut staking_store = state.token_staking_positions.write().await;
+
+    // Check if already staking
+    if let Some(existing) = staking_store.get(&stake_key) {
+        if current_time < existing.unlock_time {
+            return Ok(Json(ApiResponse::error(
+                "Already have an active stake. Unstake first or wait for unlock.".to_string()
+            )));
+        }
+    }
+
+    // Lock tokens (deduct from balance)
+    let mut token_balances = state.token_balances.write().await;
+    let new_balance = current_balance - amount as u128;
+    token_balances.insert(balance_key, new_balance);
+    drop(token_balances);
+
+    // Persist balance change
+    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &contract_addr, new_balance).await {
+        tracing::warn!("Failed to persist stake balance change: {}", e);
+    }
+
+    // Create stake position
+    let stake_position = TokenStakePosition {
+        wallet_address: request.wallet_address.clone(),
+        contract_address: contract_address.clone(),
+        amount,
+        tier,
+        start_time: current_time,
+        unlock_time,
+        last_reward_claim: current_time,
+        total_rewards_claimed: 0,
+    };
+
+    staking_store.insert(stake_key.clone(), stake_position.clone());
+    drop(staking_store);
+
+    // Persist stake position
+    if let Err(e) = state.storage_engine.save_stake_position(&stake_key, &stake_position).await {
+        tracing::warn!("Failed to persist stake position: {}", e);
+    }
+
+    let tx_hash = format!("stake-{}-{}", hex::encode(contract_addr), current_time);
+
+    tracing::info!("✅ [STAKING] {} staked {} tokens in {} tier (unlocks at {})",
+        request.wallet_address, amount_f64, tier.name(), unlock_time);
+
+    Ok(Json(ApiResponse::success(StakeResponse {
+        success: true,
+        transaction_hash: tx_hash,
+        stake_position: Some(StakePositionInfo {
+            amount: amount_f64,
+            tier: tier.name().to_string(),
+            apy: tier.apy_bps() as f64 / 100.0,
+            start_time: current_time,
+            unlock_time,
+            pending_rewards: 0.0,
+            total_rewards_claimed: 0.0,
+            is_locked: true,
+            time_remaining_seconds: unlock_time - current_time,
+        }),
+        message: format!("Successfully staked {} tokens in {} tier", amount_f64, tier.name()),
+    })))
+}
+
+/// Unstake tokens from a custom token contract
+pub async fn unstake_tokens(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<StakeRequest>,
+) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
+    tracing::info!("🔓 [STAKING] Unstake request for contract {}", contract_address);
+
+    // Parse addresses
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let wallet_addr = match parse_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let stake_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
+    let current_time = current_timestamp();
+
+    let mut staking_store = state.token_staking_positions.write().await;
+
+    let stake = match staking_store.get(&stake_key) {
+        Some(s) => s.clone(),
+        None => return Ok(Json(ApiResponse::error("No active stake found".to_string()))),
+    };
+
+    // Check if still locked
+    if current_time < stake.unlock_time {
+        let remaining = stake.unlock_time - current_time;
+        return Ok(Json(ApiResponse::error(format!(
+            "Stake still locked. {} seconds remaining",
+            remaining
+        ))));
+    }
+
+    // Calculate pending rewards
+    let pending_rewards = calculate_pending_rewards_internal(&stake);
+
+    // Return staked amount + rewards to balance
+    let mut token_balances = state.token_balances.write().await;
+    let balance_key = (wallet_addr, contract_addr);
+    let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+    let new_balance = current_balance + stake.amount as u128 + pending_rewards as u128;
+    token_balances.insert(balance_key, new_balance);
+    drop(token_balances);
+
+    // Persist balance change
+    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &contract_addr, new_balance).await {
+        tracing::warn!("Failed to persist unstake balance change: {}", e);
+    }
+
+    // Remove stake position
+    staking_store.remove(&stake_key);
+    drop(staking_store);
+
+    // Remove from persistent storage
+    if let Err(e) = state.storage_engine.delete_stake_position(&stake_key).await {
+        tracing::warn!("Failed to delete stake position from storage: {}", e);
+    }
+
+    let tx_hash = format!("unstake-{}-{}", hex::encode(contract_addr), current_time);
+    let total_returned = (stake.amount + pending_rewards) as f64 / 1e24;
+
+    tracing::info!("✅ [STAKING] {} unstaked {} tokens (+ {} rewards)",
+        request.wallet_address,
+        stake.amount as f64 / 1e24,
+        pending_rewards as f64 / 1e24);
+
+    Ok(Json(ApiResponse::success(StakeResponse {
+        success: true,
+        transaction_hash: tx_hash,
+        stake_position: None,
+        message: format!("Successfully unstaked {} tokens (including {} in rewards)",
+            total_returned, pending_rewards as f64 / 1e24),
+    })))
+}
+
+/// Claim staking rewards without unstaking
+pub async fn claim_staking_rewards(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<StakeRequest>,
+) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
+    tracing::info!("💰 [STAKING] Claim rewards request for contract {}", contract_address);
+
+    // Parse addresses
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let wallet_addr = match parse_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let stake_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
+    let current_time = current_timestamp();
+
+    let mut staking_store = state.token_staking_positions.write().await;
+
+    let stake = match staking_store.get_mut(&stake_key) {
+        Some(s) => s,
+        None => return Ok(Json(ApiResponse::error("No active stake found".to_string()))),
+    };
+
+    // Calculate pending rewards
+    let pending_rewards = calculate_pending_rewards_internal(stake);
+
+    if pending_rewards == 0 {
+        return Ok(Json(ApiResponse::error("No rewards to claim".to_string())));
+    }
+
+    // Update stake position
+    stake.last_reward_claim = current_time;
+    stake.total_rewards_claimed += pending_rewards;
+    let updated_stake = stake.clone();
+    drop(staking_store);
+
+    // Add rewards to balance
+    let mut token_balances = state.token_balances.write().await;
+    let balance_key = (wallet_addr, contract_addr);
+    let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+    let new_balance = current_balance + pending_rewards as u128;
+    token_balances.insert(balance_key, new_balance);
+    drop(token_balances);
+
+    // Persist changes
+    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &contract_addr, new_balance).await {
+        tracing::warn!("Failed to persist reward claim balance: {}", e);
+    }
+
+    let stake_key_for_save = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
+    if let Err(e) = state.storage_engine.save_stake_position(&stake_key_for_save, &updated_stake).await {
+        tracing::warn!("Failed to persist stake position update: {}", e);
+    }
+
+    let tx_hash = format!("claim-{}-{}", hex::encode(contract_addr), current_time);
+    let rewards_f64 = pending_rewards as f64 / 1e24;
+
+    tracing::info!("✅ [STAKING] {} claimed {} in rewards", request.wallet_address, rewards_f64);
+
+    Ok(Json(ApiResponse::success(StakeResponse {
+        success: true,
+        transaction_hash: tx_hash,
+        stake_position: Some(StakePositionInfo {
+            amount: updated_stake.amount as f64 / 1e24,
+            tier: updated_stake.tier.name().to_string(),
+            apy: updated_stake.tier.apy_bps() as f64 / 100.0,
+            start_time: updated_stake.start_time,
+            unlock_time: updated_stake.unlock_time,
+            pending_rewards: 0.0,
+            total_rewards_claimed: updated_stake.total_rewards_claimed as f64 / 1e24,
+            is_locked: current_time < updated_stake.unlock_time,
+            time_remaining_seconds: updated_stake.unlock_time.saturating_sub(current_time),
+        }),
+        message: format!("Successfully claimed {} in rewards", rewards_f64),
+    })))
+}
+
+/// Get stake info for a wallet
+pub async fn get_stake_info(
+    State(state): State<Arc<AppState>>,
+    Path((contract_address, wallet_address)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<StakePositionInfo>>, StatusCode> {
+    let stake_key = format!("{}:{}", wallet_address.to_lowercase(), contract_address.to_lowercase());
+    let current_time = current_timestamp();
+
+    let staking_store = state.token_staking_positions.read().await;
+
+    match staking_store.get(&stake_key) {
+        Some(stake) => {
+            let pending_rewards = calculate_pending_rewards_internal(stake);
+            Ok(Json(ApiResponse::success(StakePositionInfo {
+                amount: stake.amount as f64 / 1e24,
+                tier: stake.tier.name().to_string(),
+                apy: stake.tier.apy_bps() as f64 / 100.0,
+                start_time: stake.start_time,
+                unlock_time: stake.unlock_time,
+                pending_rewards: pending_rewards as f64 / 1e24,
+                total_rewards_claimed: stake.total_rewards_claimed as f64 / 1e24,
+                is_locked: current_time < stake.unlock_time,
+                time_remaining_seconds: stake.unlock_time.saturating_sub(current_time),
+            })))
+        }
+        None => Ok(Json(ApiResponse::error("No active stake found".to_string()))),
+    }
+}
+
+/// Get pending rewards for a wallet
+pub async fn get_pending_rewards(
+    State(state): State<Arc<AppState>>,
+    Path((contract_address, wallet_address)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<f64>>, StatusCode> {
+    let stake_key = format!("{}:{}", wallet_address.to_lowercase(), contract_address.to_lowercase());
+
+    let staking_store = state.token_staking_positions.read().await;
+
+    match staking_store.get(&stake_key) {
+        Some(stake) => {
+            let pending_rewards = calculate_pending_rewards_internal(stake);
+            Ok(Json(ApiResponse::success(pending_rewards as f64 / 1e24)))
+        }
+        None => Ok(Json(ApiResponse::success(0.0))),
+    }
+}
+
+/// Get fee configuration for a token
+pub async fn get_fee_config(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+) -> Result<Json<ApiResponse<TokenFeeConfig>>, StatusCode> {
+    let fee_configs = state.token_fee_configs.read().await;
+
+    match fee_configs.get(&contract_address.to_lowercase()) {
+        Some(config) => Ok(Json(ApiResponse::success(config.clone()))),
+        None => Ok(Json(ApiResponse::success(TokenFeeConfig::default()))),
+    }
+}
+
+/// Update fee configuration (owner only)
+pub async fn update_fee_config(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<UpdateFeeConfigRequest>,
+) -> Result<Json<ApiResponse<TokenFeeConfig>>, StatusCode> {
+    tracing::info!("⚙️ [FEES] Update fee config request for {}", contract_address);
+
+    // Parse contract address
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    // Parse wallet address
+    let wallet_addr = match parse_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    // Check if caller is contract owner
+    let ecosystem = &state.orobit_ecosystem;
+    let contract = match ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr))
+        .await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+
+    if contract.deployer != wallet_addr {
+        return Ok(Json(ApiResponse::error("Only contract owner can update fee config".to_string())));
+    }
+
+    // Validate total fee doesn't exceed 10%
+    let total_bps = request.reflection_fee_bps.unwrap_or(0)
+        + request.burn_fee_bps.unwrap_or(0)
+        + request.liquidity_fee_bps.unwrap_or(0)
+        + request.dev_fee_bps.unwrap_or(0);
+
+    if total_bps > 1000 {
+        return Ok(Json(ApiResponse::error("Total fees cannot exceed 10% (1000 basis points)".to_string())));
+    }
+
+    let mut fee_configs = state.token_fee_configs.write().await;
+
+    let config = fee_configs
+        .entry(contract_address.to_lowercase())
+        .or_insert_with(TokenFeeConfig::default);
+
+    // Update only provided fields
+    if let Some(enabled) = request.enabled {
+        config.enabled = enabled;
+    }
+    if let Some(reflection) = request.reflection_fee_bps {
+        config.reflection_fee_bps = reflection;
+    }
+    if let Some(burn) = request.burn_fee_bps {
+        config.burn_fee_bps = burn;
+    }
+    if let Some(liquidity) = request.liquidity_fee_bps {
+        config.liquidity_fee_bps = liquidity;
+    }
+    if let Some(dev) = request.dev_fee_bps {
+        config.dev_fee_bps = dev;
+    }
+
+    let updated_config = config.clone();
+    drop(fee_configs);
+
+    // Persist fee config
+    if let Err(e) = state.storage_engine.save_fee_config(&contract_address.to_lowercase(), &updated_config).await {
+        tracing::warn!("Failed to persist fee config: {}", e);
+    }
+
+    tracing::info!("✅ [FEES] Fee config updated for {}: {:?}", contract_address, updated_config);
+
+    Ok(Json(ApiResponse::success(updated_config)))
+}
+
+/// Get token statistics
+pub async fn get_token_stats(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+) -> Result<Json<ApiResponse<TokenStatsResponse>>, StatusCode> {
+    // Parse contract address
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    // Get contract info
+    let ecosystem = &state.orobit_ecosystem;
+    let contract = match ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr))
+        .await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+
+    let symbol = contract.metadata.symbol.clone().unwrap_or_else(|| "TOKEN".to_string());
+
+    // Get fee config
+    let fee_configs = state.token_fee_configs.read().await;
+    let fee_config = fee_configs.get(&contract_address.to_lowercase())
+        .cloned()
+        .unwrap_or_default();
+    drop(fee_configs);
+
+    // Count holders and calculate totals
+    // v2.7.9-beta: Changed total_supply to u128 for larger token supplies
+    let token_balances = state.token_balances.read().await;
+    let mut total_supply: u128 = 0;
+    let mut holder_count: u64 = 0;
+
+    for ((_, token_addr), balance) in token_balances.iter() {
+        if *token_addr == contract_addr && *balance > 0 {
+            total_supply += *balance;
+            holder_count += 1;
+        }
+    }
+    drop(token_balances);
+
+    // Count stakers and total staked
+    let staking_store = state.token_staking_positions.read().await;
+    let mut total_staked: u64 = 0;
+    let mut staker_count: u64 = 0;
+
+    for (key, stake) in staking_store.iter() {
+        if key.ends_with(&format!(":{}", contract_address.to_lowercase())) {
+            total_staked += stake.amount;
+            staker_count += 1;
+        }
+    }
+    drop(staking_store);
+
+    // Get burn/reflection totals
+    let burn_store = state.token_burn_totals.read().await;
+    let total_burned = burn_store.get(&contract_address.to_lowercase()).copied().unwrap_or(0);
+    drop(burn_store);
+
+    let reflection_store = state.token_reflection_totals.read().await;
+    let total_reflected = reflection_store.get(&contract_address.to_lowercase()).copied().unwrap_or(0);
+    drop(reflection_store);
+
+    Ok(Json(ApiResponse::success(TokenStatsResponse {
+        contract_address,
+        symbol,
+        total_supply: (total_supply + total_staked as u128) as f64 / 1e24,
+        circulating_supply: total_supply as f64 / 1e24,
+        total_staked: total_staked as f64 / 1e24,
+        total_burned: total_burned as f64 / 1e24,
+        total_reflected: total_reflected as f64 / 1e24,
+        holder_count,
+        staker_count,
+        fee_config,
+    })))
+}
+
+/// Calculate pending rewards for a stake position
+fn calculate_pending_rewards_internal(stake: &TokenStakePosition) -> u64 {
+    let current_time = current_timestamp();
+    let time_staked = current_time.saturating_sub(stake.last_reward_claim);
+    let seconds_per_year: u64 = 365 * 24 * 3600;
+
+    // Calculate rewards based on APY and time
+    let annual_reward = (stake.amount * stake.tier.apy_bps()) / 10000;
+    let pending = (annual_reward * time_staked) / seconds_per_year;
+
+    pending
+}
+
+// ============ v2.4.8: SOCIAL MEDIA PROFILE ENDPOINTS ============
+
+/// Request body for updating social profile
+#[derive(Debug, Deserialize)]
+pub struct UpdateSocialProfileRequest {
+    pub twitter: Option<String>,
+    pub discord: Option<String>,
+    pub telegram: Option<String>,
+    pub website: Option<String>,
+    pub github: Option<String>,
+    pub medium: Option<String>,
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    /// Wallet address of the owner (for verification)
+    pub owner_address: String,
+    /// Signature proving ownership
+    pub signature: Option<String>,
+}
+
+/// Response for social profile
+#[derive(Debug, Serialize)]
+pub struct SocialProfileResponse {
+    pub contract_address: String,
+    pub twitter: Option<String>,
+    pub discord: Option<String>,
+    pub telegram: Option<String>,
+    pub website: Option<String>,
+    pub github: Option<String>,
+    pub medium: Option<String>,
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    pub updated_at: u64,
+}
+
+/// Get social media profile for a token contract
+pub async fn get_social_profile(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+) -> Result<Json<ApiResponse<SocialProfileResponse>>, StatusCode> {
+    let key = contract_address.to_lowercase();
+
+    // Check in-memory cache first
+    let profiles = state.token_social_profiles.read().await;
+    if let Some(profile) = profiles.get(&key) {
+        return Ok(Json(ApiResponse::success(SocialProfileResponse {
+            contract_address: contract_address.clone(),
+            twitter: profile.twitter.clone(),
+            discord: profile.discord.clone(),
+            telegram: profile.telegram.clone(),
+            website: profile.website.clone(),
+            github: profile.github.clone(),
+            medium: profile.medium.clone(),
+            description: profile.description.clone(),
+            logo_url: profile.logo_url.clone(),
+            updated_at: profile.updated_at,
+        })));
+    }
+    drop(profiles);
+
+    // Try loading from RocksDB (no in-memory cache to avoid type conflicts)
+    match state.storage_engine.load_social_profile(&key).await {
+        Ok(Some(data)) => {
+            if let Ok(profile) = serde_json::from_slice::<TokenSocialProfile>(&data) {
+                return Ok(Json(ApiResponse::success(SocialProfileResponse {
+                    contract_address,
+                    twitter: profile.twitter,
+                    discord: profile.discord,
+                    telegram: profile.telegram,
+                    website: profile.website,
+                    github: profile.github,
+                    medium: profile.medium,
+                    description: profile.description,
+                    logo_url: profile.logo_url,
+                    updated_at: profile.updated_at,
+                })));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to load social profile from storage: {}", e);
+        }
+    }
+
+    // Return empty profile if not found
+    Ok(Json(ApiResponse::success(SocialProfileResponse {
+        contract_address,
+        twitter: None,
+        discord: None,
+        telegram: None,
+        website: None,
+        github: None,
+        medium: None,
+        description: None,
+        logo_url: None,
+        updated_at: 0,
+    })))
+}
+
+/// Update social media profile for a token contract
+pub async fn update_social_profile(
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<UpdateSocialProfileRequest>,
+) -> Result<Json<ApiResponse<SocialProfileResponse>>, StatusCode> {
+    let key = contract_address.to_lowercase();
+
+    // TODO: Verify ownership via signature
+    // For now, we trust the caller (frontend has already validated session)
+
+    let profile = TokenSocialProfile {
+        twitter: request.twitter.clone(),
+        discord: request.discord.clone(),
+        telegram: request.telegram.clone(),
+        website: request.website.clone(),
+        github: request.github.clone(),
+        medium: request.medium.clone(),
+        description: request.description.clone(),
+        logo_url: request.logo_url.clone(),
+        updated_at: current_timestamp(),
+        owner_signature: request.signature.clone(),
+    };
+
+    // Save to RocksDB for persistence (no in-memory cache to avoid type conflicts)
+    if let Ok(data) = serde_json::to_vec(&profile) {
+        if let Err(e) = state.storage_engine.save_social_profile(&key, &data).await {
+            tracing::error!("Failed to save social profile to storage: {}", e);
+            return Ok(Json(ApiResponse::error(format!("Storage error: {}", e))));
+        }
+    }
+
+    // Broadcast via gossipsub to sync across nodes
+    if let Some(tx) = &state.libp2p_command_tx {
+        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase16".to_string());
+        let topic = format!("/qnk/{}/token-social", network_id);
+
+        let message = serde_json::json!({
+            "type": "token_social_update",
+            "contract_address": key.clone(),
+            "profile": profile,
+        });
+
+        if let Ok(profile_bytes) = serde_json::to_vec(&message) {
+            let _ = tx.send(q_network::NetworkCommand::PublishTokenSocial {
+                topic,
+                contract_address: key.clone(),
+                profile_bytes,
+            });
+            tracing::info!("📡 Broadcast social profile update for {} via P2P", key);
+        }
+    }
+
+    tracing::info!("📱 Updated social profile for token {}", key);
+
+    Ok(Json(ApiResponse::success(SocialProfileResponse {
+        contract_address,
+        twitter: request.twitter,
+        discord: request.discord,
+        telegram: request.telegram,
+        website: request.website,
+        github: request.github,
+        medium: request.medium,
+        description: request.description,
+        logo_url: request.logo_url,
+        updated_at: profile.updated_at,
     })))
 }

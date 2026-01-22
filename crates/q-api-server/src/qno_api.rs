@@ -106,7 +106,7 @@ pub struct LeaderboardEntry {
 
 const QUG_DECIMALS: u32 = 8; // Must match q_types::QUG_DECIMALS
 
-fn parse_amount(amount_str: &str) -> Result<u64, String> {
+fn parse_amount(amount_str: &str) -> Result<u128, String> {
     let amount: f64 = amount_str
         .parse()
         .map_err(|_| "Invalid amount format".to_string())?;
@@ -115,11 +115,11 @@ fn parse_amount(amount_str: &str) -> Result<u64, String> {
         return Err("Amount must be positive".to_string());
     }
 
-    let base_units = (amount * 10f64.powi(QUG_DECIMALS as i32)) as u64;
+    let base_units = (amount * 10f64.powi(QUG_DECIMALS as i32)) as u128;
     Ok(base_units)
 }
 
-fn format_amount(base_units: u64) -> String {
+fn format_amount(base_units: u128) -> String {
     let amount = base_units as f64 / 10f64.powi(QUG_DECIMALS as i32);
     format!("{:.8}", amount)
 }
@@ -212,8 +212,8 @@ pub async fn get_staking_positions(
         // Update status for any positions that have unlocked
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         for position in &mut positions {
             if position.status == "active" && now >= position.unlocks_at {
@@ -286,22 +286,11 @@ pub async fn stake_prediction(
         ))));
     }
 
-    // Check user has sufficient balance
-    let balance = {
-        let wallet_balances = state.wallet_balances.read().await;
-        wallet_balances.get(&auth.address).copied().unwrap_or(0)
-    };
-
-    if balance < amount {
-        warn!("❌ [QNO] Insufficient balance for stake: {} < {}", balance, amount);
-        return Ok(Json(ApiResponse::error("Insufficient QUG balance".to_string())));
-    }
-
-    // Calculate timing
+    // Calculate timing (do this before the lock to minimize lock hold time)
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let unlock_timestamp = now + (request.lock_days as u64 * 24 * 60 * 60);
     let lock_multiplier = get_lock_multiplier(request.lock_days);
 
@@ -311,7 +300,29 @@ pub async fn stake_prediction(
     // Generate stake ID
     let stake_id = Uuid::new_v4().to_string();
 
-    // Create position
+    // ATOMIC: Check balance AND deduct in a single lock scope to prevent TOCTOU race
+    // This prevents double-spending from concurrent staking requests
+    let balance_deducted = {
+        let mut wallet_balances = state.wallet_balances.write().await;
+        let balance = wallet_balances.get(&auth.address).copied().unwrap_or(0);
+
+        if balance < amount {
+            warn!("❌ [QNO] Insufficient balance for stake: {} < {}", balance, amount);
+            false
+        } else {
+            // Deduct balance atomically within the same lock
+            if let Some(bal) = wallet_balances.get_mut(&auth.address) {
+                *bal = bal.saturating_sub(amount);
+            }
+            true
+        }
+    };
+
+    if !balance_deducted {
+        return Ok(Json(ApiResponse::error("Insufficient QUG balance".to_string())));
+    }
+
+    // Create position (after successful balance deduction)
     let position = StakingPosition {
         id: stake_id.clone(),
         wallet_address: address_hex.clone(),
@@ -328,14 +339,6 @@ pub async fn stake_prediction(
         status: "active".to_string(),
         prediction_accuracy: 0.0,
     };
-
-    // Deduct balance from wallet
-    {
-        let mut wallet_balances = state.wallet_balances.write().await;
-        if let Some(bal) = wallet_balances.get_mut(&auth.address) {
-            *bal = bal.saturating_sub(amount);
-        }
-    }
 
     // Persist balance deduction
     {
@@ -385,32 +388,45 @@ pub async fn stake_prediction(
     }
 
     // Broadcast via P2P gossip (if available)
+    // v2.4.9-beta: Sign QNO operations with node signing key
     if let Some(ref cmd_tx) = state.libp2p_command_tx {
+        use ed25519_dalek::Signer;
+
+        // Build the stake operation payload
+        let stake_payload = serde_json::to_vec(&QnoOperation::Stake {
+            position: StakingPosition {
+                id: stake_id.clone(),
+                wallet_address: address_hex.clone(),
+                domain: request.domain.clone(),
+                domain_name: domain.name.clone(),
+                amount,
+                confidence: request.confidence,
+                lock_days: request.lock_days,
+                lock_multiplier,
+                staked_at: now,
+                unlocks_at: unlock_timestamp,
+                reward: 0,
+                accrued_reward: 0,
+                status: "active".to_string(),
+                prediction_accuracy: 0.0,
+            },
+            signature: vec![], // Outer message has cryptographic signature
+            timestamp: now,
+        }).unwrap_or_default();
+
+        // v2.4.9-beta: Sign stake payload with node signing key
+        let signature = state.node_signing_key.sign(&stake_payload);
+        let public_key = state.node_signing_key.verifying_key().to_bytes().to_vec();
+
+        debug!("🔐 Signed QNO stake {} with Ed25519 ({} bytes)",
+               stake_id, signature.to_bytes().len());
+
         let qno_message = q_network::distributed_qno::QnoGossipMessage::new_stake(
             hex::encode(state.node_id),
             state.libp2p_peer_info.read().await.0.clone(),
-            &serde_json::to_vec(&QnoOperation::Stake {
-                position: StakingPosition {
-                    id: stake_id.clone(),
-                    wallet_address: address_hex.clone(),
-                    domain: request.domain.clone(),
-                    domain_name: domain.name.clone(),
-                    amount,
-                    confidence: request.confidence,
-                    lock_days: request.lock_days,
-                    lock_multiplier,
-                    staked_at: now,
-                    unlocks_at: unlock_timestamp,
-                    reward: 0,
-                    accrued_reward: 0,
-                    status: "active".to_string(),
-                    prediction_accuracy: 0.0,
-                },
-                signature: vec![], // TODO: Add wallet signature
-                timestamp: now,
-            }).unwrap_or_default(),
-            None, // signature
-            None, // public_key
+            &stake_payload,
+            Some(signature.to_bytes().to_vec()),
+            Some(public_key),
         );
 
         let _ = cmd_tx.send(q_network::NetworkCommand::PublishQnoOperation {
@@ -455,8 +471,8 @@ pub async fn unstake_prediction(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // Get QNO storage
     let qno = state.qno_storage.read().await;
@@ -490,7 +506,9 @@ pub async fn unstake_prediction(
     };
 
     let penalty_percentage = calculate_unstake_penalty(position.lock_days, days_remaining);
-    let penalty_amount = (position.amount as f64 * penalty_percentage) as u64;
+    // Use basis points (1/10000) to avoid f64 precision loss with large amounts
+    let penalty_bps = (penalty_percentage * 10_000.0) as u128;
+    let penalty_amount = position.amount.saturating_mul(penalty_bps) / 10_000;
     let principal_returned = position.amount.saturating_sub(penalty_amount);
 
     // Remove position from storage
@@ -582,8 +600,8 @@ pub async fn claim_reward(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // Get QNO storage
     let qno = state.qno_storage.read().await;
@@ -638,7 +656,9 @@ pub async fn claim_reward(
         * prediction_accuracy
         * position.lock_multiplier;
 
-    let final_reward = (position.amount as f64 * reward_rate) as u64;
+    // Use basis points (1/10000000 for high precision) to avoid f64 precision loss
+    let reward_bps = (reward_rate * 10_000_000.0) as u128;
+    let final_reward = position.amount.saturating_mul(reward_bps) / 10_000_000;
     let total_return = position.amount + final_reward;
 
     // Update position to claimed
@@ -754,11 +774,11 @@ pub async fn get_leaderboard(
         let positions = storage.get_all_positions().await;
 
         // Aggregate by address
-        let mut aggregated: HashMap<String, (u64, u64, f64, u32)> = HashMap::new();
+        let mut aggregated: HashMap<String, (u128, u128, f64, u32)> = HashMap::new();
 
         for (addr, user_positions) in positions.iter() {
-            let total_staked: u64 = user_positions.iter().map(|p| p.amount).sum();
-            let total_rewards: u64 = user_positions.iter().map(|p| p.reward + p.accrued_reward).sum();
+            let total_staked: u128 = user_positions.iter().map(|p| p.amount).sum();
+            let total_rewards: u128 = user_positions.iter().map(|p| p.reward + p.accrued_reward).sum();
             let accuracy_sum: f64 = user_positions.iter()
                 .filter(|p| p.prediction_accuracy > 0.0)
                 .map(|p| p.prediction_accuracy)
@@ -962,8 +982,8 @@ pub async fn submit_oracle_outcome(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // Create outcome
     let outcome_id = uuid::Uuid::new_v4().to_string();
@@ -1110,7 +1130,7 @@ pub async fn get_slashing_history(
 
     let records = storage.get_slashing_history(&address_hex).await;
 
-    let total_slashed: u64 = records.iter().map(|r| r.slash_amount).sum();
+    let total_slashed: u128 = records.iter().map(|r| r.slash_amount).sum();
     let display_records: Vec<SlashingRecordDisplay> = records.iter().map(|r| {
         SlashingRecordDisplay {
             id: r.id.clone(),

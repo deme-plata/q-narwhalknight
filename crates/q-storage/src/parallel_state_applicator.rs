@@ -42,7 +42,7 @@ pub enum ApplyError {
     /// Storage operation failed
     StorageError(String),
     /// Balance underflow during transaction
-    InsufficientBalance { address: String, required: u64, available: u64 },
+    InsufficientBalance { address: String, required: u128, available: u128 },
     /// Transaction nonce mismatch
     NonceMismatch { expected: u64, got: u64 },
 }
@@ -101,11 +101,12 @@ impl ApplyStats {
 /// This is a thread-safe snapshot that gets committed after validation
 pub struct BalanceState {
     /// Current balances (address -> balance)
-    balances: RwLock<HashMap<Address, u64>>,
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    balances: RwLock<HashMap<Address, u128>>,
     /// Pending writes from parallel execution
-    pending_writes: RwLock<HashMap<Address, u64>>,
+    pending_writes: RwLock<HashMap<Address, u128>>,
     /// Read log for Block-STM validation (tx_idx -> (address, value_read))
-    read_log: RwLock<HashMap<TxIndex, Vec<(Address, u64)>>>,
+    read_log: RwLock<HashMap<TxIndex, Vec<(Address, u128)>>>,
 }
 
 impl Default for BalanceState {
@@ -124,7 +125,8 @@ impl BalanceState {
     }
 
     /// Create with initial balances
-    pub fn with_balances(initial: HashMap<Address, u64>) -> Self {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn with_balances(initial: HashMap<Address, u128>) -> Self {
         Self {
             balances: RwLock::new(initial),
             pending_writes: RwLock::new(HashMap::new()),
@@ -133,14 +135,16 @@ impl BalanceState {
     }
 
     /// Set a balance directly (for initialization)
-    pub fn set_balance(&self, address: &Address, balance: u64) {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn set_balance(&self, address: &Address, balance: u128) {
         if let Ok(mut balances) = self.balances.write() {
             balances.insert(*address, balance);
         }
     }
 
     /// Read balance (records read for validation)
-    pub fn read_balance(&self, tx_idx: TxIndex, address: &Address) -> u64 {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn read_balance(&self, tx_idx: TxIndex, address: &Address) -> u128 {
         let balance = self.balances.read()
             .ok()
             .and_then(|b| b.get(address).copied())
@@ -158,7 +162,8 @@ impl BalanceState {
     }
 
     /// Write balance to pending (not committed yet)
-    pub fn write_balance(&self, address: &Address, new_balance: u64) {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn write_balance(&self, address: &Address, new_balance: u128) {
         if let Ok(mut pending) = self.pending_writes.write() {
             pending.insert(*address, new_balance);
         }
@@ -212,7 +217,8 @@ impl BalanceState {
     }
 
     /// Get final balances for storage commit
-    pub fn get_balances(&self) -> HashMap<Address, u64> {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    pub fn get_balances(&self) -> HashMap<Address, u128> {
         self.balances.read().ok().map(|b| b.clone()).unwrap_or_default()
     }
 }

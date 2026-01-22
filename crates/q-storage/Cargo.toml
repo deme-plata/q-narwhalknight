@@ -119,6 +119,22 @@ path = "src/bin/diagnose_block.rs"
 name = "restore-from-backup"
 path = "src/bin/restore_from_backup.rs"
 
+[[bin]]
+name = "reset-collateral-vault"
+path = "src/bin/reset_collateral_vault.rs"
+
+[[bin]]
+name = "add-missing-column-families"
+path = "src/bin/add_missing_column_families.rs"
+
+[[bin]]
+name = "check-wallet-balance"
+path = "src/bin/check_wallet_balance.rs"
+
+[[bin]]
+name = "recover-wallet-balance"
+path = "src/bin/recover_wallet_balance.rs"
+
 [build-dependencies]
 cc = "1.0"
 

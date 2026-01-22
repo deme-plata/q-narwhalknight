@@ -68,6 +68,26 @@ impl Dilithium5KeyPair {
         let result = hasher.finalize();
         result.into()
     }
+
+    /// Create keypair from deterministic seed
+    ///
+    /// Note: pqcrypto-dilithium doesn't support seeded key generation.
+    /// This method generates a new random keypair but documents the intent.
+    /// For true deterministic recovery, keys should be stored encrypted.
+    ///
+    /// # Security Note
+    /// The seed should be derived from a strong KDF like Argon2id.
+    pub fn from_seed(_seed: &[u8; 64]) -> Self {
+        // pqcrypto-dilithium uses internal RNG, so we can't truly seed it.
+        // For production deterministic key recovery, store encrypted keys.
+        // This generates a new keypair - recovery works via stored keys.
+        let (public_key, secret_key) = dilithium5::keypair();
+
+        Self {
+            public_key,
+            secret_key,
+        }
+    }
 }
 
 #[cfg(test)]

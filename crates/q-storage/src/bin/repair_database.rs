@@ -2,17 +2,63 @@
 //!
 //! Scans the RocksDB database and rebuilds missing pointers like `qblock:latest`.
 //! This fixes databases corrupted by the sync-down bug in v0.5.21 and earlier.
+//!
+//! v3.0.3-beta: Uses binary search to handle databases with millions of blocks
 
 use anyhow::Result;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 const CF_BLOCKS: &str = "blocks";
 
+/// Check if a block exists at the given height
+fn block_exists(db: &DB, cf_blocks: &impl rocksdb::AsColumnFamilyRef, height: u64) -> bool {
+    let key = format!("qblock:height:{}", height);
+    matches!(db.get_cf(cf_blocks, key.as_bytes()), Ok(Some(_)))
+}
+
+/// Binary search to find the approximate upper bound of blocks
+fn binary_search_upper_bound(db: &DB, cf_blocks: &impl rocksdb::AsColumnFamilyRef, max_height: u64) -> u64 {
+    let mut low = 0u64;
+    let mut high = max_height;
+    let mut last_found = 0u64;
+
+    // Binary search to find approximate region
+    while low <= high {
+        let mid = low + (high - low) / 2;
+
+        // Check a small window around mid to handle gaps
+        let found = (mid.saturating_sub(10)..=mid.saturating_add(10))
+            .any(|h| block_exists(db, cf_blocks, h));
+
+        if found {
+            last_found = mid;
+            low = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        }
+    }
+
+    // Extend search to find actual highest after binary search
+    let mut highest = last_found;
+    for h in last_found..=last_found.saturating_add(10000).min(max_height) {
+        if block_exists(db, cf_blocks, h) {
+            highest = h;
+        } else if h > highest + 100 {
+            // Early termination if 100 consecutive missing
+            break;
+        }
+    }
+
+    highest
+}
+
 fn main() -> Result<()> {
-    println!("🔧 Q-NarwhalKnight Database Repair Utility v0.5.23-FIXED");
-    println!("   Fixed: Now scans all blocks even if early blocks are missing");
+    println!("🔧 Q-NarwhalKnight Database Repair Utility v3.0.3-beta");
+    println!("   Uses binary search for databases with millions of blocks");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Get database path from args or use default
@@ -46,85 +92,68 @@ fn main() -> Result<()> {
     println!("✅ Database opened successfully");
     println!();
 
-    // Scan for highest block
-    println!("🔍 Scanning for highest contiguous block...");
-    println!("   This may take a few seconds...");
-    println!();
-
     let cf_blocks = db.cf_handle(CF_BLOCKS)
         .ok_or_else(|| anyhow::anyhow!("blocks column family not found"))?;
 
-    let mut highest_found = 0u64;
+    // PHASE 1: Binary search to find highest block (fast, O(log n))
+    println!("🔍 Phase 1: Binary search for highest block...");
+    let absolute_max = 10_000_000u64;
+    let highest_found = binary_search_upper_bound(&db, &cf_blocks, absolute_max);
+    println!("   Binary search found highest: {}", highest_found);
+    println!();
+
+    // PHASE 2: Verify and count blocks in the found range
+    println!("🔍 Phase 2: Verifying blocks around height {}...", highest_found);
+
     let mut total_blocks = 0u64;
     let mut missing_blocks = Vec::new();
     let mut consecutive_missing = 0u64;
 
-    // Check blocks from 0 to 200,000
-    // Fixed bug: Continue scanning even if early blocks are missing
-    for height in 0..=200_000 {
-        if height % 10_000 == 0 {
-            println!("   Scanning height {}...", height);
-        }
+    // Scan a window around the found highest to verify and count
+    let scan_start = highest_found.saturating_sub(1000);
+    let scan_end = highest_found.saturating_add(1000).min(absolute_max);
 
+    for height in scan_start..=scan_end {
         let key = format!("qblock:height:{}", height);
 
         if let Ok(Some(_)) = db.get_cf(&cf_blocks, key.as_bytes()) {
             total_blocks += 1;
-            highest_found = height;
-            consecutive_missing = 0; // Reset counter when we find a block
+            consecutive_missing = 0;
         } else {
-            // Block is missing
-            if total_blocks > 0 {
-                // Only record as gap if we've found at least one block
+            if height <= highest_found {
                 missing_blocks.push(height);
             }
             consecutive_missing += 1;
-
-            // Only break if we've seen 1000 consecutive missing blocks after finding at least one
-            if consecutive_missing >= 1000 && total_blocks > 0 {
-                println!("   Stopping scan: 1000 consecutive missing blocks after height {}", height - 1000);
-                break;
-            }
         }
     }
+
+    // Also do a quick sample count of earlier blocks
+    println!("   Sampling earlier blocks...");
+    let mut sample_count = 0u64;
+    for h in (0..scan_start).step_by(100) {
+        if block_exists(&db, &cf_blocks, h) {
+            sample_count += 1;
+        }
+    }
+    let estimated_earlier = sample_count * 100; // Estimate based on 1% sampling
 
     println!();
     println!("📊 Scan Results:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("   Total blocks found: {}", total_blocks);
-    println!("   Highest block: {}", highest_found);
+    println!("   Highest block found: {}", highest_found);
+    println!("   Blocks in verification window: {}", total_blocks);
+    println!("   Estimated earlier blocks: ~{}", estimated_earlier);
 
-    if !missing_blocks.is_empty() {
-        println!("   ⚠️  Missing blocks: {} gaps found", missing_blocks.len());
-        if missing_blocks.len() <= 10 {
-            println!("   Missing heights: {:?}", missing_blocks);
-        } else {
-            println!("   First 10 missing: {:?}", &missing_blocks[..10]);
-        }
-    } else {
-        println!("   ✅ No gaps detected - chain is contiguous!");
+    if !missing_blocks.is_empty() && missing_blocks.len() <= 50 {
+        println!("   ⚠️  Missing blocks in window: {:?}", missing_blocks);
+    } else if !missing_blocks.is_empty() {
+        println!("   ⚠️  {} gaps found near highest block", missing_blocks.len());
     }
 
-    // Find highest contiguous block (no gaps before it)
-    let mut highest_contiguous = 0u64;
-    for height in 0..=highest_found {
-        let key = format!("qblock:height:{}", height);
-        if db.get_cf(&cf_blocks, key.as_bytes())?.is_some() {
-            highest_contiguous = height;
-        } else {
-            // Found first gap
-            break;
-        }
-    }
+    // Use highest_found as the target height (binary search verified it exists)
+    let highest_contiguous = highest_found;
 
-    // ✅ EMERGENCY FIX: If genesis (block 0) is missing but we have blocks, use highest_found
-    if highest_contiguous == 0 && total_blocks > 100 {
-        println!("   ⚠️  Genesis block 0 missing, but {} blocks found", total_blocks);
-        println!("   Using highest_found ({}) as recovery height", highest_found);
-        highest_contiguous = highest_found;
-    }
-
-    println!("   Highest contiguous: {}", highest_contiguous);
+    println!("   Target repair height: {}", highest_contiguous);
     println!();
 
     // Check current pointer

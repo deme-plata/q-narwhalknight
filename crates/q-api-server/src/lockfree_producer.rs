@@ -23,7 +23,7 @@ use futures::FutureExt;
 ///
 /// **Performance**: ~10-20% faster than RwLock version due to zero lock contention.
 use q_types::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
@@ -1047,6 +1047,19 @@ pub struct LockFreeProducerPool {
 
     /// Number of producers in the pool
     num_producers: usize,
+
+    /// 🚀 v2.3.13-beta: RACE CONDITION FIX - Prevent concurrent produce_blocks() calls
+    /// Root cause of 50% block loss: Two production loops (block_production_v2 and mining handler)
+    /// could call produce_blocks() simultaneously, creating duplicate blocks at the same height.
+    /// The BlockWriter's deduplication would drop one, causing gaps.
+    /// Fix: Use atomic flag to serialize production calls.
+    production_in_progress: AtomicBool,
+
+    /// 🚀 v2.3.15-beta: POOL-LEVEL DUPLICATE PREVENTION
+    /// The per-producer last_produced_height doesn't work because multiple producers
+    /// in the pool each have their own height tracking. This global counter ensures
+    /// no producer in the pool produces at a height that any other producer already produced.
+    pool_last_produced_height: AtomicU64,
 }
 
 impl LockFreeProducerPool {
@@ -1084,6 +1097,8 @@ impl LockFreeProducerPool {
             producers,
             round_robin_index: AtomicUsize::new(0),
             num_producers,
+            production_in_progress: AtomicBool::new(false),
+            pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
         }
     }
 
@@ -1131,6 +1146,8 @@ impl LockFreeProducerPool {
             producers,
             round_robin_index: AtomicUsize::new(0),
             num_producers,
+            production_in_progress: AtomicBool::new(false),
+            pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
         })
     }
 
@@ -1185,6 +1202,27 @@ impl LockFreeProducerPool {
     /// ✅ v1.1.30-beta: FIX - Only ONE producer should produce per round to prevent double rewards!
     ///    The bug was: both producers could produce at the same height, causing 2x mining rewards.
     pub async fn produce_blocks(&self) -> Vec<(usize, QBlock)> {
+        // 🚀 v2.3.13-beta: RACE CONDITION FIX - Prevent concurrent production calls
+        // Root cause of 50% block loss: Two production loops (block_production_v2 and mining handler)
+        // could call produce_blocks() simultaneously, creating duplicate blocks at the same height.
+        // The BlockWriter's deduplication would drop one, causing gaps (382 gaps starting at 925612!).
+        // Fix: Use atomic compare-and-swap to serialize production calls.
+        if self.production_in_progress.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst
+        ).is_err() {
+            debug!("⏸️ [RACE PREVENTION] produce_blocks() already in progress, skipping concurrent call");
+            return Vec::new();
+        }
+
+        // Use a guard pattern to ensure flag is always cleared
+        struct ProductionGuard<'a>(&'a AtomicBool);
+        impl<'a> Drop for ProductionGuard<'a> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = ProductionGuard(&self.production_in_progress);
+
         let mut blocks = Vec::new();
 
         // Query each producer via channel (NO LOCKS!)
@@ -1194,9 +1232,27 @@ impl LockFreeProducerPool {
                 Ok(true) => {
                     // Produce block (async via channel)
                     if let Some(block) = producer.produce_block().await {
+                        let block_height = block.header.height;
+
+                        // 🚀 v2.3.15-beta: POOL-LEVEL DUPLICATE PREVENTION
+                        // Check if this height was already produced by the pool in a previous call.
+                        // This catches the case where two production loops call produce_blocks()
+                        // 1 second apart (not truly concurrent, so the AtomicBool doesn't help).
+                        let pool_height = self.pool_last_produced_height.load(Ordering::SeqCst);
+                        if block_height <= pool_height {
+                            warn!(
+                                "⏸️ [POOL DUPLICATE] Block {} already produced by pool (pool_height={}), skipping",
+                                block_height, pool_height
+                            );
+                            continue; // Skip this block, try next producer
+                        }
+
+                        // Update pool height BEFORE adding block
+                        self.pool_last_produced_height.store(block_height, Ordering::SeqCst);
+
                         info!(
-                            "🎉 Lock-free producer #{} created block at height {}",
-                            producer_id, block.header.height
+                            "🎉 Lock-free producer #{} created block at height {} (pool_height updated)",
+                            producer_id, block_height
                         );
                         blocks.push((producer_id, block));
                         // ✅ v1.1.30-beta CRITICAL FIX: Only ONE block per round!
@@ -1221,6 +1277,7 @@ impl LockFreeProducerPool {
         }
 
         blocks
+        // _guard drops here, clearing production_in_progress flag
     }
 
     /// Check if any producer should produce a block

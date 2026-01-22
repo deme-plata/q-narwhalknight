@@ -24,6 +24,10 @@ pub mod kyber_wallet;
 pub mod sphincs_wallet;
 pub mod hybrid_wallet;
 
+// ✨ v2.3.5-beta: Automatic key management with ZK-STARK proofs
+// Users only need a password - everything else is automatic
+pub mod auto_key_manager;
+
 // ✨ v1.0.58-beta: SQIsign compact signatures (IACR 2025/847)
 // Smallest post-quantum signatures: 204 bytes vs 49KB SPHINCS+
 #[cfg(feature = "advanced-crypto")]
@@ -32,7 +36,12 @@ pub mod sqisign_wallet;
 // Re-export key types for convenience
 pub use dilithium_wallet::{Dilithium5KeyPair, Dilithium5StoredWallet};
 pub use kyber_wallet::{Kyber1024KeyPair, Kyber1024Ciphertext, KyberHybridEncryption};
+// v2.4.9-beta: True hybrid encryption (X25519 + Kyber1024) - defense-in-depth
+pub use kyber_wallet::{TrueHybridKeypair, TrueHybridEncryption};
 pub use hybrid_wallet::{HybridWallet, HybridStoredWallet, HybridSignature, CryptoPhase};
+
+// ✨ v2.3.5-beta: Automatic key management - "just works" wallet creation
+pub use auto_key_manager::{AutoKeyManager, KeyMetadata, StarkOwnershipProof, SignedTransaction};
 
 // ✨ v1.0.58-beta: SQIsign compact signatures (99.6% smaller than SPHINCS+)
 #[cfg(feature = "advanced-crypto")]

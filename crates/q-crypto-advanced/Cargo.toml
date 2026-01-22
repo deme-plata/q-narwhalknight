@@ -38,6 +38,14 @@ rand = "0.8"
 rand_core = "0.6"
 getrandom = "0.2"
 zeroize.workspace = true
+
+# Real Bulletproofs range proofs (v2.5.1-beta: Production ZK Privacy)
+bulletproofs.workspace = true
+merlin = "3.0"  # Fiat-Shamir transcript for bulletproofs
+# Use curve25519-dalek-ng for bulletproofs compatibility (bulletproofs crate uses -ng internally)
+curve25519-dalek-ng = "4.1"
+# curve25519-dalek 4.1 for other components that need the newer API
+curve25519-dalek = { version = "4.1", features = ["serde", "rand_core", "alloc"] }
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true

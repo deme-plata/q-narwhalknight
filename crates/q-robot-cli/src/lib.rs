@@ -39,6 +39,7 @@ pub mod quantum;
 pub mod ui;
 pub mod config;
 pub mod consensus;
+pub mod finance;
 
 // Re-export main types for easy access
 pub use robot::{RobotManager, RobotId, RobotType, RobotStatus, SensorData, ScanResults, WaterQuality, MarineLifeEntry};
@@ -47,6 +48,13 @@ pub use quantum::{QuantumStateMonitor, QuantumState, QuantumObservable, BellStat
 pub use ui::TerminalUI;
 pub use config::{RobotConfig, RobotConfigEntry, NetworkConfig, QuantumConfig, SecurityConfig};
 pub use consensus::{ConsensusIntegration, RobotConsensusData, RobotDataType, ConsensusEvent};
+pub use finance::{
+    FinancialIntelligenceEngine, KLawParameters, FlowWeights,
+    QNKFlowDensity, ThreeLayerAdoption, KristensenRatio, AdoptionHealth,
+    FinancialRobotRole, FinancialSnapshot, HolderDistribution,
+    AdoptionCheckpoint, FinancialIntelligenceReport,
+    get_financial_role_for_robot_type,
+};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -213,10 +221,12 @@ pub mod prelude {
         QuantumStateMonitor, QuantumState, QuantumObservable,
         RobotConfig, RobotConfigEntry,
         ConsensusIntegration, RobotConsensusData,
+        FinancialIntelligenceEngine, KLawParameters, KristensenRatio,
+        FinancialRobotRole, FinancialSnapshot,
         Result, RobotResult, SwarmResult, QuantumResult,
         RobotError, SwarmError, QuantumError,
     };
-    
+
     pub use anyhow::{Context, Result as AnyhowResult};
     pub use tokio;
     pub use tracing::{debug, info, warn, error};

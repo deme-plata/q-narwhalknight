@@ -1,6 +1,12 @@
-/// Q-NarwhalKnight API Server - Version v1.0.17-beta
-/// Features: Enhanced HTTP server diagnostics (multi-AI consultation)
-pub const VERSION: &str = "v1.0.17-beta";
+/// Q-NarwhalKnight API Server - Version v2.4.0-beta
+/// v2.4.0-beta: Tensor Parallelism (Golden Standard) - Ring All-Reduce, Weight Sharding
+/// v2.3.20-beta: Testnet signature bypass for distributed AI inference
+/// v2.3.19-beta: Enhanced distributed AI debugging for troubleshooting P2P inference
+/// v2.3.18-beta: Safe AI Intent Architecture - AI parses, Rust executes
+/// v2.3.7-beta: TurboSync get_local_height() fix - use contiguous height, not latest stored
+/// v2.3.6-beta: Sync cooldown fix - use contiguous height for gap detection post-sync
+/// v2.3.5-beta: Sync activation fix + hashrate flickering fix
+pub const VERSION: &str = "v2.4.0-beta";
 
 // DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
 // DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
@@ -184,6 +190,20 @@ pub async fn read_lock_with_timeout<'a, T>(
     }
 }
 
+/// v1.4.10: Contract event record for persistent storage
+/// NOTE: Defined early in lib.rs so contracts_api module can import it
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContractEventRecord {
+    pub id: String,
+    pub event_type: String,  // "mint", "burn", "airdrop", "transfer", "pause", "unpause"
+    pub amount: String,      // Display units (formatted string)
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub recipients: Option<u32>,  // For airdrop events
+    pub timestamp: u64,           // Unix timestamp
+    pub tx_hash: String,
+}
+
 pub mod config;
 pub mod console_viz; // Beautiful animated console visualization
                      // v0.9.1-beta: DEX modules commented out (q_dex/q_oracle crates not yet implemented)
@@ -197,11 +217,19 @@ pub mod aegis_auth_middleware; // ✅ ENABLED - AEGIS-QL post-quantum authentica
 pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
 pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod ai_intent; // ✅ v2.3.18-beta - Safe AI intent schema (AI parses, Rust executes)
+pub mod ai_intent_parser; // ✅ v2.3.18-beta - Mistral 7B intent parsing with validation
+pub mod ai_intent_executor; // ✅ v2.3.18-beta - Deterministic Rust intent execution
+pub mod ai_intent_manager; // ✅ v2.3.18-beta - Unified intent pipeline with confirmation flow
+pub mod ai_function_tools; // ✅ v2.5.0-beta - Ministral-3B native function calling for DEX
+pub mod dex_market_analyzer; // ✅ v2.5.0-beta - Agentic market intelligence with Ministral-3B
 pub mod verification_api; // ✅ NEW - Proof-of-inference verification monitoring (SSE)
 pub mod database_replication_bridge; // Bridge between IPFS replication and gossipsub
 pub mod dex_handlers; // ✅ ENABLED - DEX HTTP API handlers
 pub mod dex_initialization; // ✅ ENABLED - DEX component initialization
 pub mod governance_api; // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
+pub mod dca_api; // ✅ v2.4.8-beta - Dollar Cost Averaging for automated recurring token purchases
+pub mod perpetual_api; // ✅ v2.5.0-beta - Perpetual futures with 10x leverage (long/short)
 pub mod handlers;
 pub mod startup_progress; // ✅ v1.4.15-beta - Startup progress tracker for frontend UI
 pub mod adaptive_confirmations; // ✅ v1.4.4-beta - ML-adaptive confirmation with retail-first instant finality
@@ -231,6 +259,7 @@ pub mod consensus_service; // ✅ v1.3.11-beta: TRUE DECENTRALIZED CONSENSUS wit
 pub mod oracle_integration; // ✅ v1.4.3-beta: Oracle feeds for QNO prediction resolution
 pub mod zcash_api;
 pub mod zcash_rpc; // ✅ v1.0.15-beta - Zcash RPC client for Zebra node integration // ✅ v1.0.15-beta - Zcash wallet API endpoints (address, balance, send)
+pub mod privacy_service; // ✅ v2.5.0 - Privacy Layer with zk-STARK + AEGIS-QL
                                                                                     // pub mod sync_activation;  // ❌ DUPLICATE - Already declared on line 73
                                                                                     // pub mod supply_persistence;  // 🔒 DEACTIVATED - Will be implemented in v0.0.10
                                                                                     // io_uring is Linux kernel's async I/O interface (requires Linux kernel ≥5.1)
@@ -240,12 +269,22 @@ pub mod io_uring_adapter; // Safe io_uring wrapper to avoid runtime conflicts
 pub mod lockfree_producer;
 pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
 pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
+pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
+pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
 pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
 pub mod stake_weighted_finality; // ✅ v1.4.11-beta: Stake-weighted finality with PoW+PoS hybrid security
+pub mod pool_api; // ✅ v2.2.1-beta: Stratum mining pool HTTP API
+pub mod temporal_api; // ✅ v2.3.5-beta: TemporalShield-STARK secret sharing with NO TRUSTED SETUP
+pub mod trustee_manager; // ✅ v2.4.1-beta: HSM-backed trustee key management for TemporalShield
+pub mod temporal_memo; // ✅ v2.4.1-beta: TemporalShield protection for private TX memos
+pub mod validator_backup_api; // ✅ v2.7.0-beta: TemporalShield validator key backup (5-of-9 threshold)
+pub mod chat_protector; // ✅ v2.7.0-beta: TemporalShield protection for AI chat content (3-of-5 threshold)
+pub mod bootstrap_config; // ✅ v2.9.0-beta: Multi-bootstrap with automatic failover (decentralization)
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
 pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent};
+pub use contracts_api::TokenSocialProfile;
 
 /// Faucet request tracking for IP-based rate limiting
 #[derive(Debug, Clone)]
@@ -295,23 +334,40 @@ pub struct PendingMixingRequest {
 }
 
 /// Liquidity pool structure
+/// v3.2.16-beta: Added token decimals for cross-decimal-base swap calculations
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiquidityPool {
     pub pool_id: String,
     pub token0: String, // Native QUG or token contract address
     pub token1: String, // Token contract address
-    pub reserve0: u64,
-    pub reserve1: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub reserve0: u128,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub reserve1: u128,
     pub provider: [u8; 32], // Wallet address that provided liquidity
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Total LP token supply (calculated using Uniswap V2 formula: sqrt(reserve0 * reserve1))
     /// For existing pools: proportional minting
     /// v0.6.0-beta: DEX Decentralization
     #[serde(default)]
-    pub lp_token_supply: u64,
+    #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
+    pub lp_token_supply: u128,
+    /// v3.2.16-beta: Decimal places for token0 (QUG/QUGUSD = 24, custom tokens = 8)
+    /// Used for normalizing reserves during swap calculations across different decimal bases
+    #[serde(default = "default_token_decimals")]
+    pub token0_decimals: u8,
+    /// v3.2.16-beta: Decimal places for token1 (QUG/QUGUSD = 24, custom tokens = 8)
+    #[serde(default = "default_token_decimals")]
+    pub token1_decimals: u8,
+}
+
+/// Default token decimals for backwards compatibility with existing pools
+fn default_token_decimals() -> u8 {
+    24 // Default to 24 for QUG/QUGUSD (existing pools assumed to be QUG pairs)
 }
 
 /// Mining submission for async queue processing
+/// v3.3.3-beta: Added miner_id and worker_name for miner identification
 #[derive(Debug, Clone)]
 pub struct MiningSubmission {
     pub nonce: u64,
@@ -320,6 +376,10 @@ pub struct MiningSubmission {
     pub miner_address: [u8; 32],
     pub miner_address_str: String,
     pub hash_rate: f64, // Hash rate in KH/s
+    /// v3.3.3-beta: Unique miner instance ID (auto-generated if not provided)
+    pub miner_id: Option<String>,
+    /// v3.3.3-beta: Human-readable miner name (e.g., "Server Alpha", "Mining Rig 1")
+    pub worker_name: Option<String>,
 }
 
 impl Default for FaucetState {
@@ -538,6 +598,48 @@ pub struct MinerStats {
     pub last_hashrate: f64, // KH/s
     pub last_update: std::time::Instant,
     pub total_solutions: u64,
+    /// v3.3.4-beta: Worker identifier to distinguish multiple miners to same wallet
+    /// Format: "direct" for local submissions, "p2p:NODE_ID" for P2P relayed, or custom worker_name
+    pub worker_id: String,
+}
+
+/// v3.2.12-beta: Serde helper for Option<u128> to string serialization
+/// JSON cannot handle integers larger than 2^53, and mining rewards are ~5*10^25 base units
+/// This serializes Option<u128> as Option<String> for safe JSON transport
+mod u128_string_option {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => serializer.serialize_some(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => {
+                // Try parsing as u128 string first
+                if let Ok(v) = s.parse::<u128>() {
+                    return Ok(Some(v));
+                }
+                // Fallback: try parsing as f64 for old JSON number format (lossy but backwards compatible)
+                if let Ok(v) = s.parse::<f64>() {
+                    return Ok(Some(v as u128));
+                }
+                // Last resort: try the raw string
+                s.parse::<u128>().map(Some).map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 /// v1.0.88-beta: P2P Miner Stats Update
@@ -561,15 +663,32 @@ pub struct P2PMinerStatsUpdate {
     pub timestamp: u64,
     /// Node ID that originated this update (for deduplication)
     pub origin_node_id: String,
-    /// v1.3.8-beta: Pending reward from latest mining submission (QUG, 8 decimals)
+    /// v1.3.8-beta: Pending reward from latest mining submission (QUG base units)
     /// This is for UI display ONLY - actual balance updates via DAG-Knight consensus
     /// when the block with coinbase transaction is committed.
-    #[serde(default)]
-    pub pending_reward: Option<u64>,
+    /// v3.2.12-beta: Use string serialization for u128 (JSON can't handle >2^53 integers)
+    #[serde(default, with = "u128_string_option")]
+    pub pending_reward: Option<u128>,
     /// v1.3.8-beta: Cumulative pending rewards this session (not yet in blocks)
     /// Resets when rewards are confirmed in committed blocks
-    #[serde(default)]
-    pub session_pending_total: Option<u64>,
+    /// v3.2.12-beta: Use string serialization for u128 (JSON can't handle >2^53 integers)
+    #[serde(default, with = "u128_string_option")]
+    pub session_pending_total: Option<u128>,
+}
+
+/// v2.2.1: Batched miner stats update to prevent gossipsub queue saturation
+/// Instead of sending one message per miner per submission, aggregate all updates
+/// into a single batched message per broadcast interval (reduces P2P traffic 10-100x)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2PMinerStatsBatch {
+    /// All miner updates in this batch
+    pub updates: Vec<P2PMinerStatsUpdate>,
+    /// Batch timestamp (Unix seconds)
+    pub batch_timestamp: u64,
+    /// Origin node ID
+    pub origin_node_id: String,
+    /// Batch sequence number (for ordering/dedup)
+    pub batch_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -593,15 +712,25 @@ impl Default for MiningStatistics {
 
 impl MiningStatistics {
     /// Update miner statistics with new submission
+    /// v3.3.4-beta: Added worker_id to distinguish multiple miners to same wallet
     pub fn update_miner(&mut self, miner_address: String, hash_rate: f64) {
+        self.update_miner_with_worker(miner_address, hash_rate, "direct".to_string());
+    }
+
+    /// v3.3.4-beta: Update miner with specific worker identifier
+    /// worker_id: "direct" for local, "p2p:NODE_ID" for P2P relayed
+    pub fn update_miner_with_worker(&mut self, miner_address: String, hash_rate: f64, worker_id: String) {
+        // Use composite key: address:worker_id to track miners separately
+        let key = format!("{}:{}", miner_address, worker_id);
         let stats = self
             .active_miners
-            .entry(miner_address.clone())
+            .entry(key)
             .or_insert(MinerStats {
                 address: miner_address,
                 last_hashrate: 0.0,
                 last_update: std::time::Instant::now(),
                 total_solutions: 0,
+                worker_id: worker_id.clone(),
             });
 
         stats.last_hashrate = hash_rate;
@@ -639,14 +768,19 @@ impl MiningStatistics {
     /// v1.0.88-beta: Update miner stats from P2P network
     /// Called when receiving miner stats from remote nodes (users mining to localhost)
     pub fn update_from_p2p(&mut self, update: &P2PMinerStatsUpdate) {
+        // v3.3.4-beta: Use composite key with P2P node ID as worker identifier
+        let worker_id = format!("p2p:{}", &update.origin_node_id[..12.min(update.origin_node_id.len())]);
+        let key = format!("{}:{}", update.miner_address, worker_id);
+
         let stats = self
             .active_miners
-            .entry(update.miner_address.clone())
+            .entry(key)
             .or_insert(MinerStats {
                 address: update.miner_address.clone(),
                 last_hashrate: 0.0,
                 last_update: std::time::Instant::now(),
                 total_solutions: 0,
+                worker_id: worker_id.clone(),
             });
 
         // Update with P2P data - use max hashrate to avoid stale data overwriting
@@ -660,6 +794,15 @@ impl MiningStatistics {
         if update.total_solutions > stats.total_solutions {
             stats.total_solutions = update.total_solutions;
         }
+    }
+
+    /// v3.3.4-beta: Get all miners for a given wallet address (across all workers)
+    pub fn get_miners_for_address(&self, address: &str) -> Vec<&MinerStats> {
+        self.active_miners
+            .iter()
+            .filter(|(key, _)| key.starts_with(address))
+            .map(|(_, stats)| stats)
+            .collect()
     }
 }
 
@@ -686,19 +829,6 @@ pub struct SolutionDedupEntry {
     pub submitted_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// v1.4.10: Contract event record for persistent storage
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ContractEventRecord {
-    pub id: String,
-    pub event_type: String,  // "mint", "burn", "airdrop", "transfer", "pause", "unpause"
-    pub amount: String,      // Display units (formatted string)
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub recipients: Option<u32>,  // For airdrop events
-    pub timestamp: u64,           // Unix timestamp
-    pub tx_hash: String,
-}
-
 /// Application state shared across handlers
 pub struct AppState {
     pub config: Config,
@@ -713,7 +843,8 @@ pub struct AppState {
     // Password hashes: wallet_address -> bcrypt_hash (for secure login)
     pub wallet_password_hashes: Arc<RwLock<HashMap<Address, String>>>,
     // Token balances: (wallet_address, token_contract_address) -> token_amount
-    pub token_balances: Arc<RwLock<HashMap<([u8; 32], [u8; 32]), u64>>>,
+    // v2.7.9-beta: Changed from u64 to u128 to support larger token supplies (up to 10^38)
+    pub token_balances: Arc<RwLock<HashMap<([u8; 32], [u8; 32]), u128>>>,
     // Liquidity pools: pool_id -> (token0, token1, reserve0, reserve1, provider)
     pub liquidity_pools: Arc<RwLock<HashMap<String, LiquidityPool>>>,
     // Nitro boosts: token_id -> total_boost_points (aggregated from all wallets)
@@ -737,7 +868,7 @@ pub struct AppState {
 
     // 🔒 MAX SUPPLY ENFORCEMENT - Post-Quantum Consensus Protected
     // Total supply tracking with Dilithium5 signature verification
-    pub total_minted_supply: Arc<RwLock<u64>>, // Total QNK minted across all wallets
+    pub total_minted_supply: Arc<RwLock<u128>>, // Total QNK minted across all wallets
     pub supply_consensus_state: Arc<RwLock<SupplyConsensusState>>, // libp2p consensus state
 
     // ⛏️ MINING STATISTICS - Real-time network hash rate tracking
@@ -827,6 +958,10 @@ pub struct AppState {
     pub lattice_guard: Option<Arc<tokio::sync::Mutex<q_lattice_guard::LatticeGuard>>>,
     pub lattice_guard_srs: Option<Arc<q_lattice_guard::LatticeGuardSRS>>,
 
+    // ✅ v2.4.1-beta: TemporalShield-STARK HSM-backed trustee management
+    // Manages threshold secret sharing trustees with simulated HSM key storage
+    pub temporal_trustee_manager: Option<Arc<tokio::sync::RwLock<trustee_manager::TrusteeManager>>>,
+
     // Performance & Scaling Optimizations
     pub simd_crypto_engine: Option<Arc<q_crypto_simd::SimdCryptoEngine>>,
     #[cfg(target_os = "linux")]
@@ -892,8 +1027,28 @@ pub struct AppState {
     pub dex_manager: Option<Arc<q_dex::QuantumDexManager>>,
     pub price_bridge: Option<Arc<()>>, // Placeholder for oracle integration
 
+    // v2.3.34-beta: Swap/Transaction History - In-memory cache + RocksDB persistence
+    // Maps token_id -> Vec of swap transactions for that token
+    pub swap_history: Arc<RwLock<HashMap<String, Vec<handlers::SwapHistoryRecord>>>>,
+
+    // v2.4.0-beta: Consensus-Verified Swap Indexer - DAGKnight-verified transaction history
+    // Indexes swap transactions from finalized blocks for trustless cross-node agreement
+    pub swap_indexer: Arc<swap_indexer::SwapIndexer>,
+
+    // v2.3.8-beta: Volume Tracker - Rolling 24h volume per token (token_id -> (timestamp, volume))
+    // Each entry is a tuple of (unix_timestamp_millis, volume_in_usd)
+    pub volume_tracker: Arc<RwLock<HashMap<String, Vec<(i64, f64)>>>>,
+
+    // v2.3.8-beta: Price Snapshot Cache - Historical prices for change calculation
+    // Maps token_id -> Vec of (timestamp, price) sorted by timestamp descending
+    pub price_snapshots: Arc<RwLock<HashMap<String, Vec<(i64, f64)>>>>,
+
     // Quillon Bank - Full Quantum Banking System with CDP
     pub quillon_bank: Arc<RwLock<QuillonBankSystem>>, // ✅ ENABLED - Real banking system
+
+    // v2.4.0-beta: Governance Coordinator - PERSISTENT across restarts
+    // Stores proposals and votes with RocksDB persistence + P2P gossipsub sync
+    pub governance_coordinator: Arc<q_governance::GovernanceCoordinator>,
 
     // AEGIS-QL Post-Quantum Authentication for Founder Operations
     pub aegis_auth_state: Arc<RwLock<aegis_auth_middleware::AegisAuthState>>, // ✅ ENABLED - Founder wallet verification
@@ -932,6 +1087,11 @@ pub struct AppState {
     // VM and Smart Contracts - Orobit Integration
     pub contract_registry: Arc<ContractRegistry>,
     pub orobit_ecosystem: Arc<OrobitSmartContractEcosystem>,
+
+    // 🚀 v2.4.8: O(1) symbol-to-address lookup for oracle price resolution
+    // DashMap for lock-free concurrent access - scales to millions of tokens
+    // Key: UPPERCASE symbol (e.g., "MEME"), Value: contract address (e.g., "qnk542e85...")
+    pub symbol_to_address: Arc<dashmap::DashMap<String, String>>,
 
     // v1.4.10: Contract event history for mint/burn/airdrop operations
     // Key: contract_address (hex string), Value: Vec of events
@@ -1026,6 +1186,58 @@ pub struct AppState {
     // 🔮 v1.4.2-beta: QNO (Quantum Neural Oracle) Prediction Staking
     // Persistent storage for prediction staking with P2P sync for decentralized validation
     pub qno_storage: Arc<RwLock<Option<Arc<q_storage::qno_storage::QnoStorage>>>>,
+
+    // ⛏️ v2.2.1-beta: Stratum Mining Pool with PPLNS Rewards
+    // Full-featured mining pool for external miner connectivity via Stratum V1 protocol
+    // Always enabled - no feature flag required
+    pub mining_pool: Option<Arc<q_mining_pool::MiningPool>>,
+
+    // 🌐 v2.3.0-beta: Decentralized Mining Pool Coordinator
+    // P2P-based mining pool with CRDT PPLNS, gossipsub coordination, and threshold payouts
+    // Enables fully decentralized mining pool operation without central pool server
+    pub distributed_pool_coordinator: Option<Arc<tokio::sync::RwLock<q_mining_pool::distributed::DistributedPoolCoordinator>>>,
+
+    // 📡 v2.3.0-beta: Outbound message channel for distributed pool
+    // Used to send pool messages to P2P network via gossipsub
+    pub distributed_pool_outbound_tx: Option<tokio::sync::mpsc::Sender<q_mining_pool::distributed::coordinator::OutboundMessage>>,
+
+    // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
+    // Enables users to automate recurring token purchases at configured intervals
+    pub dca_storage: Option<Arc<dca_api::DcaStorage>>,
+
+    // 📈 v2.5.0-beta: Perpetual Futures Storage
+    // Enables leveraged long/short trading with up to 10x leverage
+    pub perp_storage: Option<Arc<perpetual_api::PerpStorage>>,
+
+    // ============ v2.4.2: TOKEN STAKING & FEE SYSTEM ============
+
+    // 🔒 Token Fee Configurations - Fee settings per custom token contract
+    // Enables reflection, burn, liquidity, and dev fees on token transfers
+    pub token_fee_configs: Arc<RwLock<HashMap<String, q_storage::TokenFeeConfig>>>,
+
+    // 🎯 Token Staking Positions - Active stakes per wallet+contract
+    // Key format: "wallet_address:contract_address" (lowercase)
+    pub token_staking_positions: Arc<RwLock<HashMap<String, q_storage::TokenStakePosition>>>,
+
+    // 🔥 Token Burn Totals - Cumulative burned amounts per contract
+    pub token_burn_totals: Arc<RwLock<HashMap<String, u128>>>,
+
+    // 💎 Token Reflection Totals - Cumulative reflected amounts per contract
+    pub token_reflection_totals: Arc<RwLock<HashMap<String, u128>>>,
+
+    // 🌐 v2.4.8: Token Social Profiles - Decentralized social media links per contract
+    // Key: contract_address (lowercase hex), Value: JSON-serialized social profile
+    // Synced across nodes via gossipsub for decentralized token info
+    pub token_social_profiles: Arc<RwLock<HashMap<String, TokenSocialProfile>>>,
+
+    // 🚨 v3.3.3-beta: EMERGENCY PAUSE MECHANISM - Mainnet Kill Switch
+    // When enabled: Block production pauses, transactions rejected, reads still work
+    // Activation: POST /api/v1/admin/emergency-pause with founder signature
+    // Resume: POST /api/v1/admin/emergency-resume with founder signature
+    // CRITICAL: This is the last line of defense against catastrophic bugs
+    pub emergency_paused: Arc<std::sync::atomic::AtomicBool>,
+    pub emergency_pause_reason: Arc<RwLock<Option<String>>>,
+    pub emergency_pause_timestamp: Arc<std::sync::atomic::AtomicU64>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1318,7 +1530,7 @@ impl AppState {
             Ok(supply) => {
                 tracing::info!(
                     "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
-                    supply / 100_000_000
+                    supply / 1_000_000_000_000_000_000_000_000u128
                 );
                 supply
             }
@@ -1445,6 +1657,12 @@ impl AppState {
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
 
+        // v2.4.0-beta: Initialize Governance Coordinator with RocksDB persistence
+        let governance_coordinator = Arc::new(
+            q_governance::GovernanceCoordinator::with_storage(storage_engine.clone()).await
+        );
+        tracing::info!("🏛️ Governance Coordinator initialized with RocksDB persistence");
+
         // Initialize AEGIS-QL Authentication for Founder Operations
         let aegis_auth_state = {
             tracing::info!("🔐 Initializing AEGIS-QL post-quantum authentication...");
@@ -1496,6 +1714,39 @@ impl AppState {
                             );
                             persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
                         }
+
+                        // v2.4.0: CRITICAL FIX - Detect and fix u64 underflow corruption
+                        // v3.0.4: Updated to u128 for 24-decimal precision
+                        // If total_qugusd_minted is impossibly large, this indicates corruption.
+                        // Reset total_qugusd_minted to the actual sum of minted_qugusd values.
+                        const IMPOSSIBLY_LARGE_SUPPLY: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 10 billion with 24 decimals
+                        if persisted_vault.total_qugusd_minted > IMPOSSIBLY_LARGE_SUPPLY {
+                            let actual_sum: u128 = persisted_vault.minted_qugusd.values().sum();
+                            tracing::error!(
+                                "🚨 CORRUPTION DETECTED: total_qugusd_minted={} is impossibly large",
+                                persisted_vault.total_qugusd_minted
+                            );
+                            tracing::warn!(
+                                "🔧 FIXING: Resetting total_qugusd_minted from {} to actual sum {}",
+                                persisted_vault.total_qugusd_minted,
+                                actual_sum
+                            );
+                            persisted_vault.total_qugusd_minted = actual_sum;
+
+                            // Also check and fix total_qug_locked if corrupted
+                            let actual_qug_sum: u128 = persisted_vault.locked_qug.values().sum();
+                            if persisted_vault.total_qug_locked > IMPOSSIBLY_LARGE_SUPPLY {
+                                tracing::warn!(
+                                    "🔧 FIXING: Resetting total_qug_locked from {} to actual sum {}",
+                                    persisted_vault.total_qug_locked,
+                                    actual_qug_sum
+                                );
+                                persisted_vault.total_qug_locked = actual_qug_sum;
+                            }
+
+                            tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
+                        }
+
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -1700,6 +1951,9 @@ impl AppState {
             lattice_guard: None,
             lattice_guard_srs: None,
 
+            // ✅ v2.4.1-beta: TemporalShield - Initialize with None in minimal mode
+            temporal_trustee_manager: None,
+
             // Performance & Scaling Optimizations - Initialize for maximum TPS
             simd_crypto_engine: {
                 let simd_config = q_crypto_simd::SimdCryptoConfig::default();
@@ -1871,7 +2125,8 @@ impl AppState {
 
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
-            orobit_ecosystem,
+            orobit_ecosystem: orobit_ecosystem.clone(),
+            symbol_to_address: Arc::new(dashmap::DashMap::new()), // v2.4.8: O(1) symbol lookup
             contract_events: Arc::new(RwLock::new(HashMap::new())), // v1.4.10: Contract event history
 
             // v1.4.11: Commit-reveal and stake-weighted finality for hybrid PoW/PoS security
@@ -1880,6 +2135,9 @@ impl AppState {
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
+
+            // v2.4.0-beta: Governance Coordinator (persistent across restarts)
+            governance_coordinator,
 
             // AEGIS-QL Post-Quantum Authentication for Founder Operations
             aegis_auth_state,
@@ -1937,6 +2195,16 @@ impl AppState {
             dex_manager: None,
             price_bridge: None,
 
+            // v2.3.34-beta: Swap history for Token Details Modal
+            swap_history: Arc::new(RwLock::new(HashMap::new())),
+
+            // v2.4.0-beta: Consensus-Verified Swap Indexer
+            swap_indexer: Arc::new(swap_indexer::SwapIndexer::new(storage_engine.clone())),
+
+            // v2.3.8-beta: Volume and price tracking for real oracle data
+            volume_tracker: Arc::new(RwLock::new(HashMap::new())),
+            price_snapshots: Arc::new(RwLock::new(HashMap::new())),
+
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
             fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,       // Will be initialized in main.rs if enabled
@@ -1965,6 +2233,42 @@ impl AppState {
 
             // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
             qno_storage: Arc::new(RwLock::new(None)),
+
+            // ⛏️ v2.3.0-beta: Stratum Mining Pool (initialized in main.rs)
+            mining_pool: None,
+
+            // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
+            distributed_pool_coordinator: None,
+            distributed_pool_outbound_tx: None,
+
+            // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
+            dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
+
+            // 📈 v2.5.0-beta: Perpetual Futures Storage
+            perp_storage: Some(Arc::new(perpetual_api::PerpStorage::new())),
+
+            // v2.4.2: Token staking & fee system - load from persistent storage
+            token_fee_configs: {
+                let configs = storage_engine.load_fee_configs().await.unwrap_or_default();
+                if !configs.is_empty() {
+                    tracing::info!("📊 Loaded {} token fee configurations from storage", configs.len());
+                }
+                Arc::new(RwLock::new(configs))
+            },
+            token_staking_positions: {
+                let positions = storage_engine.load_stake_positions().await.unwrap_or_default();
+                if !positions.is_empty() {
+                    tracing::info!("🥩 Loaded {} staking positions from storage", positions.len());
+                }
+                Arc::new(RwLock::new(positions))
+            },
+            token_burn_totals: Arc::new(RwLock::new(HashMap::new())),
+            token_reflection_totals: Arc::new(RwLock::new(HashMap::new())),
+            token_social_profiles: Arc::new(RwLock::new(HashMap::new())),
+            // 🚨 v3.3.3-beta: Emergency pause mechanism
+            emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            emergency_pause_reason: Arc::new(RwLock::new(None)),
+            emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -2140,7 +2444,7 @@ impl AppState {
             Ok(supply) => {
                 tracing::info!(
                     "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
-                    supply / 100_000_000
+                    supply / 1_000_000_000_000_000_000_000_000u128
                 );
                 supply
             }
@@ -2267,6 +2571,12 @@ impl AppState {
         let quillon_bank = Arc::new(RwLock::new(quillon_bank_system));
         tracing::info!("🏦 Quillon Bank initialized - CDP and quantum banking ready");
 
+        // v2.4.0-beta: Initialize Governance Coordinator with RocksDB persistence
+        let governance_coordinator = Arc::new(
+            q_governance::GovernanceCoordinator::with_storage(storage_engine.clone()).await
+        );
+        tracing::info!("🏛️ Governance Coordinator initialized with RocksDB persistence");
+
         // Initialize AEGIS-QL Authentication for Founder Operations
         let aegis_auth_state = {
             tracing::info!("🔐 Initializing AEGIS-QL post-quantum authentication...");
@@ -2318,6 +2628,39 @@ impl AppState {
                             );
                             persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
                         }
+
+                        // v2.4.0: CRITICAL FIX - Detect and fix u64 underflow corruption
+                        // v3.0.4: Updated to u128 for 24-decimal precision
+                        // If total_qugusd_minted is impossibly large, this indicates corruption.
+                        // Reset total_qugusd_minted to the actual sum of minted_qugusd values.
+                        const IMPOSSIBLY_LARGE_SUPPLY: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 10 billion with 24 decimals
+                        if persisted_vault.total_qugusd_minted > IMPOSSIBLY_LARGE_SUPPLY {
+                            let actual_sum: u128 = persisted_vault.minted_qugusd.values().sum();
+                            tracing::error!(
+                                "🚨 CORRUPTION DETECTED: total_qugusd_minted={} is impossibly large",
+                                persisted_vault.total_qugusd_minted
+                            );
+                            tracing::warn!(
+                                "🔧 FIXING: Resetting total_qugusd_minted from {} to actual sum {}",
+                                persisted_vault.total_qugusd_minted,
+                                actual_sum
+                            );
+                            persisted_vault.total_qugusd_minted = actual_sum;
+
+                            // Also check and fix total_qug_locked if corrupted
+                            let actual_qug_sum: u128 = persisted_vault.locked_qug.values().sum();
+                            if persisted_vault.total_qug_locked > IMPOSSIBLY_LARGE_SUPPLY {
+                                tracing::warn!(
+                                    "🔧 FIXING: Resetting total_qug_locked from {} to actual sum {}",
+                                    persisted_vault.total_qug_locked,
+                                    actual_qug_sum
+                                );
+                                persisted_vault.total_qug_locked = actual_qug_sum;
+                            }
+
+                            tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
+                        }
+
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -2550,6 +2893,33 @@ impl AppState {
                 }
             },
 
+            // ✅ v2.4.1-beta: TemporalShield-STARK trustee management with HSM
+            temporal_trustee_manager: {
+                match trustee_manager::TrusteeManager::new() {
+                    Ok(mut manager) => {
+                        if let Err(e) = manager.initialize() {
+                            tracing::warn!(
+                                "⚠️ TrusteeManager initialization failed: {}, using uninitialized state",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "✅ TemporalShield TrusteeManager initialized - {} HSM-backed keys ready",
+                                manager.total_keys()
+                            );
+                        }
+                        Some(Arc::new(tokio::sync::RwLock::new(manager)))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ TrusteeManager creation failed: {}, TemporalShield unavailable",
+                            e
+                        );
+                        None
+                    }
+                }
+            },
+
             // Performance & Scaling Optimizations - Initialize for maximum TPS
             simd_crypto_engine: {
                 let simd_config = q_crypto_simd::SimdCryptoConfig::default();
@@ -2721,7 +3091,8 @@ impl AppState {
 
             // VM and Smart Contracts - Orobit Integration
             contract_registry,
-            orobit_ecosystem,
+            orobit_ecosystem: orobit_ecosystem.clone(),
+            symbol_to_address: Arc::new(dashmap::DashMap::new()), // v2.4.8: O(1) symbol lookup
             contract_events: Arc::new(RwLock::new(HashMap::new())), // v1.4.10: Contract event history
 
             // v1.4.11: Commit-reveal and stake-weighted finality for hybrid PoW/PoS security
@@ -2730,6 +3101,9 @@ impl AppState {
 
             // Quillon Bank - Full Quantum Banking System with CDP
             quillon_bank,
+
+            // v2.4.0-beta: Governance Coordinator (persistent across restarts)
+            governance_coordinator,
 
             // AEGIS-QL Post-Quantum Authentication for Founder Operations
             aegis_auth_state,
@@ -2787,6 +3161,16 @@ impl AppState {
             dex_manager: None,
             price_bridge: None,
 
+            // v2.3.34-beta: Swap history for Token Details Modal
+            swap_history: Arc::new(RwLock::new(HashMap::new())),
+
+            // v2.4.0-beta: Consensus-Verified Swap Indexer
+            swap_indexer: Arc::new(swap_indexer::SwapIndexer::new(storage_engine.clone())),
+
+            // v2.3.8-beta: Volume and price tracking for real oracle data
+            volume_tracker: Arc::new(RwLock::new(HashMap::new())),
+            price_snapshots: Arc::new(RwLock::new(HashMap::new())),
+
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
             fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,       // Will be initialized in main.rs if enabled
@@ -2815,11 +3199,47 @@ impl AppState {
 
             // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
             qno_storage: Arc::new(RwLock::new(None)),
+
+            // ⛏️ v2.3.0-beta: Stratum Mining Pool (initialized in main.rs)
+            mining_pool: None,
+
+            // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
+            distributed_pool_coordinator: None,
+            distributed_pool_outbound_tx: None,
+
+            // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
+            dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
+
+            // 📈 v2.5.0-beta: Perpetual Futures Storage
+            perp_storage: Some(Arc::new(perpetual_api::PerpStorage::new())),
+
+            // v2.4.2: Token staking & fee system - load from persistent storage
+            token_fee_configs: {
+                let configs = storage_engine.load_fee_configs().await.unwrap_or_default();
+                if !configs.is_empty() {
+                    tracing::info!("📊 Loaded {} token fee configurations from storage", configs.len());
+                }
+                Arc::new(RwLock::new(configs))
+            },
+            token_staking_positions: {
+                let positions = storage_engine.load_stake_positions().await.unwrap_or_default();
+                if !positions.is_empty() {
+                    tracing::info!("🥩 Loaded {} staking positions from storage", positions.len());
+                }
+                Arc::new(RwLock::new(positions))
+            },
+            token_burn_totals: Arc::new(RwLock::new(HashMap::new())),
+            token_reflection_totals: Arc::new(RwLock::new(HashMap::new())),
+            token_social_profiles: Arc::new(RwLock::new(HashMap::new())),
+            // 🚨 v3.3.3-beta: Emergency pause mechanism
+            emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            emergency_pause_reason: Arc::new(RwLock::new(None)),
+            emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
     /// Helper method to save wallet balance to persistent storage
-    pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u64) -> anyhow::Result<()> {
+    pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u128) -> anyhow::Result<()> {
         self.storage_engine
             .save_wallet_balance(address, amount)
             .await?;

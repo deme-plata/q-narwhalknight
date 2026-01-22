@@ -270,17 +270,44 @@ pub fn create_default_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+    use rocksdb::DB;
+    use q_storage::price_history::PriceHistoryManager;
+    use q_storage::token_registry::TokenRegistry;
 
-    #[test]
-    fn test_weighted_price_calculation() {
+    async fn create_test_dex_manager() -> Arc<QuantumDexManager> {
+        let temp_dir = tempdir().unwrap();
+        let db = Arc::new(DB::open_default(temp_dir.path()).unwrap());
+
+        let token_registry = Arc::new(TokenRegistry::new(db.clone()));
+        token_registry.initialize().await.unwrap();
+
+        let price_history = Arc::new(PriceHistoryManager::new(db));
+        price_history.initialize().await.unwrap();
+
+        // Keep temp_dir alive
+        std::mem::forget(temp_dir);
+
+        Arc::new(QuantumDexManager::new(token_registry, price_history).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_weighted_price_calculation() {
         let dex_price = BigDecimal::from(100);
         let oracle_price = BigDecimal::from(110);
 
-        // 70% DEX, 30% Oracle
-        let bridge = create_default_bridge(
-            Arc::new(QuantumDexManager::new().unwrap()),
-            Arc::new(QuantumOracle::new([0u8; 32], q_types::Phase::Phase1, Default::default()).await.unwrap()),
+        // Create test DEX manager
+        let dex_manager = create_test_dex_manager().await;
+
+        // Create test oracle
+        let oracle = Arc::new(
+            QuantumOracle::new([0u8; 32], q_types::Phase::Phase1, Default::default())
+                .await
+                .unwrap()
         );
+
+        // 70% DEX, 30% Oracle
+        let bridge = create_default_bridge(dex_manager, oracle);
 
         let weighted = bridge.calculate_weighted_price(&dex_price, &oracle_price).unwrap();
 

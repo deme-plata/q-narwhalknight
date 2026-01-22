@@ -372,7 +372,7 @@ pub async fn prepare_ai_transaction(
 
     // Step 3: Get user's balance
     let balance = match state.storage_engine.get_balance(&wallet_hex).await {
-        Ok(bal) => bal as f64 / 100_000_000.0, // Convert to QNK
+        Ok(bal) => bal as f64 / 1e24, // Convert to QNK
         Err(_) => 0.0,
     };
 

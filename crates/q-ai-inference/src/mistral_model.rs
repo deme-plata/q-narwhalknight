@@ -65,6 +65,40 @@ impl MistralConfig {
         }
     }
 
+    /// Create Ministral-3B-Instruct configuration (v2.5.0-beta)
+    ///
+    /// Ministral-3B is a smaller, faster model with:
+    /// - 24 layers (vs 32 for 7B)
+    /// - 2048 hidden size (vs 4096)
+    /// - Still uses GQA with 8 KV heads
+    ///
+    /// For distributed inference, this splits into:
+    /// - 2 nodes: layers 0-11, 12-23
+    /// - 3 nodes: layers 0-7, 8-15, 16-23
+    /// - 4 nodes: layers 0-5, 6-11, 12-17, 18-23
+    pub fn ministral_3b() -> Self {
+        Self {
+            vocab_size: 32768,       // Slightly larger vocabulary
+            hidden_size: 2048,       // Half of 7B
+            intermediate_size: 8192, // Proportional to hidden_size
+            num_hidden_layers: 24,   // 24 layers vs 32
+            num_attention_heads: 16, // Half of 7B
+            num_key_value_heads: 8,  // Same as 7B (GQA)
+            rope_theta: 1000000.0,
+            rms_norm_eps: 1e-5,
+            max_position_embeddings: 32768,
+        }
+    }
+
+    /// Detect model config from GGUF path (auto-select Mistral-7B or Ministral-3B)
+    pub fn from_model_path(path: &str) -> Self {
+        if path.to_lowercase().contains("ministral-3b") || path.to_lowercase().contains("mistral-3b") {
+            Self::ministral_3b()
+        } else {
+            Self::mistral_7b_v0_3()
+        }
+    }
+
     /// Get head dimension
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
@@ -73,6 +107,26 @@ impl MistralConfig {
     /// Get number of groups for GQA
     pub fn num_groups(&self) -> usize {
         self.num_attention_heads / self.num_key_value_heads
+    }
+
+    /// Get optimal layer distribution for N nodes
+    pub fn optimal_layer_ranges(&self, num_nodes: usize) -> Vec<(usize, usize)> {
+        let total_layers = self.num_hidden_layers;
+        let layers_per_node = total_layers / num_nodes;
+        let remainder = total_layers % num_nodes;
+
+        let mut ranges = Vec::with_capacity(num_nodes);
+        let mut start = 0;
+
+        for i in 0..num_nodes {
+            // Distribute remainder across first N nodes
+            let extra = if i < remainder { 1 } else { 0 };
+            let end = start + layers_per_node + extra - 1;
+            ranges.push((start, end));
+            start = end + 1;
+        }
+
+        ranges
     }
 }
 

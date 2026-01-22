@@ -73,6 +73,15 @@ q-types = { path = "../q-types" }
 # q-network = { path = "../q-network" }  # Removed to break cyclic dependency
 q-aegis-ql = { path = "../q-aegis-ql" }
 q-zk-stark = { path = "../q-zk-stark" }
+q-bitnet-ffi = { path = "../q-bitnet-ffi" }  # BitNet 1.58-bit inference for 16x faster tensor parallelism
+
+# v2.5.2-beta: Native BitNet C++ bindings for true 1.58-bit ternary inference
+# Uses dedicated bitnet.cpp (NOT llama.cpp) for 16x performance via LUT operations
+# ⚠️ CURRENTLY BROKEN: bitnet-cpp v0.0.5 has GGML API incompatibility bugs
+# Error: 'initialized', 'bitnet_tensor_extras', 'GGML_BITNET_MAX_NODES' not declared
+# Track issue: https://github.com/eugenehp/bitnet-cpp-rs/issues
+# For now, use pure Rust BitNet implementation (bitnet_integration.rs)
+bitnet-cpp = { version = "0.0.5", optional = true }  # DISABLED by default - build broken
 
 # Cryptography for privacy layer and proof-of-inference
 aes-gcm = "0.10"
@@ -104,6 +113,11 @@ name = "test_qwen3vl_inference"
 path = "examples/test_qwen3vl_inference.rs"
 
 [features]
-default = []
+default = []  # v2.5.2-beta: bitnet-native disabled (crate has C++ build bugs)
 cuda = ["candle-core/cuda", "candle-nn/cuda", "mistralrs/cuda", "mistralrs-core/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "mistralrs/metal", "mistralrs-core/metal"]
+# v2.5.2-beta: Native BitNet support via bitnet.cpp (DISABLED - crate v0.0.5 has GGML API incompatibility)
+# When enabled, provides true 1.58-bit ternary LUT inference (16x faster than FP32)
+# Currently broken: https://github.com/eugenehp/bitnet-cpp-rs/issues (ggml-bitnet-lut.cpp errors)
+# Once fixed upstream, re-enable with: default = ["bitnet-native"]
+bitnet-native = ["bitnet-cpp"]

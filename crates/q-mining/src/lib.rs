@@ -95,6 +95,7 @@ use q_types::*;
 use q_precision::QAmount;
 use anyhow::Result;
 use std::time::Duration;
+use pqcrypto_traits::sign::{SecretKey, PublicKey};
 
 /// Main quantum-enhanced mining engine
 #[derive(Debug)]
@@ -215,6 +216,9 @@ impl QuantumMiningEngine {
             }, // Future feature - use QuantumSHA3 for now
         };
 
+        // v2.5.0-beta: Generate Dilithium5 keypair for block signing
+        let (dilithium_pk, dilithium_sk) = pqcrypto_dilithium::dilithium5::keypair();
+
         let miner_config = MiningConfig {
             miner_id,
             algorithm: block_algorithm,
@@ -223,6 +227,8 @@ impl QuantumMiningEngine {
             gpu_enabled: config.gpu_enabled,
             cpu_threads: 4, // Default to 4 CPU threads (reasonable for most systems)
             seed_refresh_interval: Duration::from_secs(300), // Refresh quantum seed every 5 minutes
+            dilithium_secret_key: Some(dilithium_sk.as_bytes().to_vec()),
+            dilithium_public_key: Some(dilithium_pk.as_bytes().to_vec()),
         };
 
         Ok(Self {

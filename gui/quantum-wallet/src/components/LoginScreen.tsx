@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Sparkles, Key, AlertCircle } from 'lucide-react';
 import { qnkAPI } from '../services/api';
-import { storeWallet, walletSession } from '../services/walletAuth';
+import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 
 interface LoginScreenProps {
   onAuthenticate: () => void;
@@ -85,8 +85,23 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         localStorage.removeItem('walletPublicKey');
         localStorage.removeItem('walletEncryptedAegisKey');
         localStorage.removeItem('walletAegisPublicKey');
+        localStorage.removeItem('walletPasswordHash');
+      } else if (!hasExistingEncryptedWallet && hasPasswordHash()) {
+        // v2.3.8-beta: CRITICAL SECURITY FIX
+        // No encrypted data but password hash exists - verify password using hash
+        // This prevents login with wrong password when encrypted data is lost
+        console.log('🔐 No encrypted data but password hash exists - verifying password...');
+
+        const isPasswordValid = await verifyPasswordHash(password);
+        if (!isPasswordValid) {
+          console.error('❌ WRONG PASSWORD - Password hash verification failed');
+          setIsAuthenticating(false);
+          setGenerationError('Incorrect password. Please enter the correct password for your wallet.');
+          return;
+        }
+        console.log('✅ Password verified via hash!');
       }
-      // Note: If no stored address exists, this is a brand new wallet - no verification needed
+      // Note: If no stored address AND no password hash exists, this is a brand new wallet - no verification needed
 
       // Call the import wallet API with mnemonic and password
       const response = await qnkAPI.createWallet(seedPhrase, password);

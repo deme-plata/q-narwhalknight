@@ -75,6 +75,14 @@ async fn production_loop(
         hb.fetch_add(1, Ordering::SeqCst);
         iter += 1;
 
+        // 🚨 v3.3.3-beta: EMERGENCY PAUSE CHECK - Skip block production if paused
+        if app.emergency_paused.load(Ordering::SeqCst) {
+            if iter % 60 == 0 {
+                warn!("🚨 [EMERGENCY PAUSE] Block production HALTED - System is in emergency pause mode");
+            }
+            continue;
+        }
+
         if iter % 30 == 0 {
             // v1.0.62-beta: Use current_height_atomic for accurate height in heartbeat
             let h = app.current_height_atomic.load(Ordering::SeqCst);
@@ -94,10 +102,20 @@ async fn production_loop(
             app.highest_network_height.store(cur_h, Ordering::SeqCst);
         }
 
+        // v3.2.10-beta: DECENTRALIZED MINING FIX
+        // Previous threshold (gap > 10) prevented remote nodes from EVER producing blocks
+        // because the bootstrap node was always "ahead" by the time they caught up.
+        //
+        // New thresholds:
+        // - gap > 1000: Emergency brake - node is severely behind, don't produce
+        // - gap > 3: Minor lag - still allow production (was 10, now 3)
+        //
+        // This allows multiple nodes to produce blocks concurrently, enabling
+        // true decentralized mining where any node can include miner's solutions.
         if net_h > 0 {
             let gap = net_h.saturating_sub(cur_h);
             if gap > 1000 { if iter % 30 == 0 { warn!("🚫 Production DISABLED: {} behind (local={}, net={})", gap, cur_h, net_h); } continue; }
-            if gap > 10 { if iter % 30 == 0 { debug!("⏸️  Syncing {} behind", gap); } continue; }
+            if gap > 3 { if iter % 30 == 0 { debug!("⏸️  Syncing {} behind (threshold=3)", gap); } continue; }
         }
 
         ph.store(ProductionPhase::BeforeShouldProduce as u8, Ordering::SeqCst);

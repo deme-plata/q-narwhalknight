@@ -1,5 +1,6 @@
 //! Quillon Bank - Revolutionary Quantum-Enhanced Banking System
-//! 
+//! v2.4.1-beta: TemporalShield-protected audit trail (3-of-5 threshold, HNDL-resistant)
+//!
 //! Next-generation decentralized banking platform combining:
 //! - Quantum-resistant security with HSM clusters
 //! - AI-powered financial services and credit assessment
@@ -8,6 +9,7 @@
 //! - Plugin-based extensibility
 //! - QNKUSD quantum stablecoin
 //! - Integration with Q-NarwhalKnight consensus
+//! - TemporalShield protection for audit trail (NO TRUSTED SETUP)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +19,224 @@ use tokio::sync::{RwLock, Mutex};
 use uuid::Uuid;
 use q_types::{NodeId, Phase};
 use q_plugin_system::PluginManager;
+
+/// TemporalShield threshold parameters for bank audit trail (3-of-5)
+pub const TEMPORAL_BANK_THRESHOLD: usize = 3;
+pub const TEMPORAL_BANK_TOTAL_TRUSTEES: usize = 5;
+
+/// v2.4.1-beta: TemporalShield-protected bank transaction for audit trail
+///
+/// Protects sensitive transaction details with (3,5) threshold secret sharing
+/// while maintaining audit timeline visibility. Prevents complete de-anonymization
+/// of financial history through HNDL attacks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedBankTransaction {
+    /// Transaction ID (unprotected for audit indexing)
+    pub tx_id: [u8; 32],
+    /// Timestamp (unprotected for audit timeline)
+    pub timestamp: u64,
+    /// TemporalEnvelope containing protected transaction details
+    /// Protected: from, to, amount, fee, asset, metadata
+    pub protected_details: Vec<u8>,
+    /// Hash of transaction details for verification without decryption
+    pub details_hash: [u8; 32],
+    /// Transaction type (unprotected for audit categorization)
+    pub tx_type: ProtectedTransactionType,
+    /// Privacy tier (unprotected for compliance routing)
+    pub privacy_tier: PrivacyTier,
+    /// Block height when confirmed (unprotected for timeline)
+    pub block_height: u64,
+    /// Transaction status (unprotected for audit)
+    pub status: TransactionStatus,
+    /// Number of shares available for reconstruction
+    pub shares_available: usize,
+    /// Whether transaction can be fully audited (shares >= threshold)
+    pub can_audit: bool,
+    /// STARK proof for transaction validity (NO TRUSTED SETUP)
+    pub validity_proof: Vec<u8>,
+    /// Key commitment for verification
+    pub key_commitment: [u8; 32],
+}
+
+impl ProtectedBankTransaction {
+    /// Create a new protected bank transaction
+    pub fn new(
+        tx_id: [u8; 32],
+        timestamp: u64,
+        protected_details: Vec<u8>,
+        details_hash: [u8; 32],
+        tx_type: ProtectedTransactionType,
+        privacy_tier: PrivacyTier,
+        block_height: u64,
+        status: TransactionStatus,
+        validity_proof: Vec<u8>,
+        key_commitment: [u8; 32],
+    ) -> Self {
+        Self {
+            tx_id,
+            timestamp,
+            protected_details,
+            details_hash,
+            tx_type,
+            privacy_tier,
+            block_height,
+            status,
+            shares_available: 0,
+            can_audit: false,
+            validity_proof,
+            key_commitment,
+        }
+    }
+
+    /// Record an audit share and update audit capability
+    pub fn record_audit_share(&mut self) {
+        self.shares_available += 1;
+        if self.shares_available >= TEMPORAL_BANK_THRESHOLD {
+            self.can_audit = true;
+        }
+    }
+
+    /// Transaction ID as hex string
+    pub fn tx_id_hex(&self) -> String {
+        hex::encode(self.tx_id)
+    }
+
+    /// Serialize to bytes for storage
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self)
+            .map_err(|e| format!("Serialization failed: {}", e))
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes)
+            .map_err(|e| format!("Deserialization failed: {}", e))
+    }
+}
+
+/// Protected transaction type for audit categorization
+/// (Visible without decryption for compliance routing)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProtectedTransactionType {
+    Transfer,
+    Deposit,
+    Withdrawal,
+    Loan,
+    LoanRepayment,
+    Stake,
+    Unstake,
+    Swap,
+    Investment,
+    StablecoinMint,
+    StablecoinBurn,
+    VaultOperation,
+    Compliance,
+}
+
+impl From<TransactionType> for ProtectedTransactionType {
+    fn from(tx_type: TransactionType) -> Self {
+        match tx_type {
+            TransactionType::Transfer => ProtectedTransactionType::Transfer,
+            TransactionType::Deposit => ProtectedTransactionType::Deposit,
+            TransactionType::Withdrawal => ProtectedTransactionType::Withdrawal,
+            TransactionType::Loan => ProtectedTransactionType::Loan,
+            TransactionType::LoanRepayment => ProtectedTransactionType::LoanRepayment,
+            TransactionType::Stake => ProtectedTransactionType::Stake,
+            TransactionType::Unstake => ProtectedTransactionType::Unstake,
+            TransactionType::Swap => ProtectedTransactionType::Swap,
+            TransactionType::Investment => ProtectedTransactionType::Investment,
+            TransactionType::Salary => ProtectedTransactionType::Transfer,
+            TransactionType::Purchase => ProtectedTransactionType::Transfer,
+            TransactionType::Refund => ProtectedTransactionType::Transfer,
+            TransactionType::QNKUSDMint => ProtectedTransactionType::StablecoinMint,
+            TransactionType::QNKUSDBurn => ProtectedTransactionType::StablecoinBurn,
+            TransactionType::VaultDeposit => ProtectedTransactionType::VaultOperation,
+            TransactionType::VaultWithdraw => ProtectedTransactionType::VaultOperation,
+        }
+    }
+}
+
+/// Details to be protected inside TemporalEnvelope
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankTransactionDetails {
+    /// Sender address
+    pub from: Address,
+    /// Receiver address
+    pub to: Address,
+    /// Asset type
+    pub asset: AssetType,
+    /// Amount
+    pub amount: u128,
+    /// Fee
+    pub fee: u128,
+    /// Optional memo/description
+    pub description: Option<String>,
+    /// Merchant info (if applicable)
+    pub merchant: Option<String>,
+    /// Additional metadata
+    pub metadata: HashMap<String, String>,
+}
+
+impl BankTransactionDetails {
+    /// Compute hash for verification without decryption
+    pub fn compute_hash(&self) -> [u8; 32] {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&self.from.0);
+        hasher.update(&self.to.0);
+        hasher.update(&self.amount.to_le_bytes());
+        hasher.update(&self.fee.to_le_bytes());
+        if let Some(ref desc) = self.description {
+            hasher.update(desc.as_bytes());
+        }
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Serialize to bytes for protection
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self)
+            .map_err(|e| format!("Serialization failed: {}", e))
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes)
+            .map_err(|e| format!("Deserialization failed: {}", e))
+    }
+}
+
+/// Audit status for protected transactions
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuditStatus {
+    /// Transaction protected, waiting for audit shares
+    Protected,
+    /// Sufficient shares available for audit
+    Auditable,
+    /// Transaction has been audited
+    Audited,
+    /// Audit requested by compliance
+    ComplianceRequested,
+    /// Audit rejected (insufficient authorization)
+    Rejected,
+}
+
+/// Statistics for protected bank transactions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedBankStats {
+    /// Total protected transactions
+    pub total_protected: usize,
+    /// Transactions awaiting audit shares
+    pub pending_audit: usize,
+    /// Transactions ready for audit
+    pub auditable: usize,
+    /// Transactions successfully audited
+    pub audited: usize,
+    /// Average shares per transaction
+    pub avg_shares_per_tx: f32,
+}
 
 pub mod quantum_vault;
 pub mod credit_engine;
@@ -777,5 +997,130 @@ mod tests {
 
         // Test account creation would require mock identity proof
         // This is a placeholder test structure
+    }
+
+    #[test]
+    fn test_protected_bank_transaction() {
+        let tx = ProtectedBankTransaction::new(
+            [42u8; 32], // tx_id
+            1640000000, // timestamp
+            vec![0u8; 256], // protected_details
+            [1u8; 32], // details_hash
+            ProtectedTransactionType::Transfer,
+            PrivacyTier::Enhanced,
+            100, // block_height
+            TransactionStatus::Confirmed,
+            vec![0u8; 128], // validity_proof
+            [2u8; 32], // key_commitment
+        );
+
+        assert_eq!(tx.tx_id, [42u8; 32]);
+        assert_eq!(tx.timestamp, 1640000000);
+        assert_eq!(tx.block_height, 100);
+        assert_eq!(tx.shares_available, 0);
+        assert!(!tx.can_audit);
+    }
+
+    #[test]
+    fn test_protected_bank_audit_shares() {
+        let mut tx = ProtectedBankTransaction::new(
+            [42u8; 32],
+            1640000000,
+            vec![0u8; 256],
+            [1u8; 32],
+            ProtectedTransactionType::Loan,
+            PrivacyTier::Shadow,
+            100,
+            TransactionStatus::Confirmed,
+            vec![0u8; 128],
+            [2u8; 32],
+        );
+
+        // Need 3 shares for threshold
+        assert!(!tx.can_audit);
+
+        tx.record_audit_share();
+        assert_eq!(tx.shares_available, 1);
+        assert!(!tx.can_audit);
+
+        tx.record_audit_share();
+        assert_eq!(tx.shares_available, 2);
+        assert!(!tx.can_audit);
+
+        tx.record_audit_share();
+        assert_eq!(tx.shares_available, 3);
+        assert!(tx.can_audit); // Now can audit!
+    }
+
+    #[test]
+    fn test_bank_transaction_details_hash() {
+        let details = BankTransactionDetails {
+            from: Address([1u8; 32]),
+            to: Address([2u8; 32]),
+            asset: AssetType::ORB,
+            amount: 1000000,
+            fee: 1000,
+            description: Some("Test payment".to_string()),
+            merchant: None,
+            metadata: HashMap::new(),
+        };
+
+        let hash1 = details.compute_hash();
+        let hash2 = details.compute_hash();
+        assert_eq!(hash1, hash2); // Same details = same hash
+
+        // Different details = different hash
+        let details2 = BankTransactionDetails {
+            from: Address([1u8; 32]),
+            to: Address([3u8; 32]), // Different receiver
+            asset: AssetType::ORB,
+            amount: 1000000,
+            fee: 1000,
+            description: Some("Test payment".to_string()),
+            merchant: None,
+            metadata: HashMap::new(),
+        };
+        let hash3 = details2.compute_hash();
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_protected_transaction_type_conversion() {
+        assert_eq!(
+            ProtectedTransactionType::from(TransactionType::Transfer),
+            ProtectedTransactionType::Transfer
+        );
+        assert_eq!(
+            ProtectedTransactionType::from(TransactionType::QNKUSDMint),
+            ProtectedTransactionType::StablecoinMint
+        );
+        assert_eq!(
+            ProtectedTransactionType::from(TransactionType::VaultDeposit),
+            ProtectedTransactionType::VaultOperation
+        );
+    }
+
+    #[test]
+    fn test_protected_bank_serialization() {
+        let tx = ProtectedBankTransaction::new(
+            [42u8; 32],
+            1640000000,
+            vec![1u8, 2, 3, 4],
+            [1u8; 32],
+            ProtectedTransactionType::Investment,
+            PrivacyTier::Quantum,
+            200,
+            TransactionStatus::Pending,
+            vec![5u8, 6, 7, 8],
+            [2u8; 32],
+        );
+
+        let bytes = tx.to_bytes().unwrap();
+        let restored = ProtectedBankTransaction::from_bytes(&bytes).unwrap();
+
+        assert_eq!(tx.tx_id, restored.tx_id);
+        assert_eq!(tx.timestamp, restored.timestamp);
+        assert_eq!(tx.block_height, restored.block_height);
+        assert_eq!(tx.tx_type, restored.tx_type);
     }
 }

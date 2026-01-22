@@ -493,19 +493,63 @@ pub struct PoolInfo {
 }
 
 pub async fn get_all_pools(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<Vec<PoolInfo>>>, StatusCode> {
-    // TODO: Implement actual pool registry lookup
-    let pools = vec![];
+    // v2.4.3: Read liquidity pools from persistent storage
+    let pools_guard = state.liquidity_pools.read().await;
+
+    let pools: Vec<PoolInfo> = pools_guard
+        .values()
+        .map(|pool| {
+            // Calculate total liquidity in USD (reserve0 * price0 + reserve1 * price1)
+            // For simplicity, use reserve sum as placeholder
+            let reserve0_display = pool.reserve0 as f64 / 1e8;
+            let reserve1_display = pool.reserve1 as f64 / 1e8;
+
+            PoolInfo {
+                address: pool.pool_id.clone(),
+                token0: pool.token0.clone(),
+                token1: pool.token1.clone(),
+                fee: 30, // 0.3% fee in basis points
+                reserve0: reserve0_display.to_string(),
+                reserve1: reserve1_display.to_string(),
+                total_liquidity: pool.lp_token_supply.to_string(),
+                apy: 0.0, // TODO: Calculate from swap fees
+                volume_24h: "0".to_string(), // TODO: Track volume
+            }
+        })
+        .collect();
+
+    tracing::info!("📊 Returning {} liquidity pools", pools.len());
     Ok(Json(DexApiResponse::success(pools)))
 }
 
 pub async fn get_pool_info(
-    Path(_address): Path<String>,
-    State(_state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<PoolInfo>>, StatusCode> {
-    // TODO: Implement actual pool lookup
-    Ok(Json(DexApiResponse::error("Pool not found".to_string())))
+    // v2.4.3: Read pool info from persistent storage
+    let pools_guard = state.liquidity_pools.read().await;
+
+    if let Some(pool) = pools_guard.get(&address) {
+        let reserve0_display = pool.reserve0 as f64 / 1e8;
+        let reserve1_display = pool.reserve1 as f64 / 1e8;
+
+        let info = PoolInfo {
+            address: pool.pool_id.clone(),
+            token0: pool.token0.clone(),
+            token1: pool.token1.clone(),
+            fee: 30, // 0.3% fee in basis points
+            reserve0: reserve0_display.to_string(),
+            reserve1: reserve1_display.to_string(),
+            total_liquidity: pool.lp_token_supply.to_string(),
+            apy: 0.0,
+            volume_24h: "0".to_string(),
+        };
+        Ok(Json(DexApiResponse::success(info)))
+    } else {
+        Ok(Json(DexApiResponse::error("Pool not found".to_string())))
+    }
 }
 
 // ============ SWAP/TRADE ENDPOINTS ============
@@ -659,12 +703,12 @@ pub async fn execute_swap(
     }
 
     // Parse and validate amounts
-    let amount_in: u64 = match request.amount_in.parse() {
+    let amount_in: u128 = match request.amount_in.parse() {
         Ok(amount) if amount > 0 => amount,
         _ => return Ok(Json(DexApiResponse::error("invalid amount_in".to_string()))),
     };
 
-    let _minimum_out: u64 = match request.minimum_amount_out.parse() {
+    let _minimum_out: u128 = match request.minimum_amount_out.parse() {
         Ok(amount) if amount > 0 => amount,
         _ => {
             return Ok(Json(DexApiResponse::error(

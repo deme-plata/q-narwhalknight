@@ -40,6 +40,31 @@ pub struct PeerHeightWithProof {
 
     /// Timestamp of announcement
     pub timestamp: u64,
+
+    // ========================================
+    // v3.3.9-beta: VERSION FILTERING & CAPABILITY ANNOUNCEMENT
+    // Added for mainnet-safe peer compatibility
+    // ========================================
+
+    /// Software version string (e.g., "3.3.9-beta")
+    /// Used to filter incompatible peers
+    #[serde(default)]
+    pub software_version: Option<String>,
+
+    /// Protocol version (semantic versioning major.minor)
+    /// Major version changes = incompatible peers
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
+
+    /// Upgrade capabilities this node supports
+    /// e.g., ["pq-signatures", "upgrade-gate-v1", "consensus-guard"]
+    #[serde(default)]
+    pub upgrade_capabilities: Vec<String>,
+
+    /// Network ID this node is on (e.g., "testnet-phase19")
+    /// Must match for sync to proceed
+    #[serde(default)]
+    pub network_id: Option<String>,
 }
 
 /// Peer height proof verifier with reputation tracking
@@ -298,6 +323,176 @@ pub async fn generate_height_proof_simple(
     let merkle_root: [u8; 32] = *blake3::hash(format!("root_{}", block.header.height).as_bytes()).as_bytes();
 
     generate_height_proof(stark_system, block, merkle_proof, merkle_root).await
+}
+
+// ============================================================================
+// v3.3.9-beta: VERSION FILTERING & CAPABILITY ANNOUNCEMENT
+// ============================================================================
+
+/// Current software version for peer announcements
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Protocol version (increment on breaking P2P changes)
+/// - v1: Initial protocol
+/// - v2: Added version filtering
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Minimum required protocol version for sync
+/// Peers below this version will be filtered out
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// Upgrade capabilities this node supports
+pub fn get_upgrade_capabilities() -> Vec<String> {
+    vec![
+        "upgrade-gate-v1".to_string(),      // Height-gated upgrades
+        "consensus-guard-v1".to_string(),   // Mainnet safety checks
+        "pq-signatures-ready".to_string(),  // Post-quantum signature support
+        "sync-down-protection".to_string(), // Sync-down safety checks
+        "version-filter-v1".to_string(),    // Version-based peer filtering
+    ]
+}
+
+/// Create a properly-versioned peer height announcement
+pub fn create_peer_height_announcement(
+    peer_id: &str,
+    highest_block: u64,
+    network_id: &str,
+) -> PeerHeightWithProof {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    PeerHeightWithProof {
+        peer_id: peer_id.to_string(),
+        highest_block,
+        height_proof: None, // ZK proof optional for now
+        blockchain_merkle_root: None,
+        timestamp,
+        // v3.3.9-beta: Version filtering fields
+        software_version: Some(SOFTWARE_VERSION.to_string()),
+        protocol_version: Some(PROTOCOL_VERSION),
+        upgrade_capabilities: get_upgrade_capabilities(),
+        network_id: Some(network_id.to_string()),
+    }
+}
+
+/// Version filter result
+#[derive(Debug, Clone, PartialEq)]
+pub enum VersionFilterResult {
+    /// Peer is compatible - proceed with sync
+    Compatible {
+        peer_version: String,
+        peer_protocol: u32,
+        common_capabilities: Vec<String>,
+    },
+    /// Peer is running older but compatible version - warn but allow
+    LegacyPeer {
+        reason: String,
+    },
+    /// Peer is incompatible - reject sync
+    Incompatible {
+        reason: String,
+    },
+    /// Network ID mismatch - different network entirely
+    WrongNetwork {
+        expected: String,
+        actual: String,
+    },
+}
+
+/// Filter peer based on version and capabilities
+///
+/// **Returns**:
+/// - Compatible: Peer can be synced from
+/// - LegacyPeer: Old peer without version info (allowed with warning)
+/// - Incompatible: Peer rejected due to version/protocol mismatch
+/// - WrongNetwork: Peer is on different network
+pub fn filter_peer_version(
+    announcement: &PeerHeightWithProof,
+    our_network_id: &str,
+) -> VersionFilterResult {
+    // Check network ID first
+    if let Some(ref peer_network) = announcement.network_id {
+        if peer_network != our_network_id {
+            warn!("🚫 [VERSION FILTER] Peer {} on WRONG NETWORK: {} (we are on {})",
+                  announcement.peer_id, peer_network, our_network_id);
+            return VersionFilterResult::WrongNetwork {
+                expected: our_network_id.to_string(),
+                actual: peer_network.clone(),
+            };
+        }
+    }
+
+    // Check protocol version
+    if let Some(peer_protocol) = announcement.protocol_version {
+        if peer_protocol < MIN_PROTOCOL_VERSION {
+            warn!("🚫 [VERSION FILTER] Peer {} has OUTDATED protocol version: {} (min required: {})",
+                  announcement.peer_id, peer_protocol, MIN_PROTOCOL_VERSION);
+            return VersionFilterResult::Incompatible {
+                reason: format!("Protocol version {} < minimum required {}", peer_protocol, MIN_PROTOCOL_VERSION),
+            };
+        }
+    }
+
+    // If no version info at all, treat as legacy peer
+    if announcement.software_version.is_none() && announcement.protocol_version.is_none() {
+        debug!("⚠️ [VERSION FILTER] Peer {} has no version info - legacy peer",
+               announcement.peer_id);
+        return VersionFilterResult::LegacyPeer {
+            reason: "No version information in announcement".to_string(),
+        };
+    }
+
+    // Find common capabilities
+    let our_capabilities = get_upgrade_capabilities();
+    let common_capabilities: Vec<String> = announcement.upgrade_capabilities
+        .iter()
+        .filter(|cap| our_capabilities.contains(cap))
+        .cloned()
+        .collect();
+
+    let peer_version = announcement.software_version.clone().unwrap_or_else(|| "unknown".to_string());
+    let peer_protocol = announcement.protocol_version.unwrap_or(0);
+
+    info!("✅ [VERSION FILTER] Peer {} is COMPATIBLE | version: {} | protocol: {} | common caps: {:?}",
+          announcement.peer_id, peer_version, peer_protocol, common_capabilities);
+
+    VersionFilterResult::Compatible {
+        peer_version,
+        peer_protocol,
+        common_capabilities,
+    }
+}
+
+/// Check if peer should be used for sync based on version filtering
+///
+/// Returns true if peer passes version filter, false if should be skipped
+pub fn should_sync_from_peer(
+    announcement: &PeerHeightWithProof,
+    our_network_id: &str,
+    strict_mode: bool,
+) -> bool {
+    match filter_peer_version(announcement, our_network_id) {
+        VersionFilterResult::Compatible { .. } => true,
+        VersionFilterResult::LegacyPeer { reason } => {
+            if strict_mode {
+                warn!("🚫 [VERSION FILTER] Rejecting legacy peer in STRICT mode: {}", reason);
+                false
+            } else {
+                debug!("⚠️ [VERSION FILTER] Allowing legacy peer (non-strict): {}", reason);
+                true
+            }
+        }
+        VersionFilterResult::Incompatible { reason } => {
+            error!("🚫 [VERSION FILTER] Rejecting incompatible peer: {}", reason);
+            false
+        }
+        VersionFilterResult::WrongNetwork { expected, actual } => {
+            error!("🚫 [VERSION FILTER] Rejecting peer on WRONG network: {} (expected {})", actual, expected);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

@@ -104,8 +104,7 @@ pub struct AquaMesh {
     pub analytics: Arc<RwLock<TorAnalytics>>,
     pub message_sender: mpsc::UnboundedSender<SecureAquaMessage>,
     pub message_receiver: Arc<RwLock<mpsc::UnboundedReceiver<SecureAquaMessage>>>,
-    // Integration with existing Tor client (skipped for serialization due to trait requirements)
-    #[serde(skip)]
+    /// Integration with existing Tor client (not serializable)
     pub tor_client: Option<String>, // Tor client address placeholder
 }
 

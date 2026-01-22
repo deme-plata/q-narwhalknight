@@ -82,7 +82,8 @@ pub enum VMExecutionType {
     },
     Transfer {
         to: u64,
-        amount: u64,
+        /// v2.10.0: Updated to u128 for 24 decimal precision
+        amount: u128,
     },
 }
 
@@ -400,7 +401,9 @@ impl VMIntegratedDAG {
     }
 
     /// Execute a simple transfer
-    async fn execute_transfer(&self, from: u64, to: u64, amount: u64) -> Result<ExecutionResult> {
+    /// v2.10.0: Updated to u128 for 24 decimal precision
+    /// Note: VM state internally uses u64 for backwards compatibility
+    async fn execute_transfer(&self, from: u64, to: u64, amount: u128) -> Result<ExecutionResult> {
         tracing::info!(
             "Executing transfer: {} -> {} (amount: {})",
             from,
@@ -408,9 +411,12 @@ impl VMIntegratedDAG {
             amount
         );
 
+        // VM internal state uses u64 - cast to u64 (safe for reasonable amounts)
+        let amount_u64 = amount as u64;
+
         // Check balance
         let from_balance = self.state_db.get_balance(from).await.unwrap_or(0);
-        if from_balance < amount {
+        if from_balance < amount_u64 {
             return Ok(ExecutionResult {
                 success: false,
                 return_data: Vec::new(),
@@ -422,10 +428,10 @@ impl VMIntegratedDAG {
 
         // Execute transfer
         self.state_db
-            .set_balance(from, from_balance - amount)
+            .set_balance(from, from_balance - amount_u64)
             .await?;
         let to_balance = self.state_db.get_balance(to).await.unwrap_or(0);
-        self.state_db.set_balance(to, to_balance + amount).await?;
+        self.state_db.set_balance(to, to_balance + amount_u64).await?;
 
         Ok(ExecutionResult {
             success: true,

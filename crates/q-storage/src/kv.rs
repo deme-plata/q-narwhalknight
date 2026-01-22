@@ -298,6 +298,14 @@ impl RocksDBKV {
             Self::create_qno_stakes_cf(),        // QNO staking positions
             Self::create_qno_domains_cf(),       // QNO prediction domains
             Self::create_qno_stats_cf(),         // QNO global statistics
+            // ========== v2.3.9-beta: Swap History ==========
+            Self::create_swap_history_cf(),      // Swap/transaction history for Token Details Modal
+            // ========== v2.7.9-beta: Perpetual Trading ==========
+            Self::create_perp_positions_cf(),    // Perpetual futures positions
+            Self::create_perp_orders_cf(),       // Perpetual futures orders
+            Self::create_perp_trades_cf(),       // Perpetual futures trade history
+            Self::create_perp_funding_cf(),      // Perpetual funding rate history
+            Self::create_perp_liquidations_cf(), // Perpetual liquidation records
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -378,6 +386,13 @@ impl RocksDBKV {
             .filter(|name| !existing_cfs.contains(name))
             .cloned()
             .collect();
+
+        // v2.3.9-beta: Debug logging for migration detection
+        info!("🔍 [CF-CHECK] Existing CFs: {}, Requested CFs: {}, Missing: {}",
+            existing_cfs.len(), requested_cf_names.len(), missing_cfs.len());
+        if !missing_cfs.is_empty() {
+            info!("📋 [CF-CHECK] Missing column families: {:?}", missing_cfs);
+        }
 
         if !missing_cfs.is_empty() && existing_cfs.len() > 1 {
             // Database exists but is missing some column families - perform migration
@@ -830,6 +845,61 @@ impl RocksDBKV {
         opts.set_write_buffer_size(4 * 1024 * 1024); // 4MB - single key
         opts.set_max_write_buffer_number(2);
         ColumnFamilyDescriptor::new(crate::CF_QNO_STATS, opts)
+    }
+
+    // ========== v2.3.9-beta: Swap History Column Family ==========
+
+    /// Swap history for Token Details Modal transaction history
+    /// Key format: "swap:{token}:{timestamp}:{tx_id}" -> JSON swap record
+    fn create_swap_history_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB - many small records
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8)); // "swap:{T}"
+        ColumnFamilyDescriptor::new(crate::CF_SWAP_HISTORY, opts)
+    }
+
+    // ========== v2.7.9-beta: Perpetual Trading Column Families ==========
+
+    fn create_perp_positions_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_PERP_POSITIONS, opts)
+    }
+
+    fn create_perp_orders_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_PERP_ORDERS, opts)
+    }
+
+    fn create_perp_trades_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_PERP_TRADES, opts)
+    }
+
+    fn create_perp_funding_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - smaller, less frequent
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_PERP_FUNDING, opts)
+    }
+
+    fn create_perp_liquidations_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - smaller, less frequent
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_PERP_LIQUIDATIONS, opts)
     }
 
     /// Get column family handle (public for transactions - v0.8.1-beta)

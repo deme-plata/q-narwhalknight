@@ -219,6 +219,7 @@ impl QuantumDexManager {
             has_liquidity_pool: false,
             liquidity_pools: vec![],
             last_updated: Utc::now(),
+            social_links: None, // v2.7.7-beta
         };
         self.token_registry.register_token(orb_token).await?;
 
@@ -245,6 +246,7 @@ impl QuantumDexManager {
             has_liquidity_pool: false,
             liquidity_pools: vec![],
             last_updated: Utc::now(),
+            social_links: None, // v2.7.7-beta
         };
         self.token_registry.register_token(orbusd_token).await?;
 
@@ -533,6 +535,7 @@ impl QuantumDexManager {
             has_liquidity_pool: false,
             liquidity_pools: vec![],
             last_updated: Utc::now(),
+            social_links: None, // v2.7.7-beta
         };
 
         // Register in persistent storage
@@ -684,16 +687,37 @@ impl QuantumDexManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+    use rocksdb::DB;
+    use q_storage::price_history::PriceHistoryManager;
+
+    async fn create_test_dex_manager() -> QuantumDexManager {
+        let temp_dir = tempdir().unwrap();
+        let db = Arc::new(DB::open_default(temp_dir.path()).unwrap());
+
+        // Create token registry with test database
+        let token_registry = Arc::new(TokenRegistry::new(db.clone()));
+        token_registry.initialize().await.unwrap();
+
+        // Create price history manager with same database
+        let price_history = Arc::new(PriceHistoryManager::new(db));
+        price_history.initialize().await.unwrap();
+
+        // Keep temp_dir alive by leaking it (for test purposes only)
+        std::mem::forget(temp_dir);
+
+        QuantumDexManager::new(token_registry, price_history).unwrap()
+    }
 
     #[tokio::test]
     async fn test_quantum_dex_creation() {
-        let manager = QuantumDexManager::new().unwrap();
+        let manager = create_test_dex_manager().await;
         assert!(manager.initialize().await.is_ok());
     }
 
     #[tokio::test]
     async fn test_quantum_token_retrieval() {
-        let manager = QuantumDexManager::new().unwrap();
+        let manager = create_test_dex_manager().await;
         manager.initialize().await.unwrap();
 
         let orb_info = manager.get_quantum_token_info("ORB").await.unwrap();
@@ -704,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quantum_physics_parameters() {
-        let manager = QuantumDexManager::new().unwrap();
+        let manager = create_test_dex_manager().await;
         manager.initialize().await.unwrap();
 
         let params = manager.quantum_params.read().await;

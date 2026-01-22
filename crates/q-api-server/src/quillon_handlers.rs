@@ -334,13 +334,25 @@ pub async fn mint_qnkusd(
         None
     };
 
+    // v2.5.0-beta: Sign the QNKUSD mint operation with Ed25519
+    let quantum_signature = {
+        use ed25519_dalek::Signer;
+        let mut sign_data = Vec::with_capacity(128);
+        sign_data.extend_from_slice(transaction_id.as_bytes());
+        sign_data.extend_from_slice(request.user_address.as_bytes());
+        sign_data.extend_from_slice(request.qnkusd_amount.as_bytes());
+        sign_data.extend_from_slice(request.collateral_amount.as_bytes());
+        let sig = state.node_signing_key.sign(&sign_data);
+        base64::encode(sig.to_bytes())
+    };
+
     let response = QNKUSDMintResponse {
         transaction_id,
         qnkusd_minted: request.qnkusd_amount,
         collateral_deposited: request.collateral_amount,
         collateral_ratio: 1.6, // 160% over-collateralized
         vault_id,
-        quantum_signature: base64::encode([0u8; 64]),
+        quantum_signature, // v2.5.0-beta: Real Ed25519 signature
     };
 
     info!("✅ QNKUSD minted successfully");

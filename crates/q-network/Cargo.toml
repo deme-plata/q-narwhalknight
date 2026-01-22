@@ -60,6 +60,9 @@ sha3 = { workspace = true }
 pqcrypto-dilithium = { workspace = true }
 pqcrypto-kyber = { workspace = true }
 
+# v2.5.1-beta: AEAD encryption for P2P AI message privacy
+chacha20poly1305 = { workspace = true }
+
 # Missing dependencies
 hex = { workspace = true }
 zeroize = { workspace = true }
@@ -124,6 +127,10 @@ proptest = { workspace = true }
 default = []
 # ✨ v1.0.58-beta: Enable Lattice Aggregate Signatures for 98% bandwidth reduction
 advanced-crypto = ["q-crypto-advanced"]
+
+# 🚀 v1.4.12-beta: GPU acceleration for distributed AI inference
+cuda = ["q-ai-inference/cuda"]
+metal = ["q-ai-inference/metal"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libp2p = { workspace = true, features = ["mdns"] }

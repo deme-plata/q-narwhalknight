@@ -62,6 +62,13 @@ pub enum CryptoError {
     #[error("Circle STARK: Polynomial commitment failed")]
     CommitmentFailed,
 
+    // Bulletproofs Errors
+    #[error("Bulletproofs: Proof generation failed: {0}")]
+    ProofGenerationFailed(String),
+
+    #[error("Bulletproofs: Range proof verification failed")]
+    RangeProofVerificationFailed,
+
     // Lattice Aggregate Signature Errors
     #[error("Lattice: Invalid parameters: {0}")]
     InvalidParameters(String),

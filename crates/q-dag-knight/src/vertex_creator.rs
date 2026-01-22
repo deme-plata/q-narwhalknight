@@ -2,11 +2,15 @@
 //!
 //! Phase 2B: Creates DAG vertices with real transactions from mempool,
 //! VDF proofs, and parent selection for Q-NarwhalKnight consensus.
+//!
+//! 🔐 v2.4.7-beta: Added Ed25519 vertex signing for BFT consensus
 
 use crate::{AnchorElectionResult, QuantumVDF, QuantumVDFProof};
 use anyhow::Result;
+use ed25519_dalek::{Signer, SigningKey};
 use q_narwhal_core::production_mempool::ProductionMempool;
 use q_types::*;
+use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +21,9 @@ use tracing::{debug, info, warn};
 pub struct VertexCreator {
     /// Node identity
     node_id: NodeId,
+
+    /// 🔐 v2.4.7-beta: Ed25519 signing key for vertex signatures
+    signing_key: Arc<SigningKey>,
 
     /// Current consensus round
     current_round: Arc<RwLock<Round>>,
@@ -87,15 +94,48 @@ pub struct Vertex {
 }
 
 impl VertexCreator {
-    /// Create new vertex creator
-    pub fn new(node_id: NodeId, quantum_vdf: Arc<QuantumVDF>) -> Self {
+    /// Create new vertex creator with signing key for BFT consensus
+    ///
+    /// 🔐 v2.4.7-beta: Now requires signing key for vertex signatures
+    pub fn new(node_id: NodeId, signing_key: Arc<SigningKey>, quantum_vdf: Arc<QuantumVDF>) -> Self {
         Self {
             node_id,
+            signing_key,
             current_round: Arc::new(RwLock::new(0)),
             vertex_store: Arc::new(RwLock::new(HashMap::new())),
             quantum_vdf,
             config: VertexCreatorConfig::default(),
         }
+    }
+
+    /// Create new vertex creator with auto-generated signing key (for testing)
+    pub fn new_with_random_key(node_id: NodeId, quantum_vdf: Arc<QuantumVDF>) -> Self {
+        // Ed25519-dalek 2.x uses random_bytes() approach or from_bytes
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rand::thread_rng(), &mut secret_bytes);
+        let signing_key = Arc::new(SigningKey::from_bytes(&secret_bytes));
+        Self::new(node_id, signing_key, quantum_vdf)
+    }
+
+    /// 🔐 v2.4.7-beta: Sign vertex data using Ed25519
+    ///
+    /// Signs: H(vertex_id || round || tx_root || parents)
+    pub fn sign_vertex(&self, vertex_id: &VertexId, round: Round, tx_root: &[u8; 32], parents: &[VertexId]) -> Vec<u8> {
+        // Construct signing message
+        let mut signing_data = Vec::with_capacity(32 + 8 + 32 + parents.len() * 32);
+        signing_data.extend_from_slice(vertex_id);
+        signing_data.extend_from_slice(&round.to_le_bytes());
+        signing_data.extend_from_slice(tx_root);
+        for parent in parents {
+            signing_data.extend_from_slice(parent);
+        }
+
+        // Hash the message
+        let message_hash = Sha3_256::digest(&signing_data);
+
+        // Sign with Ed25519
+        let signature = self.signing_key.sign(&message_hash);
+        signature.to_bytes().to_vec()
     }
 
     /// Create a new DAG vertex with transactions from mempool
@@ -145,6 +185,25 @@ impl VertexCreator {
         // 6. Create vertex with timestamp
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
+        // 🔐 v2.4.7-beta: Compute transaction root for vertex integrity
+        let tx_root: [u8; 32] = if tx_hashes.is_empty() {
+            [0u8; 32]
+        } else {
+            let mut tx_hasher = Sha3_256::new();
+            for tx_hash in &tx_hashes {
+                tx_hasher.update(tx_hash);
+            }
+            tx_hasher.finalize().into()
+        };
+
+        // 🔐 v2.4.7-beta: Sign the vertex with Ed25519
+        let signature = self.sign_vertex(&vertex_id, current_round, &tx_root, &parents);
+        info!(
+            "✅ [VERTEX] Signed vertex {} with {} byte Ed25519 signature",
+            hex::encode(&vertex_id[..8]),
+            signature.len()
+        );
+
         let vertex = Vertex {
             id: vertex_id,
             round: current_round,
@@ -161,7 +220,7 @@ impl VertexCreator {
                 parallel_witnesses: Vec::new(),                // TODO: Get actual witnesses
             },
             timestamp,
-            signature: vec![], // TODO: Sign vertex with validator key
+            signature, // 🔐 v2.4.7-beta: Now properly signed!
         };
 
         // 7. Store vertex in local store
@@ -405,7 +464,8 @@ mod tests {
         };
         let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config));
 
-        let vertex_creator = VertexCreator::new(node_id, quantum_vdf);
+        // 🔐 v2.4.7-beta: Use new_with_random_key for testing
+        let vertex_creator = VertexCreator::new_with_random_key(node_id, quantum_vdf);
 
         // Test parent selection for round 1
         let parents = vertex_creator.select_parent_vertices(1).await.unwrap();
@@ -421,19 +481,24 @@ mod tests {
         };
         let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config));
 
-        let vertex_creator = VertexCreator::new(node_id, quantum_vdf);
+        // 🔐 v2.4.7-beta: Use new_with_random_key for testing
+        let vertex_creator = VertexCreator::new_with_random_key(node_id, quantum_vdf);
 
-        // Create a test vertex
+        // Create a properly signed test vertex using the creator's signing key
         let vertex_id = new_genesis_vertex_id();
+        let tx_root = [0u8; 32];
+        let parents: Vec<VertexId> = vec![];
+        let signature = vertex_creator.sign_vertex(&vertex_id, 0, &tx_root, &parents);
+
         let vertex = Vertex {
             id: vertex_id,
             round: 0,
             proposer: node_id,
             transactions: vec![],
-            parents: vec![],
+            parents,
             vdf_proof: QuantumVDFProof::default(),
             timestamp: 0,
-            signature: vec![],
+            signature,
         };
 
         // Should validate successfully

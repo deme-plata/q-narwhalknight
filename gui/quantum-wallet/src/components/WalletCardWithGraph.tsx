@@ -209,20 +209,37 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
   onCardClick,
   children
 }: WalletCardProps) {
+  // v2.3.32-beta: For QUG, ALWAYS check localStorage for locked balance
+  // This is the final defense against stale balance display
+  let displayBalance = wallet.balance;
+  if (wallet.symbol === 'QUG') {
+    const lockedBalance = localStorage.getItem('dexLockedBalance');
+    const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+    if (lockedBalance && Date.now() < cooldownUntil) {
+      const locked = parseFloat(lockedBalance);
+      if (!isNaN(locked) && isFinite(locked)) {
+        displayBalance = locked;
+        console.log('🔒 WalletCardWithGraph: Using LOCKED QUG balance:', locked, '(prop was:', wallet.balance, ')');
+      }
+    }
+  }
+
   // Debug logging
   if (wallet.symbol === 'QUG' || wallet.symbol === 'QUGUSD' || wallet.symbol === 'USD') {
     console.log(`📊 WalletCardWithGraph rendering ${wallet.symbol}:`, JSON.stringify({
-      balance: wallet.balance,
+      propBalance: wallet.balance,
+      displayBalance: displayBalance,
       historyLength: wallet.history?.length || 0,
-      hasHistory: !!wallet.history,
-      history: wallet.history
     }, null, 2));
   }
 
+  // v3.0.6-beta: Updated to show more decimals for small amounts
   const formatBalance = (amount: number) => {
+    // For very small amounts, show more decimal places
+    const maxDecimals = amount > 0 && amount < 0.00000001 ? 16 : 8;
     return new Intl.NumberFormat('en-US', {
       minimumFractionDigits: 2,
-      maximumFractionDigits: 8,
+      maximumFractionDigits: maxDecimals,
     }).format(amount);
   };
 
@@ -286,9 +303,12 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
       </div>
 
       {/* Balance Display */}
+      {/* 🚨 v2.3.7-beta: Show loading state when balance is 0 and no history (data hasn't loaded yet) */}
       <div className={`mb-3 ${wallet.comingSoon ? 'text-gray-500' : ''}`}>
         {wallet.comingSoon ? (
           <div className="text-2xl font-bold text-gray-500">0.00</div>
+        ) : displayBalance === 0 && (!wallet.history || wallet.history.length === 0) ? (
+          <div className="text-2xl font-bold text-amber-300/60 animate-pulse">Loading...</div>
         ) : (
           <motion.div
             className="text-2xl font-bold text-white"
@@ -302,7 +322,7 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
             } : {}}
             transition={{ duration: 1.5, repeat: isAnimating ? 1 : 0 }}
           >
-            {formatBalance(wallet.balance)}
+            {formatBalance(displayBalance)}
           </motion.div>
         )}
         {wallet.usdValue !== undefined && !wallet.comingSoon && (

@@ -21,8 +21,13 @@ export const ADDRESS_PREFIX = 'qug';
 /** Legacy address prefixes (still accepted) */
 export const LEGACY_PREFIXES = ['qnk'];
 
-/** Base units per coin (QUG uses 9 decimals: 1 QUG = 1,000,000,000 base units) */
-export const SATOSHIS_PER_COIN = 1_000_000_000;
+/**
+ * Base units per coin (QUG uses 24 decimals: 1 QUG = 10^24 base units)
+ * v3.0.6-beta: Updated for u128 migration
+ * NOTE: JavaScript cannot accurately represent 10^24, so we use 1e24 for division
+ * When displaying, prefer the pre-formatted `balance` string from API over `balance_base_units`
+ */
+export const SATOSHIS_PER_COIN = 1e24;
 
 /**
  * Normalize address by removing any valid prefix
@@ -55,9 +60,14 @@ export function addAddressPrefix(normalizedAddress: string): string {
 
 /**
  * Format balance with ticker symbol
+ * v3.0.6-beta: Updated to show up to 16 decimal places for small amounts
  */
 export function formatBalance(satoshis: number): string {
   const coins = satoshis / SATOSHIS_PER_COIN;
+  // For very small amounts, show more decimals
+  if (coins > 0 && coins < 0.00000001) {
+    return `${coins.toFixed(16)} ${TICKER_SYMBOL}`;
+  }
   return `${coins.toFixed(8)} ${TICKER_SYMBOL}`;
 }
 

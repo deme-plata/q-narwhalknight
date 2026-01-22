@@ -70,7 +70,7 @@ impl AuthenticatedReward {
         auth_key: &[u8; 32],
     ) -> Result<Self> {
         let new_balance = old_balance.saturating_add(reward_amount);
-        let reward_qnk = reward_amount as f64 / 100_000_000.0;
+        let reward_qnk = reward_amount as f64 / 1e24;
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -341,8 +341,8 @@ pub async fn emit_instant_balance_update(
     // v1.2.0-beta Phase 3: Enhanced with block tracking
     let balance_event = StreamEvent::BalanceUpdated {
         wallet_address: reward.miner_address.clone(),
-        old_balance: reward.old_balance as f64 / 100_000_000.0,
-        new_balance: reward.new_balance as f64 / 100_000_000.0,
+        old_balance: reward.old_balance as f64 / 1e24,
+        new_balance: reward.new_balance as f64 / 1e24,
         change_reason: "mining_reward".to_string(),
         timestamp: chrono::Utc::now(),
         block_hash: Some(hex::encode(&reward.solution_hash)), // Use solution hash as identifier
@@ -354,6 +354,7 @@ pub async fn emit_instant_balance_update(
         .map_err(|e| anyhow!("Failed to broadcast balance update: {}", e))?;
 
     // Also emit MiningReward event for mining-specific UI updates
+    // v2.3.5-beta: Include origin node info for P2P mining attribution
     let mining_event = StreamEvent::MiningReward {
         miner_address: reward.miner_address.clone(),
         reward_qnk: reward.reward_qnk,
@@ -361,7 +362,10 @@ pub async fn emit_instant_balance_update(
         block_height: reward.block_height,
         difficulty: hex::encode(&reward.solution_hash[..8]),
         hash_rate: 0.0, // Will be updated by mining stats
-        worker_name: None, // v0.6.2-beta: No worker name in instant mining
+        miner_id: None, // v3.3.3-beta: Not available in instant mining context
+        worker_name: None, // v0.6.2-beta: Not available in instant mining context
+        origin_node_id: None, // v2.3.5-beta: Not available in instant rewards context
+        origin_node_name: std::env::var("Q_NODE_NAME").ok(), // v2.3.5-beta: Use env var if set
         timestamp: chrono::Utc::now(),
     };
 

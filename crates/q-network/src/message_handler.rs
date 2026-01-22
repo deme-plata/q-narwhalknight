@@ -403,14 +403,55 @@ impl MessageHandler {
         Ok(())
     }
 
-    /// Handle sync request
+    /// Handle sync request from peer
+    ///
+    /// # v2.4.7-beta: Proper sync request handling
+    /// Validates the request and broadcasts an event for the sync manager to handle.
+    /// The sync manager (DagSyncManager) has access to vertex/certificate stores.
     async fn handle_sync_request(&self, from_round: Round, to_round: Round, source: libp2p::PeerId) -> Result<()> {
-        debug!("Received sync request from {} for rounds {}-{}", source, from_round, to_round);
+        info!("📥 Received sync request from {} for rounds {}-{}", source, from_round, to_round);
 
-        // TODO: Implement sync response by gathering vertices and certificates
-        // This would integrate with the vertex store and certificate storage
-        info!("Sync request handling not fully implemented yet");
+        // Validate round range
+        if from_round > to_round {
+            warn!("Invalid sync request: from_round {} > to_round {}", from_round, to_round);
+            return Ok(());
+        }
 
+        // Limit the range to prevent DoS (max 1000 rounds per request)
+        let max_rounds = 1000;
+        let actual_to_round = if to_round - from_round > max_rounds {
+            warn!(
+                "Sync request too large: {} rounds requested, limiting to {}",
+                to_round - from_round,
+                max_rounds
+            );
+            from_round + max_rounds
+        } else {
+            to_round
+        };
+
+        // Update stats
+        {
+            let mut stats = self.message_stats.write().await;
+            stats.total_messages += 1;
+        }
+
+        // Create a sync request event for the sync manager to handle
+        // The sync manager has access to vertex store and certificate storage
+        let sync_event = NetworkMessage::SyncRequest {
+            from_round,
+            to_round: actual_to_round,
+        };
+
+        // Broadcast via quantum channel (sync manager should subscribe to this)
+        if let Err(_) = self.quantum_tx.send(sync_event) {
+            warn!("No sync handler subscribed to process sync requests");
+        }
+
+        debug!(
+            "✅ Sync request forwarded to sync manager: rounds {}-{}",
+            from_round, actual_to_round
+        );
         Ok(())
     }
 

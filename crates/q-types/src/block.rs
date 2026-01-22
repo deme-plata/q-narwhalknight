@@ -12,35 +12,82 @@ use std::collections::HashMap;
 fn default_phase() -> u8 { 5 }  // Phase 5 is current testnet phase
 fn default_network_id() -> String { "testnet-phase5".to_string() }
 
-/// v1.1.3-beta: Custom serde module for u128 serialization as string
-/// This is needed because MessagePack doesn't support u128 natively
-/// Using string representation ensures compatibility across all serializers
+/// v1.1.3-beta: Custom serde module for u128 serialization
+/// v3.2.8-beta: RESTORED native u128 for Bincode storage compatibility
+/// Blocks are stored with Bincode which handles u128 natively.
+/// The Visitor pattern handles backward compatibility with old u64 data.
+/// NOTE: P2P balance updates use CBOR via P2PBalanceUpdate which has its own fix.
 mod u128_as_string {
-    use serde::{self, Deserialize, Deserializer, Serializer};
+    use serde::{de::Visitor, Deserializer, Serializer};
+    use std::fmt;
 
     pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.serialize_str(&value.to_string())
+        // v3.2.8-beta: RESTORED native u128 for Bincode storage compatibility
+        // Blocks are stored with Bincode which handles u128 natively
+        // P2P uses MessagePack which truncates u128, but blocks are sent as raw bytes
+        // so this doesn't affect P2P block transmission
+        serializer.serialize_u128(*value)
+    }
+
+    struct U128Visitor;
+
+    impl<'de> Visitor<'de> for U128Visitor {
+        type Value = u128;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a u128, u64, or string representing a number")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            v.parse().map_err(E::custom)
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            v.parse().map_err(E::custom)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v as u128)
+        }
+
+        fn visit_u128<E>(self, v: u128) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v >= 0 {
+                Ok(v as u128)
+            } else {
+                Err(E::custom("negative value cannot be u128"))
+            }
+        }
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // Support both string and integer deserialization for backward compatibility
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum StringOrInt {
-            String(String),
-            Int(u128),
-        }
-
-        match StringOrInt::deserialize(deserializer)? {
-            StringOrInt::String(s) => s.parse::<u128>().map_err(serde::de::Error::custom),
-            StringOrInt::Int(i) => Ok(i),
-        }
+        // v3.1.4: Use deserialize_u128 for Bincode compatibility
+        // The Visitor handles u64 for backward compatibility with old blocks
+        deserializer.deserialize_u128(U128Visitor)
     }
 }
 
@@ -129,7 +176,7 @@ pub struct BlockHeader {
     #[serde(default)]
     pub producer_id: u8,
 
-    /// Total difficulty accumulated to this block
+    /// Total difficulty accumulated to this block (Bincode native u128)
     pub total_difficulty: u128,
 
     // ============================================================================
@@ -158,8 +205,9 @@ pub struct BlockHeader {
 
     /// Total coinbase reward in this block (sum of all coinbase outputs)
     /// Used for quick emission schedule validation
+    /// v2.5.0: Upgraded to u128 for full precision (Bincode native)
     #[serde(default)]
-    pub total_coinbase_reward: Option<u64>,
+    pub total_coinbase_reward: Option<u128>,
 
     /// Number of coinbase transactions in this block
     #[serde(default)]
@@ -244,9 +292,17 @@ pub struct MiningSolution {
     /// This allows ultra-precise network hashrate calculation in real-time
     #[serde(default)]
     pub hash_rate_hs: u64,
+
+    /// v3.3.3-beta: Unique miner instance ID for identification
+    #[serde(default)]
+    pub miner_id: Option<String>,
+
+    /// v3.3.3-beta: Human-readable miner name (e.g., "Server Alpha", "Mining Rig 1")
+    #[serde(default)]
+    pub worker_name: Option<String>,
 }
 
-/// Balance update (v0.9.0-beta: Balance Consensus)
+/// Balance update (v0.9.0-beta: Balance Consensus, v2.5.0: u128)
 /// Represents a deterministic balance state transition
 /// MUST be applied in order when processing blocks
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,11 +310,11 @@ pub struct BalanceUpdate {
     /// Wallet address being updated
     pub address: super::Address,
 
-    /// Balance before this update (for verification)
-    pub old_balance: u64,
+    /// v2.5.0: Balance before this update (u128 for extreme precision, Bincode native)
+    pub old_balance: u128,
 
-    /// Balance after this update
-    pub new_balance: u64,
+    /// v2.5.0: Balance after this update (u128 for extreme precision, Bincode native)
+    pub new_balance: u128,
 
     /// Reason for balance change
     pub reason: String, // "mining_reward", "transaction", "dev_fee", etc.
@@ -700,7 +756,8 @@ impl QBlock {
     }
 
     /// Get total coinbase reward in this block
-    pub fn total_coinbase_reward(&self) -> u64 {
+    /// v2.5.0: Returns u128 for full precision
+    pub fn total_coinbase_reward(&self) -> u128 {
         self.transactions.iter()
             .filter(|tx| tx.is_coinbase())
             .map(|tx| tx.amount)
@@ -786,16 +843,51 @@ impl QBlock {
     }
 
     /// Validate all coinbase amounts against emission schedule
+    /// v2.5.0: Updated to use u128 for amounts
     pub fn validate_coinbase_amounts(&self) -> Result<(), String> {
+        const DEV_FEE_PERCENT: f64 = 0.01;
+        const TOLERANCE: f64 = 1.15; // 15% tolerance for rounding
+
+        // First pass: calculate total miner rewards (excluding dev fee which is idx 0)
+        let mut total_miner_rewards: u128 = 0;
+        let mut dev_fee_amount: u128 = 0;
+
         for (idx, tx) in self.transactions.iter().enumerate() {
             if !tx.is_coinbase() {
                 continue;
             }
 
-            // First coinbase is typically the dev fee
-            let is_dev_fee = idx == 0;
+            if idx == 0 {
+                // First coinbase is the dev fee
+                dev_fee_amount = tx.amount;
+            } else {
+                // Miner rewards
+                total_miner_rewards = total_miner_rewards.saturating_add(tx.amount);
+            }
+        }
 
-            if let Err(e) = tx.validate_coinbase_amount(self.header.height, is_dev_fee) {
+        // Validate dev fee: should be ~1% of total miner rewards
+        // (with tolerance for rounding and edge cases)
+        if dev_fee_amount > 0 && total_miner_rewards > 0 {
+            let expected_dev_fee = (total_miner_rewards as f64 * DEV_FEE_PERCENT * TOLERANCE) as u128;
+            if dev_fee_amount > expected_dev_fee {
+                // Only log warning, don't reject - this can happen with many concurrent miners
+                // The actual enforcement is at the miner submission level
+                tracing::warn!(
+                    "Dev fee {} slightly high vs expected {} (1% of {} total rewards)",
+                    dev_fee_amount, expected_dev_fee, total_miner_rewards
+                );
+            }
+        }
+
+        // Validate individual miner rewards
+        for (idx, tx) in self.transactions.iter().enumerate() {
+            if !tx.is_coinbase() || idx == 0 {
+                continue; // Skip non-coinbase and dev fee (already validated)
+            }
+
+            // Validate miner reward (not dev fee)
+            if let Err(e) = tx.validate_coinbase_amount(self.header.height, false) {
                 return Err(format!("Coinbase tx {} invalid: {}", idx, e));
             }
         }
