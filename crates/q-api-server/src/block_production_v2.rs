@@ -1,4 +1,8 @@
 //! Block Production Loop v1.0.3-beta - Comprehensive Stall Protection
+//!
+//! v3.4.3-beta: CRITICAL FIX - Added balance processing after block save
+//! Previously, blocks saved here bypassed balance_consensus entirely!
+//! This caused P2P transactions to confirm but balances never update.
 
 use std::sync::{atomic::{AtomicU64, AtomicU8, Ordering}, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,6 +10,10 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 use serde_json::json;
 use crate::AppState;
+
+/// Display divisor for QUG amounts (1 QUG = 1e24 base units, 24 decimal precision)
+/// v3.6.1-beta: CRITICAL FIX - was incorrectly 1e9, causing balance display to be 1e15x too high!
+const QUG_DISPLAY_DIVISOR: f64 = 1e24;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +147,106 @@ async fn production_loop(
             match time::timeout(Duration::from_secs(30), app.storage_engine.save_qblock(blk)).await {
                 Ok(Ok(_)) => {
                     debug!("✅ Block saved: h={}, p={}", blk.header.height, pid);
+
+                    // 🚨 v3.4.3-beta: CRITICAL FIX - Process balance updates after block save!
+                    // Previously this entire code path skipped balance_consensus, causing
+                    // P2P transactions to confirm but balances never update.
+                    // See: Block 1648786 bug - transaction 69a6934385d82c47 confirmed but funds never arrived
+
+                    // 1. Process via balance_consensus for RocksDB persistence
+                    // Note: signature is (storage, block) - use &* to deref Arc
+                    match app.balance_consensus_engine.process_block_mining_rewards(
+                        &*app.storage_engine,
+                        blk
+                    ).await {
+                        Ok(updates) => {
+                            debug!("✅ [BLOCK_PROD_V2] Balance consensus processed block {} ({} updates)",
+                                   blk.header.height, updates.len());
+                        }
+                        Err(q_storage::BalanceConsensusError::AlreadyProcessed(_)) => {
+                            debug!("[BLOCK_PROD_V2] Block {} already processed (safe)", blk.header.height);
+                        }
+                        Err(e) => {
+                            error!("❌ [BLOCK_PROD_V2] Balance consensus failed for block {}: {:?}",
+                                   blk.header.height, e);
+                        }
+                    }
+
+                    // 2. Update in-memory wallet_balances for BOTH coinbase AND transfers
+                    let balance_updates = {
+                        let mut balances = app.wallet_balances.write().await;
+                        let mut updates = Vec::new();
+
+                        for tx in &blk.transactions {
+                            if tx.from == [0u8; 32] {
+                                // Coinbase transaction - credit recipient
+                                let current = balances.get(&tx.to).copied().unwrap_or(0);
+                                let new_balance = current + tx.amount;
+                                balances.insert(tx.to, new_balance);
+
+                                info!("💰 [BLOCK_PROD_V2] Coinbase: {} QUG → {} (balance: {} → {})",
+                                      tx.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                      hex::encode(&tx.to[..8]),
+                                      current as f64 / QUG_DISPLAY_DIVISOR,
+                                      new_balance as f64 / QUG_DISPLAY_DIVISOR);
+
+                                updates.push((tx.to, current, new_balance, "coinbase".to_string()));
+                            } else {
+                                // Transfer transaction - debit sender, credit receiver
+                                let sender_current = balances.get(&tx.from).copied().unwrap_or(0);
+                                let sender_new = sender_current.saturating_sub(tx.amount);
+                                balances.insert(tx.from, sender_new);
+
+                                let receiver_current = balances.get(&tx.to).copied().unwrap_or(0);
+                                let receiver_new = receiver_current.saturating_add(tx.amount);
+                                balances.insert(tx.to, receiver_new);
+
+                                info!("🔄 [BLOCK_PROD_V2] Transfer: {} QUG {} → {} (sender: {} → {}, receiver: {} → {})",
+                                      tx.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                      hex::encode(&tx.from[..8]),
+                                      hex::encode(&tx.to[..8]),
+                                      sender_current as f64 / QUG_DISPLAY_DIVISOR,
+                                      sender_new as f64 / QUG_DISPLAY_DIVISOR,
+                                      receiver_current as f64 / QUG_DISPLAY_DIVISOR,
+                                      receiver_new as f64 / QUG_DISPLAY_DIVISOR);
+
+                                updates.push((tx.from, sender_current, sender_new, "transfer_sent".to_string()));
+                                updates.push((tx.to, receiver_current, receiver_new, "transfer_received".to_string()));
+                            }
+                        }
+                        updates
+                    };
+
+                    // 3. Broadcast SSE balance update events
+                    for (wallet_addr, old_balance, new_balance, mut change_reason) in balance_updates {
+                        let wallet_addr_hex = hex::encode(wallet_addr);
+
+                        // Dev fee wallet gets special label
+                        const MASTER_ACCOUNT_HEX: &str =
+                            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                        if wallet_addr_hex == MASTER_ACCOUNT_HEX && change_reason == "coinbase" {
+                            change_reason = "DevelopmentFee".to_string();
+                        } else if change_reason == "coinbase" {
+                            change_reason = "mining_reward".to_string();
+                        }
+
+                        let wallet_with_prefix = format!("qnk{}", wallet_addr_hex);
+                        let balance_event = crate::streaming::StreamEvent::BalanceUpdated {
+                            wallet_address: wallet_with_prefix,
+                            old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
+                            new_balance: new_balance as f64 / QUG_DISPLAY_DIVISOR,
+                            change_reason,
+                            timestamp: chrono::Utc::now(),
+                            block_hash: Some(hex::encode(blk.calculate_hash())),
+                            block_height: Some(blk.header.height),
+                            confirmation_status: "confirmed".to_string(),
+                        };
+
+                        if let Err(e) = app.event_broadcaster.broadcast(balance_event).await {
+                            warn!("[BLOCK_PROD_V2] Failed to broadcast balance SSE for {}: {}",
+                                  &wallet_addr_hex[..16], e);
+                        }
+                    }
 
                     // ✨ v1.4.0-beta: Epoch boundary detection for recursive proofs
                     // Check if this block crosses an epoch boundary (every 1000 blocks)

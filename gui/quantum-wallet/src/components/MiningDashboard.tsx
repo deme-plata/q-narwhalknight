@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles } from 'lucide-react';
-import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent } from '../services/api';
+import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
 
 interface MiningStats {
   totalRewards: number;
@@ -47,6 +47,63 @@ export default function MiningDashboard() {
   // Use the same wallet as Dashboard - from localStorage
   const [walletAddress, setWalletAddress] = useState('');
 
+  // v3.4.21-beta: Track session rewards separately from total balance
+  // This prevents jumps caused by mixing local accumulation with backend absolute values
+  const [sessionRewardsTotal, setSessionRewardsTotal] = useState(0);
+  const initialBalanceRef = useRef<number | null>(null);
+
+  // v3.4.21-beta: Fetch authoritative balance from API
+  const fetchBalance = async () => {
+    if (!walletAddress) return;
+    try {
+      const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
+      if (balanceResponse.success && balanceResponse.data) {
+        const balance = balanceResponse.data.balance_qnk || 0;
+        console.log('💰 [MiningDashboard] Fetched authoritative balance from API:', balance);
+
+        // Store initial balance on first fetch
+        if (initialBalanceRef.current === null) {
+          initialBalanceRef.current = balance;
+          console.log('💰 [MiningDashboard] Set initial balance reference:', balance);
+        }
+
+        setStats(prev => ({
+          ...prev,
+          currentBalance: balance,
+          totalRewards: balance, // Total rewards = current balance (authoritative from API)
+        }));
+      }
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+    }
+  };
+
+  // v3.5.0-beta: Fetch mining stats from backend (blocks found, hash rate)
+  // This allows stats to survive page refresh instead of resetting to 0
+  const fetchMiningStats = async () => {
+    if (!walletAddress) return;
+    try {
+      const miningStatsResponse = await qnkAPI.getMiningStats(walletAddress);
+      if (miningStatsResponse.success && miningStatsResponse.data) {
+        const serverStats = miningStatsResponse.data;
+        console.log('⛏️ [MiningDashboard] Fetched mining stats from server:', serverStats);
+
+        setStats(prev => ({
+          ...prev,
+          blocksFound: serverStats.blocks_found,
+          avgHashRate: serverStats.hash_rate, // KH/s from server
+        }));
+
+        // Only log if there are actual mining stats
+        if (serverStats.blocks_found > 0 || serverStats.hash_rate > 0) {
+          console.log(`⛏️ [MiningDashboard] Restored: ${serverStats.blocks_found} blocks, ${serverStats.hash_rate.toFixed(2)} KH/s`);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch mining stats:', error);
+    }
+  };
+
   // Get wallet address from localStorage (same as Dashboard)
   useEffect(() => {
     const storedWallet = localStorage.getItem('walletAddress');
@@ -66,26 +123,18 @@ export default function MiningDashboard() {
 
     console.log('🔌 Connecting to SSE for wallet:', walletAddress);
 
-    // Fetch initial balance from persistent storage
-    const fetchInitialBalance = async () => {
-      try {
-        const balanceResponse = await qnkAPI.getWalletBalance(walletAddress);
-        if (balanceResponse.success && balanceResponse.data) {
-          const balance = balanceResponse.data.balance_qnk || 0;
-          console.log('💰 Loaded initial balance from storage:', balance);
-          // Initialize totalRewards with current balance (accumulated rewards so far)
-          setStats(prev => ({
-            ...prev,
-            currentBalance: balance,
-            totalRewards: balance, // Start with current balance as total accumulated
-          }));
-        }
-      } catch (error) {
-        console.error('Failed to fetch initial balance:', error);
-      }
-    };
+    // v3.4.21-beta: Fetch initial balance from API (single source of truth)
+    fetchBalance();
 
-    fetchInitialBalance();
+    // v3.5.0-beta: Fetch mining stats (blocks found, hash rate) from backend
+    // This restores stats on page refresh instead of starting from 0
+    fetchMiningStats();
+
+    // v3.4.21-beta: Refresh balance periodically to stay in sync with backend
+    const balanceRefreshInterval = setInterval(fetchBalance, 10000); // Every 10s
+
+    // v3.5.0-beta: Refresh mining stats periodically (every 30s)
+    const miningStatsInterval = setInterval(fetchMiningStats, 30000);
 
     // v1.1.9-beta: Fetch network hashrate on load and periodically
     fetchNetworkHashrate();
@@ -113,6 +162,8 @@ export default function MiningDashboard() {
         eventSourceRef.current.close();
       }
       clearInterval(networkHashrateInterval);
+      clearInterval(balanceRefreshInterval);
+      clearInterval(miningStatsInterval);
     };
   }, [walletAddress]);
 
@@ -137,30 +188,23 @@ export default function MiningDashboard() {
       return updated;
     });
 
-    // Update stats
-    setStats(prev => {
-      const newTotalRewards = prev.totalRewards + reward.reward_qnk;
+    // v3.4.21-beta: Track session rewards (small incremental values only)
+    // This is separate from total balance which comes from API
+    if (reward.reward_qnk > 0 && reward.reward_qnk < 10) { // Sanity check: individual rewards should be < 10 QUG
+      setSessionRewardsTotal(prev => prev + reward.reward_qnk);
+    }
 
-      // v2.9.1-beta: CRITICAL FIX - Propagate balance update to TopBar
-      // Update localStorage and dispatch event so TopBar updates in real-time
-      localStorage.setItem('cachedBalance', newTotalRewards.toString());
-      window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-        detail: {
-          symbol: 'QUG',
-          balance: newTotalRewards,
-          reason: 'mining_reward',
-          rewardAmount: reward.reward_qnk
-        }
-      }));
-      console.log('💰 [MiningDashboard] Propagated balance to TopBar:', newTotalRewards);
+    // v3.4.21-beta: Update hash rate and blocks found, but NOT balance
+    // Balance is fetched from API periodically to stay authoritative
+    setStats(prev => ({
+      ...prev,
+      blocksFound: prev.blocksFound + 1,
+      avgHashRate: reward.hash_rate > 0 ? reward.hash_rate : prev.avgHashRate,
+    }));
 
-      return {
-        ...prev,
-        totalRewards: newTotalRewards,
-        blocksFound: prev.blocksFound + 1,
-        avgHashRate: reward.hash_rate > 0 ? reward.hash_rate : prev.avgHashRate,
-      };
-    });
+    // v3.4.21-beta: Trigger a balance refresh from API after receiving a reward
+    // This ensures we show the authoritative balance, not a locally accumulated one
+    setTimeout(() => fetchBalance(), 500);
 
     // v3.3.4-beta: Track individual miners for hash rate breakdown
     const minerId = reward.miner_id || reward.miner_address.substring(0, 16);
@@ -210,104 +254,29 @@ export default function MiningDashboard() {
   };
 
   const handleBalanceUpdate = (update: BalanceUpdateEvent) => {
-    // v2.7.8-beta: EXTENSIVE DEBUGGING for P2P balance propagation
-    console.log('🔔 [MiningDashboard] handleBalanceUpdate CALLED with:', update);
-    console.log('🔔 [MiningDashboard] Current stats BEFORE update:', stats);
-    console.log('💰 Balance details:', {
+    // v3.4.21-beta: SIMPLIFIED - Just log and trigger API refresh
+    // We no longer try to accumulate locally - API is the single source of truth
+    console.log('🔔 [MiningDashboard] handleBalanceUpdate - triggering API refresh:', {
       wallet: update.wallet_address,
       old: update.old_balance,
       new: update.new_balance,
-      reason: update.change_reason,
-      diff: update.new_balance - update.old_balance
+      reason: update.change_reason
     });
 
-    // Check if this is a mining reward or development fee
-    // Backend sends: "mining_reward", "mining_reward_instant", "mining_reward_batch_X", "development_fee", "p2p_mining_reward", "pending_mining_reward"
-    // v2.7.6-beta: DON'T add to rewards list for mining_reward/mining_reward_instant - MiningReward event handles that
-    // Only add for P2P rewards which don't have a corresponding MiningReward event
-    const isP2PMiningReward = update.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
-                              update.change_reason === 'pending_mining_reward';  // v1.3.9-beta: Pending rewards via P2P gossipsub
-    const isLocalMiningReward = update.change_reason === 'MiningReward' ||
-                                update.change_reason === 'mining_reward' ||
-                                update.change_reason === 'mining_reward_instant' ||
-                                (update.change_reason && update.change_reason.startsWith('mining_reward_batch_'));
-    const isDevFee = update.change_reason === 'DevelopmentFee' ||
-                     update.change_reason === 'development_fee';
+    // Check if this is a P2P mining reward (needs to be added to rewards list since no MiningReward event)
+    const isP2PMiningReward = update.change_reason === 'p2p_mining_reward' ||
+                              update.change_reason === 'pending_mining_reward';
 
-    console.log('🔍 [MiningDashboard] Reason classification:', { isP2PMiningReward, isLocalMiningReward, isDevFee, reason: update.change_reason });
-
-    // v2.7.6-beta FIX: For local mining, MiningReward event already adds to rewards list with proper data (block_height, nonce, etc)
-    // Only add from BalanceUpdated for P2P rewards which don't have a MiningReward event
     if (isP2PMiningReward) {
-      // P2P mining rewards - add to rewards list (no MiningReward event for these)
+      // P2P mining rewards - add to rewards list for display only
       const rewardAmount = update.new_balance - update.old_balance;
-      console.log('⛏️  P2P Mining reward detected! Amount:', rewardAmount);
 
-      // Add to rewards list (for Recent Mining Rewards display)
-      // v2.7.6-beta: Use block_height from update if available (backend now sends it)
-      const rewardWithId: RewardWithAnimation = {
-        id: `${update.timestamp}-${Math.random()}`,
-        miner_address: update.wallet_address,
-        reward_qnk: rewardAmount,
-        nonce: 0, // Not available in P2P balance_updated event
-        block_height: (update as { block_height?: number }).block_height || 0,
-        difficulty: '0', // Not available in P2P balance_updated event
-        hash_rate: 0, // Not available in P2P balance_updated event
-        timestamp: update.timestamp,
-        isNew: true,
-      };
+      // Sanity check: individual rewards should be small (< 10 QUG)
+      if (rewardAmount > 0 && rewardAmount < 10) {
+        console.log('⛏️ [MiningDashboard] P2P Mining reward - adding to list:', rewardAmount);
 
-      setRewards(prev => {
-        const updated = [rewardWithId, ...prev].slice(0, 10); // Keep last 10
-        return updated;
-      });
-
-      // Remove animation flag after animation completes
-      setTimeout(() => {
-        setRewards(prev =>
-          prev.map(r => (r.id === rewardWithId.id ? { ...r, isNew: false } : r))
-        );
-      }, 1000);
-
-      // Update stats to include this reward
-      // v2.7.7-beta: CRITICAL FIX - Accumulate P2P rewards instead of using backend's stale new_balance!
-      // Backend sends stale database balance + one reward, never accumulating across multiple events
-      // Frontend must accumulate rewards to show correct running total
-      console.log('🚀 [MiningDashboard] UPDATING STATS for P2P reward! rewardAmount:', rewardAmount);
-      setStats(prev => {
-        const newTotalRewards = prev.totalRewards + rewardAmount;
-
-        // v2.9.1-beta: CRITICAL FIX - Propagate P2P balance update to TopBar
-        localStorage.setItem('cachedBalance', newTotalRewards.toString());
-        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-          detail: {
-            symbol: 'QUG',
-            balance: newTotalRewards,
-            reason: 'p2p_mining_reward',
-            rewardAmount: rewardAmount
-          }
-        }));
-        console.log('💰 [MiningDashboard] Propagated P2P balance to TopBar:', newTotalRewards);
-
-        const newStats = {
-          ...prev,
-          currentBalance: prev.currentBalance + rewardAmount, // Accumulate instead of using stale backend value
-          totalRewards: newTotalRewards,
-          blocksFound: prev.blocksFound + 1,
-        };
-        console.log('🚀 [MiningDashboard] Stats AFTER P2P update:', newStats);
-        return newStats;
-      });
-    } else if (isLocalMiningReward || isDevFee) {
-      // v3.3.4-beta: Track miners from balance updates as fallback
-      // If MiningReward event is filtered (wallet mismatch), this ensures we still track miners
-      const rewardAmount = update.new_balance - update.old_balance;
-      console.log('💰 Local mining balance update:', rewardAmount);
-
-      // v3.3.4-beta: Add to rewards list as fallback (in case MiningReward event was filtered)
-      if (rewardAmount > 0 && !isDevFee) {
         const rewardWithId: RewardWithAnimation = {
-          id: `balance-${update.timestamp}-${Math.random()}`,
+          id: `p2p-${update.timestamp}-${Math.random()}`,
           miner_address: update.wallet_address,
           reward_qnk: rewardAmount,
           nonce: 0,
@@ -318,111 +287,37 @@ export default function MiningDashboard() {
           isNew: true,
         };
 
-        setRewards(prev => {
-          // Check if we already have this reward from MiningReward event (prevent duplicates)
-          const isDuplicate = prev.some(r =>
-            Math.abs(r.reward_qnk - rewardAmount) < 0.00000001 &&
-            new Date(r.timestamp).getTime() > Date.now() - 5000
-          );
-          if (isDuplicate) {
-            console.log('🔄 Skipping duplicate reward entry');
-            return prev;
-          }
-          const updated = [rewardWithId, ...prev].slice(0, 10);
-          return updated;
-        });
+        setRewards(prev => [rewardWithId, ...prev].slice(0, 10));
+        setSessionRewardsTotal(prev => prev + rewardAmount);
+        setStats(prev => ({ ...prev, blocksFound: prev.blocksFound + 1 }));
 
-        // Remove animation flag after animation completes
         setTimeout(() => {
-          setRewards(prev =>
-            prev.map(r => (r.id === rewardWithId.id ? { ...r, isNew: false } : r))
-          );
+          setRewards(prev => prev.map(r => r.id === rewardWithId.id ? { ...r, isNew: false } : r));
         }, 1000);
-
-        // v3.3.4-beta: Track miner from balance update
-        const minerId = update.wallet_address.replace(/^qnk/, '').substring(0, 16);
-        setMiners(prev => {
-          const newMiners = new Map(prev);
-          const existing = newMiners.get(minerId);
-          newMiners.set(minerId, {
-            minerId,
-            workerName: null, // No worker name from balance updates
-            hashRate: existing?.hashRate || 0,
-            lastSeen: new Date(),
-            blocksFound: (existing?.blocksFound || 0) + 1,
-            totalRewards: (existing?.totalRewards || 0) + rewardAmount,
-          });
-          console.log('⛏️ [MiningDashboard] Tracked miner from balance update:', minerId);
-          return newMiners;
-        });
       }
-
-      setStats(prev => {
-        const newTotalRewards = prev.totalRewards + rewardAmount;
-
-        // v2.9.1-beta: CRITICAL FIX - Propagate local mining balance update to TopBar
-        localStorage.setItem('cachedBalance', newTotalRewards.toString());
-        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-          detail: {
-            symbol: 'QUG',
-            balance: newTotalRewards,
-            reason: update.change_reason,
-            rewardAmount: rewardAmount
-          }
-        }));
-        console.log('💰 [MiningDashboard] Propagated local mining balance to TopBar:', newTotalRewards);
-
-        return {
-          ...prev,
-          currentBalance: update.new_balance,
-          totalRewards: newTotalRewards,
-          blocksFound: prev.blocksFound + 1,
-        };
-      });
-    } else {
-      // Non-mining balance update - just update balance
-      setStats(prev => ({
-        ...prev,
-        currentBalance: update.new_balance,
-      }));
     }
+
+    // v3.4.21-beta: Trigger API refresh to get authoritative balance
+    // This is the ONLY place we update the displayed balance
+    fetchBalance();
   };
 
   const handleMiningStats = (statsUpdate: MiningStatsEvent) => {
-    console.log('📊 Mining stats received:', statsUpdate);
-    console.log('📊 Stats details:', {
+    // v3.4.21-beta: SIMPLIFIED - Only update hashrate, let API handle balance
+    console.log('📊 [MiningDashboard] Mining stats received:', {
       miner: statsUpdate.miner_address,
-      total_rewards: statsUpdate.total_rewards,
-      blocks_found: statsUpdate.total_blocks_found,
-      balance: statsUpdate.current_balance,
       hash_rate: statsUpdate.avg_hash_rate,
       miner_id: statsUpdate.miner_id,
       worker_id: statsUpdate.worker_id
     });
 
-    // Update all stats from backend (preserve network hashrate)
-    // v2.9.1-beta: Also propagate to TopBar for real-time display
-    const newTotalRewards = statsUpdate.total_rewards;
-    localStorage.setItem('cachedBalance', newTotalRewards.toString());
-    window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-      detail: {
-        symbol: 'QUG',
-        balance: newTotalRewards,
-        reason: 'mining_stats_update'
-      }
-    }));
-    console.log('📊 [MiningDashboard] Propagated stats balance to TopBar:', newTotalRewards);
-
+    // Only update hashrate - balance comes from API
     setStats(prev => ({
-      totalRewards: statsUpdate.total_rewards,
-      blocksFound: statsUpdate.total_blocks_found,
-      currentBalance: statsUpdate.current_balance,
+      ...prev,
       avgHashRate: statsUpdate.avg_hash_rate,
-      networkHashRate: prev.networkHashRate, // Keep network hashrate from separate fetch
     }));
 
-    // v3.2.25-beta: Track individual miners using miner_id or worker_id
-    // This enables showing multiple miners with their individual hashrates
+    // Track individual miners for hash rate breakdown
     if (statsUpdate.worker_id || statsUpdate.miner_id) {
       const minerId = statsUpdate.miner_id || statsUpdate.worker_id || 'unknown';
       setMiners(prev => {
@@ -434,13 +329,12 @@ export default function MiningDashboard() {
           workerName: statsUpdate.worker_id || null,
           hashRate: statsUpdate.avg_hash_rate,
           lastSeen: new Date(),
-          blocksFound: statsUpdate.total_blocks_found,
-          totalRewards: existing?.totalRewards || 0, // Keep accumulated rewards
+          blocksFound: existing?.blocksFound || 0,
+          totalRewards: existing?.totalRewards || 0,
         });
 
-        console.log('⛏️ [MiningDashboard] Updated miner from stats:', {
+        console.log('⛏️ [MiningDashboard] Updated miner hashrate:', {
           minerId,
-          worker_id: statsUpdate.worker_id,
           hashRate: statsUpdate.avg_hash_rate,
           totalMiners: newMiners.size
         });
@@ -494,8 +388,9 @@ export default function MiningDashboard() {
     (sum, miner) => sum + miner.hashRate,
     0
   );
-  // Use total miner hash rate if we have miners, otherwise fall back to stats.avgHashRate
-  const displayHashRate = miners.size > 0 ? totalMinerHashRate : stats.avgHashRate;
+  // v3.5.4-beta: Use maximum of API-reported hashrate and SSE-tracked miners
+  // SSE events may have hash_rate=0, but API endpoint calculates from solution timestamps
+  const displayHashRate = Math.max(totalMinerHashRate, stats.avgHashRate);
 
   if (!walletAddress) {
     return (

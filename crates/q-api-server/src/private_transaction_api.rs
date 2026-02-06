@@ -271,6 +271,11 @@ pub async fn create_private_transaction(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     let mut tx_pool = state.tx_pool.write().await;

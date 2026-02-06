@@ -17,6 +17,36 @@ import AIWorkerDemo from './components/AIWorkerDemo';
 import AnimatedBorder from './components/AnimatedBorder';
 import './App.css';
 
+// v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
+// Any balance exceeding this is corrupted data and must be rejected
+const MAX_SANE_BALANCE = 21_000_000; // 21 million QUG
+
+/**
+ * v3.6.1-beta: Validate balance value to prevent corrupted data from being stored
+ * Returns true if the balance is sane, false if it's corrupted
+ */
+function isValidBalance(balance: number): boolean {
+  if (typeof balance !== 'number') return false;
+  if (isNaN(balance) || !isFinite(balance)) return false;
+  if (balance < 0) return false;
+  if (balance > MAX_SANE_BALANCE) {
+    console.warn(`🚨 [App] Rejected corrupted balance: ${balance.toExponential()} > max supply ${MAX_SANE_BALANCE}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * v3.6.1-beta: Safe localStorage set for cachedBalance - validates before storing
+ */
+function safeCacheBalance(balance: number): void {
+  if (isValidBalance(balance)) {
+    localStorage.setItem('cachedBalance', balance.toString());
+  } else {
+    console.warn(`🚨 [App] safeCacheBalance: Refusing to cache invalid balance: ${balance}`);
+  }
+}
+
 type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
 
 function App() {
@@ -67,11 +97,15 @@ function App() {
   // CRITICAL FIX v0.9.44-beta: Initialize balance from cached value for instant display
   // This prevents balance showing as zero while waiting for API/SSE
   // 🚨 v2.3.7-beta: Handle NaN from parseFloat and ensure valid number
+  // v3.6.1-beta: Add sanity check for max balance to prevent corrupted values
   const [nodeData, setNodeData] = useState(() => {
     const cachedBalance = localStorage.getItem('cachedBalance');
     let initialBalance = cachedBalance ? parseFloat(cachedBalance) : 0;
-    // Guard against NaN - parseFloat returns NaN for invalid strings
-    if (isNaN(initialBalance) || !isFinite(initialBalance)) {
+    // Guard against NaN and corrupted values - parseFloat returns NaN for invalid strings
+    if (!isValidBalance(initialBalance)) {
+      console.warn(`🚨 [App] Rejecting corrupted cached balance: ${initialBalance}`);
+      // Clear corrupted cache
+      if (cachedBalance) localStorage.removeItem('cachedBalance');
       initialBalance = 0;
     }
     console.log('⚡ App.tsx: Initializing balance from cache:', {
@@ -141,7 +175,7 @@ function App() {
         increase: pendingBalanceUpdate - nodeData.balance
       });
       setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
-      localStorage.setItem('cachedBalance', pendingBalanceUpdate.toString());
+      safeCacheBalance(pendingBalanceUpdate);
       setPendingBalanceUpdate(null);
       return;
     }
@@ -168,7 +202,7 @@ function App() {
         source: 'debounced-50ms'
       });
       setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
-      localStorage.setItem('cachedBalance', pendingBalanceUpdate.toString());
+      safeCacheBalance(pendingBalanceUpdate);
       setPendingBalanceUpdate(null);
     }, 50);  // v2.9.24-beta: Reduced from 300ms to 50ms for faster UX
 
@@ -269,6 +303,12 @@ function App() {
         const newBalance = customEvent.detail.balance;
         const source = customEvent.detail?.source || '';
 
+        // v3.6.1-beta: Validate balance before processing
+        if (!isValidBalance(newBalance)) {
+          console.warn(`🚨 [App] Rejecting invalid balance-update event: ${newBalance} (source: ${source})`);
+          return;
+        }
+
         // v2.3.13-beta: Track DEX swaps to block SSE from overwriting
         const isDexSwap = source.includes('DexScreen.swap');
         if (isDexSwap) {
@@ -276,9 +316,14 @@ function App() {
           console.log('🔒 App.tsx: DEX swap detected, blocking SSE balance updates for 10 seconds');
 
           // v2.3.13-beta: For DEX swaps, update IMMEDIATELY without debounce
+          // v3.6.1-beta: Validate balance before accepting
+          if (!isValidBalance(newBalance)) {
+            console.warn(`🚨 [App] DEX swap balance rejected - invalid value: ${newBalance}`);
+            return;
+          }
           console.log('🔥 App.tsx: DEX SWAP - Force updating TopBar balance to:', newBalance);
           setNodeData(prev => ({ ...prev, balance: newBalance }));
-          localStorage.setItem('cachedBalance', newBalance.toString());
+          safeCacheBalance(newBalance);
 
           // Clear the flag after 10 seconds
           setTimeout(() => {
@@ -819,7 +864,15 @@ function App() {
     localStorage.removeItem('walletSeed');
     localStorage.removeItem('walletAddress');
     localStorage.removeItem('walletData');
-    localStorage.removeItem('faucetTransactions'); // Clear transaction history
+    localStorage.removeItem('faucetTransactions');
+    // v3.9.2-beta: Clear ALL balance/token caches to prevent stale data on new login
+    localStorage.removeItem('cachedBalance');
+    localStorage.removeItem('dexLockedBalance');
+    localStorage.removeItem('dexCooldownUntil');
+    localStorage.removeItem('protectedTokenBalances');
+    localStorage.removeItem('customTokensCooldownUntil');
+    localStorage.removeItem('customTokensCache');
+    localStorage.removeItem('authToken');
     // Reset the current screen to dashboard
     setCurrentScreen('dashboard');
     // Reset node data
@@ -835,14 +888,13 @@ function App() {
 
   if (!authenticated) {
     console.log('🔓 Rendering LoginScreen');
+    // v3.4.2-beta: Login page gets full quality - no frame, always show QuantumBackground
     return (
-      <AnimatedBorder>
-        <div className="min-h-full relative overflow-hidden" style={{ background: 'transparent' }}>
-          {/* v2.4.0: Skip QuantumBackground in performance mode */}
-          {!performanceMode && <QuantumBackground />}
-          <LoginScreen onAuthenticate={() => setAuthenticated(true)} />
-        </div>
-      </AnimatedBorder>
+      <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-slate-950 via-blue-950 to-slate-900">
+        {/* Always show QuantumBackground on login for best visual quality */}
+        <QuantumBackground />
+        <LoginScreen onAuthenticate={() => setAuthenticated(true)} />
+      </div>
     );
   }
 
@@ -879,6 +931,7 @@ function App() {
             peers={nodeData.peers}
             isOnline={nodeData.isOnline}
             qci={nodeData.qci}
+            onNavigate={setCurrentScreen}
           />
 
           {/* Token Bar - Below TopBar */}

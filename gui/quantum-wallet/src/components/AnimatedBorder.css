@@ -105,15 +105,27 @@
   }
 }
 
-/* Mobile landscape */
-@media (max-width: 768px) {
+/* Smaller tablets - slightly reduced padding before hiding frame */
+@media (max-width: 900px) and (min-width: 769px) {
   .animated-border-container > .border-content {
     padding: 10vh 4vw 5vh 4vw;
   }
 }
 
-/* Hide borders on very small screens */
-@media (max-width: 480px) {
+/* Hide borders on mobile devices (768px and below) */
+@media (max-width: 768px) {
+  .border-frame,
+  .border-glow {
+    display: none;
+  }
+
+  .animated-border-container > .border-content {
+    padding: 0;
+  }
+}
+
+/* Also hide for touch devices (ensures tablets in portrait are covered) */
+@media (pointer: coarse) {
   .border-frame,
   .border-glow {
     display: none;

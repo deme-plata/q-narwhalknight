@@ -341,7 +341,7 @@ async fn get_quantum_market_data(
         current_price: "1.618".parse().unwrap(),
         volume_24h: BigDecimal::from(100000),
         liquidity: BigDecimal::from(1000000),
-        price_change_24h: 5.5,
+        price_change_24h_bps: 550, // 5.5%
         high_24h: "1.7".parse().unwrap(),
         low_24h: "1.5".parse().unwrap(),
         trades_count: 1234,
@@ -507,7 +507,7 @@ async fn get_wave_functions() -> Result<Json<serde_json::Value>, StatusCode> {
 async fn get_privacy_statistics() -> Result<Json<QuantumPrivacyStats>, StatusCode> {
     let stats = QuantumPrivacyStats {
         total_private_trades: 1000,
-        zk_proof_success_rate: 0.999,
+        zk_proof_success_rate_bps: 9990, // 99.9%
         tor_circuits_used: 42,
         privacy_level_distribution: {
             let mut map = std::collections::HashMap::new();

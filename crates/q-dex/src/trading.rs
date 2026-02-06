@@ -93,8 +93,8 @@ pub struct QuantumTradingParameters {
     pub decoherence_time_seconds: u64,
     /// Maximum allowed leverage with quantum risk management
     pub max_quantum_leverage: f64,
-    /// Quantum-enhanced liquidation threshold
-    pub quantum_liquidation_threshold: f64,
+    /// Quantum-enhanced liquidation threshold in basis points (e.g., 8000 = 80%)
+    pub quantum_liquidation_threshold_bps: u16,
 }
 
 impl Default for QuantumTradingParameters {
@@ -109,7 +109,7 @@ impl Default for QuantumTradingParameters {
             entanglement_strength: 0.707,  // √2/2
             decoherence_time_seconds: 300, // 5 minutes
             max_quantum_leverage: 10.0,
-            quantum_liquidation_threshold: 0.8,
+            quantum_liquidation_threshold_bps: 8000, // 80%
         }
     }
 }
@@ -121,11 +121,26 @@ pub struct QuantumExecutionStats {
     pub quantum_enhanced_trades: u64,
     pub wave_function_collapses: u64,
     pub entangled_trade_pairs: u64,
-    pub average_execution_time_ms: f64,
-    pub quantum_slippage_reduction: f64,
+    /// Total execution time in milliseconds (avoids f64 accumulation precision loss)
+    /// Use `average_execution_time_ms()` to get the computed average on-demand
+    pub total_execution_time_ms: u64,
+    /// Quantum slippage reduction in basis points (e.g., 618 = 6.18%)
+    pub quantum_slippage_reduction_bps: u16,
     pub privacy_enhanced_trades: u64,
     pub zk_proof_validations: u64,
     pub last_stats_update: DateTime<Utc>,
+}
+
+impl QuantumExecutionStats {
+    /// Calculate average execution time on-demand to avoid f64 accumulation errors
+    #[inline]
+    pub fn average_execution_time_ms(&self) -> f64 {
+        if self.total_trades_executed == 0 {
+            0.0
+        } else {
+            self.total_execution_time_ms as f64 / self.total_trades_executed as f64
+        }
+    }
 }
 
 impl QuantumTradingEngine {
@@ -427,10 +442,9 @@ impl QuantumTradingEngine {
             stats.zk_proof_validations += 1;
         }
 
-        // Update average execution time
-        let total_time = stats.average_execution_time_ms * (stats.total_trades_executed - 1) as f64;
-        stats.average_execution_time_ms =
-            (total_time + result.execution_time_ms) / stats.total_trades_executed as f64;
+        // Accumulate total execution time (precision-safe u64 accumulation)
+        // Average is computed on-demand via stats.average_execution_time_ms()
+        stats.total_execution_time_ms += result.execution_time_ms as u64;
 
         stats.last_stats_update = Utc::now();
 
@@ -563,7 +577,7 @@ mod tests {
             order_type: OrderType::Market,
             privacy_level: QuantumPrivacyTier::Basic,
             zk_proof_required: false,
-            max_slippage: 0.005,
+            max_slippage_bps: 50, // 0.5%
             expires_at: None,
             quantum_signature: vec![0u8; 64],
             entanglement_proof: None,

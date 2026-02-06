@@ -212,6 +212,85 @@ pub fn get_external_address() -> Option<Multiaddr> {
     }
 }
 
+/// Parse and validate WebSocket Secure (WSS) external address from environment
+///
+/// This is critical for browser P2P clients that connect via nginx WSS proxy.
+/// Format: /dns4/quillon.xyz/tcp/9443/wss
+///
+/// The peer ID will be appended automatically by the caller.
+pub fn get_external_wss_address() -> Option<Multiaddr> {
+    match std::env::var("Q_EXTERNAL_WSS_ADDRESS") {
+        Ok(addr_str) if !addr_str.is_empty() => {
+            match addr_str.parse::<Multiaddr>() {
+                Ok(addr) => {
+                    info!("🌐 [EXTERNAL-WSS] Configured external WSS address for browser P2P: {}", addr);
+                    Some(addr)
+                }
+                Err(e) => {
+                    warn!("⚠️ [EXTERNAL-WSS] Failed to parse Q_EXTERNAL_WSS_ADDRESS '{}': {}", addr_str, e);
+                    None
+                }
+            }
+        }
+        _ => {
+            // Fallback: Try to derive from Q_EXTERNAL_ADDRESS if it's a DNS address
+            if let Some(tcp_addr) = get_external_address() {
+                // Check if it's a DNS-based address we can convert
+                let addr_str = tcp_addr.to_string();
+                if addr_str.contains("/dns4/") || addr_str.contains("/dns6/") {
+                    // Try to construct WSS address from TCP address
+                    // /dns4/quillon.xyz/tcp/9001 -> /dns4/quillon.xyz/tcp/9443/wss
+                    if let Some(wss_addr) = derive_wss_address(&tcp_addr) {
+                        info!("🌐 [EXTERNAL-WSS] Derived WSS address from TCP: {}", wss_addr);
+                        return Some(wss_addr);
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Derive a WSS address from a TCP address by replacing port with 9443 and adding /wss
+fn derive_wss_address(tcp_addr: &Multiaddr) -> Option<Multiaddr> {
+    use std::fmt::Write;
+
+    let mut result = String::new();
+    let mut found_tcp = false;
+
+    for protocol in tcp_addr.iter() {
+        match protocol {
+            Protocol::Dns(host) => {
+                write!(result, "/dns4/{}", host).ok()?;
+            }
+            Protocol::Dns4(host) => {
+                write!(result, "/dns4/{}", host).ok()?;
+            }
+            Protocol::Dns6(host) => {
+                write!(result, "/dns6/{}", host).ok()?;
+            }
+            Protocol::Tcp(_port) => {
+                // Replace with WSS port 9443
+                write!(result, "/tcp/9443/wss").ok()?;
+                found_tcp = true;
+            }
+            Protocol::P2p(peer_id) => {
+                // Preserve peer ID if present
+                write!(result, "/p2p/{}", peer_id).ok()?;
+            }
+            _ => {
+                // Skip other protocols like /ws, /wss, /ip4, etc.
+            }
+        }
+    }
+
+    if found_tcp && !result.is_empty() {
+        result.parse().ok()
+    } else {
+        None
+    }
+}
+
 /// Log the current filter configuration at startup
 pub fn log_filter_configuration() {
     let filter_enabled = std::env::var("Q_FILTER_DOCKER_ADDRESSES")
@@ -223,6 +302,7 @@ pub fn log_filter_configuration() {
         .unwrap_or(false);
 
     let external_addr = std::env::var("Q_EXTERNAL_ADDRESS").ok();
+    let external_wss_addr = std::env::var("Q_EXTERNAL_WSS_ADDRESS").ok();
 
     if filter_enabled {
         info!("🔍 [ADDR-FILTER] Docker/container address filtering: ENABLED");
@@ -233,10 +313,18 @@ pub fn log_filter_configuration() {
         warn!("⚠️ [ADDR-FILTER] Address filtering DISABLED - may experience Docker sync issues");
     }
 
-    if let Some(addr) = external_addr {
-        info!("📢 [EXTERNAL] External address: {}", addr);
+    if let Some(ref addr) = external_addr {
+        info!("📢 [EXTERNAL-TCP] External TCP address: {}", addr);
     } else {
-        info!("📢 [EXTERNAL] No external address configured (auto-detection via Identify)");
+        info!("📢 [EXTERNAL-TCP] No external TCP address configured (auto-detection via Identify)");
+    }
+
+    if let Some(ref addr) = external_wss_addr {
+        info!("🌐 [EXTERNAL-WSS] External WSS address for browser P2P: {}", addr);
+    } else if external_addr.is_some() {
+        info!("🌐 [EXTERNAL-WSS] Will derive WSS address from TCP external address");
+    } else {
+        info!("🌐 [EXTERNAL-WSS] No browser P2P address configured (set Q_EXTERNAL_WSS_ADDRESS)");
     }
 }
 

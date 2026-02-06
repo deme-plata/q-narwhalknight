@@ -12621,7 +12621,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "candle-core 0.9.2-alpha.2",
@@ -12644,7 +12644,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "apodize",
@@ -12654,7 +12654,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "accelerate-src",
  "ahash 0.8.12",
@@ -12756,7 +12756,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12777,7 +12777,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-paged-attn"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
@@ -12792,7 +12792,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-quant"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
@@ -12820,7 +12820,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "candle-core 0.9.2-alpha.2",
  "image 0.25.8",
@@ -15965,7 +15965,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15984,7 +15984,7 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
@@ -16033,7 +16033,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "argon2",
@@ -16052,6 +16052,7 @@ dependencies = [
  "candle-core 0.9.2-alpha.2",
  "chrono",
  "clap 4.5.51",
+ "colored 2.2.0",
  "config",
  "core_affinity",
  "crossbeam",
@@ -16074,6 +16075,7 @@ dependencies = [
  "multer 3.1.0",
  "num_cpus",
  "once_cell",
+ "parking_lot 0.12.5",
  "pdf-extract",
  "pin-project-lite",
  "postcard",
@@ -16087,6 +16089,7 @@ dependencies = [
  "q-crypto-advanced",
  "q-crypto-simd",
  "q-dag-knight",
+ "q-dandelion",
  "q-dex",
  "q-governance",
  "q-ipfs-storage",
@@ -16148,8 +16151,10 @@ name = "q-benchmarks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode 1.3.3",
  "chrono",
  "criterion 0.5.1",
+ "ed25519-dalek",
  "procfs",
  "q-narwhal-core",
  "q-network",
@@ -16204,7 +16209,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16234,7 +16239,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -16262,7 +16267,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16333,7 +16338,7 @@ dependencies = [
 
 [[package]]
 name = "q-crypto-advanced"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "aegis",
  "anyhow",
@@ -16399,7 +16404,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16427,22 +16432,26 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base32",
  "bincode 1.3.3",
  "blake3",
+ "chrono",
  "futures",
  "hex",
  "libp2p 0.56.0",
  "proptest",
  "q-lattice-vrf",
+ "q-network",
  "q-quantum-rng",
  "q-tor-client",
  "q-types",
  "rand 0.9.2",
  "serde",
+ "sha3 0.10.8",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -16451,7 +16460,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16486,7 +16495,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16619,7 +16628,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16706,7 +16715,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16882,16 +16891,18 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
  "bincode 1.3.3",
  "chrono",
+ "dashmap 5.5.3",
  "ed25519-dalek",
  "futures",
  "hex",
  "libp2p 0.56.0",
+ "parking_lot 0.12.5",
  "proptest",
  "q-crypto-advanced",
  "q-lattice-vrf",
@@ -16927,7 +16938,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17012,7 +17023,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17044,7 +17055,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "backoff",
@@ -17075,16 +17086,21 @@ dependencies = [
  "bincode 1.3.3",
  "blake3",
  "chrono",
+ "ed25519-dalek",
  "futures",
  "hex",
  "q-narwhal-core",
  "q-types",
  "q-vm",
+ "rocksdb",
  "serde",
  "serde_json",
+ "sha3 0.10.8",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
+ "tracing",
  "uuid 1.18.1",
 ]
 
@@ -17171,15 +17187,18 @@ dependencies = [
  "curve25519-dalek",
  "dashmap 6.1.0",
  "ed25519-dalek",
+ "frost-ristretto255",
  "getrandom 0.2.16",
  "hex",
  "humantime 2.3.0",
+ "merlin",
  "num-bigint",
  "num-traits",
  "num_cpus",
  "parking_lot 0.12.5",
  "pqcrypto-dilithium",
  "pqcrypto-kyber 0.7.9",
+ "pqcrypto-traits",
  "proptest",
  "q-quantum-rng",
  "q-storage",
@@ -17208,7 +17227,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17237,7 +17256,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17272,7 +17291,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17338,7 +17357,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17476,7 +17495,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17506,7 +17525,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17534,7 +17553,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -17559,6 +17578,7 @@ dependencies = [
  "lru",
  "lz4",
  "memmap2 0.9.9",
+ "parking_lot 0.12.5",
  "postcard",
  "prometheus",
  "proptest",
@@ -17630,7 +17650,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17650,16 +17670,19 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "arti-client",
  "async-trait",
+ "base32",
  "bincode 1.3.3",
  "futures",
  "getrandom 0.2.16",
  "hex",
  "libp2p 0.56.0",
+ "pqcrypto-dilithium",
+ "pqcrypto-traits",
  "prometheus",
  "proptest",
  "q-quantum-rng",
@@ -17669,6 +17692,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.8",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-socks",
@@ -17682,7 +17706,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "bytes",
@@ -17724,7 +17748,7 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -17746,6 +17770,7 @@ dependencies = [
  "rand 0.9.2",
  "rpassword",
  "serde",
+ "serde_bytes",
  "serde_cbor",
  "serde_json",
  "sha3 0.10.8",
@@ -17758,7 +17783,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17790,7 +17815,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -17851,6 +17876,8 @@ dependencies = [
  "once_cell",
  "parity-scale-codec",
  "parking_lot 0.12.5",
+ "pqcrypto-dilithium",
+ "pqcrypto-traits",
  "pretty_env_logger",
  "priority-queue 1.4.0",
  "prometheus",
@@ -17867,6 +17894,7 @@ dependencies = [
  "rocksdb",
  "serde",
  "serde-big-array 0.4.1",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.8",
@@ -17889,7 +17917,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "2.3.5-beta"
+version = "3.9.3-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -26,11 +26,17 @@ let API_BASE_URL = getApiBaseUrl();
     timeout: 2000,
   });
 
-  if (result.success && result.url) {
-    const newBaseUrl = result.url + '/api';
-    if (newBaseUrl !== API_BASE_URL) {
-      console.log(`✅ [API] Auto-discovered node at ${result.url}, updating API base URL`);
-      API_BASE_URL = newBaseUrl;
+  if (result.success) {
+    // v3.4.15: Handle .onion sites with empty URL (use relative path)
+    if (result.url === '') {
+      console.log('🧅 [API] Tor hidden service detected, using relative /api path');
+      API_BASE_URL = '/api';
+    } else if (result.url) {
+      const newBaseUrl = result.url + '/api';
+      if (newBaseUrl !== API_BASE_URL) {
+        console.log(`✅ [API] Auto-discovered node at ${result.url}, updating API base URL`);
+        API_BASE_URL = newBaseUrl;
+      }
     }
   } else {
     console.warn('⚠️ [API] Node auto-discovery failed, using default URL:', API_BASE_URL);
@@ -40,10 +46,16 @@ let API_BASE_URL = getApiBaseUrl();
 // v1.0.53: Listen for node discovery events (in case discovery happens after initial load)
 if (typeof window !== 'undefined') {
   onNodeDiscovered((result) => {
-    if (result.success && result.url) {
-      const newBaseUrl = result.url + '/api';
-      console.log(`🔄 [API] Node discovered event received, updating to: ${newBaseUrl}`);
-      API_BASE_URL = newBaseUrl;
+    if (result.success) {
+      // v3.4.15: Handle .onion sites with empty URL
+      if (result.url === '') {
+        console.log('🧅 [API] Tor hidden service event, using relative /api path');
+        API_BASE_URL = '/api';
+      } else if (result.url) {
+        const newBaseUrl = result.url + '/api';
+        console.log(`🔄 [API] Node discovered event received, updating to: ${newBaseUrl}`);
+        API_BASE_URL = newBaseUrl;
+      }
     }
   });
 }
@@ -138,7 +150,31 @@ let globalPasswordPrompt: (() => Promise<string>) | null = null;
  */
 export function setPasswordPrompt(promptFn: (() => Promise<string>) | null) {
   globalPasswordPrompt = promptFn;
-  console.log('Password prompt registered:', !!promptFn);
+  console.log('🔐 Password prompt registered:', !!promptFn);
+}
+
+/**
+ * v3.6.12-beta: Wait for password prompt modal to be available
+ * Instead of immediately falling back to browser window.prompt, we wait for React to mount
+ * This prevents the triple-prompt bug (2x browser + 1x modal)
+ */
+async function waitForPasswordPrompt(timeoutMs: number = 3000): Promise<(() => Promise<string>) | null> {
+  if (globalPasswordPrompt) {
+    return globalPasswordPrompt;
+  }
+
+  // Wait for modal to be registered (React needs time to mount)
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (globalPasswordPrompt) {
+      console.log('🔐 Password modal became available after', Date.now() - startTime, 'ms');
+      return globalPasswordPrompt;
+    }
+  }
+
+  console.warn('⚠️ Password modal not available after', timeoutMs, 'ms timeout');
+  return null;
 }
 
 export interface MnemonicResponse {
@@ -167,6 +203,26 @@ export interface FeeEstimate {
   gas_units: string;        // Gas units required
   congestion: number;       // Network congestion (0.0 - 1.0)
   tx_type: string;          // Transaction type parsed
+}
+
+// v3.5.8-beta: Unified transaction entry (for wallet history)
+// Includes regular transfers, DEX swaps, custom token transfers
+export interface UnifiedTransactionEntry {
+  id: string;                     // Transaction ID/hash
+  tx_type: string;                // "transfer", "swap", "token_transfer", "mining_reward"
+  timestamp: number;              // Unix seconds
+  block_height: number;           // Block where confirmed
+  amount: string;                 // Amount (for transfers) or input amount (for swaps)
+  from: string;                   // Sender address
+  to: string;                     // Recipient address or pool_id (for swaps)
+  token_symbol?: string;          // Token symbol (QUG, custom tokens)
+  token_address?: string;         // Token contract address (for custom tokens)
+  amount_out?: string;            // Swap-specific: output amount
+  token_in?: string;              // Swap-specific: input token address
+  token_out?: string;             // Swap-specific: output token address
+  status: string;                 // "confirmed" (always confirmed - on-chain)
+  direction: string;              // "sent", "received", "swap" (relative to queried wallet)
+  memo?: string;                  // v3.9.6: Optional memo/message attached to transaction
 }
 
 // v3.4.0-beta: Fee reduction info for UI display
@@ -218,6 +274,16 @@ export interface NetworkSupply {
   timestamp: string;
 }
 
+// v3.5.0-beta: Wallet-specific mining statistics (survives page refresh)
+export interface WalletMiningStats {
+  wallet: string;
+  blocks_found: number;    // Total blocks mined by this wallet
+  hash_rate: number;       // Current hash rate in KH/s
+  total_workers: number;   // Number of workers mining to this wallet
+  last_activity_secs: number; // Seconds since last mining activity
+  is_active: boolean;      // True if mined in last 5 minutes
+}
+
 // v2.3.8-beta: QUGUSD Stablecoin Vault Stats (real CDP data)
 export interface VaultStats {
   total_qug_locked: number;     // QUG locked as collateral (base units)
@@ -252,6 +318,46 @@ export interface HashpowerSecurityData {
     adaptive_vdf_complexity: boolean;
     mining_randomness_beacon: boolean;
   };
+}
+
+// v3.4.8-beta: Resonance Hybrid Mode consensus metrics
+// Compares DAG-Knight (primary) with Quillon Resonance (complementary)
+export interface ResonanceMetrics {
+  version: string;
+  mode: string; // "hybrid" | "shadow" | "shadow_not_initialized"
+  description: string;
+  metrics: {
+    total_rounds: number;
+    agreement_rounds: number;
+    agreement_rate: number;
+    total_transactions: number;
+    matching_transactions: number;
+    primary_latency_ms: number;
+    shadow_latency_ms: number;
+    primary_byzantine_detected: number;
+    shadow_byzantine_detected: number;
+    resonance_weight: number;
+    migration_recommended: boolean;
+  } | null;
+  engines?: {
+    primary: {
+      name: string;
+      algorithm: string;
+      weight: number;
+    };
+    complementary: {
+      name: string;
+      algorithm: string;
+      features: string[];
+      weight: number;
+    };
+  };
+  visualization?: {
+    harmony_score: number;
+    energy_state: string; // "resonant" | "harmonizing" | "divergent"
+    spectral_health: string; // "clean" | "anomalies_detected"
+  };
+  reason?: string; // For error states
 }
 
 export interface WalletData {
@@ -345,8 +451,12 @@ class QNarwhalKnightAPI {
                   // v3.0.7-beta: Filter out HTML error pages (like nginx 404/502)
                   // Don't display raw HTML to users
                   if (errorText.includes('<html') || errorText.includes('<!DOCTYPE') || errorText.includes('<body')) {
-                    // v2.3.0: Provide user-friendly error messages based on status code
+                    // v3.6.8-beta: Auto-retry on 502/503/504 (server overload)
                     if (response.status === 502 || response.status === 503 || response.status === 504) {
+                      if (attempt < retries) {
+                        console.warn(`⚠️ [${response.status}] Server overloaded, retrying... (attempt ${attempt + 1}/${retries + 1})`);
+                        continue; // Retry the request
+                      }
                       errorMessage = 'The server is temporarily unavailable or processing heavy load. Please wait a moment and try again.';
                     } else if (response.status === 404) {
                       errorMessage = 'The requested resource was not found. Please refresh the page and try again.';
@@ -453,9 +563,27 @@ class QNarwhalKnightAPI {
               if (data.mnemonic) {
                 console.log('🔐 [AUTH DEBUG] "Never expire" enabled - restoring session from stored mnemonic');
                 const keyPair = await keypairFromMnemonic(data.mnemonic);
-                walletSession.setSession(keyPair.privateKey, keyPair.address, data.mnemonic);
+
+                // v3.7.4: Also restore Dilithium5 keys if present in stored session
+                const dilithium5SecretKey = data.dilithium5SecretKey
+                  ? new Uint8Array(data.dilithium5SecretKey)
+                  : undefined;
+                const dilithium5PublicKey = data.dilithium5PublicKey
+                  ? new Uint8Array(data.dilithium5PublicKey)
+                  : undefined;
+
+                walletSession.setSession(
+                  keyPair.privateKey,
+                  keyPair.address,
+                  data.mnemonic,
+                  dilithium5SecretKey,
+                  dilithium5PublicKey
+                );
                 session = { privateKey: keyPair.privateKey, address: keyPair.address, mnemonic: data.mnemonic };
                 console.log('✅ [AUTH DEBUG] Session auto-restored for "Never expire" user');
+                if (dilithium5SecretKey) {
+                  console.log('✅ [AUTH DEBUG] Dilithium5 post-quantum keys restored');
+                }
               }
             }
           } catch (restoreError) {
@@ -494,9 +622,30 @@ class QNarwhalKnightAPI {
               };
             }
           }
-          // Fallback to browser prompt if no modal available
+          // v3.6.12-beta: Wait for modal to be available instead of browser prompt
           else {
-            password = prompt('Enter wallet password to sign request:');
+            const modalPrompt = await waitForPasswordPrompt(3000);
+            if (modalPrompt) {
+              try {
+                password = await modalPrompt();
+              } catch (error) {
+                return {
+                  success: false,
+                  data: null,
+                  error: 'Authentication cancelled by user',
+                  timestamp: new Date().toISOString(),
+                };
+              }
+            } else {
+              // If modal still not available after waiting, return error instead of browser prompt
+              console.error('❌ Password modal not initialized. Please refresh the page.');
+              return {
+                success: false,
+                data: null,
+                error: 'Password modal not ready. Please refresh the page and try again.',
+                timestamp: new Date().toISOString(),
+              };
+            }
           }
 
           if (!password) {
@@ -511,13 +660,29 @@ class QNarwhalKnightAPI {
           try {
             const wallet = await loadWallet(password);
             // For "never expire", also store the mnemonic for future auto-restore
+            // v3.7.4: Also include Dilithium5 keys for post-quantum P2P signing
             if (sessionTimeout === 'never') {
               const mnemonic = await recoverMnemonic(password);
-              walletSession.setSession(wallet.privateKey, wallet.address, mnemonic);
+              walletSession.setSession(
+                wallet.privateKey,
+                wallet.address,
+                mnemonic,
+                wallet.dilithium5SecretKey,
+                wallet.dilithium5PublicKey
+              );
             } else {
-              walletSession.setSession(wallet.privateKey, wallet.address);
+              walletSession.setSession(
+                wallet.privateKey,
+                wallet.address,
+                undefined,
+                wallet.dilithium5SecretKey,
+                wallet.dilithium5PublicKey
+              );
             }
             session = { privateKey: wallet.privateKey, address: wallet.address };
+            if (wallet.dilithium5SecretKey) {
+              console.log('✅ Dilithium5 post-quantum keys loaded into session');
+            }
           } catch (error) {
             return {
               success: false,
@@ -626,6 +791,12 @@ class QNarwhalKnightAPI {
     return this.request<NetworkSupply>('/v1/network/supply');
   }
 
+  // v3.5.0-beta: Get wallet-specific mining statistics (blocks found, hash rate)
+  // This allows mining stats to survive page refresh
+  async getMiningStats(walletAddress: string): Promise<ApiResponse<WalletMiningStats>> {
+    return this.request<WalletMiningStats>(`/v1/mining/stats/${encodeURIComponent(walletAddress)}`);
+  }
+
   // v2.3.8-beta: Get QUGUSD stablecoin vault statistics (real CDP data)
   async getVaultStats(): Promise<ApiResponse<VaultStats>> {
     return this.request<VaultStats>('/v1/stablecoin/vault/stats');
@@ -634,6 +805,12 @@ class QNarwhalKnightAPI {
   // Get hashpower-weighted security metrics (v1.3.0-beta)
   async getHashpowerSecurity(): Promise<ApiResponse<HashpowerSecurityData>> {
     return this.request<HashpowerSecurityData>('/v1/security/hashpower');
+  }
+
+  // v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
+  // Compares DAG-Knight (primary) with Quillon Resonance (complementary) consensus
+  async getResonanceMetrics(): Promise<ApiResponse<ResonanceMetrics>> {
+    return this.request<ResonanceMetrics>('/v1/consensus/resonance');
   }
 
   // v1.4.15-beta: Get startup progress for DAG integrity check display
@@ -754,27 +931,23 @@ class QNarwhalKnightAPI {
           const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
           const passwordRequester = getGlobalPasswordRequester();
 
-          if (!passwordRequester) {
-            // Fallback to window.prompt if context not available
-            const password = window.prompt('🔒 Enter your password to continue:');
-            if (!password) {
-              return {
-                success: false,
-                data: null,
-                error: 'Password required to decrypt wallet. Transaction cancelled.',
-                timestamp: new Date().toISOString(),
-              };
-            }
+          // v3.6.12-beta: Wait for modal instead of using browser prompt
+          const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
 
-            // Manual recovery with window.prompt
-            const { recoverMnemonic } = await import('./walletAuth');
-            mnemonic = await recoverMnemonic(password);
-            console.log('✅ Mnemonic recovered from encrypted storage (fallback)');
-          } else {
-            // Use modal to request password
-            mnemonic = await passwordRequester();
-            console.log('✅ Mnemonic recovered via modal');
+          if (!actualRequester) {
+            // If modal still not available, return error instead of browser prompt
+            console.error('❌ Password modal not initialized for mnemonic recovery');
+            return {
+              success: false,
+              data: null,
+              error: 'Password modal not ready. Please refresh the page and try again.',
+              timestamp: new Date().toISOString(),
+            };
           }
+
+          // Use modal to request password
+          mnemonic = await actualRequester();
+          console.log('✅ Mnemonic recovered via modal');
         } catch (error) {
           return {
             success: false,
@@ -802,30 +975,24 @@ class QNarwhalKnightAPI {
           const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
           const passwordRequester = getGlobalPasswordRequester();
 
-          if (!passwordRequester) {
-            // Fallback to window.prompt if context not available
-            const password = window.prompt('🔒 Session expired. Enter your password to continue:');
-            if (!password) {
-              return {
-                success: false,
-                data: null,
-                error: 'Password required to decrypt wallet. Transaction cancelled.',
-                timestamp: new Date().toISOString(),
-              };
-            }
+          // v3.6.12-beta: Wait for modal instead of using browser prompt
+          const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
 
-            // Manual recovery with window.prompt
-            const { recoverMnemonic, walletSession, keypairFromMnemonic } = await import('./walletAuth');
-            mnemonic = await recoverMnemonic(password);
-            const keyPair = await keypairFromMnemonic(mnemonic);
-            walletSession.setSession(keyPair.privateKey, keyPair.address, mnemonic);
-            console.log('✅ Mnemonic recovered and session created (fallback)');
-          } else {
-            // Use modal to request password
-            // The SessionTimeoutContext handles decryption and session restoration internally
-            mnemonic = await passwordRequester();
-            console.log('✅ Mnemonic recovered via modal');
+          if (!actualRequester) {
+            // If modal still not available, return error instead of browser prompt
+            console.error('❌ Password modal not initialized for session recovery');
+            return {
+              success: false,
+              data: null,
+              error: 'Password modal not ready. Please refresh the page and try again.',
+              timestamp: new Date().toISOString(),
+            };
           }
+
+          // Use modal to request password
+          // The SessionTimeoutContext handles decryption and session restoration internally
+          mnemonic = await actualRequester();
+          console.log('✅ Mnemonic recovered via modal');
         } catch (error) {
           return {
             success: false,
@@ -869,8 +1036,12 @@ class QNarwhalKnightAPI {
         }
         console.log('🔐 Mnemonic found for Ed25519 signing:', mnemonic.split(' ').length, 'words');
         const keyPair = await keypairFromMnemonic(mnemonic);
+        // v3.7.4: For Dilithium5 keys, we need the full wallet load (which has encrypted PQ keys)
+        // This fallback path only has Ed25519 keys from mnemonic
+        // P2P transactions will use ephemeral Dilithium5 keys if persistent ones aren't available
         walletSession.setSession(keyPair.privateKey, keyPair.address);
         activeSession = { privateKey: keyPair.privateKey, address: keyPair.address };
+        console.log('⚠️ Session created with Ed25519 only (no persistent Dilithium5 keys)');
       }
 
       // Use Ed25519 authentication for transaction
@@ -1003,12 +1174,18 @@ class QNarwhalKnightAPI {
 
   /**
    * Get current network height (for checking fee reduction activation)
+   * v3.6.12: Fixed to read from correct path - upgrades.current_height
    */
   async getNetworkHeight(): Promise<number> {
     try {
       const response = await this.request<any>('/v1/status');
       if (response.success && response.data) {
-        return response.data.current_height || 0;
+        // Height is in upgrades.current_height, not at top level
+        const height = response.data.upgrades?.current_height ||
+                       response.data.current_height ||
+                       0;
+        console.log('📊 [API] Network height:', height);
+        return height;
       }
       return 0;
     } catch (error) {
@@ -1337,10 +1514,44 @@ class QNarwhalKnightAPI {
     return await this.authenticatedRequest<any[]>(`/v1/transactions/recent?limit=${limit}&wallet_address=${walletAddress}`);
   }
 
+  // v3.5.8-beta: Get unified wallet transaction history (decentralized, no auth required)
+  // Includes: regular transfers, DEX swaps, custom token transfers
+  // All data is consensus-verified and available on all nodes
+  async getWalletHistory(walletAddress: string, limit = 100): Promise<ApiResponse<UnifiedTransactionEntry[]>> {
+    // Remove qnk prefix if present
+    const cleanAddress = walletAddress.startsWith('qnk') ? walletAddress.slice(3) : walletAddress;
+    console.log('📜 [v3.5.8] Fetching unified transaction history for wallet:', cleanAddress.slice(0, 16) + '...');
+
+    // This endpoint is PUBLIC (no auth needed) - data is on-chain and verified by all nodes
+    return this.request<UnifiedTransactionEntry[]>(`/v1/wallet/${cleanAddress}/history?limit=${limit}`);
+  }
+
+  // v3.4.2: Get transaction by hash - uses authenticated request to unlock ZK-STARK encrypted data
+  // Only sender/receiver can see full transaction details (from, to, amount, fee)
+  async getTransactionByHash(txHash: string): Promise<ApiResponse<any>> {
+    console.log('🔍 Looking up transaction by hash:', txHash);
+    // Remove any tx_ prefix if present
+    const cleanHash = txHash.replace(/^tx_/i, '');
+    // v3.4.2: Use authenticatedRequest to include X-Wallet-Auth header for ZK privacy unlocking
+    return this.authenticatedRequest<any>(`/v1/transactions/${cleanHash}`);
+  }
+
   // Get contract/token information by address
   async getContractInfo(contractAddress: string): Promise<ApiResponse<any>> {
     console.log('🔍 Fetching contract info for address:', contractAddress);
     return this.request<any>(`/v1/contracts/${contractAddress}`);
+  }
+
+  // v3.4.20: Get contract transaction history (Polygonscan-style)
+  async getContractTransactions(contractAddress: string, limit: number = 20): Promise<ApiResponse<any[]>> {
+    console.log('🔍 Fetching contract transactions for:', contractAddress, 'limit:', limit);
+    return this.request<any[]>(`/v1/contracts/${contractAddress}/transactions?limit=${limit}`);
+  }
+
+  // v3.4.20: Get contract holders list
+  async getContractHolders(contractAddress: string, limit: number = 50): Promise<ApiResponse<any[]>> {
+    console.log('🔍 Fetching contract holders for:', contractAddress, 'limit:', limit);
+    return this.request<any[]>(`/v1/contracts/${contractAddress}/holders?limit=${limit}`);
   }
 
   // Get token balance for a specific address and token contract

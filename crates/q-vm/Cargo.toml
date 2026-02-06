@@ -71,6 +71,11 @@ chrono = { version = "0.4", features = ["serde"] }
 bip39 = "2.0"
 blake3 = { workspace = true }
 
+# v3.7.4: Post-quantum cryptography for contract deployment signatures
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-traits = { workspace = true }
+serde_bytes = "0.11"
+
 # For metrics (marked as optional)
 prometheus = { version = "0.13.3", optional = true }
 

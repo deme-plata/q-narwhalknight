@@ -6,7 +6,7 @@
 /// v2.3.7-beta: TurboSync get_local_height() fix - use contiguous height, not latest stored
 /// v2.3.6-beta: Sync cooldown fix - use contiguous height for gap detection post-sync
 /// v2.3.5-beta: Sync activation fix + hashrate flickering fix
-pub const VERSION: &str = "v2.4.0-beta";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
 // DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
@@ -14,6 +14,8 @@ pub const VERSION: &str = "v2.4.0-beta";
 use q_network::NetworkManager;
 use q_storage::{StorageConfig, StorageEngine};
 use q_tor_client::QTorClient; // Re-enabled for consensus integration
+// 🌻 v2.5.0-beta: Dandelion++ for mandatory Tor-based transaction anonymity
+use q_dandelion::{QuantumDandelion, DandelionConfig, NetworkBridge, NetworkBridgeConfig};
 use q_types::*;
 use q_types::upgrades::UpgradeManager;
 use q_wallet::{MemoryWalletStore, WalletManager};
@@ -63,6 +65,10 @@ pub mod instant_mining_rewards;
 // ✨ v1.4.0-beta: Recursive SNARKs for eliminating weak subjectivity
 // Post-quantum recursive proofs enable ~10ms trustless bootstrap for new nodes
 pub mod recursive_proofs_api;
+
+// ✨ v3.4.16-beta: Automatic ZK privacy proofs - ALL transactions get maximum privacy by default
+// Users don't choose privacy levels - best privacy is always applied automatically
+pub mod privacy_proof_generator;
 
 // Sharding System
 use q_sharding::{ShardConfig, ShardMetrics, ShardingEngine, ShardingStrategy};
@@ -271,6 +277,7 @@ pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.
 pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
 pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
 pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
+pub mod price_history_indexer; // ✅ v3.7.1-beta: Consensus-verified price history indexer
 pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
 pub mod stake_weighted_finality; // ✅ v1.4.11-beta: Stake-weighted finality with PoW+PoS hybrid security
 pub mod pool_api; // ✅ v2.2.1-beta: Stratum mining pool HTTP API
@@ -595,12 +602,21 @@ impl Default for SupplyConsensusState {
 #[derive(Debug, Clone)]
 pub struct MinerStats {
     pub address: String,
-    pub last_hashrate: f64, // KH/s
+    pub last_hashrate: f64, // H/s (v3.5.6-beta: changed from KH/s to H/s for frontend compatibility)
     pub last_update: std::time::Instant,
     pub total_solutions: u64,
     /// v3.3.4-beta: Worker identifier to distinguish multiple miners to same wallet
     /// Format: "direct" for local submissions, "p2p:NODE_ID" for P2P relayed, or custom worker_name
     pub worker_id: String,
+    /// v3.5.3-beta: Track recent solution timestamps for accurate hashrate calculation
+    /// Stores up to 100 recent solution timestamps for rolling hashrate computation
+    pub solution_timestamps: Vec<std::time::Instant>,
+    /// v3.5.7-beta: Track actual blocks found per worker (not just solutions submitted)
+    /// Incremented when a mining solution results in a block being added to the chain
+    pub blocks_found: u64,
+    /// v3.5.7-beta: Track total rewards earned per worker in base units (1e-24 QUG)
+    /// Allows comparing profitability between different mining rigs
+    pub rewards_earned: u128,
 }
 
 /// v3.2.12-beta: Serde helper for Option<u128> to string serialization
@@ -655,7 +671,7 @@ mod u128_string_option {
 pub struct P2PMinerStatsUpdate {
     /// Miner wallet address (qnk...)
     pub miner_address: String,
-    /// Current hashrate in KH/s
+    /// Current hashrate in H/s (v3.5.6-beta: changed from KH/s for frontend compatibility)
     pub hashrate_khs: f64,
     /// Total solutions found by this miner
     pub total_solutions: u64,
@@ -663,6 +679,10 @@ pub struct P2PMinerStatsUpdate {
     pub timestamp: u64,
     /// Node ID that originated this update (for deduplication)
     pub origin_node_id: String,
+    /// v3.5.6-beta: Worker ID to distinguish multiple miners to same wallet
+    /// Format: "direct", "miner1", "p2p:NODE_ID", etc.
+    #[serde(default)]
+    pub worker_id: Option<String>,
     /// v1.3.8-beta: Pending reward from latest mining submission (QUG base units)
     /// This is for UI display ONLY - actual balance updates via DAG-Knight consensus
     /// when the block with coinbase transaction is committed.
@@ -674,6 +694,13 @@ pub struct P2PMinerStatsUpdate {
     /// v3.2.12-beta: Use string serialization for u128 (JSON can't handle >2^53 integers)
     #[serde(default, with = "u128_string_option")]
     pub session_pending_total: Option<u128>,
+    /// v3.5.7-beta: Actual blocks found by this worker (not just solutions submitted)
+    #[serde(default)]
+    pub blocks_found: u64,
+    /// v3.5.7-beta: Total rewards earned by this worker in base units (1e-24 QUG)
+    /// v3.5.7-beta: Use string serialization for u128 (JSON can't handle >2^53 integers)
+    #[serde(default, with = "u128_string_option")]
+    pub rewards_earned: Option<u128>,
 }
 
 /// v2.2.1: Batched miner stats update to prevent gossipsub queue saturation
@@ -719,24 +746,109 @@ impl MiningStatistics {
 
     /// v3.3.4-beta: Update miner with specific worker identifier
     /// worker_id: "direct" for local, "p2p:NODE_ID" for P2P relayed
-    pub fn update_miner_with_worker(&mut self, miner_address: String, hash_rate: f64, worker_id: String) {
+    /// v3.5.3-beta: Calculate hashrate from solution submissions instead of client-reported values
+    /// v3.5.4-beta: Returns the calculated hashrate for use in SSE events
+    /// v3.9.3-beta: Added memory management - caps entries and resets counters periodically
+    pub fn update_miner_with_worker(&mut self, miner_address: String, hash_rate: f64, worker_id: String) -> f64 {
         // Use composite key: address:worker_id to track miners separately
         let key = format!("{}:{}", miner_address, worker_id);
+        let now = std::time::Instant::now();
+
+        // v3.9.3-beta: Periodic cleanup to prevent memory leak (every 30 seconds)
+        if now.duration_since(self.last_cleanup).as_secs() > 30 {
+            // Remove miners inactive for more than 5 minutes
+            self.active_miners
+                .retain(|_, stats| now.duration_since(stats.last_update).as_secs() < 300);
+
+            // v3.9.3-beta: Reset total counters every hour to prevent u64 overflow and keep metrics fresh
+            // Counters can be reconstructed from active_miners if needed
+            if self.total_solutions_submitted > 10_000_000 {
+                tracing::info!("🧹 [MEMORY] Resetting mining stats counters (submitted: {}, accepted: {})",
+                    self.total_solutions_submitted, self.total_solutions_accepted);
+                self.total_solutions_submitted = 0;
+                self.total_solutions_accepted = 0;
+                // Also reset per-miner total_solutions to prevent memory bloat in stats
+                for stats in self.active_miners.values_mut() {
+                    stats.total_solutions = stats.total_solutions.min(100_000); // Cap at 100K
+                }
+            }
+
+            self.last_cleanup = now;
+            tracing::debug!("🧹 [MEMORY] Mining stats cleanup: {} active miners", self.active_miners.len());
+        }
+
+        // v3.9.3-beta: Cap maximum number of tracked miners to prevent unbounded growth
+        const MAX_TRACKED_MINERS: usize = 500;
+        if self.active_miners.len() >= MAX_TRACKED_MINERS && !self.active_miners.contains_key(&key) {
+            // Remove the oldest inactive miner to make room
+            if let Some(oldest_key) = self.active_miners
+                .iter()
+                .min_by_key(|(_, stats)| stats.last_update)
+                .map(|(k, _)| k.clone())
+            {
+                self.active_miners.remove(&oldest_key);
+            }
+        }
+
         let stats = self
             .active_miners
             .entry(key)
             .or_insert(MinerStats {
                 address: miner_address,
                 last_hashrate: 0.0,
-                last_update: std::time::Instant::now(),
+                last_update: now,
                 total_solutions: 0,
                 worker_id: worker_id.clone(),
+                solution_timestamps: Vec::with_capacity(120), // Pre-allocate for ~2 solutions/sec
+                blocks_found: 0,      // v3.5.7-beta: Track actual blocks found
+                rewards_earned: 0,    // v3.5.7-beta: Track rewards in base units
             });
 
-        stats.last_hashrate = hash_rate;
-        stats.last_update = std::time::Instant::now();
+        // v3.5.3-beta: Track solution timestamp for hashrate calculation
+        stats.solution_timestamps.push(now);
+
+        // Keep only solutions from last 60 seconds for hashrate calculation
+        let sixty_secs_ago = now - std::time::Duration::from_secs(60);
+        stats.solution_timestamps.retain(|&t| t > sixty_secs_ago);
+
+        // v3.9.3-beta: Cap solution_timestamps to prevent unbounded growth (max ~120 for 2/sec)
+        if stats.solution_timestamps.len() > 200 {
+            stats.solution_timestamps.drain(0..100);
+        }
+
+        // Calculate hashrate from recent solutions
+        // Each solution represents approximately 2^20 hashes (difficulty baseline)
+        // Hashrate (H/s) = solutions * difficulty_factor / time_window
+        let solutions_in_window = stats.solution_timestamps.len() as f64;
+        let time_window_secs = 60.0; // Use 60 second window
+
+        // Difficulty factor: each valid solution represents ~1M hashes on average at base difficulty
+        // Adjust this based on actual network difficulty
+        let difficulty_factor = 1_000_000.0; // 1M hashes per solution at base difficulty
+
+        // v3.5.6-beta FIX: Calculate hashrate in H/s (frontend formatHashRate expects H/s)
+        // Frontend auto-converts: >= 1M H/s → MH/s, >= 1K H/s → KH/s
+        let calculated_hashrate = (solutions_in_window * difficulty_factor) / time_window_secs;
+
+        // v3.5.6-beta FIX: Convert miner-reported KH/s to H/s before comparison
+        // Miners send hashrate in KH/s (e.g., 1000 KH/s = 1 MH/s)
+        // Calculated hashrate is in H/s (e.g., 1000000 H/s = 1 MH/s)
+        let hash_rate_hs = hash_rate * 1000.0; // Convert KH/s to H/s
+
+        // Use client-reported hashrate if provided and higher, otherwise use calculated
+        // This allows miners that report accurate hashrate to show it, while fixing miners that don't
+        stats.last_hashrate = if hash_rate_hs > calculated_hashrate {
+            hash_rate_hs
+        } else {
+            calculated_hashrate
+        };
+
+        stats.last_update = now;
         stats.total_solutions += 1;
         self.total_solutions_submitted += 1;
+
+        // v3.5.4-beta: Return the calculated/effective hashrate for SSE events
+        stats.last_hashrate
     }
 
     /// Calculate total network hash rate from active miners
@@ -768,9 +880,13 @@ impl MiningStatistics {
     /// v1.0.88-beta: Update miner stats from P2P network
     /// Called when receiving miner stats from remote nodes (users mining to localhost)
     pub fn update_from_p2p(&mut self, update: &P2PMinerStatsUpdate) {
-        // v3.3.4-beta: Use composite key with P2P node ID as worker identifier
-        let worker_id = format!("p2p:{}", &update.origin_node_id[..12.min(update.origin_node_id.len())]);
+        // v3.5.6-beta: Use worker_id from P2P update if available (preserves original worker name)
+        // Fallback to p2p:{node_id} for compatibility with older nodes
+        let worker_id = update.worker_id.clone().unwrap_or_else(|| {
+            format!("p2p:{}", &update.origin_node_id[..12.min(update.origin_node_id.len())])
+        });
         let key = format!("{}:{}", update.miner_address, worker_id);
+        let now = std::time::Instant::now();
 
         let stats = self
             .active_miners
@@ -778,21 +894,70 @@ impl MiningStatistics {
             .or_insert(MinerStats {
                 address: update.miner_address.clone(),
                 last_hashrate: 0.0,
-                last_update: std::time::Instant::now(),
+                last_update: now,
                 total_solutions: 0,
                 worker_id: worker_id.clone(),
+                solution_timestamps: Vec::new(),
+                blocks_found: 0,      // v3.5.7-beta: Track actual blocks found
+                rewards_earned: 0,    // v3.5.7-beta: Track rewards in base units
             });
 
         // Update with P2P data - use max hashrate to avoid stale data overwriting
         if update.hashrate_khs > stats.last_hashrate ||
-           std::time::Instant::now().duration_since(stats.last_update).as_secs() > 30 {
+           now.duration_since(stats.last_update).as_secs() > 30 {
             stats.last_hashrate = update.hashrate_khs;
-            stats.last_update = std::time::Instant::now();
+            stats.last_update = now;
         }
 
         // Track total solutions (use max to avoid counting same solutions twice)
         if update.total_solutions > stats.total_solutions {
             stats.total_solutions = update.total_solutions;
+        }
+
+        // v3.5.7-beta: Track blocks found and rewards earned from P2P
+        if update.blocks_found > stats.blocks_found {
+            stats.blocks_found = update.blocks_found;
+        }
+        if let Some(rewards) = update.rewards_earned {
+            if rewards > stats.rewards_earned {
+                stats.rewards_earned = rewards;
+            }
+        }
+    }
+
+    /// v3.5.7-beta: Record a block being found by a specific worker
+    /// Called when a mining solution results in a block being added to the chain
+    pub fn record_block_found(&mut self, miner_address: &str, worker_id: &str, reward_amount: u128) {
+        let key = format!("{}:{}", miner_address, worker_id);
+        if let Some(stats) = self.active_miners.get_mut(&key) {
+            stats.blocks_found += 1;
+            stats.rewards_earned += reward_amount;
+            tracing::info!(
+                "🏆 [MINING] Block found by {}:{} - total blocks: {}, total rewards: {} QUG",
+                &miner_address[..16.min(miner_address.len())],
+                worker_id,
+                stats.blocks_found,
+                stats.rewards_earned as f64 / 1e24
+            );
+        } else {
+            // Worker not found in stats - try to find any worker for this address
+            for (k, stats) in self.active_miners.iter_mut() {
+                if k.starts_with(miner_address) {
+                    stats.blocks_found += 1;
+                    stats.rewards_earned += reward_amount;
+                    tracing::info!(
+                        "🏆 [MINING] Block found by {} (matched via address) - total blocks: {}, total rewards: {} QUG",
+                        &miner_address[..16.min(miner_address.len())],
+                        stats.blocks_found,
+                        stats.rewards_earned as f64 / 1e24
+                    );
+                    return;
+                }
+            }
+            tracing::warn!(
+                "⚠️ [MINING] Block found but miner {}:{} not in active stats",
+                miner_address, worker_id
+            );
         }
     }
 
@@ -893,6 +1058,12 @@ pub struct AppState {
     // DEACTIVATED: pub bep44_discovery: Option<Arc<tokio::sync::Mutex<q_bep44_discovery::DiscoveryEngine>>>,
     pub bep44_discovery: Option<Arc<()>>, // DEACTIVATED placeholder
     pub tor_client: Option<Arc<QTorClient>>,
+
+    // 🌻 v2.5.0-beta: Dandelion++ for mandatory Tor-based transaction anonymity
+    // All transactions route through stem→fluff phases for IP unlinkability
+    // Tor is NOT opt-in - it's always enabled for transaction propagation
+    pub dandelion: Option<Arc<QuantumDandelion>>,
+
     pub network_manager: Option<Arc<q_network::NetworkManager>>,
     pub production_peer_discovery:
         Option<Arc<tokio::sync::Mutex<q_network::real_peer_discovery::RealPeerDiscovery>>>,
@@ -1035,6 +1206,11 @@ pub struct AppState {
     // Indexes swap transactions from finalized blocks for trustless cross-node agreement
     pub swap_indexer: Arc<swap_indexer::SwapIndexer>,
 
+    // v3.7.1-beta: Consensus-Verified Price History Indexer - Persistent price history
+    // Derives prices from on-chain swap exchange rates, stored in RocksDB CF_PRICE_HISTORY
+    // All nodes compute identical prices from identical blocks → Decentralized price consensus
+    pub price_history_indexer: Arc<price_history_indexer::PriceHistoryIndexer>,
+
     // v2.3.8-beta: Volume Tracker - Rolling 24h volume per token (token_id -> (timestamp, volume))
     // Each entry is a tuple of (unix_timestamp_millis, volume_in_usd)
     pub volume_tracker: Arc<RwLock<HashMap<String, Vec<(i64, f64)>>>>,
@@ -1168,6 +1344,11 @@ pub struct AppState {
     // Used to verify spectral signatures on incoming blocks
     pub validator_key_registry: Arc<RwLock<q_types::ValidatorKeyRegistry>>,
 
+    // 🏛️ v3.9.5-beta: Dynamic Validator Registry for P2P decentralization
+    // Tracks registered validators with stake, endpoints, and status
+    // Used for: balance update verification, dynamic bootstrap peer discovery
+    pub validator_registry: Arc<RwLock<q_types::validator_registry::ValidatorRegistry>>,
+
     // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Breaks "stuck at genesis" deadlock
     // Forces sync after timeout even when network_height=0 (no peer announcements received)
     // Solves: Node stuck at 12,923 waiting forever for gossipsub peer height announcements
@@ -1238,6 +1419,17 @@ pub struct AppState {
     pub emergency_paused: Arc<std::sync::atomic::AtomicBool>,
     pub emergency_pause_reason: Arc<RwLock<Option<String>>>,
     pub emergency_pause_timestamp: Arc<std::sync::atomic::AtomicU64>,
+
+    // 📬 v3.9.1-beta: BANK MESSAGING SYSTEM - User-Bank Communication
+    // Enables bidirectional messaging between loan holders and Quillon Bank
+    // Messages are stored in-memory with RocksDB persistence via CF_MANIFEST
+    pub bank_messages: Arc<RwLock<Vec<quillon_bank_api::BankMessage>>>,
+
+    // 🪪 v3.9.1-beta: DECENTRALIZED IDENTITY SYSTEM - VM-Backed User Profiles
+    // User identity records with KYC levels, beneficiary addresses, and death certificates
+    // Enables account inheritance and estate planning on the blockchain
+    pub user_identities: Arc<RwLock<Vec<quillon_bank_api::UserIdentity>>>,
+    pub death_certificates: Arc<RwLock<Vec<quillon_bank_api::DeathCertificate>>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1561,6 +1753,48 @@ impl AppState {
             }
         }
 
+        // v3.9.5-beta: One-time restore of token balances destroyed by MAX_SANE_BALANCE bug
+        // The old code had a hardcoded 1e31 threshold that was too low for 24-decimal tokens,
+        // causing balances >10M tokens to be permanently reset to zero in RocksDB.
+        {
+            let restore_wallet: [u8; 32] = {
+                let mut arr = [0u8; 32];
+                if let Ok(bytes) = hex::decode("4902cccc027cd41480d9157467cb268fe12a6cadb880532b8ae926340a41a6b5") {
+                    arr.copy_from_slice(&bytes);
+                }
+                arr
+            };
+            let restore_pairs: &[(&str, u128)] = &[
+                ("ec6dba2c5e83fe2070865d4f2cdbb18575740260413c7d354d0fcbf189d8f56e", 13915517938741345604225359000000000000_u128),
+                ("3ecab66e135e20085b63008136a6ba2b527a2510628ea69df05c184f6449ba78", 9988467429964296674602000000000000_u128),
+                ("f867ecf63542dbbb8b1af539a09b6f58976ce51d873666db789e4ce1a41f63f2", 3797766368006652584918928000000000000_u128),
+                ("4b403b701fde3fdcd93fb54a83a4152b1429f6a3bece40172581662daa3c5fac", 9000000000000000024943707780816848563_u128),
+            ];
+            for (token_hex, original_balance) in restore_pairs {
+                let mut token_addr = [0u8; 32];
+                if let Ok(bytes) = hex::decode(token_hex) {
+                    token_addr.copy_from_slice(&bytes);
+                }
+                let key = (restore_wallet, token_addr);
+                let current = token_balances.get(&key).copied().unwrap_or(0);
+                if current == 0 {
+                    tracing::warn!(
+                        "🔧 [v3.9.5 RESTORE] Restoring destroyed token balance: token={}, amount={}",
+                        &token_hex[..8], original_balance
+                    );
+                    token_balances.insert(key, *original_balance);
+                    if let Err(e) = storage_engine.save_token_balance(&restore_wallet, &token_addr, *original_balance).await {
+                        tracing::error!("Failed to persist restored token balance: {}", e);
+                    }
+                } else {
+                    tracing::info!(
+                        "✅ [v3.9.5 RESTORE] Token {} already has balance {}, skipping",
+                        &token_hex[..8], current
+                    );
+                }
+            }
+        }
+
         // Load existing password hashes from persistent storage
         let mut wallet_password_hashes = HashMap::new();
         match storage_engine.load_password_hashes().await {
@@ -1618,20 +1852,10 @@ impl AppState {
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
 
-        // Note: We still load transaction count for metrics, but don't add to mempool
-        match storage_engine.load_all_transactions().await {
-            Ok(persisted_transactions) => {
-                tracing::info!(
-                    "💳 Found {} historical transactions in storage (not added to mempool)",
-                    persisted_transactions.len()
-                );
-                // Historical transactions are kept in storage for queries/history
-                // but are NOT added to tx_pool to prevent reprocessing
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load historical transactions from storage: {}", e);
-            }
-        }
+        // v3.9.3-beta: SKIP loading all transactions on startup
+        // Loading 30M+ transactions wastes memory and slows startup
+        // Transactions remain in storage and can be queried on-demand
+        tracing::info!("💳 Historical transactions available in storage (not loaded into memory)");
 
         // Initialize real-time streaming
         let event_broadcaster = Arc::new(EventBroadcaster::new());
@@ -1921,6 +2145,8 @@ impl AppState {
             dns_phantom: None,
             bep44_discovery: None,
             tor_client: None,
+            // 🌻 v2.5.0-beta: Dandelion++ disabled in test/minimal mode
+            dandelion: None,
             network_manager: None,
             consensus_service: None, // 🔐 v1.3.11-beta: Decentralized consensus (will be initialized in multi-node mode)
             production_peer_discovery: None,
@@ -2201,6 +2427,9 @@ impl AppState {
             // v2.4.0-beta: Consensus-Verified Swap Indexer
             swap_indexer: Arc::new(swap_indexer::SwapIndexer::new(storage_engine.clone())),
 
+            // v3.7.1-beta: Consensus-Verified Price History Indexer
+            price_history_indexer: Arc::new(price_history_indexer::PriceHistoryIndexer::new(storage_engine.clone())),
+
             // v2.3.8-beta: Volume and price tracking for real oracle data
             volume_tracker: Arc::new(RwLock::new(HashMap::new())),
             price_snapshots: Arc::new(RwLock::new(HashMap::new())),
@@ -2218,6 +2447,7 @@ impl AppState {
 
             // ✨ v1.0.16-beta: Validator Key Registry - For PQC signature verification
             validator_key_registry: Arc::new(RwLock::new(q_types::ValidatorKeyRegistry::new())),
+            validator_registry: Arc::new(RwLock::new(q_types::validator_registry::ValidatorRegistry::new())),
 
             // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
             sync_activator: None, // Will be set in main.rs after AppState creation
@@ -2269,6 +2499,10 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // 📬 v3.9.1-beta: Bank messaging and identity systems
+            bank_messages: Arc::new(RwLock::new(Vec::new())),
+            user_identities: Arc::new(RwLock::new(Vec::new())),
+            death_certificates: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -2475,6 +2709,48 @@ impl AppState {
             }
         }
 
+        // v3.9.5-beta: One-time restore of token balances destroyed by MAX_SANE_BALANCE bug
+        // The old code had a hardcoded 1e31 threshold that was too low for 24-decimal tokens,
+        // causing balances >10M tokens to be permanently reset to zero in RocksDB.
+        {
+            let restore_wallet: [u8; 32] = {
+                let mut arr = [0u8; 32];
+                if let Ok(bytes) = hex::decode("4902cccc027cd41480d9157467cb268fe12a6cadb880532b8ae926340a41a6b5") {
+                    arr.copy_from_slice(&bytes);
+                }
+                arr
+            };
+            let restore_pairs: &[(&str, u128)] = &[
+                ("ec6dba2c5e83fe2070865d4f2cdbb18575740260413c7d354d0fcbf189d8f56e", 13915517938741345604225359000000000000_u128),
+                ("3ecab66e135e20085b63008136a6ba2b527a2510628ea69df05c184f6449ba78", 9988467429964296674602000000000000_u128),
+                ("f867ecf63542dbbb8b1af539a09b6f58976ce51d873666db789e4ce1a41f63f2", 3797766368006652584918928000000000000_u128),
+                ("4b403b701fde3fdcd93fb54a83a4152b1429f6a3bece40172581662daa3c5fac", 9000000000000000024943707780816848563_u128),
+            ];
+            for (token_hex, original_balance) in restore_pairs {
+                let mut token_addr = [0u8; 32];
+                if let Ok(bytes) = hex::decode(token_hex) {
+                    token_addr.copy_from_slice(&bytes);
+                }
+                let key = (restore_wallet, token_addr);
+                let current = token_balances.get(&key).copied().unwrap_or(0);
+                if current == 0 {
+                    tracing::warn!(
+                        "🔧 [v3.9.5 RESTORE] Restoring destroyed token balance: token={}, amount={}",
+                        &token_hex[..8], original_balance
+                    );
+                    token_balances.insert(key, *original_balance);
+                    if let Err(e) = storage_engine.save_token_balance(&restore_wallet, &token_addr, *original_balance).await {
+                        tracing::error!("Failed to persist restored token balance: {}", e);
+                    }
+                } else {
+                    tracing::info!(
+                        "✅ [v3.9.5 RESTORE] Token {} already has balance {}, skipping",
+                        &token_hex[..8], current
+                    );
+                }
+            }
+        }
+
         // Load existing password hashes from persistent storage
         let mut wallet_password_hashes = HashMap::new();
         match storage_engine.load_password_hashes().await {
@@ -2532,20 +2808,10 @@ impl AppState {
         let tx_pool = Arc::new(dashmap::DashMap::new());
         let tx_status = Arc::new(dashmap::DashMap::new());
 
-        // Note: We still load transaction count for metrics, but don't add to mempool
-        match storage_engine.load_all_transactions().await {
-            Ok(persisted_transactions) => {
-                tracing::info!(
-                    "💳 Found {} historical transactions in storage (not added to mempool)",
-                    persisted_transactions.len()
-                );
-                // Historical transactions are kept in storage for queries/history
-                // but are NOT added to tx_pool to prevent reprocessing
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load historical transactions from storage: {}", e);
-            }
-        }
+        // v3.9.3-beta: SKIP loading all transactions on startup
+        // Loading 30M+ transactions wastes memory and slows startup
+        // Transactions remain in storage and can be queried on-demand
+        tracing::info!("💳 Historical transactions available in storage (not loaded into memory)");
 
         // Initialize real-time streaming
         let event_broadcaster = Arc::new(EventBroadcaster::new());
@@ -2780,7 +3046,12 @@ impl AppState {
             bitcoin_bridge,
             dns_phantom,
             bep44_discovery,
-            tor_client,
+            tor_client: tor_client.clone(),
+
+            // 🌻 v2.5.0-beta: Dandelion++ for mandatory Tor-based transaction anonymity
+            // Initialized to None here, will be set up in main.rs after AppState creation
+            dandelion: None,
+
             network_manager,
             consensus_service: None, // 🔐 v1.3.11-beta: Decentralized consensus (will be initialized in multi-node mode)
             production_peer_discovery: None,
@@ -3167,6 +3438,9 @@ impl AppState {
             // v2.4.0-beta: Consensus-Verified Swap Indexer
             swap_indexer: Arc::new(swap_indexer::SwapIndexer::new(storage_engine.clone())),
 
+            // v3.7.1-beta: Consensus-Verified Price History Indexer
+            price_history_indexer: Arc::new(price_history_indexer::PriceHistoryIndexer::new(storage_engine.clone())),
+
             // v2.3.8-beta: Volume and price tracking for real oracle data
             volume_tracker: Arc::new(RwLock::new(HashMap::new())),
             price_snapshots: Arc::new(RwLock::new(HashMap::new())),
@@ -3184,6 +3458,7 @@ impl AppState {
 
             // ✨ v1.0.16-beta: Validator Key Registry - For PQC signature verification
             validator_key_registry: Arc::new(RwLock::new(q_types::ValidatorKeyRegistry::new())),
+            validator_registry: Arc::new(RwLock::new(q_types::validator_registry::ValidatorRegistry::new())),
 
             // ⏰ v1.0.15-beta: Timeout-Based Sync Activation - Will be initialized in main.rs
             sync_activator: None, // Will be set in main.rs after AppState creation
@@ -3235,6 +3510,10 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // 📬 v3.9.1-beta: Bank messaging and identity systems
+            bank_messages: Arc::new(RwLock::new(Vec::new())),
+            user_identities: Arc::new(RwLock::new(Vec::new())),
+            death_certificates: Arc::new(RwLock::new(Vec::new())),
         })
     }
 

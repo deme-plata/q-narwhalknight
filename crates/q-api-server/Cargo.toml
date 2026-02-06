@@ -15,6 +15,11 @@ path = "src/main.rs"
 # name = "phantom-node"
 # path = "src/bin/phantom-node.rs"
 
+# v3.9.1-beta: Quillon Bank CLI for bank administration
+[[bin]]
+name = "quillon-bank-cli"
+path = "src/bin/quillon-bank-cli.rs"
+
 [dependencies]
 q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
@@ -26,6 +31,7 @@ libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
 # q-dns-phantom = { path = "../q-dns-phantom" } # DEACTIVATED
 # q-bep44-discovery = { path = "../q-bep44-discovery" } # DEACTIVATED
 q-tor-client = { path = "../q-tor-client" } # Re-enabled for consensus integration
+q-dandelion = { path = "../q-dandelion" } # v2.5.0-beta: Dandelion++ for mandatory Tor anonymity
 q-vm = { path = "../q-vm" }
 q-quantum-mixing = { path = "../q-quantum-mixing" }
 q-mining = { path = "../q-mining", features = ["mining-vrf"] }  # v1.3.1-beta: Ring-LWE VRF mining enabled by default
@@ -127,6 +133,9 @@ prometheus = { workspace = true }
 # Time
 chrono = { workspace = true }
 
+# CLI colored output
+colored = "2.1"
+
 # WebSocket and SSE support
 axum-extra = { version = "0.9", features = ["typed-header"] }
 tokio-tungstenite = "0.21"
@@ -158,6 +167,9 @@ argon2 = { version = "0.5", features = ["std"] }  # OWASP-recommended password h
 
 # High-performance concurrent collections for lock-free concurrency
 dashmap = { workspace = true }
+
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks (10-20% speedup in hot paths)
+parking_lot = "0.12"
 
 # CPU detection and optimization
 num_cpus = "1.16"

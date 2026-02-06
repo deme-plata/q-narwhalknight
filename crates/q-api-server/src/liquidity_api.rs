@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Deserializer, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::sync::Arc;
+use q_storage::BalanceStorage; // v3.6.4-beta: For storage_engine.get_balance()
 use q_vm::contracts::orobit_smart_contracts::ContractAddress; // v3.2.17-beta: For contract lookup
 
 /// v3.2.20-beta: Improved deserializer for u128 that preserves precision
@@ -220,6 +221,16 @@ async fn normalize_token_to_address(
     state: &Arc<AppState>,
     token: &str,
 ) -> Result<[u8; 32], String> {
+    normalize_token_to_address_for_wallet(state, token, None).await
+}
+
+/// v3.9.4-beta: Normalize token to address with wallet preference
+/// When multiple tokens have the same symbol, prefers tokens the wallet owns
+async fn normalize_token_to_address_for_wallet(
+    state: &Arc<AppState>,
+    token: &str,
+    wallet_address: Option<&[u8; 32]>,
+) -> Result<[u8; 32], String> {
     let token_upper = token.to_uppercase();
 
     // Native QUG uses zero address
@@ -237,8 +248,8 @@ async fn normalize_token_to_address(
         return parse_address(token);
     }
 
-    // It's a symbol - resolve to address from deployed contracts
-    resolve_token_symbol(state, token).await
+    // v3.9.4-beta: It's a symbol - resolve to address with wallet preference
+    resolve_token_symbol_for_wallet(state, token, wallet_address).await
 }
 
 /// API response wrapper
@@ -611,7 +622,8 @@ pub async fn add_liquidity(
         request.token1.to_uppercase() == "QUGUSD" || request.token1.to_lowercase() == "qugusd-stable";
 
     // CRITICAL: Normalize token0 to address format
-    let token0_addr = match normalize_token_to_address(&state, &request.token0).await {
+    // v3.9.4-beta: Use wallet-aware resolution to find tokens the provider owns
+    let token0_addr = match normalize_token_to_address_for_wallet(&state, &request.token0, Some(&provider)).await {
         Ok(addr) => addr,
         Err(e) => {
             return Ok(Json(ApiResponse::error(format!(
@@ -622,7 +634,8 @@ pub async fn add_liquidity(
     };
 
     // CRITICAL: Normalize token1 to address format
-    let token1_addr = match normalize_token_to_address(&state, &request.token1).await {
+    // v3.9.4-beta: Use wallet-aware resolution to find tokens the provider owns
+    let token1_addr = match normalize_token_to_address_for_wallet(&state, &request.token1, Some(&provider)).await {
         Ok(addr) => addr,
         Err(e) => {
             return Ok(Json(ApiResponse::error(format!(
@@ -665,12 +678,32 @@ pub async fn add_liquidity(
 
         // Deduct token0 (native QUG, native QUGUSD, or token)
         if is_native_token0 {
-            // Deduct native QUG - initialize if needed
-            let balance = wallet_balances.entry(provider).or_insert(0);
+            // v3.6.4-beta: CRITICAL FIX - Read balance from storage_engine (authoritative source)
+            // The in-memory wallet_balances HashMap was stale, causing "insufficient balance" errors
+            // even when user had funds (dashboard showed 4.85 QUG but liquidity showed 0.21 QUG)
+            let storage_balance = state
+                .storage_engine
+                .get_balance(&hex::encode(provider))
+                .await
+                .unwrap_or(0);
+
+            // Sync in-memory cache with storage
+            let balance = wallet_balances.entry(provider).or_insert(storage_balance);
+            if *balance != storage_balance {
+                tracing::info!(
+                    "🔄 [LIQUIDITY] Synced stale balance for {}: {} → {}",
+                    hex::encode(&provider[..8]),
+                    *balance as f64 / 1e24,
+                    storage_balance as f64 / 1e24
+                );
+                *balance = storage_balance;
+            }
+
             if *balance < request.amount0 {
+                // v3.6.2-beta: Display human-readable amounts (24 decimal precision)
                 return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient QUG balance. Required: {}, Available: {}",
-                    request.amount0, *balance
+                    "Insufficient QUG balance. Required: {:.6} QUG, Available: {:.6} QUG",
+                    request.amount0 as f64 / 1e24, *balance as f64 / 1e24
                 ))));
             }
             *balance -= request.amount0;
@@ -742,8 +775,9 @@ pub async fn add_liquidity(
                         Err(e) => return Ok(Json(ApiResponse::error(e))),
                     }
                 } else {
-                    // It's a token symbol, look it up in deployed contracts
-                    match resolve_token_symbol(&state, &request.token0).await {
+                    // v3.9.4-beta: Use resolve_token_symbol_for_wallet to prefer tokens user owns
+                    // This fixes the bug where multiple tokens have same symbol (e.g., 5 "LLAMA" tokens)
+                    match resolve_token_symbol_for_wallet(&state, &request.token0, Some(&provider)).await {
                         Ok(addr) => addr,
                         Err(e) => {
                             return Ok(Json(ApiResponse::error(format!(
@@ -911,12 +945,30 @@ pub async fn add_liquidity(
 
         // Deduct token1 (native QUG, native QUGUSD, or token)
         if is_native_token1 {
-            // Deduct native QUG - initialize if needed
-            let balance = wallet_balances.entry(provider).or_insert(0);
+            // v3.6.4-beta: CRITICAL FIX - Read balance from storage_engine (authoritative source)
+            let storage_balance = state
+                .storage_engine
+                .get_balance(&hex::encode(provider))
+                .await
+                .unwrap_or(0);
+
+            // Sync in-memory cache with storage
+            let balance = wallet_balances.entry(provider).or_insert(storage_balance);
+            if *balance != storage_balance {
+                tracing::info!(
+                    "🔄 [LIQUIDITY] Synced stale balance for {}: {} → {}",
+                    hex::encode(&provider[..8]),
+                    *balance as f64 / 1e24,
+                    storage_balance as f64 / 1e24
+                );
+                *balance = storage_balance;
+            }
+
             if *balance < request.amount1 {
+                // v3.6.2-beta: Display human-readable amounts (24 decimal precision)
                 return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient QUG balance. Required: {}, Available: {}",
-                    request.amount1, *balance
+                    "Insufficient QUG balance. Required: {:.6} QUG, Available: {:.6} QUG",
+                    request.amount1 as f64 / 1e24, *balance as f64 / 1e24
                 ))));
             }
             *balance -= request.amount1;
@@ -1298,8 +1350,8 @@ pub async fn add_liquidity(
     // v0.6.1-beta: DEX DECENTRALIZATION PHASE 3
     // Broadcast pool announcement to P2P network
     // ========================================
-    if action == "created" {
-        // Only broadcast newly created pools, not additions to existing pools
+    if action == "created" || action == "added" {
+        // Broadcast both newly created pools and liquidity additions to existing pools
         // Get the pool details for broadcasting
         let pool_for_broadcast = {
             let pools = state.liquidity_pools.read().await;
@@ -1537,6 +1589,7 @@ pub async fn remove_liquidity(
         pool.token1.to_uppercase() == "QUG" || pool.token1.to_lowercase() == "native-qug";
 
     // Resolve token addresses for custom tokens
+    // v3.9.4-beta: Use wallet-aware resolution for pools with symbol-based tokens
     let token0_addr = if !is_native_token0 {
         if pool.token0.starts_with("0x") || pool.token0.starts_with("qnk") {
             match parse_address(&pool.token0) {
@@ -1544,7 +1597,7 @@ pub async fn remove_liquidity(
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
         } else {
-            match resolve_token_symbol(&state, &pool.token0).await {
+            match resolve_token_symbol_for_wallet(&state, &pool.token0, Some(&provider)).await {
                 Ok(addr) => addr,
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
@@ -1560,7 +1613,7 @@ pub async fn remove_liquidity(
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
         } else {
-            match resolve_token_symbol(&state, &pool.token1).await {
+            match resolve_token_symbol_for_wallet(&state, &pool.token1, Some(&provider)).await {
                 Ok(addr) => addr,
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
@@ -1696,6 +1749,58 @@ pub async fn remove_liquidity(
         }
     }
 
+    // v3.9.5-beta: Broadcast pool update via gossipsub (P2P DEX state replication)
+    // Only broadcast partial removals - full removals (zero reserves) fail verify_structure()
+    // and will propagate through consensus instead
+    if request.percentage < 100 {
+        let pool_for_broadcast = {
+            let pools = state.liquidity_pools.read().await;
+            pools.get(&request.pool_id).cloned()
+        };
+
+        if let Some(ref p) = pool_for_broadcast {
+            let parse_token = |s: &str| -> [u8; 32] {
+                if s.to_uppercase() == "QUG" || s.to_lowercase() == "native-qug" {
+                    [0u8; 32]
+                } else {
+                    hex::decode(s.trim_start_matches("0x"))
+                        .ok()
+                        .and_then(|b| if b.len() == 32 {
+                            let mut a = [0u8; 32];
+                            a.copy_from_slice(&b);
+                            Some(a)
+                        } else { None })
+                        .unwrap_or([0u8; 32])
+                }
+            };
+            let t0_bytes = parse_token(&p.token0);
+            let t1_bytes = parse_token(&p.token1);
+
+            let mut announcement = q_types::PoolAnnouncement::new(
+                t0_bytes, t1_bytes, p.reserve0, p.reserve1,
+                p.lp_token_supply, provider, p.created_at.timestamp() as u64,
+            );
+
+            if let Err(e) = announcement.sign(&*state.node_signing_key) {
+                tracing::warn!("Failed to sign remove-liquidity pool announcement: {}", e);
+            } else if let Ok(announcement_bytes) = serde_json::to_vec(&announcement) {
+                if let Some(ref command_tx) = state.libp2p_command_tx {
+                    let topic = "/qnk/liquidity-pools".to_string();
+                    if let Err(e) = command_tx.send(q_network::NetworkCommand::PublishPoolAnnouncement {
+                        topic: topic.clone(),
+                        announcement_bytes: announcement_bytes.clone(),
+                    }) {
+                        tracing::warn!("🏊 [DEX P2P] Failed to broadcast remove-liquidity: {}", e);
+                    } else {
+                        tracing::info!("🏊 [DEX P2P] Broadcast pool {} reserves update via P2P ({} bytes)",
+                            &request.pool_id[..20.min(request.pool_id.len())],
+                            announcement_bytes.len());
+                    }
+                }
+            }
+        }
+    }
+
     // Create transaction history
     let tx_hash = format!(
         "remove-liquidity-{}-{}",
@@ -1704,7 +1809,7 @@ pub async fn remove_liquidity(
     );
 
     Ok(Json(ApiResponse::success(RemoveLiquidityResponse {
-        pool_id: request.pool_id,
+        pool_id: request.pool_id.clone(),
         amount0_returned: amount0_to_return,
         amount1_returned: amount1_to_return,
         transaction_id: tx_hash,
@@ -1782,7 +1887,19 @@ fn current_timestamp() -> u64 {
 }
 
 /// Resolve a token symbol to its contract address by searching deployed contracts
+/// v3.9.4-beta: Now accepts optional wallet_address to prefer tokens the user owns
 async fn resolve_token_symbol(state: &Arc<AppState>, symbol: &str) -> Result<[u8; 32], String> {
+    resolve_token_symbol_for_wallet(state, symbol, None).await
+}
+
+/// Resolve a token symbol with preference for tokens the wallet owns
+/// v3.9.4-beta: CRITICAL FIX - When multiple tokens have the same symbol (e.g., 5 different "LLAMA"),
+/// this function prefers the contract where the caller actually has a balance.
+async fn resolve_token_symbol_for_wallet(
+    state: &Arc<AppState>,
+    symbol: &str,
+    wallet_address: Option<&[u8; 32]>,
+) -> Result<[u8; 32], String> {
     // 🆕 v2.2.1: Special handling for Index Fund tokens (QNK10, DEFI5, etc.)
     let symbol_upper = symbol.to_uppercase();
     if symbol_upper.starts_with("INDEX-FUND-") || symbol_upper == "QNK10" || symbol_upper == "DEFI5" {
@@ -1819,16 +1936,70 @@ async fn resolve_token_symbol(state: &Arc<AppState>, symbol: &str) -> Result<[u8
     // Access the deployed contracts directly
     let deployed_contracts = ecosystem.deployed_contracts.read().await;
 
-    // Search for a contract with matching symbol
+    // v3.9.4-beta: Collect ALL matching contracts, then pick the one user owns
+    let mut matching_contracts: Vec<[u8; 32]> = Vec::new();
+
+    // Search for contracts with matching symbol
     for contract in deployed_contracts.values() {
         if let Some(contract_symbol) = &contract.metadata.symbol {
             if contract_symbol.eq_ignore_ascii_case(symbol) {
-                return Ok(contract.address.0);
+                matching_contracts.push(contract.address.0);
             }
         }
     }
+    drop(deployed_contracts);
 
-    Err(format!("No contract found with symbol '{}'", symbol))
+    if matching_contracts.is_empty() {
+        return Err(format!("No contract found with symbol '{}'", symbol));
+    }
+
+    // If only one contract matches, return it
+    if matching_contracts.len() == 1 {
+        tracing::debug!(
+            "🔍 [RESOLVE] Symbol '{}' -> single match: qnk{}",
+            symbol,
+            hex::encode(&matching_contracts[0][..8])
+        );
+        return Ok(matching_contracts[0]);
+    }
+
+    // v3.9.4-beta: Multiple contracts with same symbol - prefer one user has balance in
+    if let Some(wallet) = wallet_address {
+        let token_balances = state.token_balances.read().await;
+
+        for contract_addr in &matching_contracts {
+            let balance_key = (*wallet, *contract_addr);
+            if let Some(&balance) = token_balances.get(&balance_key) {
+                if balance > 0 {
+                    tracing::info!(
+                        "✅ [RESOLVE] Symbol '{}' has {} matching contracts, chose qnk{} (wallet has {} balance)",
+                        symbol,
+                        matching_contracts.len(),
+                        hex::encode(&contract_addr[..8]),
+                        balance as f64 / 1e24
+                    );
+                    return Ok(*contract_addr);
+                }
+            }
+        }
+        drop(token_balances);
+
+        tracing::warn!(
+            "⚠️  [RESOLVE] Symbol '{}' has {} matching contracts but wallet qnk{} has no balance in any. Using first match.",
+            symbol,
+            matching_contracts.len(),
+            hex::encode(&wallet[..8])
+        );
+    } else {
+        tracing::warn!(
+            "⚠️  [RESOLVE] Symbol '{}' has {} matching contracts. No wallet provided, using first match. Consider specifying full token address.",
+            symbol,
+            matching_contracts.len()
+        );
+    }
+
+    // Fallback: return first matching contract
+    Ok(matching_contracts[0])
 }
 
 /// Refresh token balances request

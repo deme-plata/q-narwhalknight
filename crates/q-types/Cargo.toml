@@ -36,6 +36,8 @@ argon2 = "0.5"
 zeroize = "1.7"
 hex = "0.4"
 tracing = { workspace = true }
+# v3.7.4: Efficient byte array serialization for validator keys
+serde_bytes = "0.11"
 # ✨ v1.0.58-beta: Advanced cryptographic primitives from IACR papers
 q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 

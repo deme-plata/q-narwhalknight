@@ -74,6 +74,10 @@ pub enum ChangeReason {
     MiningReward,
     /// Development fee (1% of block reward)
     DevelopmentFee,
+    /// Transfer sent (debited from sender) - v3.5.14-beta
+    TransferSent,
+    /// Transfer received (credited to receiver) - v3.5.14-beta
+    TransferReceived,
 }
 
 /// Balance consensus error types
@@ -256,9 +260,24 @@ impl BalanceConsensusEngine {
         }
 
         // Process existing coinbase transactions from the block
+        info!("🔍 [BALANCE] Block {} has {} transactions to process",
+              block.header.height, block.transactions.len());
+
         for (idx, block_tx) in block.transactions.iter().enumerate() {
+            // v3.5.14-beta: Debug log each transaction type
+            let is_coinbase_by_from = block_tx.is_coinbase();
+            let is_coinbase_by_type = block_tx.tx_type.is_coinbase();
+            info!("🔍 [TX {}] from={}, to={}, amount={}, is_coinbase_from={}, is_coinbase_type={}, tx_type={:?}",
+                  idx,
+                  hex::encode(&block_tx.from[..8]),
+                  hex::encode(&block_tx.to[..8]),
+                  block_tx.amount,
+                  is_coinbase_by_from,
+                  is_coinbase_by_type,
+                  block_tx.tx_type);
+
             // Check if this is a coinbase transaction (mining reward)
-            if block_tx.is_coinbase() || block_tx.tx_type.is_coinbase() {
+            if is_coinbase_by_from || is_coinbase_by_type {
                 let miner_address = hex::encode(&block_tx.to);
                 let reward_amount = block_tx.amount;
 
@@ -276,6 +295,56 @@ impl BalanceConsensusEngine {
 
                 debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
                        block.header.height, &miner_address[..16], reward_amount);
+            } else {
+                // 📦 v3.5.14-beta: Process Transfer transactions (user P2P transactions)
+                // This is CRITICAL for P2P transaction propagation to actually transfer funds!
+                let from_address = hex::encode(&block_tx.from);
+                let to_address = hex::encode(&block_tx.to);
+                let transfer_amount = block_tx.amount;
+
+                // Skip if amount is 0
+                if transfer_amount == 0 {
+                    continue;
+                }
+
+                // Debit from sender
+                match storage.subtract_balance(&from_address, transfer_amount).await {
+                    Ok(_) => {
+                        debug!("💸 [TRANSFER] Debited {} from {} at height {}",
+                               transfer_amount, &from_address[..16], block.header.height);
+                    }
+                    Err(e) => {
+                        // Log but don't fail - insufficient balance shouldn't block consensus
+                        warn!("⚠️ [TRANSFER] Failed to debit {} from {}: {}",
+                              transfer_amount, &from_address[..16], e);
+                        continue;
+                    }
+                }
+
+                // Credit to receiver
+                storage.add_balance(&to_address, transfer_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                // Record debit update
+                updates.push(BalanceUpdate {
+                    address: from_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferSent,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                // Record credit update
+                updates.push(BalanceUpdate {
+                    address: to_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferReceived,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                info!("💸 [TRANSFER] Processed transfer at height {}: {} → {} ({} QUG)",
+                       block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
             }
         }
 
@@ -491,6 +560,60 @@ impl BalanceConsensusEngine {
 
                 debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
                        block.header.height, &miner_address[..16], reward_amount);
+            } else {
+                // ✅ v3.5.17-beta: Process Transfer transactions in _tx version too!
+                //
+                // PREVIOUS BUG: The _tx version only processed coinbase transactions.
+                // User P2P transfers were included in blocks but NEVER applied to balances
+                // during P2P sync. This caused transfer recipients to never receive funds
+                // when syncing from other nodes.
+                let from_address = hex::encode(&block_tx.from);
+                let to_address = hex::encode(&block_tx.to);
+                let transfer_amount = block_tx.amount;
+
+                // Skip if amount is 0
+                if transfer_amount == 0 {
+                    continue;
+                }
+
+                // Debit from sender using the tx-aware method
+                match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
+                    Ok(_) => {
+                        debug!("💸 [TRANSFER TX] Debited {} from {} at height {}",
+                               transfer_amount, &from_address[..16], block.header.height);
+                    }
+                    Err(e) => {
+                        // Log but don't fail - insufficient balance shouldn't block consensus
+                        warn!("⚠️ [TRANSFER TX] Failed to debit {} from {}: {}",
+                              transfer_amount, &from_address[..16], e);
+                        continue;
+                    }
+                }
+
+                // Credit to receiver using the tx-aware method
+                self.add_balance_tx(tx, &to_address, transfer_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                // Record debit update
+                updates.push(BalanceUpdate {
+                    address: from_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferSent,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                // Record credit update
+                updates.push(BalanceUpdate {
+                    address: to_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferReceived,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                info!("💸 [TRANSFER TX v3.5.17] Processed transfer at height {}: {} → {} ({} QUG)",
+                       block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
             }
         }
 
@@ -634,26 +757,35 @@ impl BalanceConsensusEngine {
         address: &str,
         amount: u128,
     ) -> Result<()> {
-        // Get current balance from hot database via transaction
+        // ✅ v3.5.17-beta: CRITICAL FIX - Use same storage format as BalanceStorage trait
+        //
+        // PREVIOUS BUG: This wrote to "balances" CF with raw address bytes as key,
+        // but get_balance() reads from "wallet_balance_<hex>" keys in CF_MANIFEST.
+        // Mining rewards were stored in a location that was NEVER read by API endpoints!
+        //
+        // FIX: Use the same "manifest" CF and "wallet_balance_<hex>" key format as
+        // save_wallet_balance() in lib.rs. This ensures mining rewards are visible
+        // to API balance queries.
+        //
+        // Storage format (must match lib.rs save_wallet_balance/load_wallet_balance):
+        // - CF: "manifest" (CF_MANIFEST)
+        // - Key: "wallet_balance_<64-char-hex-address>"
+        // - Value: u128 as 16-byte little-endian
+        let key = format!("wallet_balance_{}", address);
+        const CF_MANIFEST: &str = "manifest";
+
+        // Get current balance using the correct key format
         // v2.10.0: Support both u128 (16 bytes) and legacy u64 (8 bytes)
         let current_balance = tx
-            .get("balances", address.as_bytes())
+            .get(CF_MANIFEST, key.as_bytes())
             .await?
             .and_then(|bytes| {
                 if bytes.len() == 16 {
-                    // New u128 format
-                    Some(u128::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                        bytes[8], bytes[9], bytes[10], bytes[11],
-                        bytes[12], bytes[13], bytes[14], bytes[15],
-                    ]))
+                    // New u128 format (little-endian, same as lib.rs)
+                    Some(u128::from_le_bytes(bytes[..16].try_into().unwrap()))
                 } else if bytes.len() == 8 {
                     // Legacy u64 format - convert to u128 with decimal upgrade
-                    let legacy = u64::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
-                    ]);
+                    let legacy = u64::from_le_bytes(bytes[..8].try_into().unwrap());
                     // Upgrade from 8 to 24 decimals: multiply by 10^16
                     Some((legacy as u128) * 10u128.pow(16))
                 } else {
@@ -665,8 +797,61 @@ impl BalanceConsensusEngine {
         // Calculate new balance with overflow protection
         let new_balance = current_balance.saturating_add(amount);
 
-        // Write new balance to transaction (always u128 format)
-        tx.put("balances", address.as_bytes(), &new_balance.to_be_bytes()).await?;
+        // Write new balance to transaction using wallet_balance_ key format (little-endian)
+        tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
+
+        info!("💰 [BALANCE TX v3.5.17] {} += {} → {} (CF: manifest, key: wallet_balance_{})",
+              &address[..16], amount, new_balance, &address[..16]);
+
+        Ok(())
+    }
+
+    /// Subtract balance within a transaction
+    ///
+    /// v3.5.17-beta: Added for transfer processing in _tx version
+    /// Uses same storage format as BalanceStorage::subtract_balance
+    async fn subtract_balance_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        address: &str,
+        amount: u128,
+    ) -> Result<()> {
+        // Use same key format as add_balance_tx / BalanceStorage
+        let key = format!("wallet_balance_{}", address);
+        const CF_MANIFEST: &str = "manifest";
+
+        // Get current balance
+        let current_balance = tx
+            .get(CF_MANIFEST, key.as_bytes())
+            .await?
+            .and_then(|bytes| {
+                if bytes.len() == 16 {
+                    Some(u128::from_le_bytes(bytes[..16].try_into().unwrap()))
+                } else if bytes.len() == 8 {
+                    let legacy = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                    Some((legacy as u128) * 10u128.pow(16))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Check sufficient balance
+        if current_balance < amount {
+            return Err(anyhow::anyhow!(
+                "Insufficient balance: {} < {} for address {}",
+                current_balance, amount, &address[..16]
+            ));
+        }
+
+        // Calculate new balance
+        let new_balance = current_balance.saturating_sub(amount);
+
+        // Write new balance
+        tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
+
+        info!("💸 [BALANCE TX v3.5.17] {} -= {} → {} (CF: manifest, key: wallet_balance_{})",
+              &address[..16], amount, new_balance, &address[..16]);
 
         Ok(())
     }
@@ -942,6 +1127,10 @@ pub trait BalanceStorage: Send + Sync {
     /// v2.5.0: amount is now u128
     async fn add_balance(&self, address: &str, amount: u128) -> Result<()>;
 
+    /// Subtract amount from wallet balance (atomic operation) - v3.5.14-beta
+    /// Returns error if insufficient balance
+    async fn subtract_balance(&self, address: &str, amount: u128) -> Result<()>;
+
     /// Get current balance for wallet
     /// v2.5.0: returns u128
     async fn get_balance(&self, address: &str) -> Result<u128>;
@@ -979,6 +1168,16 @@ mod tests {
         async fn add_balance(&self, address: &str, amount: u128) -> Result<()> {
             let mut balances = self.balances.write().await;
             *balances.entry(address.to_string()).or_insert(0) += amount;
+            Ok(())
+        }
+
+        async fn subtract_balance(&self, address: &str, amount: u128) -> Result<()> {
+            let mut balances = self.balances.write().await;
+            let current = *balances.get(address).unwrap_or(&0);
+            if current < amount {
+                return Err(anyhow!("Insufficient balance: {} < {}", current, amount));
+            }
+            balances.insert(address.to_string(), current - amount);
             Ok(())
         }
 

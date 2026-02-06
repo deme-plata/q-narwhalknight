@@ -132,10 +132,32 @@ button,
 .performance-mode .finance-modal-content [class*="from-"],
 .performance-mode .k-law-value,
 .performance-mode .k-law-label,
-.performance-mode .flow-density-value {
+.performance-mode .flow-density-value,
+/* v3.6.12: Password modal text must be visible */
+.performance-mode .password-modal-content *,
+.performance-mode .password-modal-overlay * {
   -webkit-text-fill-color: inherit !important;
   background-clip: border-box !important;
   -webkit-background-clip: border-box !important;
+}
+
+/* v3.6.12: But keep the password modal title gradient beautiful */
+.performance-mode .password-modal-title {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  background: none !important;
+}
+
+/* v3.6.12: Ensure password modal message is visible */
+.performance-mode .password-modal-message {
+  color: rgba(255, 255, 255, 0.7) !important;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.7) !important;
+}
+
+/* v3.6.12: Password hint at bottom */
+.performance-mode .password-modal-hint {
+  color: rgba(255, 255, 255, 0.5) !important;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.5) !important;
 }
 
 /* Force visibility for K-Law values with inline styles */
@@ -189,11 +211,185 @@ button,
   text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
 }
 
-/* Keep modals looking polished */
-.performance-mode [class*="modal"] {
+/* Keep modals looking polished - but exclude password modal which has its own styling */
+.performance-mode [class*="modal"]:not(.password-modal-overlay):not(.password-modal-content):not([class*="password-modal"]) {
   background: rgba(15, 10, 30, 0.95) !important;
   border: 1px solid rgba(212, 175, 55, 0.2) !important;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 40px rgba(147, 51, 234, 0.1) !important;
+}
+
+/* ================================================================
+   v3.6.12: PASSWORD MODAL EXEMPTION
+   Keep password modal beautiful even in performance mode
+   Users need a polished experience when unlocking their wallet
+
+   NOTE: We must explicitly redefine animations here because
+   performance mode uses `animation: none !important` globally.
+   ================================================================ */
+
+/* Password modal overlay - fade in animation */
+.performance-mode .password-modal-overlay {
+  animation: pwdFadeIn 0.2s ease-out !important;
+}
+
+@keyframes pwdFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Password modal content - slide up animation */
+.performance-mode .password-modal-content {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
+  border: 1px solid rgba(139, 92, 246, 0.3) !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 100px rgba(139, 92, 246, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
+  animation: pwdSlideUp 0.3s ease-out !important;
+}
+
+@keyframes pwdSlideUp {
+  from { transform: translateY(30px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Quantum background particles - floating animation */
+.performance-mode .password-modal-bg-animation {
+  display: block !important;
+  opacity: 0.4 !important;
+}
+
+.performance-mode .password-modal-bg-animation .quantum-particle {
+  display: block !important;
+}
+
+.performance-mode .password-modal-bg-animation .quantum-particle:nth-child(1) {
+  animation: pwdFloat1 8s infinite ease-in-out !important;
+}
+
+.performance-mode .password-modal-bg-animation .quantum-particle:nth-child(2) {
+  animation: pwdFloat2 8s infinite ease-in-out 2s !important;
+}
+
+.performance-mode .password-modal-bg-animation .quantum-particle:nth-child(3) {
+  animation: pwdFloat3 8s infinite ease-in-out 4s !important;
+}
+
+@keyframes pwdFloat1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(20px, -20px) scale(1.1); }
+  66% { transform: translate(-20px, 20px) scale(0.9); }
+}
+
+@keyframes pwdFloat2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-15px, 15px) scale(1.05); }
+  66% { transform: translate(15px, -15px) scale(0.95); }
+}
+
+@keyframes pwdFloat3 {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); }
+  33% { transform: translate(calc(-50% + 10px), calc(-50% - 10px)) scale(1.08); }
+  66% { transform: translate(calc(-50% - 10px), calc(-50% + 10px)) scale(0.92); }
+}
+
+/* Lock icon - full styling */
+.performance-mode .password-modal-icon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 80px !important;
+  height: 80px !important;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.2)) !important;
+  border: 2px solid rgba(139, 92, 246, 0.4) !important;
+  border-radius: 50% !important;
+  color: #8b5cf6 !important;
+  animation: pwdPulse 2s infinite ease-in-out !important;
+}
+
+@keyframes pwdPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(139, 92, 246, 0.3); }
+  50% { box-shadow: 0 0 40px rgba(139, 92, 246, 0.6); }
+}
+
+/* Password input field */
+.performance-mode .password-input {
+  width: 100% !important;
+  padding: 16px 50px 16px 20px !important;
+  font-size: 16px !important;
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 2px solid rgba(139, 92, 246, 0.3) !important;
+  border-radius: 12px !important;
+  outline: none !important;
+}
+
+.performance-mode .password-input:focus {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: #8b5cf6 !important;
+  box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.1) !important;
+}
+
+.performance-mode .password-input::placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+}
+
+/* Password toggle button */
+.performance-mode .password-toggle-btn {
+  background: none !important;
+  border: none !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+}
+
+.performance-mode .password-toggle-btn:hover {
+  color: rgba(255, 255, 255, 0.8) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Secondary button (Cancel) */
+.performance-mode .password-btn-secondary {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: rgba(255, 255, 255, 0.8) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 12px !important;
+}
+
+.performance-mode .password-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: #ffffff !important;
+}
+
+/* Primary button styles */
+.performance-mode .password-btn-primary {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%) !important;
+  color: #ffffff !important;
+  border: none !important;
+  border-radius: 12px !important;
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.performance-mode .password-btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 6px 20px rgba(139, 92, 246, 0.4) !important;
+}
+
+.performance-mode .password-btn-primary:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+}
+
+/* Modal footer */
+.performance-mode .password-modal-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Error message shake animation */
+.performance-mode .password-error-message {
+  animation: pwdShake 0.4s ease-in-out !important;
+}
+
+@keyframes pwdShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-10px); }
+  75% { transform: translateX(10px); }
 }
 
 /* Nice hover states for interactive elements */

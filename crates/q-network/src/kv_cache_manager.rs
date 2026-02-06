@@ -373,6 +373,36 @@ impl KVCacheManager {
             info!("🗑️ Evicted oldest cache: {}", oldest_id);
         }
     }
+
+    /// Start periodic cleanup task for expired caches
+    /// v3.5.22-beta: Fix memory leak by periodically evicting expired sessions
+    ///
+    /// This spawns a background task that runs evict_expired every 5 minutes.
+    /// Call this once during coordinator initialization to prevent memory buildup.
+    pub fn start_cleanup_task(self: Arc<Self>) {
+        let manager = Arc::clone(&self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+            info!("🧹 [KV-CACHE] Started periodic cleanup task (every 5 minutes)");
+
+            loop {
+                interval.tick().await;
+
+                match manager.evict_expired().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("🧹 [KV-CACHE] Periodic cleanup: evicted {} expired sessions", count);
+                        } else {
+                            debug!("🧹 [KV-CACHE] Periodic cleanup: no expired sessions");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("🧹 [KV-CACHE] Periodic cleanup error: {}", e);
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[cfg(test)]

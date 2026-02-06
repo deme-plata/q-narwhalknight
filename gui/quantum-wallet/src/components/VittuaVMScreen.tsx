@@ -1465,7 +1465,9 @@ export default function VittuaVMScreen() {
                           value={Math.max(3, Math.min(36, Math.log10(Number(initialSupply) || 1000)))}
                           onChange={(e) => {
                             const exp = Number(e.target.value);
-                            setInitialSupply(Math.round(Math.pow(10, exp)).toString());
+                            // v3.6.18: Use BigInt to preserve precision for large exponents (>15)
+                            // Math.pow(10, 30) loses precision, but BigInt(10) ** BigInt(30) is exact
+                            setInitialSupply((BigInt(10) ** BigInt(exp)).toString());
                           }}
                           className="w-full h-2 rounded-lg appearance-none cursor-pointer"
                           style={{
@@ -1493,12 +1495,13 @@ export default function VittuaVMScreen() {
                             border: 2px solid rgba(255, 255, 255, 0.3);
                           }
                         `}</style>
-                        <div className="flex justify-between text-xs text-gray-500 mt-1">
-                          <span>1K</span>
-                          <span>1B</span>
-                          <span>1T (10^12)</span>
-                          <span>10^24</span>
-                          <span>10^36</span>
+                        {/* Labels positioned to match logarithmic scale (3-36) */}
+                        <div className="relative h-5 mt-1">
+                          <span className="absolute text-xs text-gray-500" style={{ left: '0%' }}>1K</span>
+                          <span className="absolute text-xs text-gray-500" style={{ left: '18%', transform: 'translateX(-50%)' }}>1B</span>
+                          <span className="absolute text-xs text-gray-500" style={{ left: '27%', transform: 'translateX(-50%)' }}>1T</span>
+                          <span className="absolute text-xs text-gray-500" style={{ left: '64%', transform: 'translateX(-50%)' }}>10^24</span>
+                          <span className="absolute text-xs text-gray-500" style={{ right: '0%' }}>10^36</span>
                         </div>
                       </div>
                       <p className="text-xs text-gray-500 mt-2">
@@ -1554,11 +1557,16 @@ export default function VittuaVMScreen() {
                                 <span className="text-xl font-bold text-quantum-cyan">{effectiveDecimals}</span>
                               </div>
                             </div>
-                            <div className="flex justify-between text-xs text-gray-500">
-                              <span>0 (whole)</span>
-                              {maxDecimalsForSupply >= 8 && <span>8 (standard)</span>}
-                              {maxDecimalsForSupply >= 18 && <span>18 (ETH)</span>}
-                              <span className={maxDecimalsForSupply < 24 ? 'text-red-400' : ''}>{maxDecimalsForSupply} (max)</span>
+                            {/* Labels positioned to match linear scale (0 to maxDecimalsForSupply) */}
+                            <div className="relative h-5">
+                              <span className="absolute text-xs text-gray-500" style={{ left: '0%' }}>0</span>
+                              {maxDecimalsForSupply >= 8 && (
+                                <span className="absolute text-xs text-gray-500" style={{ left: `${(8 / Math.max(1, maxDecimalsForSupply)) * 100}%`, transform: 'translateX(-50%)' }}>8</span>
+                              )}
+                              {maxDecimalsForSupply >= 18 && (
+                                <span className="absolute text-xs text-gray-500" style={{ left: `${(18 / Math.max(1, maxDecimalsForSupply)) * 100}%`, transform: 'translateX(-50%)' }}>18</span>
+                              )}
+                              <span className={`absolute text-xs ${maxDecimalsForSupply < 24 ? 'text-red-400' : 'text-gray-500'}`} style={{ right: '0%' }}>{maxDecimalsForSupply}</span>
                             </div>
                             {maxDecimalsForSupply < 24 && (
                               <div className="mt-2 p-2 bg-red-900/20 border border-red-500/30 rounded-lg">

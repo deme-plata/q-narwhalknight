@@ -7,6 +7,7 @@
 use crate::tor_broadcast::{BroadcastConfig, BroadcastMessage, TorBroadcastManager, TorClient};
 use anyhow::Result;
 use bincode;
+use dashmap::DashMap;
 use q_types::{Certificate, Transaction, TxHash, ValidatorId};
 use q_types::{NodeId, Phase};
 use serde::{Deserialize, Serialize};
@@ -14,12 +15,23 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Production-ready transaction mempool
+///
+/// v3.4.6-beta: Added O(1) nonce tracking for instant replay/double-spend detection
 pub struct ProductionMempool {
     /// Pending transactions awaiting inclusion in blocks
     pending_transactions: Arc<RwLock<BTreeMap<TxHash, MempoolTransaction>>>,
+
+    /// 🚀 v3.4.6-beta: O(1) nonce tracking for instant replay/double-spend detection
+    /// Key: (sender_address, nonce) - unique identifier for sender's transaction
+    /// Value: TxHash of the transaction using this nonce
+    ///
+    /// In account-based blockchains, each sender can only have ONE pending transaction
+    /// per nonce. This prevents replay attacks and double-spends.
+    /// Ported from QTFT blockchain concept, adapted for account model.
+    pending_nonces: DashMap<([u8; 32], u64), TxHash>,
 
     /// Transaction validator for signature/validity checks
     transaction_validator: Arc<TxValidator>,
@@ -234,8 +246,11 @@ impl ProductionMempool {
         let broadcast_manager =
             Arc::new(TorBroadcastManager::new(tor_client, BroadcastConfig::default()).await?);
 
+        info!("   🚀 O(1) nonce tracking: enabled (instant replay/double-spend detection)");
+
         Ok(Self {
             pending_transactions: Arc::new(RwLock::new(BTreeMap::new())),
+            pending_nonces: DashMap::new(),
             transaction_validator,
             broadcast_manager,
             config,
@@ -246,6 +261,8 @@ impl ProductionMempool {
     }
 
     /// Add transaction to mempool (from client or peer)
+    ///
+    /// v3.4.6-beta: Added O(1) double-spend detection using spent_outpoints DashMap
     pub async fn add_transaction(
         &self,
         transaction: Transaction,
@@ -266,6 +283,21 @@ impl ProductionMempool {
                 debug!("   Transaction already in mempool");
                 return Ok(false);
             }
+        }
+
+        // 🚀 v3.4.6-beta: O(1) nonce-based replay/double-spend detection
+        // In account-based blockchains, each (sender, nonce) pair can only be used once
+        let nonce_key = (transaction.from, transaction.nonce);
+        if let Some(conflicting_tx) = self.pending_nonces.get(&nonce_key) {
+            error!(
+                "🚫 [REPLAY/DOUBLE-SPEND] Transaction {} uses nonce {} already used by pending tx {}",
+                hex::encode(&tx_hash[..8]),
+                transaction.nonce,
+                hex::encode(&conflicting_tx[..8])
+            );
+            let mut metrics = self.metrics.write().await;
+            metrics.invalid_transactions += 1;
+            return Ok(false);
         }
 
         // Anti-spam check
@@ -353,6 +385,14 @@ impl ProductionMempool {
         };
 
         if should_add {
+            // 🚀 v3.4.6-beta: Mark nonce as used in O(1) lookup table
+            let nonce_key = (transaction.from, transaction.nonce);
+            self.pending_nonces.insert(nonce_key, tx_hash);
+            debug!(
+                "   Marked nonce {} for sender {:?} as pending",
+                transaction.nonce,
+                &transaction.from[..4]
+            );
             // Update metrics
             {
                 let mut metrics = self.metrics.write().await;
@@ -441,20 +481,29 @@ impl ProductionMempool {
     }
 
     /// Remove transactions that have been included in a block
+    ///
+    /// v3.4.6-beta: Also removes pending nonces from O(1) tracking table
     pub async fn remove_included_transactions(&self, tx_hashes: &[TxHash]) {
         let mut pending = self.pending_transactions.write().await;
         let mut removed_count = 0;
+        let mut nonces_removed = 0;
 
         for hash in tx_hashes {
-            if pending.remove(hash).is_some() {
+            if let Some((_, removed_tx)) = pending.remove_entry(hash) {
                 removed_count += 1;
+
+                // 🚀 v3.4.6-beta: Clean up pending nonce for this transaction
+                let nonce_key = (removed_tx.transaction.from, removed_tx.transaction.nonce);
+                if self.pending_nonces.remove(&nonce_key).is_some() {
+                    nonces_removed += 1;
+                }
             }
         }
 
         if removed_count > 0 {
             info!(
-                "🗑️  Removed {} transactions from mempool (included in block)",
-                removed_count
+                "🗑️  Removed {} transactions ({} nonces) from mempool (included in block)",
+                removed_count, nonces_removed
             );
 
             let mut metrics = self.metrics.write().await;

@@ -134,7 +134,8 @@ impl StakingTier {
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_consensus;
-pub mod batch_sync; // ✅ v1.0.12-beta: Phase 1 batch sync with 512-block batches + parallel validation
+pub mod batch_sync;
+pub mod sharded_balance;  // 🚀 v3.4.6-beta: 16-shard balance cache for 2-3x lookup speedup // ✅ v1.0.12-beta: Phase 1 batch sync with 512-block batches + parallel validation
 pub mod checkpoint; // ✅ v1.0.79-beta: Height checkpoint files for data loss detection
 pub mod block_writer; // ✅ v0.9.93-beta: Single-writer queue to prevent database corruption
 pub mod chain_reorganization; // v0.9.37-beta: Cross-fork blockchain synchronization
@@ -170,6 +171,7 @@ pub mod encryption_migration;  // ✅ v1.0.41-beta - Transitional provider for o
 pub mod encryption_zkstark;  // ✅ v1.0.43-beta - ZK-STARK proofs for untrusted automatic setup
 pub mod genesis_checkpoint;  // ✅ v1.1.21-beta - Kaspa-style genesis checkpoint for fork prevention
 pub mod mainnet_safety;  // ✅ v1.1.24-beta - Production-grade database safety for mainnet deployment
+pub mod overflow_storage;  // ✅ v3.9.3-beta - Multi-path storage with S3 support for overflow
 
 // ========== v1.0.4-beta: Phase 2 DAG-Aware Sync (20-40x Performance) ==========
 pub mod sync_state_manager;  // Checkpoint/resume for crash recovery
@@ -450,6 +452,35 @@ pub const CF_PERP_LIQUIDATIONS: &str = "cf_perp_liquidations";
 /// key = contract_address:block_height:event_index, value = ContractEvent JSON
 pub const CF_CONTRACT_EVENTS: &str = "cf_contract_events";
 
+// ========== v3.9.1-beta: Bank Messaging & Identity System ==========
+/// Bank messages: key = msg_id, value = BankMessage JSON
+/// Stores bidirectional messages between users and Quillon Bank
+pub const CF_BANK_MESSAGES: &str = "cf_bank_messages";
+/// Bank message index by wallet: key = [wallet:32][inverted_timestamp:8], value = msg_id
+/// Allows efficient O(log n) lookups of all messages for a wallet
+pub const CF_BANK_MSG_INDEX: &str = "cf_bank_msg_index";
+/// User identities: key = wallet_address, value = UserIdentity JSON
+/// Decentralized identity records with KYC levels and beneficiary addresses
+pub const CF_USER_IDENTITIES: &str = "cf_user_identities";
+/// Death certificates: key = cert_id, value = DeathCertificate JSON
+/// Enables account inheritance and estate planning on the blockchain
+pub const CF_DEATH_CERTIFICATES: &str = "cf_death_certificates";
+
+// ========== v3.5.8-beta: Wallet Transaction Index for Decentralized History ==========
+/// Wallet transaction index: key = [wallet:32][inverted_timestamp:8][tx_id:8], value = tx_id:32
+/// Allows efficient O(log n) lookups of all transactions for a wallet address
+/// Indexed for BOTH sender and recipient (each transaction creates 2 entries)
+pub const CF_WALLET_TX_INDEX: &str = "cf_wallet_tx_index";
+
+/// Wallet swap index: key = [wallet:32][inverted_timestamp:8][tx_id:8], value = swap_record
+/// Allows efficient O(log n) lookups of all DEX swaps for a wallet address
+pub const CF_WALLET_SWAP_INDEX: &str = "cf_wallet_swap_index";
+
+/// v3.6.0-beta: Consensus-verified price history for tokens
+/// Key format: [token_address:32][inverted_timestamp:8] for reverse chronological order
+/// Value format: [price:f64 LE][block_height:u64 LE] = 16 bytes
+pub const CF_PRICE_HISTORY: &str = "cf_price_history";
+
 /// All column families for state sync (for database initialization)
 pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_TOKEN_BALANCES,
@@ -482,6 +513,9 @@ pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_PERP_FUNDING,
     CF_PERP_LIQUIDATIONS,
     CF_CONTRACT_EVENTS,
+    CF_WALLET_TX_INDEX,      // v3.5.8-beta: Wallet-indexed transaction history
+    CF_WALLET_SWAP_INDEX,    // v3.5.8-beta: Wallet-indexed swap history
+    CF_PRICE_HISTORY,        // v3.6.0-beta: Consensus-verified price history
 ];
 
 /// Storage configuration
@@ -1856,10 +1890,11 @@ impl QStorage {
         let cached_height = self.height_cache.cached();
 
         // 🚨 v1.1.9: PERIODIC CACHE VERIFICATION
-        // Every 100 calls, verify the cache matches the database to detect desync
+        // 🔧 v3.4.4: Increased from 100 to 10000 to reduce sync overhead (was causing 12x slowdown!)
+        // Every 10000 calls, verify the cache matches the database to detect desync
         let counter = self.cache_verification_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if counter % 100 == 0 && cached_height > 0 {
+        if counter % 10000 == 0 && cached_height > 0 {
             // Verify cached height block actually exists
             let height_key = format!("qblock:height:{}", cached_height);
             if let Ok(None) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
@@ -2919,8 +2954,17 @@ impl QStorage {
                     warn!("Invalid total supply data in storage, starting from 0");
                     return Ok(0);
                 };
+                // v3.9.3-beta: SANITY CHECK - reject obviously corrupted supply values
+                // Max supply is 21 million QUG with 24 decimals = 21e6 * 10^24 = 21e30 base units
+                // If stored value exceeds this by 10x (210M QUG), it's corrupt
+                const MAX_SANE_SUPPLY: u128 = 210_000_000_000_000_000_000_000_000_000_000; // 210M QUG (10x max) with 24 decimals
+                if supply > MAX_SANE_SUPPLY {
+                    warn!("🚨 [CORRUPT] Total supply in storage ({}) exceeds max sane value!", supply);
+                    warn!("🚨 [CORRUPT] Ignoring corrupted value, will recalculate from balances");
+                    return Ok(0); // Return 0 to trigger recalculation
+                }
                 info!("💎 Loaded total supply from storage: {} QUG ({} base units)",
-                    supply / 100_000_000, supply);
+                    supply / 1_000_000_000_000_000_000_000_000, supply);  // v3.9.3-beta: Fix divisor to 10^24
                 Ok(supply)
             }
             None => {
@@ -3313,17 +3357,43 @@ impl QStorage {
         Ok(profiles)
     }
 
-    /// Save transaction to persistent storage
+    /// Save transaction to persistent storage with wallet address indexing
+    /// v3.5.8-beta: Also creates wallet index entries for decentralized history
     pub async fn save_transaction(&self, tx: &q_types::Transaction) -> Result<()> {
         let tx_data = bincode::serialize(tx)?;
+
+        // Save main transaction
         self.hot_db.put(CF_TRANSACTIONS, &tx.id, &tx_data).await?;
+
+        // v3.5.8-beta: Index by sender wallet address
+        let sender_key = Self::build_wallet_tx_key(&tx.from, tx.timestamp.timestamp(), &tx.id);
+        self.hot_db.put(CF_WALLET_TX_INDEX, &sender_key, &tx.id).await?;
+
+        // v3.5.8-beta: Index by recipient wallet address (if different from sender)
+        if tx.from != tx.to {
+            let recipient_key = Self::build_wallet_tx_key(&tx.to, tx.timestamp.timestamp(), &tx.id);
+            self.hot_db.put(CF_WALLET_TX_INDEX, &recipient_key, &tx.id).await?;
+        }
+
         debug!(
-            "💳 Saved transaction: {} ({} -> {})",
+            "💳 Saved transaction with wallet index: {} ({} -> {})",
             hex::encode(&tx.id),
             hex::encode(&tx.from),
             hex::encode(&tx.to)
         );
         Ok(())
+    }
+
+    /// Build wallet transaction index key: [wallet:32][inverted_timestamp:8][tx_id:8]
+    /// Using inverted timestamp ensures newest transactions come first in prefix scan
+    fn build_wallet_tx_key(wallet: &[u8; 32], timestamp: i64, tx_id: &[u8; 32]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(48);
+        key.extend_from_slice(wallet);
+        // Invert timestamp so newer entries sort first (RocksDB sorts ascending)
+        let inverted_ts = i64::MAX - timestamp;
+        key.extend_from_slice(&inverted_ts.to_be_bytes());
+        key.extend_from_slice(&tx_id[..8]);
+        key
     }
 
     /// Load transaction from persistent storage
@@ -3339,6 +3409,7 @@ impl QStorage {
     }
 
     /// Load all transactions from persistent storage
+    /// WARNING: This loads ALL transactions into memory - use count_transactions() for metrics
     pub async fn load_all_transactions(&self) -> Result<Vec<q_types::Transaction>> {
         let mut transactions = Vec::new();
 
@@ -3363,21 +3434,299 @@ impl QStorage {
     }
 
     /// Save multiple transactions atomically with SYNC to guarantee disk write
+    /// v3.5.8-beta: Also creates wallet index entries for decentralized history
     pub async fn save_transactions(&self, transactions: &[q_types::Transaction]) -> Result<()> {
         let mut batch_ops = Vec::new();
 
         for tx in transactions {
             let tx_data = bincode::serialize(tx)?;
+
+            // Main transaction
             batch_ops.push((CF_TRANSACTIONS, tx.id.to_vec(), tx_data));
+
+            // v3.5.8-beta: Index by sender wallet
+            let sender_key = Self::build_wallet_tx_key(&tx.from, tx.timestamp.timestamp(), &tx.id);
+            batch_ops.push((CF_WALLET_TX_INDEX, sender_key, tx.id.to_vec()));
+
+            // v3.5.8-beta: Index by recipient wallet (if different)
+            if tx.from != tx.to {
+                let recipient_key = Self::build_wallet_tx_key(&tx.to, tx.timestamp.timestamp(), &tx.id);
+                batch_ops.push((CF_WALLET_TX_INDEX, recipient_key, tx.id.to_vec()));
+            }
         }
 
         // CRITICAL: write_batch now uses fsync to survive hard kills (fixed in kv.rs)
         self.hot_db.write_batch(batch_ops).await?;
         info!(
-            "💳 SYNCED {} transactions to persistent storage (survives hard kill)",
+            "💳 SYNCED {} transactions with wallet indexes to persistent storage",
             transactions.len()
         );
         Ok(())
+    }
+
+    /// Load transactions for a specific wallet address (decentralized history)
+    /// v3.5.8-beta: Uses wallet index for O(log n) lookups instead of O(n) full scan
+    /// Returns transactions where the wallet is sender OR recipient, newest first
+    pub async fn load_transactions_for_wallet(
+        &self,
+        wallet: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<q_types::Transaction>> {
+        let mut transactions = Vec::new();
+
+        // Build prefix for wallet (first 32 bytes of key)
+        let prefix = wallet.to_vec();
+
+        // Scan wallet index with prefix
+        match self.hot_db.scan_prefix(CF_WALLET_TX_INDEX, &prefix).await {
+            Ok(entries) => {
+                let mut seen_tx_ids = std::collections::HashSet::new();
+
+                for (_key, tx_id_data) in entries {
+                    if transactions.len() >= limit {
+                        break;
+                    }
+
+                    // tx_id_data contains the full 32-byte transaction ID
+                    if tx_id_data.len() >= 32 {
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(&tx_id_data[..32]);
+
+                        // Avoid duplicates (same tx indexed for both sender and recipient)
+                        if seen_tx_ids.contains(&tx_id) {
+                            continue;
+                        }
+                        seen_tx_ids.insert(tx_id);
+
+                        // Load full transaction
+                        if let Ok(Some(tx)) = self.load_transaction(&tx_id).await {
+                            transactions.push(tx);
+                        }
+                    }
+                }
+
+                info!(
+                    "💳 Loaded {} transactions for wallet {} via index",
+                    transactions.len(),
+                    hex::encode(&wallet[..8])
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan wallet transaction index: {}", e);
+            }
+        }
+
+        Ok(transactions)
+    }
+
+    /// Save swap record indexed by wallet address
+    /// v3.5.8-beta: Enables wallet-based swap history lookup
+    pub async fn save_wallet_swap_index(
+        &self,
+        wallet: &[u8; 32],
+        timestamp: i64,
+        tx_id: &[u8; 32],
+        swap_data: &[u8],
+    ) -> Result<()> {
+        let key = Self::build_wallet_tx_key(wallet, timestamp, tx_id);
+        self.hot_db.put(CF_WALLET_SWAP_INDEX, &key, swap_data).await?;
+        debug!(
+            "🔄 Indexed swap for wallet {} at timestamp {}",
+            hex::encode(&wallet[..8]),
+            timestamp
+        );
+        Ok(())
+    }
+
+    /// Load swap history for a specific wallet address
+    /// v3.5.8-beta: Returns all DEX swaps where wallet is the trader, newest first
+    pub async fn load_swaps_for_wallet(
+        &self,
+        wallet: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut swaps = Vec::new();
+        let prefix = wallet.to_vec();
+
+        match self.hot_db.scan_prefix(CF_WALLET_SWAP_INDEX, &prefix).await {
+            Ok(entries) => {
+                for (_key, swap_data) in entries {
+                    if swaps.len() >= limit {
+                        break;
+                    }
+                    swaps.push(swap_data);
+                }
+                info!(
+                    "🔄 Loaded {} swaps for wallet {} via index",
+                    swaps.len(),
+                    hex::encode(&wallet[..8])
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan wallet swap index: {}", e);
+            }
+        }
+
+        Ok(swaps)
+    }
+
+    /// Migrate existing transactions to wallet index (one-time backfill)
+    /// v3.5.8-beta: Run at startup to index all existing transactions by wallet
+    /// v3.5.11-beta: Also scan blocks for coinbase/mining transactions (background)
+    /// This enables the new decentralized transaction history feature
+    pub async fn migrate_transactions_to_wallet_index(&self) -> Result<usize> {
+        info!("🔄 [v3.5.11] Starting transaction wallet index migration...");
+
+        // Check if migration already done (look for marker)
+        // v3.5.11: Use new marker version to force re-migration with background block scanning
+        let migration_key = b"migration_wallet_index_v3.5.11_done";
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, migration_key).await {
+            // Verify the index actually has data
+            match self.hot_db.scan_prefix(CF_WALLET_TX_INDEX, &[]).await {
+                Ok(entries) if !entries.is_empty() => {
+                    info!("✅ [v3.5.11] Wallet index migration already completed ({} entries), skipping", entries.len());
+                    return Ok(0);
+                }
+                _ => {
+                    // Index is empty - previous migration failed, re-run it
+                    warn!("⚠️ [v3.5.11] Migration marker exists but index is empty - re-running migration");
+                    // Delete the old marker
+                    let _ = self.hot_db.delete(CF_MANIFEST, migration_key).await;
+                }
+            }
+        }
+
+        let mut indexed_count = 0;
+        let mut batch_ops: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut seen_tx_ids = std::collections::HashSet::new();
+
+        // Part 1: Scan all transactions in CF_TRANSACTIONS column family
+        match self.hot_db.scan_prefix(CF_TRANSACTIONS, &[]).await {
+            Ok(entries) => {
+                info!("🔄 [v3.5.11] Found {} standalone transactions to index", entries.len());
+
+                for (tx_id_data, tx_data) in entries {
+                    if let Ok(tx) = bincode::deserialize::<q_types::Transaction>(&tx_data) {
+                        seen_tx_ids.insert(tx.id);
+
+                        // Index by sender
+                        let sender_key = Self::build_wallet_tx_key(&tx.from, tx.timestamp.timestamp(), &tx.id);
+                        batch_ops.push((CF_WALLET_TX_INDEX, sender_key, tx.id.to_vec()));
+
+                        // Index by recipient (if different)
+                        if tx.from != tx.to {
+                            let recipient_key = Self::build_wallet_tx_key(&tx.to, tx.timestamp.timestamp(), &tx.id);
+                            batch_ops.push((CF_WALLET_TX_INDEX, recipient_key, tx.id.to_vec()));
+                        }
+
+                        indexed_count += 1;
+
+                        // Write in batches of 1000 to avoid memory issues
+                        if batch_ops.len() >= 1000 {
+                            if let Err(e) = self.hot_db.write_batch(batch_ops.clone()).await {
+                                warn!("Failed to write batch during migration: {}", e);
+                            }
+                            batch_ops.clear();
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan CF_TRANSACTIONS for migration: {}", e);
+            }
+        }
+
+        // Part 2: v3.5.11-beta - Scan ALL BLOCKS for coinbase/mining transactions
+        // This is critical because mining rewards are stored inside blocks, not CF_TRANSACTIONS
+        info!("🔄 [v3.5.11] Scanning blocks for coinbase transactions (mining rewards)...");
+        let mut block_tx_count = 0;
+        let mut blocks_scanned = 0usize;
+        let progress_interval = 50_000usize; // Log every 50k blocks
+
+        // Scan block column family
+        match self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+            Ok(entries) => {
+                let total_entries = entries.len();
+                info!("🔄 [v3.5.11] Found {} blocks to scan for transactions", total_entries);
+
+                for (key, block_data) in entries {
+                    // v3.5.11: Fix filter to process actual block data
+                    // Block keys: qblock:height:N, qblock:dag:N:proposer
+                    // Skip: qblock:latest (pointer), qblock:hash:* (no block data)
+                    let key_str = String::from_utf8_lossy(&key);
+                    if key_str == "qblock:latest" || key_str.starts_with("qblock:hash:") {
+                        continue;
+                    }
+
+                    blocks_scanned += 1;
+
+                    // Progress logging every 50k blocks
+                    if blocks_scanned % progress_interval == 0 {
+                        let pct = (blocks_scanned as f64 / total_entries as f64 * 100.0) as u32;
+                        info!("🔄 [v3.5.11] Migration progress: {}/{} blocks ({}%), {} txs indexed",
+                              blocks_scanned, total_entries, pct, block_tx_count);
+                    }
+
+                    // Try to deserialize as QBlock
+                    if let Ok(block) = bincode::deserialize::<q_types::QBlock>(&block_data) {
+                        for tx in &block.transactions {
+                            // Skip if already indexed from CF_TRANSACTIONS
+                            if seen_tx_ids.contains(&tx.id) {
+                                continue;
+                            }
+
+                            // Index by sender
+                            let sender_key = Self::build_wallet_tx_key(&tx.from, tx.timestamp.timestamp(), &tx.id);
+                            batch_ops.push((CF_WALLET_TX_INDEX, sender_key, tx.id.to_vec()));
+
+                            // Index by recipient (if different)
+                            if tx.from != tx.to {
+                                let recipient_key = Self::build_wallet_tx_key(&tx.to, tx.timestamp.timestamp(), &tx.id);
+                                batch_ops.push((CF_WALLET_TX_INDEX, recipient_key, tx.id.to_vec()));
+                            }
+
+                            // Also save transaction to CF_TRANSACTIONS for future lookups
+                            if let Ok(tx_data) = bincode::serialize(&tx) {
+                                batch_ops.push((CF_TRANSACTIONS, tx.id.to_vec(), tx_data));
+                            }
+
+                            block_tx_count += 1;
+                            indexed_count += 1;
+
+                            // Write in batches
+                            if batch_ops.len() >= 1000 {
+                                if let Err(e) = self.hot_db.write_batch(batch_ops.clone()).await {
+                                    warn!("Failed to write batch during block migration: {}", e);
+                                }
+                                batch_ops.clear();
+                            }
+                        }
+                    }
+                }
+
+                info!("🔄 [v3.5.11] Block scan complete: {} blocks scanned, {} txs found", blocks_scanned, block_tx_count);
+            }
+            Err(e) => {
+                warn!("Failed to scan CF_BLOCKS for migration: {}", e);
+            }
+        }
+
+        // Write remaining batch
+        if !batch_ops.is_empty() {
+            if let Err(e) = self.hot_db.write_batch(batch_ops).await {
+                warn!("Failed to write final batch during migration: {}", e);
+            }
+        }
+
+        // Mark migration as done
+        self.hot_db.put(CF_MANIFEST, migration_key, b"done").await?;
+
+        info!(
+            "✅ [v3.5.11] Wallet index migration complete: indexed {} transactions ({} from blocks)",
+            indexed_count, block_tx_count
+        );
+
+        Ok(indexed_count)
     }
 
     /// Delete transaction from persistent storage
@@ -4646,6 +4995,48 @@ impl BalanceStorage for QStorage {
         Ok(())
     }
 
+    /// Subtract amount from wallet balance (atomic operation) - v3.5.14-beta
+    /// Returns error if insufficient balance
+    async fn subtract_balance(&self, address: &str, amount: u128) -> Result<()> {
+        // Convert hex string address to [u8; 32]
+        let address_bytes = hex::decode(address)
+            .context("Invalid hex address format")?;
+
+        if address_bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "Invalid address length: expected 32 bytes, got {}",
+                address_bytes.len()
+            ));
+        }
+
+        let mut addr_array = [0u8; 32];
+        addr_array.copy_from_slice(&address_bytes);
+
+        // Get current balance
+        let current = self.load_wallet_balance(&addr_array).await?.unwrap_or(0);
+
+        // Check if sufficient balance
+        if current < amount {
+            return Err(anyhow::anyhow!(
+                "Insufficient balance: {} < {} for address {}",
+                current, amount, &address[..16]
+            ));
+        }
+
+        // Subtract amount
+        let new_balance = current - amount;
+
+        // Save new balance
+        self.save_wallet_balance(&addr_array, new_balance).await?;
+
+        debug!(
+            "💸 [BALANCE CONSENSUS] Subtracted {} from {}, new balance: {}",
+            amount, address, new_balance
+        );
+
+        Ok(())
+    }
+
     /// Get wallet balance
     /// v2.5.0: returns u128
     async fn get_balance(&self, address: &str) -> Result<u128> {
@@ -4905,6 +5296,133 @@ impl QStorage {
         }
         debug!("🗑️ Deleted {} executions for DCA order {}", deleted, order_id);
         Ok(deleted)
+    }
+
+    // ========================================================================
+    // v3.6.0-beta: Consensus-Verified Price History Persistence
+    // Store historical price data for tokens in RocksDB
+    // Key format: [token_address:32][inverted_timestamp:8] for reverse chronological order
+    // Value format: [price:f64 LE][block_height:u64 LE] = 16 bytes
+    // ========================================================================
+
+    /// Store a price snapshot for a token
+    /// Key format: [token_address:32][inverted_timestamp:8] for reverse chronological order
+    pub async fn save_price_snapshot(
+        &self,
+        token_address: &[u8; 32],
+        timestamp_ms: i64,
+        price: f64,
+        block_height: u64,
+    ) -> Result<()> {
+        // Inverted timestamp for reverse chronological ordering
+        let inverted_ts = i64::MAX - timestamp_ms;
+
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(token_address);
+        key.extend_from_slice(&inverted_ts.to_be_bytes());
+
+        // Value: price (f64) + block_height (u64) = 16 bytes
+        let mut value = Vec::with_capacity(16);
+        value.extend_from_slice(&price.to_le_bytes());
+        value.extend_from_slice(&block_height.to_le_bytes());
+
+        self.hot_db.put(CF_PRICE_HISTORY, &key, &value).await?;
+        debug!(
+            "💹 Saved price snapshot: {} at height {} (ts: {})",
+            price, block_height, timestamp_ms
+        );
+        Ok(())
+    }
+
+    /// Load price history for a token within a time range
+    /// Returns: Vec<(timestamp_ms, price, block_height)> in reverse chronological order
+    pub async fn load_price_history(
+        &self,
+        token_address: &[u8; 32],
+        since_timestamp_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, f64, u64)>> {
+        let inverted_since = i64::MAX - since_timestamp_ms;
+
+        // Scan all records for this token (prefix scan)
+        let records = self.hot_db.scan_prefix(CF_PRICE_HISTORY, token_address).await?;
+
+        let mut results = Vec::new();
+        for (key, value) in records {
+            if results.len() >= limit {
+                break;
+            }
+
+            // Check key length
+            if key.len() < 40 {
+                continue;
+            }
+
+            // Check prefix matches
+            if &key[..32] != token_address {
+                break;
+            }
+
+            // Check time range (key must be <= inverted_since to be within range)
+            let key_inverted_ts = i64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
+            if key_inverted_ts > inverted_since {
+                // This timestamp is more recent than our cutoff, still in range
+                // Continue iterating
+            }
+
+            // Decode value
+            if value.len() >= 16 {
+                let price = f64::from_le_bytes(value[0..8].try_into().unwrap_or([0u8; 8]));
+                let block_height = u64::from_le_bytes(value[8..16].try_into().unwrap_or([0u8; 8]));
+                let timestamp_ms = i64::MAX - key_inverted_ts;
+
+                // Only include if within time range
+                if timestamp_ms >= since_timestamp_ms {
+                    results.push((timestamp_ms, price, block_height));
+                }
+            }
+        }
+
+        debug!(
+            "📊 Loaded {} price history records for token (since: {})",
+            results.len(),
+            since_timestamp_ms
+        );
+        Ok(results)
+    }
+
+    /// Get the price closest to a specific timestamp (most recent before that time)
+    /// Returns: Option<(timestamp_ms, price)>
+    pub async fn get_price_at_time(
+        &self,
+        token_address: &[u8; 32],
+        timestamp_ms: i64,
+    ) -> Result<Option<(i64, f64)>> {
+        let inverted_ts = i64::MAX - timestamp_ms;
+
+        // Scan records for this token
+        let records = self.hot_db.scan_prefix(CF_PRICE_HISTORY, token_address).await?;
+
+        for (key, value) in records {
+            // Check key length and prefix
+            if key.len() < 40 || &key[..32] != token_address {
+                continue;
+            }
+
+            let key_inverted = i64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
+
+            // We want the first record where inverted_ts >= key_inverted
+            // (meaning timestamp <= requested timestamp)
+            if key_inverted >= inverted_ts {
+                if value.len() >= 8 {
+                    let ts = i64::MAX - key_inverted;
+                    let price = f64::from_le_bytes(value[0..8].try_into().unwrap_or([0u8; 8]));
+                    return Ok(Some((ts, price)));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     // ========================================================================

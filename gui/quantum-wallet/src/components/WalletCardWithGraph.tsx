@@ -233,14 +233,10 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
     }, null, 2));
   }
 
-  // v3.0.6-beta: Updated to show more decimals for small amounts
+  // v3.6.10-beta: Always show full 24 decimal precision
   const formatBalance = (amount: number) => {
-    // For very small amounts, show more decimal places
-    const maxDecimals = amount > 0 && amount < 0.00000001 ? 16 : 8;
-    return new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: maxDecimals,
-    }).format(amount);
+    // Show full 24 decimal precision for all amounts
+    return amount.toFixed(24);
   };
 
   return (

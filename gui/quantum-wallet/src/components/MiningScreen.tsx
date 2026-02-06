@@ -716,7 +716,7 @@ export default function MiningScreen() {
               {/* Miner Downloads */}
               <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
                 <Download className="w-5 h-5 text-quantum-cyan" />
-                Latest Miner (v1.0.2-beta)
+                Latest Miner (v3.4.2-beta)
               </h3>
 
               <div className="grid md:grid-cols-2 gap-4 mb-6">
@@ -730,7 +730,7 @@ export default function MiningScreen() {
                     <Terminal className="w-5 h-5" />
                     <span>Linux x86_64</span>
                   </div>
-                  <span className="text-xs text-quantum-cyan/80">v1.0.2-beta</span>
+                  <span className="text-xs text-quantum-cyan/80">v3.4.2-beta</span>
                 </motion.button>
 
                 <motion.button
@@ -743,7 +743,7 @@ export default function MiningScreen() {
                     <Download className="w-5 h-5" />
                     <span>Windows x64</span>
                   </div>
-                  <span className="text-xs text-quantum-purple/80">v1.0.2-beta</span>
+                  <span className="text-xs text-quantum-purple/80">v3.4.2-beta</span>
                 </motion.button>
 
                 <motion.button
@@ -756,7 +756,7 @@ export default function MiningScreen() {
                     <Download className="w-5 h-5" />
                     <span>macOS Intel (x64)</span>
                   </div>
-                  <span className="text-xs text-quantum-green/80">v1.0.2-beta</span>
+                  <span className="text-xs text-quantum-green/80">v3.4.2-beta</span>
                 </motion.button>
 
                 <motion.button
@@ -769,7 +769,7 @@ export default function MiningScreen() {
                     <Download className="w-5 h-5" />
                     <span>macOS Apple Silicon</span>
                   </div>
-                  <span className="text-xs text-quantum-orange/80">v1.0.2-beta</span>
+                  <span className="text-xs text-quantum-orange/80">v3.4.2-beta</span>
                 </motion.button>
               </div>
 
@@ -782,11 +782,11 @@ export default function MiningScreen() {
               <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-purple/20 mb-4">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <p className="font-bold text-white">q-api-server v2.2.1-beta</p>
+                    <p className="font-bold text-white">q-api-server v3.4.2-beta</p>
                     <p className="text-gray-400 text-sm">Full node with mining, wallet, and P2P sync</p>
                   </div>
                   <motion.a
-                    href="/downloads/q-api-server-v2.2.1-beta"
+                    href="/downloads/q-api-server-v3.4.2-beta"
                     download
                     className="bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-2 px-4 rounded-lg transition-all flex items-center gap-2"
                     whileHover={{ scale: 1.02 }}
@@ -797,7 +797,7 @@ export default function MiningScreen() {
                   </motion.a>
                 </div>
                 <div className="bg-quantum-dark/80 rounded-lg p-3 font-mono text-sm text-quantum-cyan">
-                  <code>wget https://quillon.xyz/downloads/q-api-server-v2.2.1-beta && chmod +x q-api-server-v2.2.1-beta</code>
+                  <code>wget https://quillon.xyz/downloads/q-api-server-v3.4.2-beta && chmod +x q-api-server-v3.4.2-beta</code>
                 </div>
               </div>
             </div>

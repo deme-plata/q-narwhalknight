@@ -58,12 +58,26 @@ pub struct QuantumIntegrationStats {
     pub total_api_calls: u64,
     pub quantum_enhanced_calls: u64,
     pub cache_hit_rate: f64,
-    pub average_response_time_ms: f64,
+    /// Total response time in milliseconds (avoids f64 accumulation precision loss)
+    /// Use `average_response_time_ms()` to get the computed average on-demand
+    pub total_response_time_ms: u64,
     pub data_accuracy_score: f64,
     pub uptime_percentage: f64,
     pub last_successful_update: DateTime<Utc>,
     pub quantum_correlation_accuracy: f64,
     pub wave_function_prediction_rate: f64,
+}
+
+impl QuantumIntegrationStats {
+    /// Calculate average response time on-demand to avoid f64 accumulation errors
+    #[inline]
+    pub fn average_response_time_ms(&self) -> f64 {
+        if self.total_api_calls == 0 {
+            0.0
+        } else {
+            self.total_response_time_ms as f64 / self.total_api_calls as f64
+        }
+    }
 }
 
 /// Real-time quantum data feed
@@ -319,12 +333,14 @@ impl QuantumDexScreenerIntegration {
                         // Simulate quantum-enhanced data update
                         use std::str::FromStr;
                         let random_price = 1.618 + rand::random::<f64>() * 0.1;
+                        // Generate random price change in basis points (-1000 to +1000 = -10% to +10%)
+                        let price_change_bps = ((rand::random::<f64>() - 0.5) * 2000.0) as i32;
                         cache_entry.cached_data = QuantumMarketData {
                             pair_id: pair_id.clone(),
                             current_price: BigDecimal::from_str(&random_price.to_string()).unwrap_or_else(|_| "1.618".parse().unwrap()),
                             volume_24h: BigDecimal::from(100000 + rand::random::<u32>() % 50000),
                             liquidity: BigDecimal::from(1000000 + rand::random::<u32>() % 500000),
-                            price_change_24h: (rand::random::<f64>() - 0.5) * 20.0,
+                            price_change_24h_bps: price_change_bps,
                             high_24h: "1.7".parse().unwrap(),
                             low_24h: "1.5".parse().unwrap(),
                             trades_count: 1000 + rand::random::<u64>() % 500,
@@ -368,11 +384,9 @@ impl QuantumDexScreenerIntegration {
                     stats_guard.total_api_calls += 1;
                     stats_guard.quantum_enhanced_calls += 1;
 
-                    // Update average response time
-                    stats_guard.average_response_time_ms = (stats_guard.average_response_time_ms
-                        * (stats_guard.total_api_calls - 1) as f64
-                        + execution_time)
-                        / stats_guard.total_api_calls as f64;
+                    // Accumulate total response time (precision-safe u64 accumulation)
+                    // Average is computed on-demand via stats_guard.average_response_time_ms()
+                    stats_guard.total_response_time_ms += execution_time as u64;
 
                     stats_guard.cache_hit_rate = 0.95; // High cache efficiency
                     stats_guard.data_accuracy_score = 0.99;

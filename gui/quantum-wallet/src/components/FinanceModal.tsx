@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle } from 'lucide-react';
+import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle, LineChart } from 'lucide-react';
 
 // Big, user-friendly tooltip component - FIXED: stays open when hovering tooltip
 const BigTooltip: React.FC<{
@@ -246,7 +246,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
   const [stablecoinError, setStablecoinError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin' | 'graphs'>('overview');
 
   useEffect(() => {
     if (isOpen) {
@@ -315,6 +315,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: Activity },
+    { id: 'graphs', label: 'Graphs', icon: LineChart },
     { id: 'adoption', label: 'Adoption', icon: TrendingUp },
     { id: 'holders', label: 'Holders', icon: Users },
     { id: 'stablecoin', label: 'QUGUSD', icon: Anchor },
@@ -664,7 +665,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                       </div>
 
                       {/* Composite */}
-                      <div className="mt-6 p-5 rounded-xl bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-500/30">
+                      <div className="mt-6 p-5 rounded-xl bg-gradient-to-r from-cyan-900/40 to-blue-900/40 border border-cyan-500/40">
                         <div className="flex items-center justify-between">
                           <BigTooltip
                             title="Total Adoption Score"
@@ -673,7 +674,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                           >
                             <span className="text-lg font-semibold text-white">Composite Adoption (A_t)</span>
                           </BigTooltip>
-                          <span className="text-4xl font-bold text-amber-400">{(data.three_layer_adoption.composite_adoption * 100).toFixed(1)}%</span>
+                          <span className="text-4xl font-bold text-cyan-400">{(data.three_layer_adoption.composite_adoption * 100).toFixed(1)}%</span>
                         </div>
                         <p className="mt-3 text-sm text-gray-400 font-mono bg-black/20 p-2 rounded">
                           = 0.50×{(data.three_layer_adoption.layer1_savings).toFixed(2)} + 0.30×{(data.three_layer_adoption.layer2_settlement).toFixed(2)} + 0.20×{(data.three_layer_adoption.layer3_collateral).toFixed(2)}
@@ -710,20 +711,20 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                       </div>
 
                       {/* Gini */}
-                      <div className="mt-5 p-4 rounded-xl bg-orange-500/10 border border-orange-500/20">
+                      <div className="mt-5 p-4 rounded-xl bg-slate-800/60 border border-orange-500/30">
                         <div className="flex items-center justify-between mb-3">
                           <BigTooltip
                             title="Wealth Distribution Score"
                             explanation="The Gini coefficient measures how evenly tokens are distributed. 0 = perfectly equal (everyone has exactly the same). 1 = one person owns everything. Most crypto projects are 0.6-0.9 (very unequal). Lower is generally better for decentralization."
                             example="0.3 = Fairly equal (like Sweden) | 0.9 = Very unequal (one whale holds most)"
                           >
-                            <span className="text-sm text-gray-300">Gini Coefficient (Wealth Inequality)</span>
+                            <span className="text-sm text-gray-200">Gini Coefficient (Wealth Inequality)</span>
                           </BigTooltip>
-                          <span className="font-bold text-2xl text-orange-400">{data.gini_coefficient.toFixed(3)}</span>
+                          <span className="font-bold text-2xl text-orange-300">{data.gini_coefficient.toFixed(3)}</span>
                         </div>
-                        <div className="relative h-3 bg-white/10 rounded-full overflow-hidden">
+                        <div className="relative h-3 bg-slate-700 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 rounded-full"
+                            className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-red-500 rounded-full"
                             style={{ width: `${data.gini_coefficient * 100}%` }}
                           />
                         </div>
@@ -819,14 +820,14 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                                   <p className="text-xs text-gray-400 mt-1">Liquidation</p>
                                 </BigTooltip>
                               </div>
-                              <div className="p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-center">
+                              <div className="p-4 rounded-xl bg-amber-900/30 border border-amber-500/30 text-center">
                                 <BigTooltip
                                   title="Liquidator Reward"
                                   explanation="People who help liquidate undercollateralized positions earn a 5% bonus. This incentivizes the community to keep the system healthy. Without this reward, no one would bother helping maintain the peg."
                                   example="Liquidate a $1000 position = Earn $50 bonus"
                                 >
-                                  <p className="text-2xl font-bold text-yellow-400">{(stablecoinData.peg_mechanism.liquidation_bonus * 100).toFixed(0)}%</p>
-                                  <p className="text-xs text-gray-400 mt-1">Liquidator Bonus</p>
+                                  <p className="text-2xl font-bold text-amber-300">{(stablecoinData.peg_mechanism.liquidation_bonus * 100).toFixed(0)}%</p>
+                                  <p className="text-xs text-gray-300 mt-1">Liquidator Bonus</p>
                                 </BigTooltip>
                               </div>
                               <div className="p-4 rounded-xl bg-blue-500/10 border border-blue-500/20 text-center">
@@ -987,6 +988,315 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                             <p className="text-2xl font-bold k-law-value" style={{ color: '#c084fc' }}>{data.staking_percentage.toFixed(1)}%</p>
                             <p className="text-xs text-gray-400">Staked</p>
                           </BigTooltip>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Graphs Tab - v3.4.15: Beautiful Interactive Charts */}
+                  {activeTab === 'graphs' && (
+                    <>
+                      {/* K-Law Adoption Curve */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-purple-500/10 to-cyan-500/10 border border-purple-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <LineChart className="w-5 h-5 text-purple-400" />
+                          K-Law Adoption Curve (S-Curve)
+                        </h3>
+                        <div className="relative h-64 bg-black/30 rounded-xl p-4 overflow-hidden">
+                          <svg viewBox="0 0 400 200" className="w-full h-full">
+                            {/* Grid lines */}
+                            {[0, 25, 50, 75, 100].map((y) => (
+                              <g key={y}>
+                                <line x1="40" y1={180 - y * 1.6} x2="380" y2={180 - y * 1.6} stroke="rgba(255,255,255,0.1)" strokeDasharray="4" />
+                                <text x="35" y={184 - y * 1.6} fill="#6b7280" fontSize="8" textAnchor="end">{y}%</text>
+                              </g>
+                            ))}
+                            {/* X-axis labels - proportionally spaced (2025-2035 = 10 years) */}
+                            {[2025, 2027, 2029, 2031, 2033, 2035].map((year) => {
+                              const xPos = 60 + ((year - 2025) / 10) * 320; // 320px span for 10 years
+                              return (
+                                <text key={year} x={xPos} y="195" fill="#6b7280" fontSize="8" textAnchor="middle">{year}</text>
+                              );
+                            })}
+
+                            {/* Animated S-curve path */}
+                            <motion.path
+                              d="M 50,175 C 100,175 120,172 150,165 C 180,155 200,140 230,110 C 260,80 290,55 320,35 C 350,20 370,15 380,12"
+                              fill="none"
+                              stroke="url(#adoptionGradient)"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                              initial={{ pathLength: 0 }}
+                              animate={{ pathLength: 1 }}
+                              transition={{ duration: 2, ease: "easeOut" }}
+                            />
+
+                            {/* Current position dot - X based on year (2026), Y based on adoption rate */}
+                            {(() => {
+                              const currentYear = new Date().getFullYear(); // 2026
+                              const startYear = 2025;
+                              const endYear = 2035;
+                              const xStart = 60;
+                              const xEnd = 380;
+                              // Calculate X position based on current year
+                              const yearProgress = (currentYear - startYear) / (endYear - startYear);
+                              const cx = xStart + yearProgress * (xEnd - xStart);
+                              // Y position based on adoption rate
+                              const cy = 180 - (data.kristensen_ratio.current_adoption * 100) * 1.6;
+                              return (
+                                <motion.circle
+                                  cx={cx}
+                                  cy={cy}
+                                  r="6"
+                                  fill="#22d3ee"
+                                  initial={{ scale: 0 }}
+                                  animate={{ scale: [1, 1.3, 1] }}
+                                  transition={{ duration: 1.5, repeat: Infinity }}
+                                />
+                              );
+                            })()}
+
+                            {/* Equilibrium line */}
+                            <motion.line
+                              x1="40"
+                              y1={180 - (data.kristensen_ratio.equilibrium_ceiling * 100) * 1.6}
+                              x2="380"
+                              y2={180 - (data.kristensen_ratio.equilibrium_ceiling * 100) * 1.6}
+                              stroke="#c084fc"
+                              strokeWidth="2"
+                              strokeDasharray="8 4"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              transition={{ delay: 1 }}
+                            />
+
+                            {/* Gradient definitions */}
+                            <defs>
+                              <linearGradient id="adoptionGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stopColor="#22d3ee" />
+                                <stop offset="50%" stopColor="#c084fc" />
+                                <stop offset="100%" stopColor="#22c55e" />
+                              </linearGradient>
+                            </defs>
+                          </svg>
+
+                          {/* Legend */}
+                          <div className="absolute bottom-2 right-4 flex gap-4 text-xs">
+                            <div className="flex items-center gap-1">
+                              <div className="w-3 h-3 rounded-full bg-cyan-400"></div>
+                              <span className="text-gray-400">Current</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <div className="w-3 h-0.5 bg-purple-400"></div>
+                              <span className="text-gray-400">Equilibrium</span>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2 text-center">Logistic adoption curve: A*(t) = K / (1 + μ·e^(-λ·Ω))</p>
+                      </div>
+
+                      {/* Flow Density Radar Chart */}
+                      <div className="p-5 rounded-xl bg-white/5 border border-white/10">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Waves className="w-5 h-5 text-cyan-400" />
+                          Network Flow Radar
+                        </h3>
+                        <div className="relative h-64 bg-black/30 rounded-xl flex items-center justify-center">
+                          <svg viewBox="0 0 300 300" className="w-64 h-64">
+                            {/* Radar background circles */}
+                            {[1, 0.75, 0.5, 0.25].map((scale) => (
+                              <circle
+                                key={scale}
+                                cx="150"
+                                cy="150"
+                                r={100 * scale}
+                                fill="none"
+                                stroke="rgba(255,255,255,0.1)"
+                                strokeWidth="1"
+                              />
+                            ))}
+
+                            {/* Radar axes */}
+                            {['Staking', 'DeFi', 'Treasury', 'Unlocks', 'Exchange'].map((label, i) => {
+                              const angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+                              const x = 150 + Math.cos(angle) * 120;
+                              const y = 150 + Math.sin(angle) * 120;
+                              const lineX = 150 + Math.cos(angle) * 100;
+                              const lineY = 150 + Math.sin(angle) * 100;
+                              return (
+                                <g key={label}>
+                                  <line x1="150" y1="150" x2={lineX} y2={lineY} stroke="rgba(255,255,255,0.2)" />
+                                  <text x={x} y={y} fill="#9ca3af" fontSize="10" textAnchor="middle" dominantBaseline="middle">
+                                    {label}
+                                  </text>
+                                </g>
+                              );
+                            })}
+
+                            {/* Data polygon */}
+                            <motion.polygon
+                              points={(() => {
+                                const flows = [
+                                  data.current_flow.staking_flow,
+                                  data.current_flow.defi_flow,
+                                  data.current_flow.treasury_flow,
+                                  data.current_flow.unlock_flow,
+                                  data.current_flow.exchange_flow,
+                                ];
+                                return flows.map((flow, i) => {
+                                  const angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+                                  const r = Math.min(flow * 200, 100); // Scale to max 100
+                                  const x = 150 + Math.cos(angle) * r;
+                                  const y = 150 + Math.sin(angle) * r;
+                                  return `${x},${y}`;
+                                }).join(' ');
+                              })()}
+                              fill="rgba(34, 211, 238, 0.3)"
+                              stroke="#22d3ee"
+                              strokeWidth="2"
+                              initial={{ opacity: 0, scale: 0.5 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ duration: 0.8, ease: "easeOut" }}
+                            />
+
+                            {/* Data points */}
+                            {[
+                              data.current_flow.staking_flow,
+                              data.current_flow.defi_flow,
+                              data.current_flow.treasury_flow,
+                              data.current_flow.unlock_flow,
+                              data.current_flow.exchange_flow,
+                            ].map((flow, i) => {
+                              const angle = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+                              const r = Math.min(flow * 200, 100);
+                              const x = 150 + Math.cos(angle) * r;
+                              const y = 150 + Math.sin(angle) * r;
+                              return (
+                                <motion.circle
+                                  key={i}
+                                  cx={x}
+                                  cy={y}
+                                  r="5"
+                                  fill="#22d3ee"
+                                  initial={{ scale: 0 }}
+                                  animate={{ scale: 1 }}
+                                  transition={{ delay: 0.8 + i * 0.1 }}
+                                />
+                              );
+                            })}
+                          </svg>
+
+                          {/* Composite Omega display */}
+                          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-center">
+                            <div className="text-2xl font-bold text-cyan-400">Ω = {data.current_flow.composite_omega.toFixed(4)}</div>
+                            <div className="text-xs text-gray-500">Composite Flow Density</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Holder Distribution Pie Chart */}
+                      <div className="p-5 rounded-xl bg-white/5 border border-white/10">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Users className="w-5 h-5 text-green-400" />
+                          Holder Distribution
+                        </h3>
+                        <div className="flex items-center gap-8">
+                          {/* Pie chart */}
+                          <div className="relative w-48 h-48">
+                            <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+                              {(() => {
+                                const colors = ['#22d3ee', '#c084fc', '#22c55e', '#eab308', '#ec4899', '#f97316'];
+                                let cumulativePercent = 0;
+                                return data.holder_distribution.slice(0, 6).map((cohort, i) => {
+                                  const percent = cohort.percentage_supply / 100;
+                                  const startAngle = cumulativePercent * 360;
+                                  cumulativePercent += percent;
+                                  const endAngle = cumulativePercent * 360;
+
+                                  // SVG arc path
+                                  const largeArcFlag = percent > 0.5 ? 1 : 0;
+                                  const startX = 50 + 40 * Math.cos((startAngle - 90) * Math.PI / 180);
+                                  const startY = 50 + 40 * Math.sin((startAngle - 90) * Math.PI / 180);
+                                  const endX = 50 + 40 * Math.cos((endAngle - 90) * Math.PI / 180);
+                                  const endY = 50 + 40 * Math.sin((endAngle - 90) * Math.PI / 180);
+
+                                  return (
+                                    <motion.path
+                                      key={i}
+                                      d={`M 50 50 L ${startX} ${startY} A 40 40 0 ${largeArcFlag} 1 ${endX} ${endY} Z`}
+                                      fill={colors[i]}
+                                      initial={{ opacity: 0 }}
+                                      animate={{ opacity: 0.9 }}
+                                      transition={{ delay: i * 0.1 }}
+                                      className="hover:opacity-100 cursor-pointer transition-opacity"
+                                    />
+                                  );
+                                });
+                              })()}
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <div className="text-center">
+                                <div className="text-xl font-bold text-white">{formatNumber(data.total_holders)}</div>
+                                <div className="text-xs text-gray-400">Total Holders</div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Legend */}
+                          <div className="flex-1 space-y-2">
+                            {data.holder_distribution.slice(0, 6).map((cohort, i) => {
+                              const colors = ['bg-cyan-400', 'bg-purple-400', 'bg-green-400', 'bg-yellow-400', 'bg-pink-400', 'bg-orange-400'];
+                              return (
+                                <div key={i} className="flex items-center gap-2 text-sm">
+                                  <div className={`w-3 h-3 rounded-full ${colors[i]}`}></div>
+                                  <span className="text-gray-300 flex-1">{cohort.emoji} {cohort.name}</span>
+                                  <span className="text-gray-400">{cohort.percentage_supply.toFixed(1)}%</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Gini Index Bar */}
+                      <div className="p-5 rounded-xl bg-gradient-to-r from-orange-500/10 to-red-500/10 border border-orange-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                          <BarChart3 className="w-5 h-5 text-orange-400" />
+                          Wealth Distribution Index
+                        </h3>
+                        <div className="relative h-12 bg-black/30 rounded-xl overflow-hidden">
+                          {/* Gradient bar */}
+                          <div className="absolute inset-0 bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 opacity-30" />
+
+                          {/* Animated indicator */}
+                          <motion.div
+                            className="absolute top-0 h-full w-1 bg-white shadow-lg shadow-white/50"
+                            initial={{ left: '0%' }}
+                            animate={{ left: `${data.gini_coefficient * 100}%` }}
+                            transition={{ duration: 1, ease: "easeOut" }}
+                          />
+
+                          {/* Current value */}
+                          <motion.div
+                            className="absolute -top-1 transform -translate-x-1/2"
+                            initial={{ left: '0%' }}
+                            animate={{ left: `${data.gini_coefficient * 100}%` }}
+                            transition={{ duration: 1, ease: "easeOut" }}
+                          >
+                            <div className="bg-black/80 px-2 py-1 rounded text-sm font-bold text-orange-400 border border-orange-500/30">
+                              {data.gini_coefficient.toFixed(3)}
+                            </div>
+                          </motion.div>
+
+                          {/* Scale markers */}
+                          <div className="absolute bottom-1 left-2 text-xs text-gray-400">0 Equal</div>
+                          <div className="absolute bottom-1 right-2 text-xs text-gray-400">1 Monopoly</div>
+                        </div>
+                        <div className="flex justify-between mt-4 text-xs">
+                          <div className="text-green-400">🌍 Sweden: 0.25</div>
+                          <div className="text-yellow-400">🇺🇸 USA: 0.39</div>
+                          <div className="text-orange-400">₿ Bitcoin: 0.88</div>
+                          <div className="text-red-400">⚠️ Danger: 0.95+</div>
                         </div>
                       </div>
                     </>

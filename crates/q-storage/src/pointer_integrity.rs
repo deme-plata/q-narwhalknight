@@ -20,19 +20,26 @@ use tracing::{error, info, warn};
 use crate::CF_BLOCKS;
 
 /// Configuration for pointer integrity severity thresholds
+/// v3.5.22-beta: Increased thresholds to tolerate normal operation lag
 #[derive(Debug, Clone)]
 pub struct IntegrityThresholds {
-    /// Threshold for minor corruption (default: 10 blocks)
+    /// Threshold for minor corruption (default: 100 blocks)
+    /// Anything below this is normal pointer lag during block production
     pub minor_threshold: u64,
-    /// Threshold for moderate corruption (default: 100 blocks)
+    /// Threshold for moderate corruption (default: 10000 blocks)
+    /// Anything above this requires attention but can still auto-repair
     pub moderate_threshold: u64,
 }
 
 impl Default for IntegrityThresholds {
     fn default() -> Self {
+        // v3.5.22-beta: More tolerant thresholds for production use
+        // - Minor: Up to 100 blocks behind (normal operation, ~2 hours of blocks)
+        // - Moderate: 100-10000 blocks behind (needs auto-repair)
+        // - Severe: 10000+ blocks behind (significant issue, still auto-repairs)
         Self {
-            minor_threshold: 10,
-            moderate_threshold: 100,
+            minor_threshold: 100,
+            moderate_threshold: 10000,
         }
     }
 }
@@ -45,7 +52,7 @@ pub struct PointerIntegrityChecker {
 }
 
 /// Result of pointer integrity check
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IntegrityCheckResult {
     pub pointer_height: u64,
     pub actual_highest_height: u64,
@@ -55,9 +62,10 @@ pub struct IntegrityCheckResult {
 }
 
 /// Severity of pointer corruption
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CorruptionSeverity {
     /// Pointer matches actual height - no corruption
+    #[default]
     None,
     /// Pointer off by <10 blocks - minor (may be race condition)
     Minor,
@@ -169,17 +177,75 @@ impl PointerIntegrityChecker {
     /// Find the highest block in the database using optimized parallel search
     ///
     /// 🚀 v1.0.76-beta: OPTIMIZED with Rayon parallel scanning (10-50x faster)
+    /// 🔧 v3.5.22-beta: FIXED for checkpoint-sync databases where early blocks are missing
     ///
     /// Strategy:
     /// 1. Fast path: Check pointer value first (healthy DB completes in <1ms)
-    /// 2. Binary search to find upper bound quickly
-    /// 3. Parallel chunk scanning with Rayon for final verification
-    /// 4. Early termination on 1000 consecutive gaps
+    /// 2. If pointer block exists, search locally around it (for checkpoint-sync DBs)
+    /// 3. Binary search to find upper bound quickly (fallback)
+    /// 4. Parallel chunk scanning with Rayon for final verification
+    /// 5. Early termination on 1000 consecutive gaps
     fn find_highest_block(&self, cf_blocks: &impl rocksdb::AsColumnFamilyRef) -> Result<u64> {
         let start_time = Instant::now();
         info!("🚀 find_highest_block: Starting PARALLEL optimized scan");
 
         let absolute_max = 10_000_000u64;
+
+        // 🔧 v3.5.22-beta: FAST PATH - Check pointer value first
+        // This handles checkpoint-sync databases where early blocks (0-N) are missing
+        // but blocks exist at higher heights (e.g., 1477600+)
+        let pointer_height = match self.db.get_cf(cf_blocks, b"qblock:latest")? {
+            Some(bytes) if bytes.len() == 8 => {
+                let mut height_array = [0u8; 8];
+                height_array.copy_from_slice(&bytes);
+                u64::from_be_bytes(height_array)
+            }
+            _ => 0
+        };
+
+        if pointer_height > 0 {
+            info!("   Pointer value: {} - checking if block exists", pointer_height);
+
+            // Check if the pointer's block actually exists
+            if self.block_exists(cf_blocks, pointer_height)? {
+                info!("   ✅ Pointer block {} exists - searching locally", pointer_height);
+
+                // Search upward from pointer to find actual highest
+                let mut highest = pointer_height;
+                for h in pointer_height..=pointer_height.saturating_add(10000).min(absolute_max) {
+                    if self.block_exists(cf_blocks, h)? {
+                        highest = h;
+                    } else if h > highest + 100 {
+                        // Early termination if 100 consecutive missing
+                        break;
+                    }
+                }
+
+                let elapsed = start_time.elapsed();
+                info!("✅ find_highest_block: Found highest block at {} (fast path, took {:?})", highest, elapsed);
+                return Ok(highest);
+            } else {
+                info!("   ⚠️  Pointer block {} doesn't exist - trying nearby search", pointer_height);
+
+                // Pointer block missing but maybe blocks exist nearby (checkpoint-sync scenario)
+                // Search a wider range around the pointer
+                let search_start = pointer_height.saturating_sub(10000);
+                let search_end = pointer_height.saturating_add(1000).min(absolute_max);
+
+                let mut highest = 0u64;
+                for h in search_start..=search_end {
+                    if self.block_exists(cf_blocks, h)? {
+                        highest = h;
+                    }
+                }
+
+                if highest > 0 {
+                    let elapsed = start_time.elapsed();
+                    info!("✅ find_highest_block: Found highest block at {} (near-pointer search, took {:?})", highest, elapsed);
+                    return Ok(highest);
+                }
+            }
+        }
 
         // PHASE 1: Binary search to find approximate upper bound (O(log n))
         // This dramatically reduces the search space from millions to thousands
@@ -433,10 +499,21 @@ impl PointerIntegrityChecker {
                 Ok(())
             }
             CorruptionSeverity::Moderate => {
-                warn!("⚠️  Moderate pointer corruption detected ({} blocks off)",
-                      check_result.actual_highest_height.saturating_sub(check_result.pointer_height));
-                warn!("   Not auto-repairing (manual intervention recommended)");
-                Err(anyhow::anyhow!("Moderate corruption detected - manual repair recommended"))
+                let blocks_behind = check_result.actual_highest_height.saturating_sub(check_result.pointer_height);
+                warn!("⚠️  Moderate pointer lag detected ({} blocks behind)", blocks_behind);
+
+                // v3.9.3-beta: Auto-repair if pointer is BEHIND (safe - blocks already exist)
+                // Only refuse if pointer is AHEAD (dangerous - would point to non-existent blocks)
+                if check_result.actual_highest_height >= check_result.pointer_height {
+                    warn!("   Pointer is behind actual blocks - safe to auto-repair");
+                    self.repair_pointer(check_result.actual_highest_height)?;
+                    info!("✅ Auto-repair successful! Pointer updated: {} → {}",
+                          check_result.pointer_height, check_result.actual_highest_height);
+                    Ok(())
+                } else {
+                    error!("🚨 Pointer is AHEAD of actual blocks - manual intervention required");
+                    Err(anyhow::anyhow!("Dangerous corruption detected - pointer ahead of blocks"))
+                }
             }
             CorruptionSeverity::Severe => {
                 error!("🚨 SEVERE pointer corruption detected!");
@@ -553,9 +630,32 @@ pub fn check_and_repair_on_startup(db: Arc<DB>) -> Result<IntegrityCheckResult> 
                 return Ok(recheck);
             }
             CorruptionSeverity::Moderate => {
-                error!("🚨 CRITICAL: Moderate pointer corruption detected!");
-                error!("   Manual intervention required - run repair-database tool");
-                return Err(anyhow::anyhow!("Moderate pointer corruption - manual repair required"));
+                // v3.5.22-beta: Auto-repair Moderate forward corruption (pointer behind actual)
+                // This is NORMAL operation when blocks are added faster than pointer is updated
+                // Only require manual intervention for reverse corruption (pointer ahead of actual)
+                if result.pointer_height > result.actual_highest_height {
+                    error!("🚨 CRITICAL: Moderate REVERSE pointer corruption detected!");
+                    error!("   Pointer ahead of actual - this indicates data loss!");
+                    error!("   Manual intervention required - run repair-database tool");
+                    return Err(anyhow::anyhow!("Moderate reverse pointer corruption - manual repair required"));
+                }
+
+                warn!("⚠️  Moderate forward pointer lag detected (pointer behind by {} blocks)",
+                      result.actual_highest_height - result.pointer_height);
+                warn!("   This is normal during high block production - auto-repairing...");
+
+                checker.auto_repair(&result)
+                    .context("Failed to auto-repair moderate pointer lag")?;
+
+                // Re-check after repair
+                let recheck = checker.check_on_startup()?;
+                if recheck.is_corrupted && recheck.corruption_severity != CorruptionSeverity::Minor {
+                    error!("🚨 Auto-repair failed - pointer still corrupted!");
+                    return Err(anyhow::anyhow!("Pointer auto-repair failed verification"));
+                }
+
+                info!("✅ Database pointer auto-repaired successfully!");
+                return Ok(recheck);
             }
             CorruptionSeverity::Minor => {
                 warn!("⚠️  Minor pointer mismatch detected - monitoring");

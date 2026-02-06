@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
+pub mod auto_cluster;         // 🚀 v3.4.6-beta: Zero-config UDP peer discovery
 pub mod crypto_agile;
 pub mod dag_sync;
 pub mod network_manager;
@@ -45,6 +46,10 @@ pub mod zk_peer_height_proof;
 #[cfg(feature = "advanced-crypto")]
 pub mod lattice_gossip;
 
+pub use auto_cluster::{
+    AutoCluster, AutoClusterConfig, ClusterPeerInfo, ClusterState, DiscoveryMessage,
+    DISCOVERY_PORT, HEARTBEAT_INTERVAL, PEER_TIMEOUT,
+};
 pub use crypto_agile::{AgileHandshake, CryptoProvider, CryptoScheme, Kyber1024KeyExchange};
 pub use network_manager::{NetworkManager, NetworkManagerConfig};
 pub use peer_registry::{PeerCapability, PeerInfo, PeerRegistry};
@@ -112,6 +117,7 @@ pub mod signature_cache; // v1.0.3-beta: Signature verification cache with TOCTO
 pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verification (Week 2, Day 1-2)
 pub mod circuit_breaker; // v1.0.3-beta: Circuit breaker for attack protection (Week 2, Day 3-4)
 pub mod address_filter; // v1.2.2-beta: Docker/container address filtering for P2P sync optimization
+pub mod gossipsub_queue; // v3.4.13-beta: Priority queue with rate limiting for gossipsub
 
 // ========== v1.9.0-SLINGSHOT: Project APOLLO Phase 4 - Continuous Streaming ==========
 pub mod continuous_sync; // Continuous stream protocol (SCRAMJET FLOW) - 30-50% RTT savings

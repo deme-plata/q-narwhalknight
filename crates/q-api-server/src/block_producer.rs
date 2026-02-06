@@ -145,6 +145,11 @@ pub struct BlockProducer {
     /// 🏷️ v2.3.5-beta: Human-friendly node name (e.g., "Bootstrap", "Alpha")
     /// Displayed in UI to help users identify mining sources
     node_name: Option<String>,
+
+    /// 📦 v3.5.20-beta: Transaction status tracker for P2P transactions
+    /// When present, updates transaction status from InMempool to Confirmed
+    /// after they are included in a block
+    tx_status: Option<Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>>,
 }
 
 /// 📊 v1.0.72-beta: Finality metrics for sub-50ms tracking
@@ -191,6 +196,7 @@ impl BlockProducer {
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution (use set_node_identity to enable)
             node_name: None,         // v2.3.5-beta: Human-friendly node name
+            tx_status: None,         // v3.5.20-beta: Transaction status tracker
         }
     }
 
@@ -221,6 +227,7 @@ impl BlockProducer {
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
+            tx_status: None,         // v3.5.20-beta: Transaction status tracker
         }
     }
 
@@ -262,6 +269,7 @@ impl BlockProducer {
             hashpower_security: None, // v1.3.0-beta: Hashpower-weighted security (disabled by default)
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
+            tx_status: None,         // v3.5.20-beta: Transaction status tracker
         })
     }
 
@@ -500,15 +508,37 @@ impl BlockProducer {
             }
         }
 
+        // 🚀 v3.4.2-beta: Fetch user transactions BEFORE deciding to produce
+        // This prevents the race condition where an empty block is produced before
+        // user transactions arrive, causing the tx-containing block to be discarded
+        let user_transactions = self.fetch_user_transactions_from_mempool().await;
+
+        // 🔄 v3.4.2-beta CRITICAL FIX: Don't produce truly empty blocks
+        // If we have no mining solutions AND no user transactions, skip this round.
+        // This prevents race conditions where:
+        // 1. Producer #0 creates empty block at height N
+        // 2. User tx arrives and is queued
+        // 3. Producer #1 creates block N with user tx
+        // 4. Block with user tx is DISCARDED because height N "already produced"
+        // 5. User transaction is LOST
+        if solutions.is_empty() && user_transactions.is_empty() {
+            debug!(
+                "⏸️ [SKIP] No solutions AND no user transactions - skipping empty block at height {}",
+                self.current_height + 1
+            );
+            return None; // Don't produce empty block
+        }
+
         if solutions.is_empty() {
-            // No solutions available - create empty block for DAG continuity
-            debug!("📦 Producing empty block for DAG continuity (no mining solutions)");
+            // Has user transactions but no mining solutions - still produce
+            debug!("📦 Producing block with {} user transactions (no mining solutions)", user_transactions.len());
         }
 
         info!(
-            "🏗️  Producing block: height={}, solutions={} (Phase 2.2 lock-free drain)",
+            "🏗️  Producing block: height={}, solutions={}, user_txs={} (Phase 2.2 lock-free drain)",
             self.current_height + 1,
-            solutions.len()
+            solutions.len(),
+            user_transactions.len()
         );
 
         // Calculate block difficulty from solutions
@@ -537,9 +567,8 @@ impl BlockProducer {
         let solutions_root = self.compute_solutions_merkle_root_simd(&solutions).await;
         let state_root = [0u8; 32]; // TODO: Compute state root
 
-        // 🚀 v1.0.72-beta: Fetch user transactions from Narwhal ProductionMempool
-        // Fee-ordered (highest first) for optimal miner revenue
-        let user_transactions = self.fetch_user_transactions_from_mempool().await;
+        // 🚀 v3.4.2-beta: user_transactions already fetched at the start of produce_block()
+        // to enable the empty-block-skip optimization (prevents race condition)
 
         // ============================================================================
         // 🔐 v1.3.0-beta: Enhanced VDF with Hashpower Security Integration
@@ -687,6 +716,18 @@ impl BlockProducer {
         // Order: coinbase first (required), then fee-ordered user transactions
         let mut all_transactions = coinbase_transactions;
         let user_tx_count = user_transactions.len();
+
+        // 📦 v3.5.14-beta: Collect user transaction hashes BEFORE extending
+        // These will be removed from the mempool after block creation
+        // IMPORTANT: Mempool uses tx.hash() (postcard-based) for storage, but tx_status uses
+        // tx.id (SHA3-256 of core fields). We need BOTH for different purposes:
+        // - user_tx_hashes_for_mempool: tx.hash() for mempool removal (matches mempool storage)
+        // - user_tx_ids_for_status: tx.id for status updates (matches P2P handler storage)
+        let user_tx_hashes_for_mempool: Vec<[u8; 32]> = user_transactions.iter().map(|tx| tx.hash()).collect();
+        // v3.5.25-beta CRITICAL FIX: Use tx.id for status updates to match P2P handler!
+        // P2P handler stores status with tx.id, so status updates must use the same key.
+        let user_tx_ids_for_status: Vec<[u8; 32]> = user_transactions.iter().map(|tx| tx.id).collect();
+
         all_transactions.extend(user_transactions);
 
         // 📊 v1.0.72-beta: Track user transaction inclusion
@@ -924,6 +965,45 @@ impl BlockProducer {
         // This prevents race condition where multiple calls produce at the same height
         self.last_produced_height = block.header.height;
 
+        // 📦 v3.5.14-beta: Remove included transactions from mempool
+        // CRITICAL: Without this, the same transactions would be included in every block!
+        if !user_tx_hashes_for_mempool.is_empty() {
+            if let Some(mempool) = &self.production_mempool {
+                let mempool_clone = mempool.clone();
+                let hashes = user_tx_hashes_for_mempool.clone();
+                let tx_count = hashes.len();
+                tokio::spawn(async move {
+                    mempool_clone.remove_included_transactions(&hashes).await;
+                    info!(
+                        "🗑️  [MEMPOOL] Removed {} transactions after block inclusion",
+                        tx_count
+                    );
+                });
+            }
+
+            // 📦 v3.5.20-beta: Update transaction status from InMempool to Confirmed
+            // CRITICAL FIX: Without this, P2P transactions stay "in_mempool" forever!
+            // The tx_status is updated synchronously to ensure consistency before block is returned
+            // v3.5.25-beta: Use tx.id (not tx.hash()) to match how P2P handler stores status
+            if let Some(ref tx_status_map) = self.tx_status {
+                let block_height = block.header.height;
+                for tx_id in &user_tx_ids_for_status {
+                    tx_status_map.insert(
+                        *tx_id,
+                        q_types::TxStatus::Confirmed {
+                            block_height,
+                            round: block_height,
+                        },
+                    );
+                }
+                info!(
+                    "✅ [TX-CONFIRMED] Marked {} P2P transactions as confirmed at block {}",
+                    user_tx_ids_for_status.len(),
+                    block_height
+                );
+            }
+        }
+
         Some(block)
     }
 
@@ -1071,6 +1151,12 @@ impl BlockProducer {
             pqc_signature: None,
             signature_phase: TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            // v3.4.2-beta: ZK privacy fields (transparent by default)
+            zk_proof_bundle: None,
+            privacy_level: TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         });
 
         // Transaction 2-N: Miner rewards (99% split among all miners)
@@ -1103,6 +1189,12 @@ impl BlockProducer {
                 pqc_signature: None,
                 signature_phase: TxSignaturePhase::Phase0Ed25519,
                 pqc_public_key: None,
+                // v3.4.2-beta: ZK privacy fields (transparent by default)
+                zk_proof_bundle: None,
+                privacy_level: TransactionPrivacyLevel::Transparent,
+                bulletproof: None,
+                nullifier: None,
+                memo: None,
             });
 
             // ✨ v1.0.17-beta: Emit SSE event for mining reward
@@ -1742,6 +1834,16 @@ impl BlockProducer {
         info!("   Blocks will include fee-ordered user transactions");
         info!("   Sub-50ms finality: Transaction pre-ordering enabled");
         self.production_mempool = Some(mempool);
+    }
+
+    /// 📦 v3.5.20-beta: Set transaction status tracker for P2P transaction confirmations
+    /// When set, updates transaction status from InMempool to Confirmed
+    /// after they are included in a block. This is CRITICAL for P2P transactions
+    /// to show as confirmed in the explorer!
+    pub fn set_tx_status(&mut self, tx_status: Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>) {
+        info!("📦 [TX-STATUS] Setting transaction status tracker for block producer");
+        info!("   P2P transactions will be marked Confirmed after block inclusion");
+        self.tx_status = Some(tx_status);
     }
 
     /// 🔐 v1.3.0-beta: Set HashpowerSecurityManager for enhanced cryptographic security

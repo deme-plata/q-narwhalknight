@@ -51,13 +51,27 @@ pub struct QuantumMetrics {
     pub superposition_trades: u64,
     pub collapsed_trades: u64,
     pub entangled_trades: u64,
-    pub average_quantum_correlation: f64,
+    /// Sum of quantum correlations (avoids f64 accumulation precision loss)
+    /// Use `average_quantum_correlation()` to get the computed average on-demand
+    pub total_quantum_correlation: f64,
     pub wave_function_stability: f64,
     pub quantum_volatility_index: BigDecimal,
     pub uncertainty_principle_factor: f64,
     pub decoherence_events: u64,
     pub quantum_efficiency_ratio: f64,
     pub last_metrics_update: DateTime<Utc>,
+}
+
+impl QuantumMetrics {
+    /// Calculate average quantum correlation on-demand to avoid f64 accumulation errors
+    #[inline]
+    pub fn average_quantum_correlation(&self) -> f64 {
+        if self.total_quantum_trades == 0 {
+            0.0
+        } else {
+            self.total_quantum_correlation / self.total_quantum_trades as f64
+        }
+    }
 }
 
 /// Quantum wave function analysis
@@ -90,12 +104,18 @@ pub struct QuantumPerformanceStats {
     pub quantum_enhanced_volume: BigDecimal,
     pub average_trade_size: BigDecimal,
     pub median_trade_size: BigDecimal,
-    pub quantum_slippage_reduction: f64,
-    pub impermanent_loss_protection: f64,
-    pub yield_farming_efficiency: f64,
-    pub privacy_enhancement_ratio: f64,
-    pub zk_proof_success_rate: f64,
-    pub quantum_execution_speed: f64,
+    /// Quantum slippage reduction in basis points (e.g., 618 = 6.18%)
+    pub quantum_slippage_reduction_bps: u16,
+    /// Impermanent loss protection in basis points (e.g., 8500 = 85%)
+    pub impermanent_loss_protection_bps: u16,
+    /// Yield farming efficiency in basis points (e.g., 10000 = 100%, 16180 = 161.8%)
+    pub yield_farming_efficiency_bps: u16,
+    /// Privacy enhancement ratio in basis points (e.g., 10000 = 100%)
+    pub privacy_enhancement_ratio_bps: u16,
+    /// ZK proof success rate in basis points (e.g., 9990 = 99.9%)
+    pub zk_proof_success_rate_bps: u16,
+    /// Quantum execution speed improvement in basis points over classical (e.g., 5000 = 50% faster)
+    pub quantum_execution_speed_bps: u16,
 }
 
 /// Analytics configuration with physics constants
@@ -157,10 +177,14 @@ pub struct QuantumTradingStats {
 /// Quantum efficiency metrics
 #[derive(Debug, Clone, Default)]
 pub struct QuantumEfficiencyMetrics {
-    pub slippage_reduction_percentage: f64,
-    pub execution_time_improvement: f64,
-    pub fee_optimization_ratio: f64,
-    pub liquidity_utilization_efficiency: f64,
+    /// Slippage reduction in basis points (e.g., 6180 = 61.8%)
+    pub slippage_reduction_bps: u16,
+    /// Execution time improvement in basis points (e.g., 7070 = 70.7%)
+    pub execution_time_improvement_bps: u16,
+    /// Fee optimization ratio in basis points (e.g., 16180 = 161.8% = 1.618x)
+    pub fee_optimization_ratio_bps: u16,
+    /// Liquidity utilization efficiency in basis points (e.g., 8500 = 85%)
+    pub liquidity_utilization_efficiency_bps: u16,
     pub quantum_arbitrage_opportunities: u32,
 }
 
@@ -269,10 +293,9 @@ impl QuantumTradingAnalytics {
                         QuantumState::Entangled => metrics.entangled_trades += 1,
                     }
 
-                    metrics.average_quantum_correlation = (metrics.average_quantum_correlation
-                        * (metrics.total_quantum_trades - 1) as f64
-                        + data_point.entanglement_correlation)
-                        / metrics.total_quantum_trades as f64;
+                    // Accumulate total correlation (precision-safe)
+                    // Average is computed on-demand via metrics.average_quantum_correlation()
+                    metrics.total_quantum_correlation += data_point.entanglement_correlation;
 
                     metrics.quantum_volatility_index = data_point.uncertainty_factor.clone();
                     metrics.last_metrics_update = Utc::now();
@@ -373,7 +396,7 @@ impl QuantumTradingAnalytics {
             current_price: "1.618".parse().unwrap(),
             volume_24h: BigDecimal::from(100000),
             liquidity: BigDecimal::from(1000000),
-            price_change_24h: 5.5,
+            price_change_24h_bps: 550, // 5.5%
             high_24h: "1.7".parse().unwrap(),
             low_24h: "1.5".parse().unwrap(),
             trades_count: quantum_metrics.total_quantum_trades,
@@ -402,10 +425,10 @@ impl QuantumTradingAnalytics {
             entanglement_events: quantum_metrics.entangled_trades,
             top_trading_pairs: vec!["ORB/ORBUSD".to_string()],
             quantum_efficiency_metrics: QuantumEfficiencyMetrics {
-                slippage_reduction_percentage: 61.8, // Golden ratio reduction
-                execution_time_improvement: 70.7,    // √2/2 * 100
-                fee_optimization_ratio: 1.618,       // Golden ratio
-                liquidity_utilization_efficiency: 85.0,
+                slippage_reduction_bps: 6180,               // 61.8% - Golden ratio reduction
+                execution_time_improvement_bps: 7070,       // 70.7% - √2/2 * 100
+                fee_optimization_ratio_bps: 16180,          // 161.8% = 1.618x - Golden ratio
+                liquidity_utilization_efficiency_bps: 8500, // 85%
                 quantum_arbitrage_opportunities: 42,
             },
             generated_at: Utc::now(),

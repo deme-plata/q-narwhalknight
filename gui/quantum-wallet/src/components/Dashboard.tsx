@@ -1,8 +1,10 @@
 import { useState, useEffect, memo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3 } from 'lucide-react';
+import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
 import TransactionDetailsModal from './TransactionDetailsModal';
+// 🌐 v3.4.3-browser: P2P real-time block streaming
+import { useRealtimeBlocks } from '../hooks/useRealtimeBlocks';
 import QRCodeModal from './QRCodeModal';
 import StripeCheckout from './StripeCheckout';
 import DAGKnightVisualization from './DAGKnightVisualization';
@@ -18,14 +20,49 @@ import CustomTokensCard from './CustomTokensCard';
 import FinanceModal from './FinanceModal';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
+// v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
+// Any balance exceeding this is corrupted data and must be rejected
+const MAX_SANE_BALANCE = 21_000_000; // 21 million QUG
+
+/**
+ * v3.6.1-beta: Validate balance value to prevent corrupted data from being cached
+ */
+function isValidBalance(balance: number): boolean {
+  if (typeof balance !== 'number') return false;
+  if (isNaN(balance) || !isFinite(balance)) return false;
+  if (balance < 0) return false;
+  if (balance > MAX_SANE_BALANCE) {
+    console.warn(`🚨 [Dashboard] Rejected corrupted balance: ${balance.toExponential()} > max supply ${MAX_SANE_BALANCE}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * v3.6.1-beta: Safe localStorage set for cachedBalance - validates before storing
+ */
+function safeCacheBalance(balance: number): void {
+  if (isValidBalance(balance)) {
+    localStorage.setItem('cachedBalance', balance.toString());
+  } else {
+    console.warn(`🚨 [Dashboard] safeCacheBalance: Refusing to cache invalid balance: ${balance}`);
+  }
+}
+
 interface Transaction {
   id: string;
-  type: 'receive' | 'send' | 'mining';
+  type: 'receive' | 'send' | 'mining' | 'swap';
   amount: number;
   from?: string;
   to?: string;
   timestamp: string;
   txHash: string;
+  // v3.5.8-beta: Additional fields for swaps and token transfers
+  tokenSymbol?: string;
+  tokenAddress?: string;
+  amountOut?: string;
+  tokenIn?: string;
+  tokenOut?: string;
 }
 
 interface BalanceHistoryPoint {
@@ -50,6 +87,9 @@ interface DashboardProps {
 }
 
 const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) {
+  // 🌐 v3.4.3-browser: P2P real-time block streaming via gossipsub
+  const { latestBlock: p2pLatestBlock, blockHistory: p2pBlockHistory, isSubscribed: p2pSubscribed } = useRealtimeBlocks();
+
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>(() => {
     // Load faucet transactions from localStorage on mount
@@ -220,7 +260,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   // Enhanced filtering and pagination state
-  const [filterType, setFilterType] = useState<'all' | 'receive' | 'send' | 'mining'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'receive' | 'send' | 'mining' | 'swap'>('all');
   const [sortBy, setSortBy] = useState<'date' | 'amount'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [currentPage, setCurrentPage] = useState(1);
@@ -421,7 +461,7 @@ Provide a brief analysis (under 250 tokens) covering:
                   const lsGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
                   const lsGlobalCooldownActive = Date.now() < lsGlobalCooldownUntil;
                   if (!dexSwapCooldownRef.current && !lsGlobalCooldownActive) {
-                    localStorage.setItem('cachedBalance', fetchedBalance.toString());
+                    safeCacheBalance(fetchedBalance);
                   } else {
                     console.log('🚫 [fetchNodeStatusCore] SKIPPING localStorage write during DEX cooldown (global:', lsGlobalCooldownActive, ')');
                   }
@@ -529,7 +569,7 @@ Provide a brief analysis (under 250 tokens) covering:
             const wbGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
             const wbGlobalCooldownActive = Date.now() < wbGlobalCooldownUntil;
             if (!dexSwapCooldownRef.current && !wbGlobalCooldownActive) {
-              localStorage.setItem('cachedBalance', fetchedBalance.toString());
+              safeCacheBalance(fetchedBalance);
             } else {
               console.log('🚫 [fetchWalletBalances] SKIPPING localStorage write during DEX cooldown (global:', wbGlobalCooldownActive, ')');
             }
@@ -787,17 +827,26 @@ Provide a brief analysis (under 250 tokens) covering:
     };
 
     const fetchRecentTransactionsCore = async () => {
-      console.log('📋 [fetchRecentTransactions] START - Fetching recent transactions...');
+      console.log('📋 [fetchRecentTransactions] START - Fetching decentralized wallet history...');
       console.log('📋 [fetchRecentTransactions] Mounted status:', mounted);
-      console.log('📋 [fetchRecentTransactions] Current wallet:', localStorage.getItem('walletAddress'));
+      const currentWalletAddress = localStorage.getItem('walletAddress') || '';
+      console.log('📋 [fetchRecentTransactions] Current wallet:', currentWalletAddress);
+
       if (!mounted) {
         console.log('📋 [fetchRecentTransactions] ABORT - Component not mounted');
         return;
       }
 
+      if (!currentWalletAddress) {
+        console.log('📋 [fetchRecentTransactions] ABORT - No wallet address');
+        return;
+      }
+
       try {
-        const response = await qnkAPI.getRecentTransactions(100);
-        console.log('📋 Transactions API response:', response);
+        // v3.5.8-beta: Use new decentralized wallet history API
+        // This fetches transactions verified by all nodes (transfers + swaps + token transfers)
+        const response = await qnkAPI.getWalletHistory(currentWalletAddress, 100);
+        console.log('📋 Wallet history API response:', response);
         if (!mounted) return;
 
         // Always merge with existing faucet transactions, even if API fails
@@ -824,63 +873,68 @@ Provide a brief analysis (under 250 tokens) covering:
           // Clear error on successful load
           setTransactionError(null);
 
-          // Get current wallet address to determine send/receive
-          const currentWalletAddress = localStorage.getItem('walletAddress') || '';
-          console.log('📋 Current wallet address for comparison:', currentWalletAddress);
-
-          // Transform API data to match frontend Transaction interface
+          // v3.5.8-beta: Transform UnifiedTransactionEntry[] to frontend Transaction interface
           const burnAddress = '0000000000000000000000000000000000000000000000000000000000000000';
           const transformedTransactions: Transaction[] = response.data
             .filter((tx: any) => {
-              // Filter out invalid transactions
-              if (!tx.from || !tx.to) return false;
+              // Filter out invalid transactions (swaps may have different structure)
+              if (tx.tx_type !== 'swap' && (!tx.from || !tx.to)) return false;
               // Allow burn transactions (to burn address) but not from burn address
               if (tx.from === burnAddress) return false;
               return true;
             })
             .map((tx: any) => {
-              // Determine transaction type based on current wallet address
-              // Compare both with and without "qnk" prefix for compatibility
-              const walletHex = currentWalletAddress?.startsWith('qnk')
-                ? currentWalletAddress.substring(3)
-                : (currentWalletAddress || '');
-              const toHex = tx.to?.startsWith('qnk') ? tx.to.substring(3) : (tx.to || '');
-              const fromHex = tx.from?.startsWith('qnk') ? tx.from.substring(3) : (tx.from || '');
+              // v3.5.8-beta: Map tx_type and direction to Transaction type
+              let type: 'receive' | 'send' | 'mining' | 'swap';
 
-              const type: 'receive' | 'send' = toHex === walletHex ? 'receive' : 'send';
+              if (tx.tx_type === 'swap') {
+                type = 'swap';
+              } else if (tx.tx_type === 'mining_reward') {
+                type = 'mining';
+              } else if (tx.direction === 'received') {
+                type = 'receive';
+              } else {
+                type = 'send';
+              }
 
               console.log('📋 Transaction type detection:', {
-                txTo: tx.to,
-                txFrom: tx.from,
-                currentWallet: currentWalletAddress,
-                toHex,
-                fromHex,
-                walletHex,
+                tx_type: tx.tx_type,
+                direction: tx.direction,
                 detectedType: type
               });
 
-              // Convert Unix timestamp to ISO string
+              // Convert Unix timestamp (seconds) to ISO string
               const timestamp = typeof tx.timestamp === 'number'
                 ? new Date(tx.timestamp * 1000).toISOString()
                 : tx.timestamp;
 
-              // Convert amount from smallest units to QNK (divide by 1,000,000,000 - 9 decimals)
-              const amount = typeof tx.amount === 'number'
-                ? tx.amount / 1000000000
-                : tx.amount;
+              // Parse amount - it comes as string from unified API
+              // Convert from smallest units to display units (QUG has 24 decimals)
+              const rawAmount = typeof tx.amount === 'string'
+                ? parseFloat(tx.amount)
+                : (tx.amount || 0);
+              const amount = rawAmount / 1e24;
 
               // Label burn address as "Nitro Points Purchase"
+              const toHex = tx.to?.startsWith('qnk') ? tx.to.substring(3) : (tx.to || '');
+              const fromHex = tx.from?.startsWith('qnk') ? tx.from.substring(3) : (tx.from || '');
               const displayTo = toHex === burnAddress ? 'Nitro Points Purchase ⚡' : tx.to;
               const displayFrom = fromHex === burnAddress ? 'Burn Address' : tx.from;
 
               return {
-                id: tx.id || tx.hash,
+                id: tx.id,
                 type,
                 amount,
                 from: displayFrom,
                 to: displayTo,
                 timestamp,
-                txHash: tx.hash || tx.id,
+                txHash: tx.id,
+                // v3.5.8-beta: Additional fields for swaps and token transfers
+                tokenSymbol: tx.token_symbol,
+                tokenAddress: tx.token_address,
+                amountOut: tx.amount_out,
+                tokenIn: tx.token_in,
+                tokenOut: tx.token_out,
               };
             });
 
@@ -900,7 +954,7 @@ Provide a brief analysis (under 250 tokens) covering:
           );
         });
       } catch (err) {
-        console.error('❌ Error fetching transactions:', err);
+        console.error('❌ Error fetching wallet history:', err);
         // On error, preserve faucet and mining transactions
         setRecentTransactions(prev => prev.filter(tx =>
           tx.id.startsWith('faucet-') || tx.id.startsWith('mining-')
@@ -986,9 +1040,10 @@ Provide a brief analysis (under 250 tokens) covering:
     console.log('ℹ️  [SSE DISABLED] Dashboard no longer uses local SSE - App.tsx handles it');
     // ============================================
 
-    const loadData = async () => {
-      console.log('🚀 [loadData] START - Loading dashboard data...');
+    const loadData = async (retryCount = 0) => {
+      console.log(`🚀 [loadData] START - Loading dashboard data... (attempt ${retryCount + 1})`);
       setLoading(true);
+      let loadSuccess = false;
       try {
         console.log('🚀 [loadData] Step 1: Generating wallet address...');
         await generateWalletAddress();
@@ -999,16 +1054,36 @@ Provide a brief analysis (under 250 tokens) covering:
         console.log('🚀 [loadData] Step 4: Fetching wallet balances...');
         await fetchWalletBalances();
         console.log('🚀 [loadData] Step 5: Wallet balances fetched');
+        loadSuccess = true;
       } catch (error) {
         console.error('❌ [loadData] Error loading data:', error);
+        // v3.4.15: Auto-retry on initial load failure (likely API discovery timing issue)
+        if (retryCount < 2 && mounted) {
+          console.log(`🔄 [loadData] Retrying in ${(retryCount + 1) * 500}ms...`);
+          setTimeout(() => {
+            if (mounted) {
+              loadData(retryCount + 1);
+            }
+          }, (retryCount + 1) * 500); // 500ms, 1000ms delays
+          return; // Don't set loading=false yet
+        }
       } finally {
-        setLoading(false);
-        console.log('✅ [loadData] COMPLETE - Dashboard data loaded');
+        // Set loading to false on success or final retry
+        if (loadSuccess || retryCount >= 2) {
+          setLoading(false);
+          console.log('✅ [loadData] COMPLETE - Dashboard data loaded');
+        }
       }
     };
 
-    console.log('🎬 [Dashboard useEffect] Calling loadData()...');
-    loadData();
+    // v3.4.15: Small delay to allow node discovery to complete on first load
+    console.log('🎬 [Dashboard useEffect] Scheduling loadData() with 100ms delay...');
+    const initialDelay = setTimeout(() => {
+      if (mounted) {
+        console.log('🎬 [Dashboard useEffect] Calling loadData()...');
+        loadData();
+      }
+    }, 100);
 
     // Set up SSE for real-time balance updates
     // CRITICAL: Pass wallet_address parameter for privacy-filtered SSE
@@ -1028,6 +1103,12 @@ Provide a brief analysis (under 250 tokens) covering:
     if (mounted) {
       setSseConnected(true);
     }
+
+    // v3.4.15: Cleanup for the initial delay timeout
+    return () => {
+      mounted = false;
+      clearTimeout(initialDelay);
+    };
 
     // Early return - skip all SSE setup since App.tsx handles it
     // The cleanup function below will still run on unmount
@@ -1488,7 +1569,7 @@ Provide a brief analysis (under 250 tokens) covering:
 
         // Update tracking and localStorage
         highestKnownBalancesRef.current['QUG'] = newBalance;
-        localStorage.setItem('cachedBalance', newBalance.toString());
+        safeCacheBalance(newBalance);
 
         // Update wallet balances state
         setWalletBalances(wallets => {
@@ -1603,7 +1684,7 @@ Provide a brief analysis (under 250 tokens) covering:
         // Immediately update all tracking refs and storage
         highestKnownBalancesRef.current[symbol] = incomingBalance;
         if (symbol === 'QUG') {
-          localStorage.setItem('cachedBalance', incomingBalance.toString());
+          safeCacheBalance(incomingBalance);
         } else if (symbol === 'QUGUSD') {
           localStorage.setItem('cachedQugusdBalance', incomingBalance.toString());
         }
@@ -1655,7 +1736,7 @@ Provide a brief analysis (under 250 tokens) covering:
         highestKnownBalancesRef.current[symbol] = incomingBalance;
         // v2.3.27-beta: Don't write to localStorage during DEX cooldown
         if (symbol === 'QUG' && !dexSwapCooldownRef.current) {
-          localStorage.setItem('cachedBalance', incomingBalance.toString());
+          safeCacheBalance(incomingBalance);
         }
       }
 
@@ -2179,6 +2260,13 @@ Provide a brief analysis (under 250 tokens) covering:
                 Live Updates
               </span>
             )}
+            {/* 🌐 v3.4.3-browser: P2P gossipsub status indicator */}
+            {p2pSubscribed && (
+              <span className="inline-flex items-center gap-1 text-xs text-cyan-400 ml-2">
+                <Radio className="w-3 h-3 animate-pulse" />
+                P2P {p2pBlockHistory.length > 0 ? `(${p2pBlockHistory.length} blocks)` : 'Subscribed'}
+              </span>
+            )}
           </p>
         </div>
         <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-quantum-purple to-quantum-cyan flex items-center justify-center">
@@ -2198,14 +2286,6 @@ Provide a brief analysis (under 250 tokens) covering:
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
       >
-        {/* Animated shimmer effect */}
-        <motion.div
-          className="absolute inset-0 bg-gradient-to-r from-transparent via-amber-500/10 to-transparent"
-          initial={{ x: '-100%' }}
-          animate={{ x: '100%' }}
-          transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-        />
-
         <div className="relative space-y-6">
           {/* Wallet Address Section */}
           <div className="flex items-start justify-between">
@@ -2609,7 +2689,7 @@ Provide a brief analysis (under 250 tokens) covering:
                   border: '1px solid rgba(212, 175, 55, 0.2)'
                 }}
               >
-                {(['all', 'receive', 'send', 'mining'] as const).map((type) => (
+                {(['all', 'receive', 'send', 'mining', 'swap'] as const).map((type) => (
                   <motion.button
                     key={type}
                     onClick={() => setFilterType(type)}
@@ -2623,7 +2703,7 @@ Provide a brief analysis (under 250 tokens) covering:
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
-                    {type === 'all' ? 'All' : type === 'receive' ? '↓ Received' : type === 'send' ? '↑ Sent' : '⛏️ Mining'}
+                    {type === 'all' ? 'All' : type === 'receive' ? '↓ Received' : type === 'send' ? '↑ Sent' : type === 'mining' ? '⛏️ Mining' : '⇄ Swaps'}
                   </motion.button>
                 ))}
               </div>
@@ -2696,17 +2776,19 @@ Provide a brief analysis (under 250 tokens) covering:
                           ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))'
                           : tx.type === 'mining'
                           ? 'linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(245, 158, 11, 0.15))'
+                          : tx.type === 'swap'
+                          ? 'linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(124, 58, 237, 0.15))'
                           : 'linear-gradient(135deg, rgba(244, 63, 94, 0.2), rgba(225, 29, 72, 0.15))',
-                        border: `1px solid ${tx.type === 'receive' ? 'rgba(34, 197, 94, 0.3)' : tx.type === 'mining' ? 'rgba(251, 191, 36, 0.3)' : 'rgba(244, 63, 94, 0.3)'}`
+                        border: `1px solid ${tx.type === 'receive' ? 'rgba(34, 197, 94, 0.3)' : tx.type === 'mining' ? 'rgba(251, 191, 36, 0.3)' : tx.type === 'swap' ? 'rgba(139, 92, 246, 0.3)' : 'rgba(244, 63, 94, 0.3)'}`
                       }}
                     >
-                      {tx.type === 'receive' ? '↓' : tx.type === 'mining' ? '⛏️' : '↑'}
+                      {tx.type === 'receive' ? '↓' : tx.type === 'mining' ? '⛏️' : tx.type === 'swap' ? '⇄' : '↑'}
                     </div>
                     <div>
                       <div className="font-semibold text-amber-100">
-                        {tx.type === 'receive' ? 'Received from' : tx.type === 'mining' ? 'Mining Reward' : 'Sent to'} {' '}
+                        {tx.type === 'receive' ? 'Received from' : tx.type === 'mining' ? 'Mining Reward' : tx.type === 'swap' ? 'Swapped' : 'Sent to'} {' '}
                         <span className="text-amber-300/70">
-                          {tx.type === 'receive' ? (tx.from || 'Unknown') : tx.type === 'mining' ? '' : (tx.to || 'Unknown')}
+                          {tx.type === 'receive' ? (tx.from || 'Unknown') : tx.type === 'mining' ? '' : tx.type === 'swap' ? `${tx.tokenIn || 'Token'} → ${tx.tokenOut || 'Token'}` : (tx.to || 'Unknown')}
                         </span>
                       </div>
                       <div className="text-sm text-amber-300/50 flex items-center gap-2">
@@ -2717,10 +2799,10 @@ Provide a brief analysis (under 250 tokens) covering:
                   </div>
                   <div
                     className={`font-bold text-lg ${
-                      tx.type === 'receive' ? 'text-green-400' : tx.type === 'mining' ? 'text-amber-400' : 'text-rose-400'
+                      tx.type === 'receive' ? 'text-green-400' : tx.type === 'mining' ? 'text-amber-400' : tx.type === 'swap' ? 'text-violet-400' : 'text-rose-400'
                     }`}
                   >
-                    {tx.type === 'receive' ? '+' : tx.type === 'mining' ? '+' : '-'}{formatBalance(tx.amount)} {TICKER_SYMBOL}
+                    {tx.type === 'receive' ? '+' : tx.type === 'mining' ? '+' : tx.type === 'swap' ? '' : '-'}{formatBalance(tx.amount)} {tx.tokenSymbol || TICKER_SYMBOL}
                   </div>
                 </motion.div>
               )) : (

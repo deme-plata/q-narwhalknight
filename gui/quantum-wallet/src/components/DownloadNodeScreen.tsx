@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v2.3.12-beta • WarpSync + Instant Endgame</span>
+          <span className="text-sm font-bold text-quantum-cyan">v3.5.14-beta • WarpSync + ZK Privacy + Real Cryptography</span>
         </div>
       </motion.div>
 
@@ -135,15 +135,15 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v2.3.4-beta"
+              href="/downloads/q-api-server-v3.9.3-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v2.3.4-beta)
+              Download Linux Binary (v3.5.14-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 178 MB | WarpSync + Instant Endgame + Ring-LWE VRF + Genus-2 VDF
+              Size: 181 MB | WarpSync + ZK Privacy + Ring-LWE VRF + Genus-2 VDF
             </p>
           </div>
 
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v2.3.4-beta
-chmod +x q-api-server-v2.3.4-beta
-./q-api-server-v2.3.4-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v3.9.3-beta
+chmod +x q-api-server-v3.9.3-beta
+./q-api-server-v3.9.3-beta --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes

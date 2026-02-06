@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import SessionTimeoutModal from '../components/SessionTimeoutModal';
-import { recoverMnemonic, walletSession, keypairFromMnemonic } from '../services/walletAuth';
+import { recoverMnemonic, walletSession, keypairFromMnemonic, loadWallet } from '../services/walletAuth';
 
 interface SessionTimeoutContextType {
   requestPassword: () => Promise<string>;
@@ -56,10 +56,33 @@ export const SessionTimeoutProvider: React.FC<{ children: React.ReactNode }> = (
       // Attempt to decrypt mnemonic with provided password
       const mnemonic = await recoverMnemonic(password);
 
-      // Restore session
+      // v3.7.4: Load full wallet to get Dilithium5 keys as well
+      // The loadWallet function decrypts and loads Ed25519, SQIsign, and Dilithium5 keys
+      let dilithium5SecretKey: Uint8Array | undefined;
+      let dilithium5PublicKey: Uint8Array | undefined;
+
+      try {
+        const fullWallet = await loadWallet(password);
+        dilithium5SecretKey = fullWallet.dilithium5SecretKey;
+        dilithium5PublicKey = fullWallet.dilithium5PublicKey;
+        if (dilithium5SecretKey) {
+          console.log('✅ Loaded Dilithium5 post-quantum keys from encrypted storage');
+        }
+      } catch (walletError) {
+        console.warn('⚠️ Could not load Dilithium5 keys, using Ed25519 only:', walletError);
+      }
+
+      // Restore session with Ed25519 keys (always) and Dilithium5 keys (if available)
       const keyPair = await keypairFromMnemonic(mnemonic);
       // Pass mnemonic to session for "Never expire" convenience (stored only if timeout is "never")
-      walletSession.setSession(keyPair.privateKey, keyPair.address, mnemonic);
+      // v3.7.4: Also include Dilithium5 keys for post-quantum P2P transactions
+      walletSession.setSession(
+        keyPair.privateKey,
+        keyPair.address,
+        mnemonic,
+        dilithium5SecretKey,
+        dilithium5PublicKey
+      );
 
       // SECURITY: Mnemonic is only stored in sessionStorage if "Never expire" is enabled
       console.log('✅ Session restored with mnemonic for "Never expire" convenience');

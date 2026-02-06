@@ -31,6 +31,8 @@
 pub mod error;
 pub mod mixing_engine;
 pub mod ring_signatures;
+pub mod clsag;
+pub mod aggregated_ring_sig;
 pub mod uc_traceable_ring_sig;
 pub mod stealth_addresses;
 pub mod zkp_prover;
@@ -42,11 +44,30 @@ pub mod decoy_transactions;
 pub mod performance_profiler;
 pub mod optimization_engine;
 pub mod advanced_zk;
+pub mod recursive_stark;
+
+// Bulletproofs++ Range Proofs (v3.9.0: EUROCRYPT 2024)
+// 39% smaller proofs (416 bytes for 64-bit), 5x faster proving, 9.5x batch verification speedup
+pub mod bulletproofs_pp;
+
+// Threshold Mixing Pool using Multi-Party Computation (v3.9.0: NIST IR 8214C)
+// FROST threshold signatures for trustless mixing coordination
+pub mod threshold_pool;
+
+// Post-quantum lattice-based ring signatures (v3.9.0)
+// Based on IACR ePrint 2025/2170: Module-LWE linkable ring signatures
+#[cfg(feature = "lattice-ring-sigs")]
+pub mod lattice_ring_sig;
 
 // Re-export main types (only existing ones)
 pub use error::{MixingError, Result};
 pub use mixing_engine::QuantumMixingEngine;
 pub use ring_signatures::{QuantumRingSigner, RingSignature, KeyImage};
+pub use clsag::{
+    CLSAGSignature, CLSAGSigner,
+    batch_verify_clsag, batch_verify_clsag_detailed,
+    create_pedersen_commitment, generate_commitment_mask,
+};
 pub use uc_traceable_ring_sig::{
     UCTraceableRingSigner, UCTraceableRingSignature, UCTRSConfig,
     VRFOutput, VRFProof, TracingTag, TracingResult,
@@ -73,6 +94,49 @@ pub use optimization_engine::{QuantumMixingOptimizer, OptimizationResult, Produc
 
 // Re-export advanced ZK types
 pub use advanced_zk::{AdvancedZKSystem, AdvancedZKConfig, RecursiveProofTree, UCEnvironment, UCProtocol, AdvancedZKMetrics};
+
+// Re-export recursive STARK types for compressed mixing proofs
+pub use recursive_stark::{
+    RecursiveStarkProof, RecursiveStarkComposer, RecursiveConfig,
+    StarkProofData, RecursiveProofMetadata, VerificationAir,
+    VerificationConstraint, ConstraintType, ComposerMetrics,
+};
+
+// Re-export aggregated ring signature types (EURASIP 2025 O(log mn) space efficiency)
+pub use aggregated_ring_sig::{
+    AggregatedRingSignature, RingSignatureAggregator,
+    MerkleTree, MerkleProof, MerkleResponseTree,
+    BatchHints, SpaceAnalysis,
+};
+
+// Re-export Bulletproofs++ types (v3.9.0: EUROCRYPT 2024)
+// 39% smaller proofs, 5x faster proving, 9.5x batch verification speedup
+pub use bulletproofs_pp::{
+    BPPlusConfig, BPPlusRangeProof, BPPlusError, PedersenCommitment,
+    GeneratorSet, InnerProductProof, AggregatedBPPlusProof,
+    PROOF_SIZE_64BIT,
+};
+
+// Re-export threshold mixing pool types (v3.9.0: NIST IR 8214C)
+// MPC-based trustless mixing with FROST threshold signatures
+pub use threshold_pool::{
+    ThresholdPoolConfig, ThresholdMixingPool, MixingState as ThresholdMixingState,
+    ParticipantId, ThresholdPedersenCommitment, ParticipantInput,
+    SubmitReceipt, MixingOutput as ThresholdMixingOutput,
+    ShuffledOutput, ThresholdSignature, ShuffleProof,
+    ThresholdKeyShare, DKGRound1Package, DKGRound2Package,
+};
+
+// Re-export post-quantum lattice-based ring signature types (v3.9.0)
+#[cfg(feature = "lattice-ring-sigs")]
+pub use lattice_ring_sig::{
+    LatticeRingParams, LatticeRingSignature, LatticeKeyImage,
+    LatticeRingKeypair, LatticeRingSigner, SecurityLevel,
+    verify as verify_lattice_ring_sig,
+    is_linked as lattice_sigs_linked,
+    estimate_signature_size as estimate_lattice_sig_size,
+    batch_verify as batch_verify_lattice_sigs,
+};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

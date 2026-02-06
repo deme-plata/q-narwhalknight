@@ -5,6 +5,21 @@ import { TrendingUp, TrendingDown, Zap, ChevronLeft, ChevronRight, Flame } from 
 import { qnkAPI } from '../services/api';
 import NitroSuccessModal from './NitroSuccessModal';
 
+// v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
+const MAX_SANE_BALANCE = 21_000_000;
+
+/**
+ * v3.6.1-beta: Safe localStorage set for cachedBalance - validates before storing
+ */
+function safeCacheBalance(balance: number): void {
+  if (typeof balance === 'number' && !isNaN(balance) && isFinite(balance) &&
+      balance >= 0 && balance <= MAX_SANE_BALANCE) {
+    localStorage.setItem('cachedBalance', balance.toString());
+  } else {
+    console.warn(`🚨 [TokenBar] safeCacheBalance: Refusing to cache invalid balance: ${balance}`);
+  }
+}
+
 interface Token {
   id: string;
   symbol: string;
@@ -98,7 +113,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
               if (Date.now() < cooldownUntil) {
                 console.log('🚫 TokenBar: SKIPPING localStorage write - DEX cooldown active');
               } else {
-                localStorage.setItem('cachedBalance', nativeQugBalance.toString());
+                safeCacheBalance(nativeQugBalance);
                 console.log('💰 TokenBar: Cached balance:', nativeQugBalance);
               }
             } else {
@@ -390,11 +405,29 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
     }
   };
 
+  // v3.9.5-beta: Subscript zero notation for tiny prices (like DEXScreener)
+  const SUBSCRIPT_DIGITS = ['₀','₁','₂','₃','₄','₅','₆','₇','₈','₉'];
+  const toSubscript = (n: number): string => {
+    return String(n).split('').map(d => SUBSCRIPT_DIGITS[parseInt(d)] || d).join('');
+  };
   const formatPrice = (price: number) => {
+    if (price >= 1000000) return `$${(price / 1000000).toFixed(2)}M`;
     if (price >= 1000) return `$${(price / 1000).toFixed(2)}K`;
     if (price >= 1) return `$${price.toFixed(2)}`;
     if (price >= 0.01) return `$${price.toFixed(4)}`;
-    return `$${price.toFixed(6)}`;
+    if (price >= 0.0001) return `$${price.toFixed(6)}`;
+    if (price <= 0) return '$0.00';
+    // Tiny prices: subscript zero notation ($0.0₇38)
+    const str = price.toFixed(20);
+    const afterDot = str.split('.')[1] || '';
+    let zeroCount = 0;
+    for (const ch of afterDot) {
+      if (ch === '0') zeroCount++;
+      else break;
+    }
+    const sigDigits = afterDot.slice(zeroCount, zeroCount + 4).replace(/0+$/, '') || '0';
+    if (zeroCount >= 2) return `$0.0${toSubscript(zeroCount)}${sigDigits}`;
+    return `$${price.toFixed(8).replace(/0+$/, '')}`;
   };
 
   if (loading) {

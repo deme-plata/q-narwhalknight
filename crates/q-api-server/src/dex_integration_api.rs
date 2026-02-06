@@ -501,10 +501,10 @@ pub async fn get_all_pools(
     let pools: Vec<PoolInfo> = pools_guard
         .values()
         .map(|pool| {
-            // Calculate total liquidity in USD (reserve0 * price0 + reserve1 * price1)
-            // For simplicity, use reserve sum as placeholder
-            let reserve0_display = pool.reserve0 as f64 / 1e8;
-            let reserve1_display = pool.reserve1 as f64 / 1e8;
+            // v3.7.3-beta: CRITICAL FIX - Pool reserves are stored in 24-decimal format
+            // (frontend sends all amounts * 1e24). Use 24 for both, not pool.tokenX_decimals.
+            let reserve0_display = pool.reserve0 as f64 / 1e24;
+            let reserve1_display = pool.reserve1 as f64 / 1e24;
 
             PoolInfo {
                 address: pool.pool_id.clone(),
@@ -532,8 +532,9 @@ pub async fn get_pool_info(
     let pools_guard = state.liquidity_pools.read().await;
 
     if let Some(pool) = pools_guard.get(&address) {
-        let reserve0_display = pool.reserve0 as f64 / 1e8;
-        let reserve1_display = pool.reserve1 as f64 / 1e8;
+        // v3.7.3-beta: CRITICAL FIX - Pool reserves are stored in 24-decimal format
+        let reserve0_display = pool.reserve0 as f64 / 1e24;
+        let reserve1_display = pool.reserve1 as f64 / 1e24;
 
         let info = PoolInfo {
             address: pool.pool_id.clone(),
@@ -600,20 +601,27 @@ pub async fn get_swap_quote(
     }
 
     // Validate slippage tolerance
-    let slippage = request.slippage_tolerance.unwrap_or(0.5);
-    if slippage < 0.0 || slippage > 10.0 {
+    // v3.4.19-beta: Convert to basis points for integer math (0.5% = 50 bps, max 10% = 1000 bps)
+    let slippage_percent = request.slippage_tolerance.unwrap_or(0.5);
+    if slippage_percent < 0.0 || slippage_percent > 10.0 {
         return Ok(Json(DexApiResponse::error(
             "Slippage tolerance must be between 0% and 10%".to_string(),
         )));
     }
+    // Convert to basis points (1% = 100 bps) for integer math
+    let slippage_bps: u128 = (slippage_percent * 100.0) as u128;
 
     // For demonstration, return a mock quote
     let amount_in = request.amount_in.unwrap_or_else(|| "1000000".to_string()); // 1 QNK
     let amount_out = "950000".to_string(); // 0.95 of the other token (accounting for fees)
+
+    // v3.4.19-beta: Use integer math for slippage calculation to avoid f64 precision loss
+    // Formula: minimum_out = amount_out * (10000 - slippage_bps) / 10000
     let minimum_amount_out = {
-        let base: u64 = amount_out.parse().unwrap_or(0);
-        let slippage_adjusted = base as f64 * (1.0 - slippage / 100.0);
-        (slippage_adjusted as u64).to_string()
+        let base: u128 = amount_out.parse().unwrap_or(0);
+        // 10000 bps = 100%, so (10000 - slippage_bps) gives the multiplier
+        let slippage_adjusted = base.saturating_mul(10000 - slippage_bps) / 10000;
+        slippage_adjusted.to_string()
     };
 
     let quote = SwapQuote {
@@ -765,6 +773,14 @@ pub async fn execute_swap(
     ).await;
 
     // Create result with proper status
+    // v3.4.19-beta: Use integer math for amount_out calculation
+    // In production, this would come from the actual AMM calculation
+    // For now, estimate with 0.3% swap fee (30 bps): output = input * 9970 / 10000
+    let estimated_amount_out = amount_in
+        .saturating_mul(9970)  // 99.7% (0.3% fee)
+        .checked_div(10000)
+        .unwrap_or(0);
+
     let swap_result = SwapResult {
         transaction_hash: tx_hash.clone(),
         status: match submission_result.status {
@@ -773,7 +789,7 @@ pub async fn execute_swap(
             _ => "pending".to_string(),
         },
         amount_in: request.amount_in,
-        amount_out: (amount_in * 95 / 100).to_string(), // 5% fee estimate
+        amount_out: estimated_amount_out.to_string(),
         gas_used: 125000,
     };
 

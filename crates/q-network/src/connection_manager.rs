@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 // PHASE 2 SCALING IMPORTS
 use futures::future::join_all;
@@ -757,7 +757,8 @@ impl ConnectionManager {
                         );
                     }
                     Ok(_) => {
-                        debug!("🔍 No new peers to process");
+                        // v3.4.2: Reduced to trace to prevent log spam
+                        trace!("🔍 No new peers to process");
                     }
                     Err(e) => {
                         error!("❌ Error processing discovery queue: {}", e);

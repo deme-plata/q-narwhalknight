@@ -21,6 +21,10 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 q-network = { path = "../q-network" }
 # q-sharding = { path = "../q-sharding" }    # Temporarily disabled due to compilation errors
 
+# Cryptography and serialization for real benchmarks
+ed25519-dalek = { workspace = true }
+bincode = { workspace = true }
+
 # Performance monitoring
 sysinfo = "0.29"
 

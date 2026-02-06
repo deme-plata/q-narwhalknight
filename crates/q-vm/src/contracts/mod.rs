@@ -9,6 +9,10 @@ pub mod orobit_smart_contracts;
 pub mod security;
 pub mod collateral_vault;
 pub mod bio_contracts;
+/// v3.7.4: Post-quantum contract deployment signatures (Dilithium5)
+pub mod pq_deployment;
+/// v3.9.1: Decentralized identity with inheritance support
+pub mod decentralized_identity;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{
@@ -28,6 +32,11 @@ pub use collateral_vault::{
     LIQUIDATION_BONUS, LIQUIDATION_RATIO, MIN_COLLATERAL_RATIO, WARNING_RATIO,
 };
 
+// Re-export post-quantum deployment types (v3.7.4)
+pub use pq_deployment::{
+    ContractDeployerKeys, PQContractDeployment, PQDeploymentRequest,
+};
+
 // Re-export bio contract types
 pub use bio_contracts::{
     // License system
@@ -42,6 +51,14 @@ pub use bio_contracts::{
     SynthesisMarketplaceContract, SynthesisListing, SynthesisOrder, OrderStatus,
     // Errors
     BioContractError,
+};
+
+// Re-export decentralized identity types (v3.9.1)
+pub use decentralized_identity::{
+    DecentralizedIdentityContract, OnChainIdentity, OnChainDeathCertificate,
+    InheritanceTransfer, KycLevel, TokenType as IdentityTokenType,
+    IdentityEvent, IdentityError, IdentityContractStats,
+    IdentityContractMethod, IdentityContractResult,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -82,6 +82,12 @@ export default function AddressBook({ onSelectAddress, compactMode = false }: Ad
       }
     };
 
+    eventSource.onerror = () => {
+      // SSE connection failed - addresses will stay as saved locally
+      // This is fine - they still work, just without real-time sync status
+      console.warn('⚠️ Address book sync stream unavailable');
+    };
+
     return () => {
       eventSource.close();
     };
@@ -179,7 +185,7 @@ export default function AddressBook({ onSelectAddress, compactMode = false }: Ad
         created_at: Date.now(),
         last_used: Date.now(),
         usage_count: 0,
-        sync_status: 'pending',
+        sync_status: 'pending', // Will be updated to 'synced' when gossipsub confirms
         sync_timestamp: null
       };
 
@@ -195,7 +201,9 @@ export default function AddressBook({ onSelectAddress, compactMode = false }: Ad
 
       if (response.success) {
         console.log('✅ [ADDRESS BOOK] Address saved successfully!');
-        setAddresses(prev => [addressData, ...prev]);
+        // Use the entry from response which has sync_status: 'synced' from backend
+        const savedEntry = response.data?.entry || { ...addressData, sync_status: 'synced', sync_timestamp: Date.now() };
+        setAddresses(prev => [savedEntry, ...prev]);
         resetForm();
         setIsAddingNew(false);
         setSaveSuccess(true);

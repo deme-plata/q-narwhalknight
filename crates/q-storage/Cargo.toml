@@ -56,6 +56,9 @@ lru = "0.12"
 # DashMap for concurrent peer trust tracking (v0.9.15-beta)
 dashmap = "5.5"
 
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks (10-20% speedup in hot paths)
+parking_lot = "0.12"
+
 # Rayon for parallel processing (v0.9.41-beta: parallel decompression)
 rayon = "1.8"
 

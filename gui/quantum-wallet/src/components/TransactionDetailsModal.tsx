@@ -1,11 +1,11 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Copy, ExternalLink, Clock, Hash, Wallet, ArrowUpRight, ArrowDownLeft, Check, Coins, Code } from 'lucide-react';
+import { X, Copy, ExternalLink, Clock, Hash, Wallet, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Check, Coins, Code } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
 interface Transaction {
   id: string;
-  type: 'send' | 'receive' | 'mining' | 'contract' | 'token_transfer' | 'staking_reward' | 'reflection_reward';
+  type: 'send' | 'receive' | 'mining' | 'contract' | 'token_transfer' | 'staking_reward' | 'reflection_reward' | 'swap';
   amount: number;
   fee?: number; // Transaction fee in QUG
   from?: string;
@@ -18,6 +18,10 @@ interface Transaction {
   tokenSymbol?: string;
   tokenName?: string;
   rewardType?: 'staking' | 'reflection' | 'dividend';
+  // v3.5.8-beta: Swap transaction fields
+  amountOut?: string;
+  tokenIn?: string;
+  tokenOut?: string;
 }
 
 interface TransactionDetailsModalProps {
@@ -63,6 +67,7 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
   if (!transaction) return null;
 
   const dateTime = formatDateTime(transaction.timestamp);
+  const isSwap = transaction.type === 'swap';
   const isReceive = transaction.type === 'receive' || transaction.type === 'mining' || transaction.type === 'staking_reward' || transaction.type === 'reflection_reward';
   const isMining = transaction.type === 'mining';
   const isContract = transaction.type === 'contract';
@@ -98,12 +103,16 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
               <div className="flex items-center gap-3">
                 <div className="p-3 rounded-xl"
                   style={{
-                    background: isReceive
-                      ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))'
-                      : 'linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(220, 38, 38, 0.15))',
-                    border: isReceive
-                      ? '2px solid rgba(34, 197, 94, 0.3)'
-                      : '2px solid rgba(239, 68, 68, 0.3)'
+                    background: isSwap
+                      ? 'linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(6, 182, 212, 0.15))'
+                      : isReceive
+                        ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))'
+                        : 'linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(220, 38, 38, 0.15))',
+                    border: isSwap
+                      ? '2px solid rgba(34, 211, 238, 0.3)'
+                      : isReceive
+                        ? '2px solid rgba(34, 197, 94, 0.3)'
+                        : '2px solid rgba(239, 68, 68, 0.3)'
                   }}
                 >
                   {isMining ? (
@@ -116,6 +125,8 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                     <Coins className="w-6 h-6 text-emerald-400" />
                   ) : isReflection ? (
                     <Coins className="w-6 h-6 text-lime-400" />
+                  ) : isSwap ? (
+                    <ArrowRightLeft className="w-6 h-6 text-cyan-400" />
                   ) : isReceive ? (
                     <ArrowDownLeft className="w-6 h-6 text-green-400" />
                   ) : (
@@ -125,13 +136,14 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 <div>
                   <h2 className="text-xl font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent">Transaction Details</h2>
                   <p className={`text-sm ${
-                    isReceive ? 'text-green-400' : 'text-red-400'
+                    isSwap ? 'text-cyan-400' : isReceive ? 'text-green-400' : 'text-red-400'
                   }`}>
                     {isMining ? '⛏️ Mining Reward' :
                      isContract ? '📜 Contract Deployment' :
                      isToken ? `🪙 ${transaction.tokenSymbol || 'Token'} Transfer` :
                      isStaking ? `🎁 Staking Reward` :
                      isReflection ? `💎 Reflection Reward` :
+                     isSwap ? `🔄 Swap${transaction.tokenIn && transaction.tokenOut ? ` (${transaction.tokenIn} → ${transaction.tokenOut})` : ''}` :
                      isReceive ? 'Received' : 'Sent'}
                   </p>
                 </div>

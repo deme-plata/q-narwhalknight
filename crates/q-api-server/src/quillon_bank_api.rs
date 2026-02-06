@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::handlers::parse_wallet_address;
+use crate::privacy_proof_generator::apply_privacy_proofs; // v3.4.16: Auto privacy by default
 use crate::AppState;
 use chrono::Utc;
 use q_quillon_bank::{AssetType, QuillonBankSystem};
@@ -58,6 +59,16 @@ pub fn create_public_routes() -> Router<Arc<AppState>> {
         .route("/devfee/status", get(get_dev_fee_status))
         .route("/devfee/stats", get(get_dev_fee_stats))
         .route("/devfee/wallet", get(get_founder_wallet_info))
+        // v3.9.1-beta: Bank Messaging System (User communication with bank)
+        .route("/messages/:wallet_address", get(get_user_messages))
+        .route("/messages/send", post(send_message))
+        .route("/messages/unread/:wallet_address", get(get_unread_count))
+        .route("/messages/:message_id/read", post(mark_message_read))
+        // v3.9.1-beta: Identity System (Decentralized ID with VM)
+        .route("/identity/:wallet_address", get(get_user_identity))
+        .route("/identity/register", post(register_identity))
+        .route("/identity/death-certificate", post(issue_death_certificate))
+        .route("/identity/inheritance/:wallet_address", get(get_inheritance_info))
 }
 
 /// Create protected Quillon Bank routes (FOUNDER-ONLY - requires AEGIS-QL authentication)
@@ -82,6 +93,13 @@ pub fn create_protected_routes() -> Router<Arc<AppState>> {
         .route("/treasury/profits/distribute", post(distribute_profits))
         // Risk Management (FOUNDER-ONLY)
         .route("/risk/liquidations/execute", post(execute_liquidations))
+        // v3.9.1-beta: Bank Admin Messaging (FOUNDER-ONLY)
+        .route("/messages/admin/respond", post(bank_respond_message))
+        .route("/messages/admin/list", get(list_all_user_messages))
+        // v3.9.1-beta: Identity Admin (FOUNDER-ONLY)
+        .route("/identity/admin/approve", post(approve_identity))
+        .route("/identity/admin/death-certificate/approve", post(approve_death_certificate))
+        .route("/identity/admin/transfer", post(execute_inheritance_transfer))
 }
 
 // ============================================================================
@@ -346,7 +364,7 @@ pub async fn mint_qnkusd(
 
     // Create a blockchain Transaction object for Recent Activity
     let zero_address = [0u8; 32]; // System address for minting
-    let transaction = Transaction {
+    let mut transaction = Transaction {
         id: tx_id.0,            // Use the transaction ID from Quillon Bank
         from: zero_address,     // System/CDP mint (from zero address)
         to: borrower_bytes,     // User receiving QUGUSD
@@ -366,7 +384,18 @@ pub async fn mint_qnkusd(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        // v3.4.16-beta: ZK privacy fields - auto-populated below
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
+
+    // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY for CDP transactions
+    if let Err(e) = apply_privacy_proofs(&mut transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed for CDP mint: {}", e);
+    }
 
     // Store transaction for Recent Activity display
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
@@ -829,7 +858,7 @@ pub async fn approve_loan(
 
     // 3. Create a transaction record for the loan disbursement
     let zero_address = [0u8; 32]; // System address for loan minting
-    let transaction = Transaction {
+    let mut transaction = Transaction {
         id: hex::decode(loan_id.replace("-", ""))
             .unwrap_or_else(|_| vec![0u8; 32])
             .try_into()
@@ -855,7 +884,18 @@ pub async fn approve_loan(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        // v3.4.16-beta: ZK privacy fields - auto-populated below
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
+
+    // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY for loan disbursements
+    if let Err(e) = apply_privacy_proofs(&mut transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed for loan disbursement: {}", e);
+    }
 
     // Store transaction for Recent Activity display
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
@@ -1173,7 +1213,7 @@ pub async fn payback_loan(
     }
 
     // 10. Create transaction record for payback
-    let transaction = Transaction {
+    let mut transaction = Transaction {
         id: hex::decode(request.loan_id.replace("-", ""))
             .unwrap_or_else(|_| vec![0u8; 32])
             .try_into()
@@ -1193,7 +1233,18 @@ pub async fn payback_loan(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        // v3.4.16-beta: ZK privacy fields - auto-populated below
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
+
+    // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY for loan payback
+    if let Err(e) = apply_privacy_proofs(&mut transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed for loan payback: {}", e);
+    }
 
     if let Err(e) = state.storage_engine.save_transaction(&transaction).await {
         error!("Failed to save loan payback transaction: {}", e);
@@ -1463,4 +1514,502 @@ async fn get_founder_wallet_info(
     };
 
     Ok(Json(ApiResponse::success(info)))
+}
+
+// ============================================================================
+// v3.9.1-beta: Bank Messaging System
+// ============================================================================
+
+/// Message between user and bank
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankMessage {
+    pub id: String,
+    pub from: MessageSender,
+    pub wallet_address: String,
+    pub content: String,
+    pub subject: Option<String>,
+    pub loan_id: Option<String>,
+    pub timestamp: i64,
+    pub read: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageSender {
+    User,
+    Bank,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendMessageRequest {
+    pub wallet_address: String,
+    pub content: String,
+    pub subject: Option<String>,
+    pub loan_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BankRespondRequest {
+    pub message_id: String,
+    pub wallet_address: String,
+    pub content: String,
+    pub subject: Option<String>,
+}
+
+/// Get all messages for a user wallet
+async fn get_user_messages(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> Result<Json<Vec<BankMessage>>, StatusCode> {
+    info!("📬 Fetching messages for wallet: {}", wallet_address);
+
+    let messages = state.bank_messages.read().await;
+    let normalized = wallet_address.to_lowercase().replace("qnk", "");
+
+    let user_messages: Vec<BankMessage> = messages
+        .iter()
+        .filter(|m| m.wallet_address.to_lowercase().replace("qnk", "") == normalized)
+        .cloned()
+        .collect();
+
+    Ok(Json(user_messages))
+}
+
+/// Send a message to the bank (from user)
+async fn send_message(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<Json<ApiResponse<BankMessage>>, StatusCode> {
+    info!("📤 User sending message from wallet: {}", req.wallet_address);
+
+    let message = BankMessage {
+        id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
+        from: MessageSender::User,
+        wallet_address: req.wallet_address.clone(),
+        content: req.content,
+        subject: req.subject,
+        loan_id: req.loan_id,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        read: false, // Bank hasn't read it yet
+    };
+
+    state.bank_messages.write().await.push(message.clone());
+
+    // v3.9.1-beta: RocksDB persistence
+    if let Ok(data) = serde_json::to_vec(&message) {
+        let kv = state.storage_engine.get_kv();
+        if let Err(e) = kv.put(q_storage::CF_BANK_MESSAGES, message.id.as_bytes(), &data).await {
+            error!("Failed to persist bank message to RocksDB: {}", e);
+        } else {
+            // Also index by wallet address for efficient lookups
+            let inverted_ts = u64::MAX - (message.timestamp as u64);
+            let mut index_key = Vec::with_capacity(40);
+            index_key.extend_from_slice(req.wallet_address.as_bytes());
+            index_key.extend_from_slice(&inverted_ts.to_be_bytes());
+            let _ = kv.put(q_storage::CF_BANK_MSG_INDEX, &index_key, message.id.as_bytes()).await;
+            info!("📬 Message persisted to RocksDB: {}", message.id);
+        }
+    }
+
+    Ok(Json(ApiResponse::success(message)))
+}
+
+/// Get unread message count for a wallet
+async fn get_unread_count(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> Result<Json<ApiResponse<u32>>, StatusCode> {
+    let messages = state.bank_messages.read().await;
+    let normalized = wallet_address.to_lowercase().replace("qnk", "");
+
+    let unread = messages
+        .iter()
+        .filter(|m| {
+            m.wallet_address.to_lowercase().replace("qnk", "") == normalized
+                && !m.read
+                && m.from == MessageSender::Bank
+        })
+        .count() as u32;
+
+    Ok(Json(ApiResponse::success(unread)))
+}
+
+/// Mark a message as read
+async fn mark_message_read(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<ApiResponse<bool>>, StatusCode> {
+    let mut messages = state.bank_messages.write().await;
+
+    if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+        msg.read = true;
+        return Ok(Json(ApiResponse::success(true)));
+    }
+
+    Ok(Json(ApiResponse::success(false)))
+}
+
+/// Bank responds to a user message (FOUNDER-ONLY)
+async fn bank_respond_message(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BankRespondRequest>,
+) -> Result<Json<ApiResponse<BankMessage>>, StatusCode> {
+    info!("🏦 Bank responding to wallet: {}", req.wallet_address);
+
+    let message = BankMessage {
+        id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
+        from: MessageSender::Bank,
+        wallet_address: req.wallet_address.clone(),
+        content: req.content,
+        subject: req.subject,
+        loan_id: None,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        read: false, // User hasn't read it yet
+    };
+
+    state.bank_messages.write().await.push(message.clone());
+
+    // v3.9.1-beta: RocksDB persistence
+    if let Ok(data) = serde_json::to_vec(&message) {
+        let kv = state.storage_engine.get_kv();
+        if let Err(e) = kv.put(q_storage::CF_BANK_MESSAGES, message.id.as_bytes(), &data).await {
+            error!("Failed to persist bank response to RocksDB: {}", e);
+        } else {
+            // Also index by wallet address
+            let inverted_ts = u64::MAX - (message.timestamp as u64);
+            let mut index_key = Vec::with_capacity(40);
+            index_key.extend_from_slice(req.wallet_address.as_bytes());
+            index_key.extend_from_slice(&inverted_ts.to_be_bytes());
+            let _ = kv.put(q_storage::CF_BANK_MSG_INDEX, &index_key, message.id.as_bytes()).await;
+            info!("🏦 Bank response persisted to RocksDB: {}", message.id);
+        }
+    }
+
+    Ok(Json(ApiResponse::success(message)))
+}
+
+/// List all user messages (FOUNDER-ONLY for admin dashboard)
+async fn list_all_user_messages(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<BankMessage>>, StatusCode> {
+    let messages = state.bank_messages.read().await;
+    Ok(Json(messages.clone()))
+}
+
+// ============================================================================
+// v3.9.1-beta: Decentralized Identity System
+// ============================================================================
+
+/// User identity record stored on VM
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIdentity {
+    pub wallet_address: String,
+    pub display_name: Option<String>,
+    pub email_hash: Option<String>, // SHA3-256 hash for privacy
+    pub created_at: i64,
+    pub verified: bool,
+    pub kyc_level: u8, // 0=none, 1=basic, 2=enhanced, 3=full
+    pub is_deceased: bool,
+    pub death_certificate_id: Option<String>,
+    pub beneficiary_address: Option<String>,
+    pub last_active: i64,
+}
+
+/// Death certificate for account inheritance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeathCertificate {
+    pub id: String,
+    pub deceased_wallet: String,
+    pub beneficiary_wallet: String,
+    pub issued_at: i64,
+    pub approved: bool,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<i64>,
+    pub executed: bool,
+    pub executed_at: Option<i64>,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterIdentityRequest {
+    pub wallet_address: String,
+    pub display_name: Option<String>,
+    pub email_hash: Option<String>,
+    pub beneficiary_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssuDeathCertificateRequest {
+    pub deceased_wallet: String,
+    pub beneficiary_wallet: String,
+    pub reason: String,
+    pub proof_documents: Option<String>, // Hash of uploaded documents
+}
+
+#[derive(Debug, Serialize)]
+pub struct InheritanceInfo {
+    pub deceased_wallet: String,
+    pub beneficiary_wallet: String,
+    pub total_balance: u128,
+    pub token_balances: Vec<TokenBalance>,
+    pub active_loans: Vec<String>,
+    pub death_certificate: Option<DeathCertificate>,
+    pub transfer_ready: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenBalance {
+    pub token_address: String,
+    pub symbol: String,
+    pub balance: u128,
+}
+
+/// Get user identity
+async fn get_user_identity(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> Result<Json<ApiResponse<Option<UserIdentity>>>, StatusCode> {
+    info!("🪪 Fetching identity for wallet: {}", wallet_address);
+
+    let identities = state.user_identities.read().await;
+    let normalized = wallet_address.to_lowercase().replace("qnk", "");
+
+    let identity = identities
+        .iter()
+        .find(|i| i.wallet_address.to_lowercase().replace("qnk", "") == normalized)
+        .cloned();
+
+    Ok(Json(ApiResponse::success(identity)))
+}
+
+/// Register new identity
+async fn register_identity(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterIdentityRequest>,
+) -> Result<Json<ApiResponse<UserIdentity>>, StatusCode> {
+    info!("🪪 Registering identity for wallet: {}", req.wallet_address);
+
+    let identity = UserIdentity {
+        wallet_address: req.wallet_address.clone(),
+        display_name: req.display_name,
+        email_hash: req.email_hash,
+        created_at: chrono::Utc::now().timestamp_millis(),
+        verified: false, // Needs admin approval
+        kyc_level: 0,
+        is_deceased: false,
+        death_certificate_id: None,
+        beneficiary_address: req.beneficiary_address,
+        last_active: chrono::Utc::now().timestamp_millis(),
+    };
+
+    state.user_identities.write().await.push(identity.clone());
+
+    // v3.9.1-beta: RocksDB persistence
+    if let Ok(data) = serde_json::to_vec(&identity) {
+        let kv = state.storage_engine.get_kv();
+        if let Err(e) = kv.put(q_storage::CF_USER_IDENTITIES, req.wallet_address.as_bytes(), &data).await {
+            error!("Failed to persist identity to RocksDB: {}", e);
+        } else {
+            info!("🪪 Identity persisted to RocksDB: {}", req.wallet_address);
+        }
+    }
+
+    Ok(Json(ApiResponse::success(identity)))
+}
+
+/// Issue death certificate request
+async fn issue_death_certificate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IssuDeathCertificateRequest>,
+) -> Result<Json<ApiResponse<DeathCertificate>>, StatusCode> {
+    info!(
+        "💀 Death certificate request: {} -> {}",
+        req.deceased_wallet, req.beneficiary_wallet
+    );
+
+    let cert = DeathCertificate {
+        id: format!("death_{}", chrono::Utc::now().timestamp_millis()),
+        deceased_wallet: req.deceased_wallet,
+        beneficiary_wallet: req.beneficiary_wallet,
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        approved: false,
+        approved_by: None,
+        approved_at: None,
+        executed: false,
+        executed_at: None,
+        reason: req.reason,
+    };
+
+    state.death_certificates.write().await.push(cert.clone());
+
+    // v3.9.1-beta: RocksDB persistence
+    if let Ok(data) = serde_json::to_vec(&cert) {
+        let kv = state.storage_engine.get_kv();
+        if let Err(e) = kv.put(q_storage::CF_DEATH_CERTIFICATES, cert.id.as_bytes(), &data).await {
+            error!("Failed to persist death certificate to RocksDB: {}", e);
+        } else {
+            info!("💀 Death certificate persisted to RocksDB: {}", cert.id);
+        }
+    }
+
+    Ok(Json(ApiResponse::success(cert)))
+}
+
+/// Get inheritance information for a wallet
+async fn get_inheritance_info(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> Result<Json<ApiResponse<Option<InheritanceInfo>>>, StatusCode> {
+    let certs = state.death_certificates.read().await;
+    let normalized = wallet_address.to_lowercase().replace("qnk", "");
+
+    // Find death certificate for this wallet (as deceased)
+    let cert = certs
+        .iter()
+        .find(|c| c.deceased_wallet.to_lowercase().replace("qnk", "") == normalized)
+        .cloned();
+
+    if let Some(cert) = cert {
+        // Parse wallet address to get balance
+        let wallet_bytes = match parse_wallet_address(&wallet_address) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(Json(ApiResponse::success(None))),
+        };
+
+        let balance = state
+            .wallet_balances
+            .read()
+            .await
+            .get(&wallet_bytes)
+            .copied()
+            .unwrap_or(0);
+
+        let info = InheritanceInfo {
+            deceased_wallet: cert.deceased_wallet.clone(),
+            beneficiary_wallet: cert.beneficiary_wallet.clone(),
+            total_balance: balance,
+            token_balances: vec![], // TODO: Fetch token balances
+            active_loans: vec![],   // TODO: Check for active loans
+            death_certificate: Some(cert.clone()),
+            transfer_ready: cert.approved && !cert.executed,
+        };
+
+        return Ok(Json(ApiResponse::success(Some(info))));
+    }
+
+    Ok(Json(ApiResponse::success(None)))
+}
+
+/// Approve identity (FOUNDER-ONLY)
+async fn approve_identity(
+    State(state): State<Arc<AppState>>,
+    Json(wallet_address): Json<String>,
+) -> Result<Json<ApiResponse<bool>>, StatusCode> {
+    let mut identities = state.user_identities.write().await;
+    let normalized = wallet_address.to_lowercase().replace("qnk", "");
+
+    if let Some(identity) = identities
+        .iter_mut()
+        .find(|i| i.wallet_address.to_lowercase().replace("qnk", "") == normalized)
+    {
+        identity.verified = true;
+        identity.kyc_level = 1;
+        return Ok(Json(ApiResponse::success(true)));
+    }
+
+    Ok(Json(ApiResponse::success(false)))
+}
+
+/// Approve death certificate (FOUNDER-ONLY)
+async fn approve_death_certificate(
+    State(state): State<Arc<AppState>>,
+    Json(cert_id): Json<String>,
+) -> Result<Json<ApiResponse<bool>>, StatusCode> {
+    let mut certs = state.death_certificates.write().await;
+
+    if let Some(cert) = certs.iter_mut().find(|c| c.id == cert_id) {
+        cert.approved = true;
+        cert.approved_by = Some("founder".to_string());
+        cert.approved_at = Some(chrono::Utc::now().timestamp_millis());
+
+        // Mark identity as deceased
+        let mut identities = state.user_identities.write().await;
+        let normalized = cert.deceased_wallet.to_lowercase().replace("qnk", "");
+        if let Some(identity) = identities
+            .iter_mut()
+            .find(|i| i.wallet_address.to_lowercase().replace("qnk", "") == normalized)
+        {
+            identity.is_deceased = true;
+            identity.death_certificate_id = Some(cert.id.clone());
+        }
+
+        return Ok(Json(ApiResponse::success(true)));
+    }
+
+    Ok(Json(ApiResponse::success(false)))
+}
+
+/// Execute inheritance transfer (FOUNDER-ONLY)
+async fn execute_inheritance_transfer(
+    State(state): State<Arc<AppState>>,
+    Json(cert_id): Json<String>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("💰 Executing inheritance transfer for certificate: {}", cert_id);
+
+    let mut certs = state.death_certificates.write().await;
+
+    let cert = match certs.iter_mut().find(|c| c.id == cert_id && c.approved && !c.executed) {
+        Some(c) => c,
+        None => {
+            return Ok(Json(ApiResponse::error(
+                "Certificate not found or not approved".to_string(),
+            )));
+        }
+    };
+
+    // Get deceased wallet balance
+    let deceased_bytes = match parse_wallet_address(&cert.deceased_wallet) {
+        Ok(bytes) => bytes,
+        Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid deceased wallet: {}", e)))),
+    };
+
+    let beneficiary_bytes = match parse_wallet_address(&cert.beneficiary_wallet) {
+        Ok(bytes) => bytes,
+        Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid beneficiary wallet: {}", e)))),
+    };
+
+    let balance = {
+        let balances = state.wallet_balances.read().await;
+        balances.get(&deceased_bytes).copied().unwrap_or(0)
+    };
+
+    if balance == 0 {
+        return Ok(Json(ApiResponse::error("No balance to transfer".to_string())));
+    }
+
+    // Execute the transfer
+    {
+        let mut balances = state.wallet_balances.write().await;
+        // Remove from deceased
+        balances.insert(deceased_bytes, 0);
+        // Add to beneficiary
+        let current = balances.get(&beneficiary_bytes).copied().unwrap_or(0);
+        balances.insert(beneficiary_bytes, current + balance);
+    }
+
+    // Mark certificate as executed
+    cert.executed = true;
+    cert.executed_at = Some(chrono::Utc::now().timestamp_millis());
+
+    info!(
+        "✅ Inheritance transfer complete: {} QUG from {} to {}",
+        balance as f64 / 1e24,
+        cert.deceased_wallet,
+        cert.beneficiary_wallet
+    );
+
+    Ok(Json(ApiResponse::success(format!(
+        "Transferred {} QUG to beneficiary",
+        balance as f64 / 1e24
+    ))))
 }

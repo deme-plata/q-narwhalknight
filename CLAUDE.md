@@ -351,55 +351,85 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
 # 4. Only after successful soak: Deploy to production
 ```
 
-### **🚀 DEPLOYMENT CHECKLIST (After Testing Passes)**
+### **🚀 DEPLOYMENT - ALWAYS USE THE SAFE DEPLOY SCRIPT**
+
+   **⚠️ CRITICAL: NEVER use raw `cargo build` for deployments!**
+
+   Always use the safe deploy script which runs ALL 4000+ tests before building:
 
    ```bash
    # ═══════════════════════════════════════════════════════════════════
-   # DEPLOYMENT CHECKLIST - ONLY RUN AFTER ALL TESTS PASS!
+   # SAFE DEPLOYMENT - Use the deploy script, NOT manual cargo build!
    # ═══════════════════════════════════════════════════════════════════
 
-   VERSION="v3.2.25-beta"  # Update for each release
+   # Option 1: Full pipeline (recommended) - tests → build → docker test → deploy
+   ./scripts/safe-deploy.sh full
 
-   # 1. ✅ Confirm tests passed (check output above)
-   echo "All tests passed? (yes/no)"
-   # If no: STOP HERE and fix tests first!
+   # Option 2: Step by step
+   ./scripts/safe-deploy.sh test-all     # Run all 4000+ tests first
+   ./scripts/safe-deploy.sh build        # Build (includes tests again)
+   ./scripts/safe-deploy.sh test-docker  # Canary test in Docker
+   ./scripts/safe-deploy.sh deploy-beta  # Deploy to production
 
-   # 2. Build release binary
-   timeout 36000 cargo build --release --package q-api-server --bin q-api-server
-
-   # 3. Copy to downloads folder for wget access
-   cp /opt/orobit/shared/q-narwhalknight/target/release/q-api-server \
-      /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-${VERSION}
-
-   # 4. Restart service
-   ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null
-   sleep 2 && systemctl start q-api-server
-
-   # 5. Verify deployment
-   sleep 5
-   systemctl status q-api-server --no-pager | head -20
-   curl -s http://localhost:8080/api/v1/status | jq '.data.version'
-
-   # 6. Tell user the wget link
-   echo "wget https://quillon.xyz/downloads/q-api-server-${VERSION} && chmod +x q-api-server-${VERSION}"
+   # If something goes wrong:
+   ./scripts/safe-deploy.sh rollback     # Rollback to previous binary
+   ./scripts/safe-deploy.sh status       # Check current status
    ```
 
-   **⚠️ NOTE: No /usr/bin copy needed!**
-   The systemd service file (`/etc/systemd/system/q-api-server.service`) points
-   directly to `/opt/orobit/shared/q-narwhalknight/target/release/q-api-server`.
-   Do NOT copy binaries to /usr/bin - it's unnecessary and can cause version confusion.
+   **Test Categories Run by safe-deploy.sh:**
+   1. Critical Mainnet Safety (sync-down, balances, validation)
+   2. Decentralization & Consensus (validators, BFT, voting)
+   3. Network & P2P (version filtering, DoS, partitions)
+   4. Sync & State (turbo sync, state applicator)
+   5. Privacy & Cryptography (bulletproofs, ring signatures)
+   6. API & Server (SSE, mining, contracts)
+   7. VM & Smart Contracts (WASM sandbox)
+   8. Tor & Anonymity (dandelion++, onion routing)
+   9. Full Workspace (all remaining tests)
+
+   **Why NOT raw cargo build?**
+   - `cargo build` skips ALL tests - you could deploy broken code
+   - The deploy script runs 4000+ tests BEFORE building
+   - Auto-rollback if deployment fails health checks
+   - Creates automatic backups before each deploy
+   - Copies binary to downloads folder automatically
 
    **📥 LATEST WGET DOWNLOAD LINK (Update after each deploy):**
    ```
-   Current Version: v3.3.9-beta
-   wget https://quillon.xyz/downloads/q-api-server-v3.3.9-beta
-   chmod +x q-api-server-v3.3.9-beta
+   Current Version: v3.4.6-beta
+   wget https://quillon.xyz/downloads/q-api-server-v3.4.6-beta
+   chmod +x q-api-server-v3.4.6-beta
    ```
 
    **IMPORTANT**: After EVERY deployment, tell the user the wget link:
    ```
-   wget https://quillon.xyz/downloads/q-api-server-v3.3.9-beta && chmod +x q-api-server-v3.3.9-beta
+   wget https://quillon.xyz/downloads/q-api-server-v3.4.6-beta && chmod +x q-api-server-v3.4.6-beta
    ```
+
+   **🚨 MANDATORY: TEST BEFORE DEPLOYMENT**
+
+   **NEVER deploy without testing first!** The server is production and users depend on it.
+   Before killing/restarting the service, ALWAYS verify the build works:
+
+   ```bash
+   # STEP 1: Quick syntax check (fast, catches compile errors)
+   cd /opt/orobit/shared/q-narwhalknight
+   timeout 600 cargo check --package q-api-server
+
+   # STEP 2: Only if check passes, do the full release build
+   cargo build --release --package q-api-server
+
+   # STEP 3: Verify binary exists and is recent
+   ls -lh target/release/q-api-server
+
+   # STEP 4: ONLY THEN restart the service
+   systemctl restart q-api-server
+   ```
+
+   **DO NOT:**
+   - Kill the service before the build completes
+   - Deploy without running `cargo check` first
+   - Skip testing "because it's just a small change"
 
 5. **🔄 CONNECTION WARMUP FOR NEW NODES (v3.3.7-beta)**
 
@@ -645,31 +675,29 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
    ```
 
    **D) AUTOMATIC DEPLOYMENT WORKFLOW:**
-   When Claude builds and deploys, ALWAYS use this sequence:
+   When Claude builds and deploys, ALWAYS use the safe-deploy.sh script:
    ```bash
-   # 1. Build with 10-hour timeout
-   timeout 36000 cargo build --release --package q-api-server
+   # ═══════════════════════════════════════════════════════════════════
+   # ALWAYS USE THE DEPLOY SCRIPT - It runs 4000+ tests before building!
+   # ═══════════════════════════════════════════════════════════════════
 
-   # 2. Copy to downloads
-   VERSION="v3.3.9-beta"  # Update version
-   cp target/release/q-api-server \
-      /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-${VERSION}
+   # Option 1: Full automated pipeline (RECOMMENDED)
+   ./scripts/safe-deploy.sh full
 
-   # 3. Copy to /usr/bin
-   cp target/release/q-api-server /usr/bin/q-api-server
+   # Option 2: Step by step
+   ./scripts/safe-deploy.sh test-all     # Run all 4000+ tests
+   ./scripts/safe-deploy.sh build        # Tests + build
+   ./scripts/safe-deploy.sh deploy-beta  # Deploy to production
 
-   # 4. Restart service (use kill -9, NOT killall)
-   ps aux | grep q-api-server | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null
-   sleep 2
-   systemctl start q-api-server
+   # If something goes wrong:
+   ./scripts/safe-deploy.sh rollback
 
-   # 5. Verify upgrade gate
-   sleep 5
-   journalctl -u q-api-server --since "30 seconds ago" | grep "UPGRADE GATE"
-
-   # 6. Tell user the download link
-   echo "Download: wget https://quillon.xyz/downloads/q-api-server-${VERSION}"
+   # After deployment, tell user the download link:
+   echo "Download: wget https://quillon.xyz/downloads/q-api-server-v3.4.2-beta"
    ```
+
+   **⚠️ NEVER use raw `cargo build --release` for deployments!**
+   The deploy script runs ALL 4000+ tests before building, ensuring safe deployments.
 
    **E) MAINNET SAFETY FEATURES (Auto-enabled in v3.3.9+):**
    - ✅ **Upgrade Gate**: Height-gated validation rules (crates/q-consensus-guard/)
@@ -786,28 +814,37 @@ cargo test --package q-tor-circuit 2>/dev/null || true
 Never deploy if any of the 125+ critical tests fail. These tests exist because each
 scenario has caused or could cause real money loss on mainnet.
 
-#### **⏱️ COMPILATION TIMEOUT REQUIREMENT (MANDATORY):**
+#### **⏱️ COMPILATION & BUILD REQUIREMENTS:**
 
-**🚨 NEVER use short timeouts for cargo check/build/test - ALWAYS use 10-hour (36000s) timeout!**
-
-This codebase has complex dependencies (post-quantum crypto, AI inference, etc.) that require
-extended compilation times. Short timeouts cause builds to fail silently or terminate early.
+**🚨 FOR DEPLOYMENTS: Always use the safe-deploy.sh script (NOT raw cargo build)!**
 
 ```bash
-# CRITICAL: Always use 10-hour timeout for ALL cargo operations
-# This ensures complex quantum consensus components have sufficient build time
-timeout 36000 cargo check --package q-api-server  # 10 hours even for check!
-timeout 36000 cargo build --release --workspace   # 10 hours = 36000 seconds
-timeout 36000 cargo run --bin q-api-server        # 10 hours for development builds
-timeout 36000 cargo test --workspace              # 10 hours for comprehensive testing
+# ═══════════════════════════════════════════════════════════════════
+# PREFERRED: Use the deploy script for ALL production builds
+# ═══════════════════════════════════════════════════════════════════
+./scripts/safe-deploy.sh full        # Full pipeline: tests → build → deploy
+./scripts/safe-deploy.sh build       # Just tests + build
+./scripts/safe-deploy.sh test-all    # Run all 4000+ tests
 
-# Example usage:
-timeout 36000 cargo build --release --package q-api-server
-timeout 36000 cargo build --release --package q-narwhal-core
+# The deploy script automatically:
+# - Runs ALL 4000+ tests before building
+# - Uses proper 10-hour timeouts
+# - Creates backups before deployment
+# - Copies binaries to downloads folder
+# - Has auto-rollback on failure
+```
+
+**For development/debugging only (NOT for deployments):**
+```bash
+# Use 10-hour timeout for ALL cargo operations
+timeout 36000 cargo check --package q-api-server  # Quick syntax check
+timeout 36000 cargo test --workspace              # Run tests
+timeout 36000 cargo run --bin q-api-server        # Development run
 
 # WRONG - NEVER DO THIS:
 # timeout 120 cargo check   # ❌ TOO SHORT - will terminate prematurely!
 # cargo build              # ❌ NO TIMEOUT - may hang indefinitely!
+# cargo build --release    # ❌ For deployments, use safe-deploy.sh instead!
 ```
 
 **Why 10 hours?** Post-quantum cryptography crates (pqcrypto, kyber, dilithium) plus AI inference

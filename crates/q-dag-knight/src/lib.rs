@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 pub mod anchor_election;
 pub mod commit_logic;
+pub mod homological_consensus;  // 🚀 v3.4.6-beta: Homological fork detection (H₀/H₁ Betti numbers)
 pub mod mempool_integration;
 pub mod ordering_rules;
 pub mod quantum_beacon;
@@ -30,6 +31,9 @@ pub mod genus2_vdf_integration;
 
 pub use anchor_election::{AnchorElectionResult, QuantumAnchorElection};
 pub use commit_logic::CommitProtocol;
+pub use homological_consensus::{
+    HomologicalConsensus, HomologicalState, HomologicalResult, HomologicalConfig, HomologicalStats,
+};
 pub use mempool_integration::{
     ConsensusStatus as MempoolConsensusStatus, IntegrationConfig, MempoolDAGIntegration,
 };

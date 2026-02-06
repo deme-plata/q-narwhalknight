@@ -13,7 +13,7 @@
 //! - Native ORBUSD stablecoin support
 
 use anyhow::Result;
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -148,8 +148,8 @@ impl QuantumDexManager {
 
             // Risk management parameters
             max_leverage: 10.0,
-            liquidation_threshold: 0.8,
-            slippage_protection: 0.005, // 0.5% max slippage
+            liquidation_threshold_bps: 8000, // 80%
+            slippage_protection_bps: 50,     // 0.5% max slippage
         };
 
         info!("⚛️ Quantum physics parameters configured");
@@ -211,7 +211,7 @@ impl QuantumDexManager {
             price_usd: BigDecimal::from(0),
             market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
-            price_change_24h: 0.0,
+            price_change_24h_bps: 0,
             logo_url: Some("https://q-narwhalknight.xyz/orb-logo.png".to_string()),
             website: Some("https://q-narwhalknight.xyz".to_string()),
             description: Some("ORB - Quantum-enhanced governance token for Q-NarwhalKnight with post-quantum security".to_string()),
@@ -238,7 +238,7 @@ impl QuantumDexManager {
             price_usd: BigDecimal::from(1), // Quantum-stabilized at $1
             market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
-            price_change_24h: 0.0,
+            price_change_24h_bps: 0,
             logo_url: Some("https://q-narwhalknight.xyz/orbusd-logo.png".to_string()),
             website: Some("https://q-narwhalknight.xyz/orbusd".to_string()),
             description: Some("ORBUSD - Physics-inspired algorithmic stablecoin with quantum uncertainty-based stability".to_string()),
@@ -309,7 +309,11 @@ impl QuantumDexManager {
             price,
             volume_24h: pool.volume_24h.clone(),
             liquidity: pool.liquidity_usd.clone(),
-            fee_rate: (pool.fee_rate.to_string().parse::<f64>().unwrap_or(0.003) * 10000.0) as u16,
+            // Convert fee_rate to basis points using integer math (no f64 precision loss)
+            // fee_rate is a BigDecimal like 0.003 (0.3%), multiply by 10000 to get 30 basis points
+            fee_rate: (&pool.fee_rate * BigDecimal::from(10000))
+                .to_u16()
+                .unwrap_or(30), // 30 basis points = 0.3% default
             fee_tier: pool.fee_rate.clone(),
             min_trade_size: "0.001".parse().unwrap(),
             max_trade_size: "1000000".parse().unwrap(),
@@ -418,7 +422,7 @@ impl QuantumDexManager {
             order_type: OrderType::Market,
             privacy_level: QuantumPrivacyTier::Basic,
             zk_proof_required: false,
-            max_slippage: 0.01, // 1% default slippage
+            max_slippage_bps: 100, // 1% default slippage
             expires_at: None,
             quantum_signature: vec![0u8; 64], // Post-quantum signature placeholder
             entanglement_proof: Some(vec![0u8; 32]),
@@ -527,7 +531,7 @@ impl QuantumDexManager {
             price_usd: BigDecimal::from(0),
             market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
-            price_change_24h: 0.0,
+            price_change_24h_bps: 0,
             logo_url: None,
             website: None,
             description: None,

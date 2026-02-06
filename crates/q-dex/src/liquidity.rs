@@ -57,14 +57,14 @@ pub struct QuantumAutomatedMarketMaker {
     pub euler_constant: BigDecimal,
     /// Pi constant for wave function calculations
     pub pi_constant: BigDecimal,
-    /// Quantum slippage reduction factor
-    pub quantum_slippage_reduction: f64,
-    /// Impermanent loss protection coefficient
-    pub impermanent_loss_protection: f64,
-    /// Maximum allowed price impact per trade
-    pub max_price_impact: f64,
-    /// Quantum yield farming multiplier
-    pub quantum_yield_multiplier: f64,
+    /// Quantum slippage reduction factor in basis points (e.g., 618 = 6.18%)
+    pub quantum_slippage_reduction_bps: u16,
+    /// Impermanent loss protection coefficient in basis points (e.g., 8500 = 85%)
+    pub impermanent_loss_protection_bps: u16,
+    /// Maximum allowed price impact in basis points (e.g., 500 = 5%)
+    pub max_price_impact_bps: u16,
+    /// Quantum yield farming multiplier in basis points (e.g., 16180 = 161.80% = 1.618x)
+    pub quantum_yield_multiplier_bps: u16,
 }
 
 impl Default for QuantumAutomatedMarketMaker {
@@ -73,10 +73,10 @@ impl Default for QuantumAutomatedMarketMaker {
             golden_ratio: "1.618033988749895".parse().unwrap(),
             euler_constant: "2.718281828459045".parse().unwrap(),
             pi_constant: "3.141592653589793".parse().unwrap(),
-            quantum_slippage_reduction: 0.618, // Golden ratio reduction
-            impermanent_loss_protection: 0.85, // 85% protection
-            max_price_impact: 0.05,            // 5% maximum impact
-            quantum_yield_multiplier: 1.618,   // Golden ratio yield boost
+            quantum_slippage_reduction_bps: 618,   // 6.18% (golden ratio reduction)
+            impermanent_loss_protection_bps: 8500, // 85% protection
+            max_price_impact_bps: 500,             // 5% maximum impact
+            quantum_yield_multiplier_bps: 16180,   // 161.80% = 1.618x golden ratio yield boost
         }
     }
 }
@@ -480,11 +480,12 @@ impl QuantumLiquidityManager {
             let denominator = reserve_in + &amount_in_with_fee;
             let base_amount_out = numerator / denominator;
 
-            // Apply quantum slippage reduction
-            use std::str::FromStr;
-            let slippage_reduction = BigDecimal::from_str(&amm.quantum_slippage_reduction.to_string())?;
-            let quantum_amount_out = &base_amount_out
-                * (BigDecimal::from(1) + slippage_reduction / BigDecimal::from(100));
+            // Apply quantum slippage reduction using integer basis points
+            // slippage_reduction_bps is in basis points (e.g., 618 = 6.18%)
+            // Formula: amount * (10000 + bps) / 10000
+            let bps_denominator = BigDecimal::from(10000);
+            let slippage_numerator = BigDecimal::from(10000 + amm.quantum_slippage_reduction_bps as i64);
+            let quantum_amount_out = &base_amount_out * slippage_numerator / &bps_denominator;
 
             // Apply price uncertainty (Heisenberg principle)
             let uncertainty_factor = &pool.price_uncertainty;
@@ -526,6 +527,10 @@ impl QuantumLiquidityManager {
     }
 
     /// Calculate impermanent loss with quantum protection
+    ///
+    /// Uses high-precision integer arithmetic for basis points to avoid f64 rounding errors.
+    /// The impermanent loss formula: IL = 1 - (2 * sqrt(r)) / (1 + r)
+    /// where r = current_price / initial_price
     pub async fn calculate_quantum_impermanent_loss(
         &self,
         position_id: &str,
@@ -538,17 +543,27 @@ impl QuantumLiquidityManager {
             let initial_price_ratio = &position.token_a_amount / &position.token_b_amount;
             let price_change_ratio = current_price_ratio / initial_price_ratio;
 
-            // Standard impermanent loss formula
+            // BigDecimal sqrt with maintained precision
             let sqrt_ratio = price_change_ratio
                 .sqrt()
                 .ok_or_else(|| anyhow::anyhow!("Cannot calculate square root"))?;
-            let il_multiplier =
-                BigDecimal::from(2) * &sqrt_ratio / (BigDecimal::from(1) + &price_change_ratio);
-            let impermanent_loss = (BigDecimal::from(1) - il_multiplier) * BigDecimal::from(100);
 
-            // Apply quantum protection
-            let protection_factor = BigDecimal::from_str(&amm.impermanent_loss_protection.to_string())?;
-            let protected_loss = &impermanent_loss * (BigDecimal::from(1) - protection_factor);
+            // Calculate IL multiplier: 2 * sqrt(r) / (1 + r)
+            // All operations maintain BigDecimal precision
+            let two = BigDecimal::from(2);
+            let one = BigDecimal::from(1);
+            let il_multiplier = &two * &sqrt_ratio / (&one + &price_change_ratio);
+
+            // Impermanent loss as percentage: (1 - multiplier) * 100
+            let hundred = BigDecimal::from(100);
+            let impermanent_loss = (&one - &il_multiplier) * &hundred;
+
+            // Apply quantum protection using integer basis points
+            // protection_bps is in basis points (e.g., 8500 = 85%)
+            // Formula: loss * (10000 - protection_bps) / 10000
+            let bps_denominator = BigDecimal::from(10000);
+            let protection_numerator = BigDecimal::from(10000 - amm.impermanent_loss_protection_bps as i64);
+            let protected_loss = &impermanent_loss * protection_numerator / bps_denominator;
 
             Ok(protected_loss)
         } else {
@@ -610,7 +625,7 @@ mod tests {
             order_type: OrderType::Market,
             privacy_level: QuantumPrivacyTier::Basic,
             zk_proof_required: false,
-            max_slippage: 0.005,
+            max_slippage_bps: 50, // 0.5%
             expires_at: None,
             quantum_signature: vec![0u8; 64],
             entanglement_proof: None,

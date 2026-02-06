@@ -710,7 +710,121 @@ impl IpfsBackupSystem {
         self.last_backup_height
             .store(current_height, Ordering::SeqCst);
 
+        // v3.9.3-beta: Automatic backup cleanup to prevent disk bloat
+        if let Err(e) = self.cleanup_old_backups().await {
+            warn!("⚠️  [BACKUP] Cleanup failed: {}", e);
+        }
+
         Ok(Some(manifest))
+    }
+
+    /// v3.9.3-beta: Automatically clean up old backups to prevent disk bloat
+    /// Keeps backups from last 24 hours + one backup per day for last 7 days
+    async fn cleanup_old_backups(&self) -> Result<()> {
+        let backups_dir = self.data_dir.join("backups");
+
+        if !backups_dir.exists() {
+            return Ok(());
+        }
+
+        let now = SystemTime::now();
+        let one_day = Duration::from_secs(24 * 60 * 60);
+        let seven_days = Duration::from_secs(7 * 24 * 60 * 60);
+
+        let mut entries: Vec<(std::path::PathBuf, SystemTime)> = Vec::new();
+
+        // Collect all backup files with their modification times
+        let mut dir = tokio::fs::read_dir(&backups_dir).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "bin") {
+                if let Ok(metadata) = entry.metadata().await {
+                    if let Ok(modified) = metadata.modified() {
+                        entries.push((path, modified));
+                    }
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Sort by modification time (newest first)
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut deleted_count = 0;
+        let mut freed_bytes: u64 = 0;
+        let mut kept_days: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        for (path, modified) in entries {
+            let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+
+            // Keep all backups from last 24 hours
+            if age < one_day {
+                continue;
+            }
+
+            // For backups older than 24 hours, keep one per day (up to 7 days)
+            if age < seven_days {
+                let day_number = age.as_secs() / (24 * 60 * 60);
+                if !kept_days.contains(&day_number) {
+                    kept_days.insert(day_number);
+                    continue; // Keep this backup (first one for this day)
+                }
+            }
+
+            // Delete this backup (older than 7 days, or duplicate for a day)
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                freed_bytes += metadata.len();
+            }
+
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!("⚠️  [BACKUP] Failed to delete {:?}: {}", path, e);
+            } else {
+                deleted_count += 1;
+            }
+        }
+
+        if deleted_count > 0 {
+            info!(
+                "🧹 [BACKUP] Cleaned up {} old backups, freed {:.2} GB",
+                deleted_count,
+                freed_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
+        }
+
+        // Also clean up manifests for deleted backups
+        self.cleanup_orphaned_manifests().await?;
+
+        Ok(())
+    }
+
+    /// Remove manifests for backups that no longer exist
+    async fn cleanup_orphaned_manifests(&self) -> Result<()> {
+        let backups_dir = self.data_dir.join("backups");
+        let mut manifests = self.manifests.write().await;
+        let original_count = manifests.len();
+
+        manifests.retain(|m| {
+            if m.ipfs_cid.starts_with("local://") {
+                let filename = &m.ipfs_cid[8..];
+                let path = backups_dir.join(filename);
+                path.exists()
+            } else {
+                true // Keep IPFS/S3 manifests
+            }
+        });
+
+        let removed = original_count - manifests.len();
+        if removed > 0 {
+            debug!("🧹 [BACKUP] Removed {} orphaned manifests", removed);
+        }
+
+        drop(manifests);
+        self.save_manifests().await?;
+
+        Ok(())
     }
 
     /// Restore from backup to a specific height

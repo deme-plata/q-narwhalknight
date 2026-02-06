@@ -121,9 +121,18 @@ pub mod u128_serde {
     where
         D: Deserializer<'de>,
     {
-        // v3.2.7: Use deserialize_any for maximum compatibility
-        // The Visitor handles: u64, u128, i64, i128, strings, and bytes
-        deserializer.deserialize_any(U128Visitor)
+        // v3.4.1: CRITICAL FIX - Use deserialize_str for bincode compatibility
+        // ROOT CAUSE: deserialize_any is NOT supported by bincode, causing
+        // "Bincode does not support the serde::Deserializer::deserialize_any method"
+        // errors when reading blocks with transactions from the database.
+        //
+        // Since serialize() uses serialize_str() (line 42), we must use deserialize_str()
+        // for consistency. The visitor handles conversion from string to u128.
+        //
+        // BREAKING CHANGE: Old data serialized differently will fail. However,
+        // the string format has been used since v3.2.7, so this should be compatible
+        // with all recent data.
+        deserializer.deserialize_str(U128Visitor)
     }
 }
 
@@ -303,6 +312,14 @@ pub mod validator_backup;
 #[doc = "Ed25519 signed token announcements for decentralized token registry"]
 pub mod token_announcement;
 
+/// v3.4.2-beta: Unified ZK Transaction Validator
+/// Integrates STARK, Bulletproofs, and LatticeGuard for full privacy
+#[doc = "Comprehensive ZK proof verification for transactions and blocks"]
+pub mod unified_zk_validator;
+
+/// v3.7.4: Validator Registry with Dilithium5 post-quantum signatures
+pub mod validator_registry;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
@@ -376,6 +393,14 @@ pub use balance_update::{
 // Re-export CHIRON execution hints types (v1.5.0-beta: parallel sync)
 pub use execution_hints::{
     BlockExecutionHints, TxAccessSet, TxIndex,
+};
+
+// Re-export unified ZK validator types (v3.4.2-beta: full privacy)
+pub use unified_zk_validator::{
+    UnifiedZkValidator, BlockZkValidator, BlockZkRequirements, BlockZkValidationResult,
+    ZkProofBundle, ZkPrivacyLevel, StarkTransactionProof, StarkPublicInputs,
+    BulletproofRangeProof, LatticeTransactionProof, LatticeSecurityLevel,
+    ValidationStats,
 };
 
 // P2P block synchronization types are defined at the end of this file (BlockRequest, BlockResponse)
@@ -513,7 +538,9 @@ pub const QUG_TOKEN_ADDRESS: [u8; 32] = [
 ];
 
 /// QUGUSD token constants
-pub const QUGUSD_DECIMALS: u8 = 8;
+/// v3.6.11-beta: CRITICAL FIX - QUGUSD uses 24 decimals (same as QUG), not 8!
+/// This was causing balance display issues where 42 QUGUSD appeared as 0.
+pub const QUGUSD_DECIMALS: u8 = 24;
 pub const QUGUSD_TOKEN_ADDRESS: [u8; 32] = [
     0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0x00, 0x00, // "QUGUSD" in hex + zeros
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1056,6 +1083,16 @@ pub enum TransactionType {
     /// Slash validator for misbehavior
     Slash = 0x74,
 
+    // ========== Privacy Operations (0x80-0x8F) ==========
+    /// v3.4.15: Privacy-mixed transfer (Dandelion++ stem/fluff with Tor routing)
+    PrivacyMixed = 0x80,
+    /// Stealth address creation
+    StealthCreate = 0x81,
+    /// Ring signature transaction
+    RingTransfer = 0x82,
+    /// zk-STARK shielded transfer
+    ShieldedTransfer = 0x83,
+
     // ========== System Operations (0xF0-0xFF) ==========
     /// System parameter update (via governance)
     SystemParamUpdate = 0xF0,
@@ -1122,6 +1159,10 @@ impl TransactionType {
             0x72 => TransactionType::ClaimRewards,
             0x73 => TransactionType::Redelegate,
             0x74 => TransactionType::Slash,
+            0x80 => TransactionType::PrivacyMixed,
+            0x81 => TransactionType::StealthCreate,
+            0x82 => TransactionType::RingTransfer,
+            0x83 => TransactionType::ShieldedTransfer,
             0xF0 => TransactionType::SystemParamUpdate,
             0xF1 => TransactionType::EmergencyPause,
             0xF2 => TransactionType::EmergencyResume,
@@ -1307,6 +1348,12 @@ impl TransactionType {
             TransactionType::StateCheckpoint => 10,
             TransactionType::Genesis => 0, // Free (only at genesis)
             TransactionType::Unknown => 1,
+
+            // v3.4.15: Privacy operations - higher gas for mixing/stealth
+            TransactionType::PrivacyMixed => 15,      // Dandelion++ routing overhead
+            TransactionType::StealthCreate => 20,    // Generate stealth address
+            TransactionType::RingTransfer => 25,     // Ring signature computation
+            TransactionType::ShieldedTransfer => 30, // Full ZK-STARK proof
         }
     }
 
@@ -1366,6 +1413,11 @@ impl TransactionType {
             TransactionType::StateCheckpoint => "State Checkpoint",
             TransactionType::Genesis => "Genesis",
             TransactionType::Unknown => "Unknown",
+            // v3.4.15: Privacy operations
+            TransactionType::PrivacyMixed => "Privacy Mixed",
+            TransactionType::StealthCreate => "Stealth Create",
+            TransactionType::RingTransfer => "Ring Transfer",
+            TransactionType::ShieldedTransfer => "Shielded Transfer",
         }
     }
 }
@@ -1901,16 +1953,24 @@ pub type FixedPoint28 = i64;
 
 /// v2.3.0-beta: Transaction signature phase for post-quantum migration
 /// Matches block SignaturePhase but for user transactions
+/// v3.7.4: Added Dilithium5 NIST Level 5 post-quantum signatures
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TxSignaturePhase {
     /// Phase 0: Classical Ed25519 signatures (64 bytes) - DEFAULT for backwards compat
     #[default]
     Phase0Ed25519,
+    /// Phase 1: Dilithium5 post-quantum signatures (4,627 bytes) - NIST Level 5
+    /// v3.7.4: New post-quantum mode
+    Phase1Dilithium5,
     /// Phase 2: SQIsign compact post-quantum signatures (204 bytes)
     Phase2SQIsign,
     /// Hybrid: Ed25519 + SQIsign (64 + 204 = 268 bytes total)
     /// Both signatures must verify for transaction to be valid
     HybridEd25519SQIsign,
+    /// Hybrid: Ed25519 + Dilithium5 (64 + 4,627 = 4,691 bytes total)
+    /// v3.7.4: Browser P2P transactions use this mode for quantum resistance
+    /// Both signatures must verify for transaction to be valid
+    HybridEd25519Dilithium5,
 }
 
 /// Default transaction signature phase for backwards compatibility
@@ -1961,6 +2021,56 @@ pub struct Transaction {
     /// Required for Phase2SQIsign and HybridEd25519SQIsign
     #[serde(default)]
     pub pqc_public_key: Option<Vec<u8>>,
+
+    // ========================================================================
+    // v3.4.2-beta: UNIFIED ZK PRIVACY FIELDS
+    // ========================================================================
+
+    /// v3.4.2-beta: ZK proof bundle for privacy (STARK + Bulletproof + LatticeGuard)
+    /// When set, this transaction has cryptographic privacy proofs attached
+    #[serde(default)]
+    pub zk_proof_bundle: Option<Vec<u8>>,
+
+    /// v3.4.2-beta: Privacy level for this transaction
+    /// Determines what proofs are required/expected
+    #[serde(default = "default_privacy_level")]
+    pub privacy_level: TransactionPrivacyLevel,
+
+    /// v3.4.2-beta: Bulletproof range proof for amount confidentiality
+    /// Proves amount is in [0, 2^64) without revealing the actual value
+    #[serde(default)]
+    pub bulletproof: Option<Vec<u8>>,
+
+    /// v3.4.2-beta: Nullifier to prevent double-spending private transactions
+    /// Must be unique across all transactions
+    #[serde(default)]
+    pub nullifier: Option<[u8; 32]>,
+
+    /// v3.9.6-beta: Optional memo/message attached to transaction
+    /// Displayed in recipient's inbox for person-to-person transfers
+    #[serde(default)]
+    pub memo: Option<String>,
+}
+
+/// Privacy level for transactions (v3.4.2-beta)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TransactionPrivacyLevel {
+    /// Default: No privacy, fully transparent
+    #[default]
+    Transparent,
+    /// Amount hidden with Bulletproofs
+    ConfidentialAmount,
+    /// Full privacy with STARK proofs
+    FullPrivacy,
+    /// Post-quantum privacy with LatticeGuard
+    PostQuantumPrivacy,
+    /// Maximum security: all proof systems combined
+    MaximumSecurity,
+}
+
+/// Default privacy level for backwards compatibility
+fn default_privacy_level() -> TransactionPrivacyLevel {
+    TransactionPrivacyLevel::Transparent
 }
 
 // ============================================================================
@@ -2522,6 +2632,10 @@ impl Transaction {
             TxSignaturePhase::Phase0Ed25519 => {
                 self.verify_ed25519_signature()
             }
+            TxSignaturePhase::Phase1Dilithium5 => {
+                // v3.7.4: Dilithium5 only (NIST Level 5)
+                self.verify_dilithium5_signature()
+            }
             TxSignaturePhase::Phase2SQIsign => {
                 self.verify_sqisign_signature()
             }
@@ -2529,6 +2643,13 @@ impl Transaction {
                 // BOTH signatures must verify in hybrid mode
                 self.verify_ed25519_signature()?;
                 self.verify_sqisign_signature()?;
+                Ok(())
+            }
+            TxSignaturePhase::HybridEd25519Dilithium5 => {
+                // v3.7.4: BOTH signatures must verify in Ed25519+Dilithium5 hybrid mode
+                // This is the recommended mode for browser P2P transactions
+                self.verify_ed25519_signature()?;
+                self.verify_dilithium5_signature()?;
                 Ok(())
             }
         }
@@ -2676,11 +2797,84 @@ impl Transaction {
         Ok(())
     }
 
+    /// v3.7.4: Verify Dilithium5 post-quantum signature (NIST Level 5)
+    /// Dilithium5 provides 256-bit post-quantum security
+    /// Signature size: 4,627 bytes, Public key size: 2,592 bytes
+    fn verify_dilithium5_signature(&self) -> Result<(), String> {
+        use pqcrypto_dilithium::dilithium5;
+        use pqcrypto_traits::sign::PublicKey as PQPublicKey;
+        use pqcrypto_traits::sign::DetachedSignature;
+
+        // Dilithium5 signature size constant
+        const DILITHIUM5_SIG_SIZE: usize = 4627;
+        const DILITHIUM5_PK_SIZE: usize = 2592;
+
+        let pqc_sig = self.pqc_signature.as_ref()
+            .ok_or_else(|| "Dilithium5 signature missing for PQC transaction".to_string())?;
+
+        let pqc_pk = self.pqc_public_key.as_ref()
+            .ok_or_else(|| "Dilithium5 public key missing for PQC transaction".to_string())?;
+
+        // Validate signature size
+        if pqc_sig.len() != DILITHIUM5_SIG_SIZE {
+            return Err(format!(
+                "Invalid Dilithium5 signature length: expected {} bytes, got {}",
+                DILITHIUM5_SIG_SIZE, pqc_sig.len()
+            ));
+        }
+
+        // Validate public key size
+        if pqc_pk.len() != DILITHIUM5_PK_SIZE {
+            return Err(format!(
+                "Invalid Dilithium5 public key length: expected {} bytes, got {}",
+                DILITHIUM5_PK_SIZE, pqc_pk.len()
+            ));
+        }
+
+        // Parse public key
+        let public_key = dilithium5::PublicKey::from_bytes(pqc_pk)
+            .map_err(|_| "Failed to parse Dilithium5 public key".to_string())?;
+
+        // Parse signature
+        let signature = dilithium5::DetachedSignature::from_bytes(pqc_sig)
+            .map_err(|_| "Failed to parse Dilithium5 signature".to_string())?;
+
+        // Get message to verify (transaction hash)
+        let tx_hash = self.hash();
+
+        // Verify signature using pqcrypto-dilithium
+        match dilithium5::verify_detached_signature(&signature, &tx_hash, &public_key) {
+            Ok(()) => {
+                tracing::debug!(
+                    "✅ [DILITHIUM5] Signature verified for tx {}",
+                    hex::encode(&self.id[..8])
+                );
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "🚫 [DILITHIUM5] Signature verification FAILED for tx {}",
+                    hex::encode(&self.id[..8])
+                );
+                Err("Dilithium5 signature verification failed".to_string())
+            }
+        }
+    }
+
     /// v2.3.0-beta: Check if transaction has a valid signature for its phase
+    /// v3.7.4: Added Dilithium5 support
     pub fn is_signed(&self) -> bool {
+        const DILITHIUM5_SIG_SIZE: usize = 4627;
+        const DILITHIUM5_PK_SIZE: usize = 2592;
+
         match self.signature_phase {
             TxSignaturePhase::Phase0Ed25519 => {
                 !self.signature.is_empty() && self.signature.len() == 64
+            }
+            TxSignaturePhase::Phase1Dilithium5 => {
+                // v3.7.4: Dilithium5 only
+                self.pqc_signature.as_ref().map(|s| s.len() == DILITHIUM5_SIG_SIZE).unwrap_or(false)
+                    && self.pqc_public_key.as_ref().map(|pk| pk.len() == DILITHIUM5_PK_SIZE).unwrap_or(false)
             }
             TxSignaturePhase::Phase2SQIsign => {
                 self.pqc_signature.as_ref().map(|s| s.len() >= 34).unwrap_or(false)
@@ -2691,6 +2885,13 @@ impl Transaction {
                 let ed_valid = !self.signature.is_empty() && self.signature.len() == 64;
                 let pqc_valid = self.pqc_signature.as_ref().map(|s| s.len() >= 34).unwrap_or(false)
                     && self.pqc_public_key.is_some();
+                ed_valid && pqc_valid
+            }
+            TxSignaturePhase::HybridEd25519Dilithium5 => {
+                // v3.7.4: Both Ed25519 and Dilithium5 required
+                let ed_valid = !self.signature.is_empty() && self.signature.len() == 64;
+                let pqc_valid = self.pqc_signature.as_ref().map(|s| s.len() == DILITHIUM5_SIG_SIZE).unwrap_or(false)
+                    && self.pqc_public_key.as_ref().map(|pk| pk.len() == DILITHIUM5_PK_SIZE).unwrap_or(false);
                 ed_valid && pqc_valid
             }
         }
@@ -3595,6 +3796,14 @@ impl NetworkId {
     /// Topic: /qnk/{network}/mempool-txs
     pub fn mempool_transactions_topic(&self) -> String {
         format!("{}/mempool-txs", self.gossipsub_topic_prefix())
+    }
+
+    /// v3.5.8: Browser peer discovery topic
+    /// Browsers announce their presence so they can discover each other
+    /// This enables the Network Map to show browser-to-browser connectivity
+    /// Topic: /qnk/{network}/browser-peers
+    pub fn browser_peers_topic(&self) -> String {
+        format!("{}/browser-peers", self.gossipsub_topic_prefix())
     }
 }
 

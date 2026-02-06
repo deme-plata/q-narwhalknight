@@ -311,22 +311,22 @@ export default function QuantumMixerVisualization({
   const remainingTime = Math.max(0, totalDuration - Math.floor(elapsedTime / 1000));
 
   return (
-    <div className="relative w-full h-screen overflow-auto bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex flex-col">
-      {/* Top Info Bar */}
-      <div className="flex-shrink-0 p-3 flex justify-between items-center">
+    <div className="relative w-full h-full bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex flex-col">
+      {/* Top Info Bar - Compact */}
+      <div className="flex-shrink-0 p-2 flex justify-between items-center">
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-slate-800/80 backdrop-blur-lg rounded-xl p-4 border border-purple-500/30"
+          className="bg-slate-800/80 backdrop-blur-lg rounded-lg p-2 border border-purple-500/30"
         >
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <div className="relative">
               <div className="absolute inset-0 bg-purple-500 rounded-full blur-md animate-pulse"></div>
-              <Shield className="w-8 h-8 text-purple-400 relative z-10" />
+              <Shield className="w-6 h-6 text-purple-400 relative z-10" />
             </div>
             <div>
-              <div className="text-sm text-slate-400">Quantum Privacy Mixing</div>
-              <div className="text-xl font-bold text-white">
+              <div className="text-xs text-slate-400">Quantum Privacy Mixing</div>
+              <div className="text-base font-bold text-white">
                 {privacyLevel.charAt(0).toUpperCase() + privacyLevel.slice(1)} Level
               </div>
             </div>
@@ -334,9 +334,9 @@ export default function QuantumMixerVisualization({
         </motion.div>
 
         {/* Session ID - Center */}
-        <div className="bg-slate-800/60 backdrop-blur-sm rounded-lg px-4 py-2 border border-slate-700">
+        <div className="bg-slate-800/60 backdrop-blur-sm rounded-lg px-3 py-1 border border-slate-700">
           <div className="text-xs text-slate-400 font-mono">
-            Session: {sessionId.substring(0, 16)}...
+            {sessionId.substring(0, 12)}...
           </div>
         </div>
 
@@ -344,13 +344,13 @@ export default function QuantumMixerVisualization({
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className="bg-slate-800/80 backdrop-blur-lg rounded-xl p-4 border border-purple-500/30"
+          className="bg-slate-800/80 backdrop-blur-lg rounded-lg p-2 border border-purple-500/30"
         >
-          <div className="flex items-center gap-3">
-            <Clock className="w-6 h-6 text-purple-400" />
+          <div className="flex items-center gap-2">
+            <Clock className="w-5 h-5 text-purple-400" />
             <div>
-              <div className="text-sm text-slate-400">Time Remaining</div>
-              <div className="text-2xl font-mono font-bold text-white">
+              <div className="text-xs text-slate-400">Remaining</div>
+              <div className="text-lg font-mono font-bold text-white">
                 {remainingTime}s
               </div>
             </div>
@@ -358,8 +358,8 @@ export default function QuantumMixerVisualization({
         </motion.div>
       </div>
 
-      {/* 3D Canvas - Takes remaining space but capped */}
-      <div className="flex-1 min-h-[200px] max-h-[50vh]">
+      {/* 3D Canvas - Takes remaining space, but leaves room for progress section */}
+      <div className="flex-1 min-h-0 overflow-hidden">
         <Canvas camera={{ position: [0, 4, 8], fov: 50 }}>
           <OrbitControls
             enableZoom={true}
@@ -371,18 +371,18 @@ export default function QuantumMixerVisualization({
         </Canvas>
       </div>
 
-      {/* Progress Section - Bottom */}
-      <div className="flex-shrink-0 p-3 pb-4">
-        <div className="bg-slate-800/80 backdrop-blur-lg rounded-xl p-4 border border-purple-500/30">
+      {/* Progress Section - Bottom - More Compact */}
+      <div className="flex-shrink-0 p-2">
+        <div className="bg-slate-800/80 backdrop-blur-lg rounded-xl p-3 border border-purple-500/30">
           {/* Overall Progress */}
-          <div className="mb-4">
+          <div className="mb-3">
             <div className="flex justify-between items-center mb-1">
-              <span className="text-sm text-slate-400">Overall Progress</span>
+              <span className="text-xs text-slate-400">Overall Progress</span>
               <span className="text-sm font-mono text-purple-400">
                 {Math.floor(progress * 100)}%
               </span>
             </div>
-            <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
+            <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
               <motion.div
                 className="h-full bg-gradient-to-r from-purple-500 via-pink-500 to-purple-500"
                 style={{ width: `${progress * 100}%` }}
@@ -391,8 +391,8 @@ export default function QuantumMixerVisualization({
             </div>
           </div>
 
-          {/* Stages Grid */}
-          <div className="grid grid-cols-5 gap-2">
+          {/* Stages Grid - More Compact */}
+          <div className="grid grid-cols-5 gap-1.5">
             <AnimatePresence>
               {stages.map((stageInfo, index) => {
                 const isActive = index === stage;
@@ -405,11 +405,11 @@ export default function QuantumMixerVisualization({
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{
                       opacity,
-                      scale: isActive ? 1.03 : 1,
+                      scale: isActive ? 1.02 : 1,
                     }}
                     transition={{ delay: index * 0.08 }}
                     className={`
-                      relative p-2 rounded-lg border-2 transition-all duration-300
+                      relative p-1.5 rounded-lg border transition-all duration-300
                       ${isPast
                         ? 'bg-gradient-to-br from-green-900/50 to-emerald-900/50 border-green-500/50'
                         : isActive
@@ -419,26 +419,23 @@ export default function QuantumMixerVisualization({
                     `}
                   >
                     {isPast && (
-                      <div className="absolute -top-1.5 -right-1.5 bg-green-500 rounded-full p-0.5">
-                        <CheckCircle className="w-3 h-3 text-white" />
+                      <div className="absolute -top-1 -right-1 bg-green-500 rounded-full p-0.5">
+                        <CheckCircle className="w-2.5 h-2.5 text-white" />
                       </div>
                     )}
 
-                    <div className="flex flex-col items-center gap-1">
-                      <div style={{ color: stageInfo.color }}>
+                    <div className="flex flex-col items-center gap-0.5">
+                      <div style={{ color: stageInfo.color }} className="scale-75">
                         {stageInfo.icon}
                       </div>
-                      <div className="text-[11px] font-semibold text-white text-center leading-tight">
+                      <div className="text-[10px] font-semibold text-white text-center leading-tight">
                         {stageInfo.name}
-                      </div>
-                      <div className="text-[9px] text-slate-400 text-center leading-tight hidden sm:block">
-                        {stageInfo.description}
                       </div>
                     </div>
 
                     {isActive && (
                       <div className="absolute inset-0 rounded-lg animate-pulse">
-                        <div className="absolute inset-0 rounded-lg border-2 border-purple-400/50"></div>
+                        <div className="absolute inset-0 rounded-lg border border-purple-400/50"></div>
                       </div>
                     )}
                   </motion.div>
@@ -453,17 +450,12 @@ export default function QuantumMixerVisualization({
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="mt-3 p-3 bg-gradient-to-r from-green-900/50 to-emerald-900/50 rounded-lg border-2 border-green-500/50"
+                className="mt-2 p-2 bg-gradient-to-r from-green-900/50 to-emerald-900/50 rounded-lg border border-green-500/50"
               >
-                <div className="flex items-center gap-3">
-                  <CheckCircle className="w-6 h-6 text-green-400 flex-shrink-0" />
-                  <div>
-                    <div className="text-base font-bold text-white">
-                      Quantum Mixing Complete!
-                    </div>
-                    <div className="text-xs text-slate-300">
-                      Your transaction is now fully anonymous and ready for confirmation
-                    </div>
+                <div className="flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5 text-green-400 flex-shrink-0" />
+                  <div className="text-sm font-bold text-white">
+                    Quantum Mixing Complete! Transaction is now anonymous.
                   </div>
                 </div>
               </motion.div>

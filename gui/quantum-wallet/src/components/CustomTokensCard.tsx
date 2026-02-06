@@ -1,7 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Coins, Send, ChevronDown, ChevronUp, Loader2, AlertCircle, TrendingUp, DollarSign, PieChart, Lock, Unlock, Gift, Timer, Award } from 'lucide-react';
+import { Coins, Send, ChevronDown, ChevronUp, Loader2, AlertCircle, TrendingUp, DollarSign, PieChart, Lock, Unlock, Gift, Timer, Award, Search, ArrowUpDown, ArrowUp, ArrowDown, SlidersHorizontal } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+
+// v3.7.1: Sort options for the token list
+type SortField = 'symbol' | 'balance' | 'valueUsd' | 'change24h' | 'volume24h' | 'liquidity';
+type SortDirection = 'asc' | 'desc';
 
 interface CustomToken {
   symbol: string;
@@ -12,6 +16,8 @@ interface CustomToken {
   priceUsd?: number;
   valueUsd?: number;
   change24h?: number;
+  volume24h?: number;   // v3.6.12: 24h trading volume
+  liquidity?: number;   // v3.6.12: Pool liquidity
 }
 
 interface StakePosition {
@@ -56,6 +62,12 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
   const [error, setError] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(true);
 
+  // v3.7.1: Sorting and filtering state
+  const [sortField, setSortField] = useState<SortField>('valueUsd');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [filterText, setFilterText] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+
   // Staking modal state
   const [stakingToken, setStakingToken] = useState<CustomToken | null>(null);
   const [stakeAmount, setStakeAmount] = useState('');
@@ -64,6 +76,15 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
   const [stakeError, setStakeError] = useState<string | null>(null);
   const [stakeSuccess, setStakeSuccess] = useState<string | null>(null);
   const [stakePositions, setStakePositions] = useState<Record<string, StakePosition>>({});
+  // v3.6.18: Track token's reflection rate from contract (set by owner)
+  const [tokenReflectionRate, setTokenReflectionRate] = useState<number | null>(null);
+  // v3.6.18: Track stake history showing profits
+  const [stakeHistory, setStakeHistory] = useState<Array<{
+    timestamp: number;
+    amount: number;
+    reward: number;
+    type: 'stake' | 'unstake' | 'reward';
+  }>>([]);
 
   // v2.9.8-beta: Track DEX swap cooldowns per token to prevent stale API data overwriting correct balance
   // Maps token symbol (uppercase) to the timestamp until which we should preserve local balance
@@ -78,10 +99,13 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
 
   // v2.4.1: Only show tokens with balance > 0
   // v2.9.15-beta: During cooldown, OVERRIDE state with localStorage protected values
+  // v3.7.1: Added filtering and sorting
   const tokensWithBalance = useMemo(() => {
     const now = Date.now();
     const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
     const isInCooldown = now < globalCooldownUntil;
+
+    let tokens: CustomToken[];
 
     if (isInCooldown) {
       // During cooldown, use protected balances from localStorage as source of truth
@@ -89,7 +113,7 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
         const protectedBalances = JSON.parse(localStorage.getItem('protectedTokenBalances') || '{}');
         console.log('🔒 [CustomTokens v2.9.15] In cooldown - using protected balances:', protectedBalances);
 
-        return customTokens
+        tokens = customTokens
           .map(token => {
             const tokenUpper = token.symbol?.toUpperCase() || '';
             const protectedData = protectedBalances[tokenUpper];
@@ -103,11 +127,65 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
           .filter(token => token.balance > 0);
       } catch (e) {
         console.warn('[CustomTokens] Failed to read protected balances');
+        tokens = customTokens.filter(token => token.balance > 0);
       }
+    } else {
+      tokens = customTokens.filter(token => token.balance > 0);
     }
 
-    return customTokens.filter(token => token.balance > 0);
-  }, [customTokens]);
+    // v3.7.1: Apply text filter
+    if (filterText.trim()) {
+      const searchLower = filterText.toLowerCase();
+      tokens = tokens.filter(token =>
+        token.symbol.toLowerCase().includes(searchLower) ||
+        token.name.toLowerCase().includes(searchLower) ||
+        token.contractAddress.toLowerCase().includes(searchLower)
+      );
+    }
+
+    // v3.7.1: Apply sorting
+    tokens.sort((a, b) => {
+      let aVal: number | string;
+      let bVal: number | string;
+
+      switch (sortField) {
+        case 'symbol':
+          aVal = a.symbol.toLowerCase();
+          bVal = b.symbol.toLowerCase();
+          break;
+        case 'balance':
+          aVal = a.balance;
+          bVal = b.balance;
+          break;
+        case 'valueUsd':
+          aVal = a.valueUsd || 0;
+          bVal = b.valueUsd || 0;
+          break;
+        case 'change24h':
+          aVal = a.change24h || 0;
+          bVal = b.change24h || 0;
+          break;
+        case 'volume24h':
+          aVal = a.volume24h || 0;
+          bVal = b.volume24h || 0;
+          break;
+        case 'liquidity':
+          aVal = a.liquidity || 0;
+          bVal = b.liquidity || 0;
+          break;
+        default:
+          aVal = a.valueUsd || 0;
+          bVal = b.valueUsd || 0;
+      }
+
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return sortDirection === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
+    });
+
+    return tokens;
+  }, [customTokens, filterText, sortField, sortDirection]);
 
   // v2.4.1: Calculate total portfolio value
   const totalPortfolioValue = useMemo(() => {
@@ -122,8 +200,8 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
   useEffect(() => {
     fetchCustomTokens();
 
-    // Refresh every 30 seconds (reduced frequency)
-    const interval = setInterval(fetchCustomTokens, 30000);
+    // v3.6.18: Refresh every 15 seconds for faster token updates
+    const interval = setInterval(fetchCustomTokens, 15000);
 
     // v1.4.10-beta: Listen for token balance updates via SSE for instant refresh
     // v2.4.2: Enhanced to trigger full refresh for new tokens
@@ -200,7 +278,10 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
           // Token doesn't exist and has a balance - this is a first-time buy!
           // Trigger full refresh to fetch the new token's metadata
           console.log(`🆕 [CustomTokens] New token ${tokenSymbol} detected, triggering full refresh...`);
-          setTimeout(() => fetchCustomTokens(), 500); // Small delay to ensure backend has processed
+          // v3.6.18: Increased delay to 2s to ensure backend has processed the swap
+          // Also trigger immediate fetch + delayed fetch for faster response
+          fetchCustomTokens(); // Try immediately first
+          setTimeout(() => fetchCustomTokens(), 2000); // Retry after 2s for backend sync
           return prev;
         }
 
@@ -242,19 +323,30 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
     const now = Date.now();
     const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
     if (now < globalCooldownUntil) {
-      console.log(`⏸️ [CustomTokens v2.9.11] SKIPPING FETCH - global cooldown active for ${Math.round((globalCooldownUntil - now) / 1000)}s more`);
-      setLoading(false);
-      return;
+      const remainingSeconds = Math.round((globalCooldownUntil - now) / 1000);
+      console.log(`⏸️ [CustomTokens v2.9.11] SKIPPING FETCH - global cooldown active for ${remainingSeconds}s more`);
+      // v3.6.14: Clear stuck cooldowns (shouldn't be more than 5 minutes)
+      if (remainingSeconds > 300) {
+        console.warn(`⚠️ [CustomTokens v3.6.14] Cooldown is stuck at ${remainingSeconds}s - clearing!`);
+        localStorage.removeItem('customTokensCooldownUntil');
+        localStorage.removeItem('protectedTokenBalances');
+      } else {
+        setLoading(false);
+        return;
+      }
     }
 
     try {
       setLoading(true);
       setError(null);
 
+      console.log('🔄 [CustomTokens v3.6.14] Fetching multi-token balance...');
       const response = await qnkAPI.getMultiTokenBalance();
+      console.log('📦 [CustomTokens v3.6.14] API Response:', response);
 
       if (response.success && response.data && response.data.tokens) {
         const tokensObj = response.data.tokens;
+        console.log('🪙 [CustomTokens v3.6.14] Tokens from API:', Object.keys(tokensObj));
 
         // v2.9.9-beta: Get protected balances from localStorage
         // const now = Date.now(); // already declared above
@@ -307,7 +399,20 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
             continue;
           }
 
-          const apiBalance = parseFloat(token.balance || '0');
+          // v3.6.14: Handle both balance formats from API:
+          // - balance_base_units: raw u128 value (needs conversion)
+          // - balance: already formatted string
+          let apiBalance = 0;
+          const tokenDecimals = token.decimals || 8;
+
+          if (token.balance_base_units && token.balance_base_units > 0) {
+            // Convert from base units using token's decimals
+            const divisor = Math.pow(10, tokenDecimals);
+            apiBalance = token.balance_base_units / divisor;
+            console.log(`💰 [CustomTokens v3.6.14] ${upperSymbol}: balance_base_units=${token.balance_base_units}, decimals=${tokenDecimals}, converted=${apiBalance}`);
+          } else {
+            apiBalance = parseFloat(token.balance || '0');
+          }
 
           // v2.9.9-beta: Check if this token has a protected balance (from recent DEX swap)
           const protectedData = protectedBalances[upperSymbol];
@@ -358,16 +463,61 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
         const prices = await Promise.all(pricePromises);
         const priceMap = new Map(prices.map(p => [p.contractAddress, p]));
 
-        // Update tokens with prices
+        // v3.6.12: Fetch liquidity pools to get volume and liquidity data
+        // v3.6.14: FIX - Backend returns total_liquidity as raw lp_token_supply (u128 base units)
+        // Need to divide by 1e8 (token decimals) to get human-readable amount
+        let poolsData: Map<string, { volume24h: number; liquidity: number }> = new Map();
+        try {
+          const poolsResponse = await qnkAPI.getLiquidityPools();
+          if (poolsResponse.success && poolsResponse.data) {
+            // Aggregate volume and liquidity by token address
+            for (const pool of poolsResponse.data) {
+              const tokenA = pool.token_a_address || pool.tokenA?.address || pool.token0;
+              const tokenB = pool.token_b_address || pool.tokenB?.address || pool.token1;
+              // v3.6.14: total_liquidity is raw u128, divide by 1e8 to get human-readable
+              // Then multiply by reserve values to estimate USD liquidity
+              const rawLiquidity = parseFloat(pool.total_liquidity || pool.total_liquidity_usd || pool.liquidity_usd || '0');
+              // If the value is absurdly large (>1e15), it's likely in base units
+              const poolLiquidity = rawLiquidity > 1e15 ? rawLiquidity / 1e8 : rawLiquidity;
+              const rawVolume = parseFloat(pool.volume_24h || pool.volume24h || '0');
+              const poolVolume = rawVolume > 1e15 ? rawVolume / 1e8 : rawVolume;
+
+              // Add to token A
+              if (tokenA) {
+                const existing = poolsData.get(tokenA) || { volume24h: 0, liquidity: 0 };
+                poolsData.set(tokenA, {
+                  volume24h: existing.volume24h + poolVolume,
+                  liquidity: existing.liquidity + poolLiquidity,
+                });
+              }
+              // Add to token B
+              if (tokenB) {
+                const existing = poolsData.get(tokenB) || { volume24h: 0, liquidity: 0 };
+                poolsData.set(tokenB, {
+                  volume24h: existing.volume24h + poolVolume,
+                  liquidity: existing.liquidity + poolLiquidity,
+                });
+              }
+            }
+            console.log('💧 [CustomTokens] Loaded pool data for', poolsData.size, 'tokens');
+          }
+        } catch (e) {
+          console.warn('Failed to fetch liquidity pools for volume/liquidity data');
+        }
+
+        // Update tokens with prices, volume, and liquidity
         // v2.9.9-beta: Simplified - protected balances already applied above from localStorage
         const tokensWithPrices = customTokensList.map(token => {
           const priceInfo = priceMap.get(token.contractAddress);
+          const poolInfo = poolsData.get(token.contractAddress);
           const priceUsd = priceInfo?.price || 0;
           return {
             ...token,
             priceUsd,
             valueUsd: token.balance * priceUsd,
             change24h: priceInfo?.change24h || 0,
+            volume24h: poolInfo?.volume24h || 0,
+            liquidity: poolInfo?.liquidity || 0,
           };
         });
 
@@ -424,20 +574,20 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
         return;
       }
 
-      const tier = STAKING_TIERS[selectedTier];
+      // v3.6.18: Use contract's reflection rate instead of hardcoded tiers
       const response = await fetch(`/api/v1/contracts/${stakingToken.contractAddress}/stake`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           wallet_address: localStorage.getItem('walletAddress') || '',
-          amount: Math.floor(amount * 1e24), // Convert to base units
-          lock_days: tier.days,
+          amount: Math.floor(amount * 1e8), // Convert to base units (8 decimals for custom tokens)
+          reflection_rate: tokenReflectionRate, // Use contract's reflection rate
         }),
       });
 
       const data = await response.json();
       if (data.success) {
-        setStakeSuccess(`Successfully staked ${amount} ${stakingToken.symbol} in ${tier.name} tier!`);
+        setStakeSuccess(`Successfully staked ${amount} ${stakingToken.symbol} at ${tokenReflectionRate || 0}% reflection!`);
         setStakeAmount('');
         // Refresh balances
         fetchCustomTokens();
@@ -523,16 +673,54 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
     }
   };
 
-  const openStakeModal = (token: CustomToken) => {
+  const openStakeModal = async (token: CustomToken) => {
     setStakingToken(token);
     setStakeAmount('');
     setSelectedTier(0);
     setStakeError(null);
     setStakeSuccess(null);
+    setTokenReflectionRate(null);
+    setStakeHistory([]);
+
+    // v3.7.0: Fetch reflection rate from fee-config endpoint (basis points -> percentage)
+    try {
+      const feeConfigResponse = await fetch(`/api/v1/contracts/${token.contractAddress}/fee-config`);
+      if (feeConfigResponse.ok) {
+        const feeConfigData = await feeConfigResponse.json();
+        if (feeConfigData.success && feeConfigData.data) {
+          // reflection_fee_bps is in basis points (200 = 2%), convert to percentage
+          const reflectionBps = feeConfigData.data.reflection_fee_bps || 0;
+          setTokenReflectionRate(reflectionBps / 100);
+        } else {
+          // No fee config set - default to 2%
+          setTokenReflectionRate(2.0);
+        }
+      } else {
+        // Endpoint error - default to 2%
+        setTokenReflectionRate(2.0);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch contract fee config:', e);
+      // Network error - default to 2%
+      setTokenReflectionRate(2.0);
+    }
+
     // Fetch existing stake info
     const walletAddr = localStorage.getItem('walletAddress') || '';
     if (walletAddr) {
       fetchStakeInfo(token.contractAddress, walletAddr);
+      // v3.6.18: Also fetch stake history for this wallet
+      try {
+        const historyResponse = await fetch(`/api/v1/contracts/${token.contractAddress}/stake-history/${walletAddr}`);
+        if (historyResponse.ok) {
+          const historyData = await historyResponse.json();
+          if (historyData.success && historyData.data) {
+            setStakeHistory(historyData.data);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to fetch stake history:', e);
+      }
     }
   };
 
@@ -565,17 +753,31 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
     }
   };
 
-  // v3.2.15-beta: Format USD values - FULL NUMBER (no abbreviations)
+  // v3.9.5-beta: Format USD values with subscript zero notation for tiny prices
+  const SUBSCRIPT_DIGITS = ['₀','₁','₂','₃','₄','₅','₆','₇','₈','₉'];
+  const toSubscript = (n: number): string => {
+    return String(n).split('').map(d => SUBSCRIPT_DIGITS[parseInt(d)] || d).join('');
+  };
   const formatUsd = (value: number) => {
     if (!isFinite(value) || value <= 0) return '$0.00';
-    // v3.2.15-beta: Show full dollar amount with comma separators
     try {
-      // For safe numbers, use standard formatting
       if (value <= Number.MAX_SAFE_INTEGER) {
         if (value >= 1) {
           return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        } else if (value >= 0.0001) {
+          return `$${value.toFixed(6)}`;
         } else if (value > 0) {
-          return `$${value.toFixed(4)}`;
+          // Tiny prices: subscript zero notation ($0.0₇38)
+          const str = value.toFixed(20);
+          const afterDot = str.split('.')[1] || '';
+          let zeroCount = 0;
+          for (const ch of afterDot) {
+            if (ch === '0') zeroCount++;
+            else break;
+          }
+          const sigDigits = afterDot.slice(zeroCount, zeroCount + 4).replace(/0+$/, '') || '0';
+          if (zeroCount >= 2) return `$0.0${toSubscript(zeroCount)}${sigDigits}`;
+          return `$${value.toFixed(8).replace(/0+$/, '')}`;
         }
       }
       // For very large values (> MAX_SAFE_INTEGER), use mantissa/exponent approach
@@ -682,6 +884,69 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
           </div>
         )}
 
+        {/* v3.7.1: Sort & Filter Controls */}
+        {!loading && customTokens.filter(t => t.balance > 0).length > 0 && (
+          <div className="mb-4 space-y-3">
+            {/* Search Input */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search tokens..."
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 rounded-lg bg-black/30 border border-purple-500/20 text-white text-sm placeholder-gray-500 focus:border-purple-500/50 focus:outline-none"
+              />
+              {filterText && (
+                <button
+                  onClick={() => setFilterText('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-300"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            {/* Sort Controls */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-gray-400 flex items-center gap-1">
+                <ArrowUpDown className="w-3 h-3" />
+                Sort by:
+              </span>
+              {(['valueUsd', 'symbol', 'balance', 'change24h', 'volume24h', 'liquidity'] as SortField[]).map((field) => (
+                <button
+                  key={field}
+                  onClick={() => {
+                    if (sortField === field) {
+                      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+                    } else {
+                      setSortField(field);
+                      setSortDirection('desc');
+                    }
+                  }}
+                  className={`px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1 ${
+                    sortField === field
+                      ? 'bg-purple-500/30 text-purple-300 border border-purple-500/50'
+                      : 'bg-black/20 text-gray-400 border border-transparent hover:border-purple-500/30 hover:text-purple-300'
+                  }`}
+                >
+                  {{
+                    valueUsd: 'Value',
+                    symbol: 'Name',
+                    balance: 'Balance',
+                    change24h: '24h %',
+                    volume24h: 'Volume',
+                    liquidity: 'Liquidity',
+                  }[field]}
+                  {sortField === field && (
+                    sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Content */}
         <AnimatePresence>
           {isExpanded && (
@@ -748,12 +1013,25 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                               </p>
                             )}
                           </div>
-                          <div className="flex items-center gap-3 mt-1">
+                          <div className="flex items-center gap-3 mt-1 flex-wrap">
                             {(token.priceUsd ?? 0) > 0 && (
                               <p className="text-xs text-gray-400">
                                 @ {formatUsd(token.priceUsd ?? 0)} each
                               </p>
                             )}
+                            {/* v3.6.12: Volume and Liquidity from DEX */}
+                            {(token.volume24h ?? 0) > 0 && (
+                              <p className="text-xs text-blue-400">
+                                Vol: {formatUsd(token.volume24h ?? 0)}
+                              </p>
+                            )}
+                            {(token.liquidity ?? 0) > 0 && (
+                              <p className="text-xs text-cyan-400">
+                                Liq: {formatUsd(token.liquidity ?? 0)}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center mt-1">
                             <p className="text-xs text-gray-500 font-mono truncate">
                               {token.contractAddress.substring(0, 8)}...{token.contractAddress.substring(token.contractAddress.length - 6)}
                             </p>
@@ -924,33 +1202,86 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                   </p>
                 </div>
 
-                {/* Tier Selection */}
-                <div>
-                  <label className="text-sm text-gray-400 mb-2 block">Lock Period</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {STAKING_TIERS.map((tier, index) => (
-                      <motion.button
-                        key={tier.name}
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        onClick={() => setSelectedTier(index)}
-                        className={`p-3 rounded-xl border-2 transition-all ${
-                          selectedTier === index
-                            ? 'bg-yellow-500/20 border-yellow-500/50'
-                            : 'bg-black/20 border-gray-700/50 hover:border-gray-600'
-                        }`}
-                      >
-                        <p className={`font-bold ${selectedTier === index ? 'text-yellow-300' : 'text-gray-300'}`}>
-                          {tier.name}
-                        </p>
-                        <p className="text-xs text-gray-500">{tier.days} days</p>
-                        <p className={`text-sm font-bold ${selectedTier === index ? 'text-green-400' : 'text-green-500/70'}`}>
-                          {tier.apy}% APY
-                        </p>
-                      </motion.button>
-                    ))}
+                {/* v3.6.18: Reflection Rate from Contract (set by token owner) */}
+                <div className="p-4 rounded-xl bg-gradient-to-br from-purple-500/10 to-cyan-500/10 border border-purple-500/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm text-gray-400">Reflection Rate</label>
+                    <span className="text-xs text-gray-500">Set by token owner</span>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400">
+                      {tokenReflectionRate !== null ? `${tokenReflectionRate}%` : 'Loading...'}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {tokenReflectionRate !== null
+                        ? `Earn ${tokenReflectionRate}% of all transaction fees redistributed to stakers`
+                        : 'Fetching reflection settings...'}
+                    </p>
                   </div>
                 </div>
+
+                {/* v3.6.18: Stake History */}
+                {stakeHistory.length > 0 && (
+                  <div className="mt-4">
+                    <label className="text-sm text-gray-400 mb-2 block flex items-center gap-2">
+                      <Award className="w-4 h-4 text-yellow-400" />
+                      Stake History & Profits
+                    </label>
+                    <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                      {stakeHistory.map((entry, index) => (
+                        <div
+                          key={index}
+                          className={`p-2 rounded-lg text-sm flex items-center justify-between ${
+                            entry.type === 'reward'
+                              ? 'bg-green-500/10 border border-green-500/20'
+                              : entry.type === 'stake'
+                              ? 'bg-yellow-500/10 border border-yellow-500/20'
+                              : 'bg-cyan-500/10 border border-cyan-500/20'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            {entry.type === 'reward' ? (
+                              <Gift className="w-4 h-4 text-green-400" />
+                            ) : entry.type === 'stake' ? (
+                              <Lock className="w-4 h-4 text-yellow-400" />
+                            ) : (
+                              <Unlock className="w-4 h-4 text-cyan-400" />
+                            )}
+                            <span className={
+                              entry.type === 'reward' ? 'text-green-300'
+                              : entry.type === 'stake' ? 'text-yellow-300'
+                              : 'text-cyan-300'
+                            }>
+                              {entry.type === 'reward' ? 'Reward' : entry.type === 'stake' ? 'Staked' : 'Unstaked'}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <p className={`font-bold ${
+                              entry.type === 'reward' ? 'text-green-400' : 'text-white'
+                            }`}>
+                              {entry.type === 'reward' ? '+' : ''}{entry.amount.toLocaleString()} {stakingToken.symbol}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {new Date(entry.timestamp * 1000).toLocaleDateString()}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {/* Total Rewards Summary */}
+                    <div className="mt-2 p-2 rounded-lg bg-green-500/10 border border-green-500/30">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-400">Total Rewards Earned</span>
+                        <span className="font-bold text-green-400">
+                          +{stakeHistory
+                            .filter(e => e.type === 'reward')
+                            .reduce((sum, e) => sum + e.amount, 0)
+                            .toLocaleString()} {stakingToken.symbol}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Error/Success Messages */}
                 {stakeError && (

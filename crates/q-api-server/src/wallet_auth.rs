@@ -119,13 +119,21 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let request_path = parts.uri.path();
+
         // Extract authentication header
         let auth_header = parts
             .headers
             .get("X-Wallet-Auth")
-            .ok_or_else(|| AuthError {
-                error: "missing_auth".to_string(),
-                message: "Missing X-Wallet-Auth header. Please sign your request.".to_string(),
+            .ok_or_else(|| {
+                // v3.4.5: Only log for transaction lookups to debug ZK-STARK auth
+                if request_path.contains("/transactions/") && !request_path.contains("/transactions/send") {
+                    tracing::debug!("🔐 [AUTH] No X-Wallet-Auth header for transaction lookup: {}", request_path);
+                }
+                AuthError {
+                    error: "missing_auth".to_string(),
+                    message: "Missing X-Wallet-Auth header. Please sign your request.".to_string(),
+                }
             })?
             .to_str()
             .map_err(|_| AuthError {
@@ -133,12 +141,18 @@ where
                 message: "Invalid X-Wallet-Auth header format".to_string(),
             })?;
 
-        // AUTH DEBUG logging removed - was spamming logs
+        // v3.4.5: Debug log for transaction lookup auth attempts
+        if request_path.contains("/transactions/") && !request_path.contains("/transactions/send") {
+            tracing::debug!("🔐 [AUTH] X-Wallet-Auth received for transaction lookup: {}", request_path);
+        }
 
         // Parse JSON authentication header
-        let auth: AuthHeader = serde_json::from_str(auth_header).map_err(|e| AuthError {
-            error: "invalid_auth_json".to_string(),
-            message: format!("Invalid authentication JSON: {}", e),
+        let auth: AuthHeader = serde_json::from_str(auth_header).map_err(|e| {
+            tracing::warn!("🔐 [AUTH] Invalid JSON in X-Wallet-Auth header: {}", e);
+            AuthError {
+                error: "invalid_auth_json".to_string(),
+                message: format!("Invalid authentication JSON: {}", e),
+            }
         })?;
 
         // AUTH DEBUG logging removed - was spamming logs
@@ -180,13 +194,22 @@ where
 
         // Generate authentication challenge message
         // Message format: SHA3-256(address + timestamp + request_path)
+        let backend_path = parts.uri.path();
         let mut hasher = Sha3_256::new();
         hasher.update(&address);
         hasher.update(&auth.timestamp.to_le_bytes());
-        hasher.update(parts.uri.path().as_bytes());
+        hasher.update(backend_path.as_bytes());
         let message = hasher.finalize();
 
-        // AUTH DEBUG logging removed - was spamming logs
+        // v3.4.5: Debug log for transaction lookup path verification
+        if backend_path.contains("/transactions/") && !backend_path.contains("/transactions/send") {
+            tracing::debug!(
+                "🔐 [AUTH] Path verification: backend_path={} wallet={} timestamp={}",
+                backend_path,
+                &auth.address,
+                auth.timestamp
+            );
+        }
 
         // Verify signature(s) based on scheme
         match auth.scheme {
@@ -259,9 +282,17 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
 
     public_key
         .verify(message, &signature)
-        .map_err(|_| AuthError {
-            error: "invalid_signature".to_string(),
-            message: "Ed25519 signature verification failed".to_string(),
+        .map_err(|e| {
+            // v3.4.5: Log signature verification failures for debugging
+            tracing::debug!(
+                "🔐 [AUTH FAIL] Ed25519 signature verification failed for address {}: {:?}",
+                hex::encode(address),
+                e
+            );
+            AuthError {
+                error: "invalid_signature".to_string(),
+                message: "Ed25519 signature verification failed".to_string(),
+            }
         })?;
 
     Ok(())

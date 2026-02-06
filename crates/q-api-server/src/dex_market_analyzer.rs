@@ -42,9 +42,12 @@ pub struct MarketAnalysis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketMetrics {
     pub price_usd: f64,
-    pub price_change_1h: f64,
-    pub price_change_24h: f64,
-    pub price_change_7d: f64,
+    /// Price change in 1h in basis points (e.g., 100 = 1%)
+    pub price_change_1h_bps: i32,
+    /// Price change in 24h in basis points (e.g., 550 = 5.5%, -200 = -2%)
+    pub price_change_24h_bps: i32,
+    /// Price change in 7d in basis points
+    pub price_change_7d_bps: i32,
     pub volume_24h: f64,
     pub liquidity_usd: f64,
     pub volatility_score: f64,            // 0-100, higher = more volatile
@@ -337,9 +340,9 @@ Always remind users that past performance doesn't guarantee future results."#.to
             timestamp: now,
             metrics: MarketMetrics {
                 price_usd: 1.25,
-                price_change_1h: 0.5,
-                price_change_24h: 3.2,
-                price_change_7d: 12.8,
+                price_change_1h_bps: 50,   // 0.5%
+                price_change_24h_bps: 320, // 3.2%
+                price_change_7d_bps: 1280, // 12.8%
                 volume_24h: 45000.0,
                 liquidity_usd: 250000.0,
                 volatility_score: 45.0,

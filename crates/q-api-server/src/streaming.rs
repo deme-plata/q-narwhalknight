@@ -20,7 +20,7 @@ use serde_json;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as TokioStreamExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::AppState;
 
@@ -403,7 +403,7 @@ impl EventBroadcaster {
                 if (*last_balance - new_balance).abs() < 0.00000001
                     && now.duration_since(*last_time).as_millis() < 500
                 {
-                    debug!(
+                    trace!(
                         "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 500ms)",
                         &wallet_address[..16]
                     );
@@ -421,7 +421,8 @@ impl EventBroadcaster {
         // 🔒 PRIVACY: Log aggregate statistics only, no individual wallet data
         match &event {
             StreamEvent::BalanceUpdated { change_reason, .. } => {
-                debug!(
+                // v3.4.2: Reduced to trace to prevent log spam
+                trace!(
                     "📡 [SSE] Broadcasting BalanceUpdated: reason={}, subscribers={}",
                     change_reason, subscriber_count
                 );
@@ -435,7 +436,8 @@ impl EventBroadcaster {
                     hex::encode(&transaction_hash[..8]), &mixing_session_id[..8], subscriber_count);
             }
             _ => {
-                debug!(
+                // v3.4.4: Reduced to trace to prevent log spam
+                trace!(
                     "Broadcasting event: {}, subscriber count: {}",
                     event_type_name(&event),
                     subscriber_count
@@ -459,8 +461,8 @@ impl EventBroadcaster {
                 }
             }
         } else {
-            // Silently succeed when no subscribers are present
-            debug!("Event emission skipped: no active subscribers");
+            // Silently succeed when no subscribers are present (trace level to reduce spam)
+            trace!("Event emission skipped: no active subscribers");
             Ok(())
         }
     }
@@ -554,8 +556,8 @@ pub async fn sse_events(
                     wallet_address.clone()
                 };
                 let matches = normalized_event == normalized_filter;
-                // v2.7.8-beta: Extensive debugging for P2P balance propagation
-                info!("🔍 [SSE FILTER] BalanceUpdated: reason={}, event_addr={} (first 16), filter={} (first 16), old={:.8}, new={:.8}, matches={}",
+                // v2.7.8-beta: Extensive debugging for P2P balance propagation (trace level to avoid log spam)
+                trace!("🔍 [SSE FILTER] BalanceUpdated: reason={}, event_addr={} (first 16), filter={} (first 16), old={:.8}, new={:.8}, matches={}",
                       change_reason,
                       &normalized_event[..16.min(normalized_event.len())],
                       &normalized_filter[..16.min(normalized_filter.len())],
@@ -583,8 +585,8 @@ pub async fn sse_events(
                     miner_address.clone()
                 };
                 let matches = normalized_event == normalized_filter;
-                // v3.3.4-beta: Debug logging for SSE filter to diagnose direct-to-bootstrap mining
-                info!("🔍 [SSE FILTER] MiningReward: event_addr={} (len={}), filter={} (len={}), matches={}",
+                // v3.3.4-beta: Debug logging for SSE filter (trace level to avoid log spam)
+                trace!("🔍 [SSE FILTER] MiningReward: event_addr={} (len={}), filter={} (len={}), matches={}",
                       &normalized_event[..16.min(normalized_event.len())],
                       normalized_event.len(),
                       &normalized_filter[..16.min(normalized_filter.len())],
@@ -601,8 +603,8 @@ pub async fn sse_events(
                     miner_address.clone()
                 };
                 let matches = normalized_event == normalized_filter;
-                // v2.7.6-beta: Debug logging for SSE filter
-                info!("🔍 [SSE FILTER] MiningStats: event_addr_len={}, filter_len={}, event_prefix={}, filter_prefix={}, matches={}",
+                // v2.7.6-beta: Debug logging for SSE filter (trace level to avoid log spam)
+                trace!("🔍 [SSE FILTER] MiningStats: event_addr_len={}, filter_len={}, event_prefix={}, filter_prefix={}, matches={}",
                       normalized_event.len(),
                       normalized_filter.len(),
                       &normalized_event[..16.min(normalized_event.len())],
@@ -619,8 +621,8 @@ pub async fn sse_events(
                     miner_address.clone()
                 };
                 let matches = normalized_event == normalized_filter;
-                // v2.7.6-beta: Debug logging for SSE filter
-                info!("🔍 [SSE FILTER] PendingMiningReward: event_addr={} (first 16), filter={} (first 16), matches={}",
+                // v2.7.6-beta: Debug logging for SSE filter (trace level to avoid log spam)
+                trace!("🔍 [SSE FILTER] PendingMiningReward: event_addr={} (first 16), filter={} (first 16), matches={}",
                       &normalized_event[..16.min(normalized_event.len())],
                       &normalized_filter[..16.min(normalized_filter.len())],
                       matches);
@@ -730,8 +732,8 @@ pub async fn sse_events(
                         match serde_json::to_string(&event) {
                             Ok(json) => {
                                 let event_name = event_type_name(&event);
-                                // v2.7.6-beta: Upgrade to info! for visibility
-                                info!(
+                                // v3.4.0: Downgrade to debug! to reduce log spam
+                                debug!(
                                     "📤 [SSE SEND] Sending {} event to wallet filter (first 16): {:?}",
                                     event_name,
                                     filter.as_ref().map(|f| &f[..16.min(f.len())])
@@ -990,7 +992,8 @@ impl HighPerformanceEmitter {
             }
             Err(broadcast::error::SendError(_)) => {
                 // Event could not be sent (usually means no active subscribers)
-                debug!("HighPerformanceEmitter: Event emission skipped: no active subscribers");
+                // v3.4.2: Reduced to trace to prevent log spam
+                trace!("HighPerformanceEmitter: Event emission skipped: no active subscribers");
                 Ok(())
             }
         }

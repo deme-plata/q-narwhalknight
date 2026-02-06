@@ -245,39 +245,35 @@ impl Default for TurboSyncConfig {
         // - Q_BATCHED_WRITES (MUST STAY FALSE - breaks P2P!)
 
         Self {
-            // 🚀 v1.5.1-beta: EXTREME TURBO SYNC - TARGET 1000 BPS!
-            // Key optimizations for maximum throughput:
-            // 1. Massive parallel streams: 64 (saturate network bandwidth)
-            // 2. Large chunks: 20k blocks (better amortization of overhead)
-            // 3. Minimal compression: Level 1 (CPU not bottleneck)
-            // 4. Aggressive timeout: 30s (fast retry on stalls)
-            // 5. 64 peer connections (more sources = more bandwidth)
-            //
-            // Math for 1000 BPS:
-            // - 64 parallel streams × 20k blocks/chunk = 1.28M blocks in flight
-            // - If each chunk takes 20 seconds: 64 × 20k / 20s = 64,000 BPS theoretical
-            // - Real-world: 1000-2000 BPS achievable with good network
+            // 🚀 v3.4.7-beta: RELIABLE TURBO SYNC - Sequential with parallelism
+            // v3.4.7 FIX: Reduced parallelism to prevent timeout cascades
+            // PROBLEM: 64 streams × 20k chunks = 1.28M blocks in flight
+            //   → Far-ahead chunks timeout while near chunks complete
+            //   → Creates unresolvable gaps, sync stalls
+            // SOLUTION: 8 streams × 5k chunks = 40k blocks in flight
+            //   → More manageable, fewer timeouts
+            //   → Sequential progress with light parallelism
             //
             // Override via environment variables:
-            // - Q_TURBO_PARALLEL_STREAMS=64
-            // - Q_TURBO_CHUNK_SIZE=20000
+            // - Q_TURBO_PARALLEL_STREAMS=8
+            // - Q_TURBO_CHUNK_SIZE=5000
             // - Q_TURBO_COMPRESSION_LEVEL=1
-            // - Q_TURBO_CHUNK_TIMEOUT_SECS=30
+            // - Q_TURBO_CHUNK_TIMEOUT_SECS=45
             parallel_streams: std::env::var("Q_TURBO_PARALLEL_STREAMS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(64),  // v1.5.1: 64 streams (was 32)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v3.4.9: 32 streams for parallel fetching
             chunk_size: std::env::var("Q_TURBO_CHUNK_SIZE")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(20000),  // v1.5.1: 20k blocks (was 8k)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(1000),  // v3.4.10: 1k blocks (10k was too slow for tx-heavy blocks)
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1),  // Level 1 for speed
             chunk_timeout: Duration::from_secs(
                 std::env::var("Q_TURBO_CHUNK_TIMEOUT_SECS")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(30)),  // v1.5.1: 30s (was 45)
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(45)),  // v3.4.7: 45s (was 30s, max was 180s)
 
             // Protocol features (safe to keep enabled)
             delta_compression: true,
             enable_pipelining: true,
             max_peer_connections: std::env::var("Q_MAX_PEER_CONNECTIONS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(64),  // v1.5.1: 64 peers (was 32)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v3.4.9: 32 peers for faster sync
             smart_protocol: true,
 
             // 🚀 v1.0.89-beta: TURBO SYNC - Batched writes now default TRUE
@@ -1154,19 +1150,19 @@ impl TurboSyncManager {
         // 🚀 v1.0.50-beta: Initialize crypto-enhanced sync components
         // These provide reliability improvements to prevent sync stalling
         let enhanced_config = EnhancedSyncConfig::default();
-        // 🚀 v2.3.12-beta: SYNC SPEED FIX - Reduced minimum timeout from 30s to 10s
-        // REASON: 30s minimum was causing 30-second waits even for small 200-block syncs
-        // For small syncs (<1000 blocks), 10s is plenty. RTT-based adaptive scaling
-        // will increase timeout for larger chunks automatically.
-        // Original v1.4.7 reasoning (5k chunks need 5-8s) still works with 10s minimum.
+        // 🚀 v3.4.7-beta: SYNC TIMEOUT FIX - Reduced max timeout from 180s to 45s
+        // REASON: 180s max was causing 3-minute stalls when peers are slow/busy
+        // Faster timeout = faster retry with different peer = faster overall sync
+        // If a request takes >45s, it's better to retry with another peer anyway.
+        // For 5000-block chunks at ~100KB/block = ~500MB, 45s = ~11MB/s minimum.
         let adaptive_timeout = Arc::new(RwLock::new(AdaptiveTimeout::new(
-            10000,  // 10 second minimum timeout (was 30s - too slow for small syncs!)
-            180000, // 3 minute maximum timeout (was 5m - still generous for large chunks)
+            10000,  // 10 second minimum timeout (fast retry for small syncs)
+            45000,  // 45 second maximum timeout (was 180s - too slow!)
         )));
         let progress_tracker = Arc::new(RwLock::new(SyncProgressTracker::new(enhanced_config.clone())));
         let block_verifier = Arc::new(RwLock::new(IncrementalBlockVerifier::new(enhanced_config, None)));
         info!("🔐 [CRYPTO-ENHANCED SYNC] Initialized:");
-        info!("   • Adaptive timeout: 10s-180s based on RTT (v2.3.12 speed fix)");
+        info!("   • Adaptive timeout: 10s-45s based on RTT (v3.4.7 speed fix)");
         info!("   • Progress tracker: checkpointing every 1000 blocks");
         info!("   • Incremental verifier: early error detection");
 
@@ -2701,7 +2697,45 @@ impl TurboSyncManager {
             // ✅ v1.0.76-beta: BATCHED BALANCE CONSENSUS - single transaction for all blocks!
             // BEFORE: 500 blocks × 50-400ms fsync = 25-200 SECONDS
             // AFTER:  1 transaction × 50-400ms fsync = 50-400ms TOTAL
+            //
+            // 🚀 v3.4.12-beta: EXTREME_SKIP_BALANCES - Skip balance processing for 10x speed
+            // When Q_EXTREME_SKIP_BALANCES=1 or auto-detected (>100k behind), skip balance
+            // processing to achieve 2000+ BPS. Balances can be rebuilt after sync completes.
+            let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100_000);  // 100k blocks = auto-skip balances
+
+            let estimated_network_height_for_balance = {
+                let registry = self.peer_registry.read().await;
+                registry.iter().map(|(_, h)| *h).max().unwrap_or(pack.end_height)
+            };
+            let blocks_behind_for_balance = estimated_network_height_for_balance
+                .saturating_sub(self.storage.height_cache.cached());
+
+            let skip_balances_env = std::env::var("Q_EXTREME_SKIP_BALANCES")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false);
+
+            // v3.4.12: Skip balances when explicitly set OR auto-detected far behind
+            let skip_balances = skip_balances_env || blocks_behind_for_balance > extreme_skip_balances_threshold;
+
+            if skip_balances {
+                // Log every 50 chunks to avoid spam
+                let chunk_count = self.chunks_since_wal_sync.load(Ordering::Relaxed);
+                if chunk_count % 50 == 0 {
+                    warn!(
+                        "🔥 [EXTREME v3.4.12] SKIPPING BALANCE PROCESSING ({} blocks behind > {}k threshold) - 10x SPEED BOOST!",
+                        blocks_behind_for_balance, extreme_skip_balances_threshold / 1000
+                    );
+                }
+            }
+
             if let Some(engine) = balance_engine {
+                // Skip balance processing in extreme mode
+                if skip_balances {
+                    debug!("🔥 [EXTREME] Skipping balance processing for {} blocks", blocks.len());
+                } else {
                 let balance_start = std::time::Instant::now();
 
                 // Create SINGLE transaction for ALL blocks in the batch
@@ -2746,6 +2780,7 @@ impl TurboSyncManager {
                         balance_updates_total, blocks_committed, balance_elapsed
                     );
                 }
+                }  // end of else (not skip_balances)
             }
 
             // ✅ SINGLE BATCH WRITE (instead of 500+ individual writes!)
@@ -2791,9 +2826,27 @@ impl TurboSyncManager {
             //    - Slow: 50-100 BPS
             //    - Risk: Minimal data loss
             //    - Use for: Critical production nodes
-            let use_extreme = std::env::var("Q_EXTREME_SYNC")
+            // 🚀 v3.4.11-beta: AUTO-EXTREME SYNC for initial sync
+            // When node is >50,000 blocks behind, automatically use EXTREME mode
+            // This gives fresh nodes 2000+ BPS without manual configuration
+            let auto_extreme_threshold: u64 = std::env::var("Q_AUTO_EXTREME_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50_000);  // 50k blocks = auto-enable extreme
+
+            // Use peer registry to estimate network height (highest known peer)
+            let estimated_network_height = {
+                let registry = self.peer_registry.read().await;
+                registry.iter().map(|(_, h)| *h).max().unwrap_or(pack.end_height)
+            };
+            let blocks_behind = estimated_network_height.saturating_sub(self.storage.height_cache.cached());
+
+            let use_extreme_env = std::env::var("Q_EXTREME_SYNC")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false);
+
+            // v3.4.11: Auto-extreme when far behind, or explicit env var
+            let use_extreme = use_extreme_env || blocks_behind > auto_extreme_threshold;
 
             let use_turbo = std::env::var("Q_TURBO_SYNC")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -2807,9 +2860,10 @@ impl TurboSyncManager {
 
                 // Only log every 100 chunks to avoid log spam
                 if chunks_processed % 100 == 0 {
+                    let auto_reason = if use_extreme_env { "env" } else { "auto (>50k behind)" };
                     info!(
-                        "🔥 [EXTREME SYNC v1.5.1] {} chunks processed, NO WAL SYNC (maximum speed mode)",
-                        chunks_processed
+                        "🔥 [EXTREME SYNC v3.4.11] {} chunks processed, NO WAL SYNC ({}, {} blocks behind) - TARGET: 2000+ BPS",
+                        chunks_processed, auto_reason, blocks_behind
                     );
                 }
                 // NO sync_wal() call - maximum speed!
@@ -3222,12 +3276,12 @@ impl TurboSyncManager {
             info!("📨 [P2P DIRECT] Requesting blocks {}..={} via request-response from {}",
                   start_height, end_height, peer);
 
-            // 🚀 v1.3.9-beta: Use adaptive timeout (now starts at 15s minimum!)
+            // 🚀 v3.4.7-beta: Use adaptive timeout (10s-45s range for faster retry)
             let dynamic_timeout = {
                 let timeout_calc = self.adaptive_timeout.read().await;
                 timeout_calc.get_timeout()
             };
-            info!("⏱️  [ADAPTIVE TIMEOUT] Using {:?} for chunk {}..={} (v1.3.9: 15s-180s range)",
+            info!("⏱️  [ADAPTIVE TIMEOUT] Using {:?} for chunk {}..={} (v3.4.7: 10s-45s range)",
                    dynamic_timeout, start_height, end_height);
 
             // Wait for response with adaptive timeout
@@ -3351,12 +3405,12 @@ impl TurboSyncManager {
                         tracker.record_failure(&peer.to_string()).await;
                     }
 
-                    // ⏱️ v1.3.9-beta: Timeout logging (should be rare with 15s minimum!)
+                    // ⏱️ v3.4.7-beta: Timeout logging with reduced max timeout
                     error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                     error!("⏱️  [P2P DIRECT] Chunk timeout after {:?}", dynamic_timeout);
                     error!("    Range: {}..={}", start_height, end_height);
                     error!("    Peer: {} (score decreased)", peer);
-                    error!("    NOTE: v1.4.7 uses 30s minimum timeout - check peer connectivity");
+                    error!("    NOTE: v3.4.7 uses 10s-45s adaptive timeout - will retry with different peer");
                     error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
                     let local_height = self.storage.get_latest_qblock_height().await?.unwrap_or(0);
@@ -3440,14 +3494,26 @@ impl TurboSyncManager {
             .collect();
         self.warp_prefetch.queue_prefetch(&chunk_assignments).await;
 
-        // v1.3.10-beta: Create parallel download tasks with DIFFERENT PEER RETRY
-        // When a chunk fails, retry with a DIFFERENT peer instead of the same one
-        for (chunk_idx, (start, end)) in chunks.into_iter().enumerate() {
-            // 🚀 v2.3.10-beta: Use priority-ordered peers from Warp Sync
-            let peers_for_retry = if use_warp_peers { priority_peers.clone() } else { peers.clone() };
-            let peer_count = peers_for_retry.len();
+        // 🚀 v3.4.8-beta: SLIDING WINDOW PARALLEL SYNC
+        // Instead of spawning ALL chunks at once (causing far-ahead timeouts),
+        // only spawn chunks within a window from current applied height.
+        // This prevents 200K+ block-ahead chunks from timing out.
+        let max_in_flight_chunks = self.config.parallel_streams; // Default: 8
+        let mut chunks_queue: std::collections::VecDeque<(usize, u64, u64)> = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (start, end))| (idx, start, end))
+            .collect();
 
-            let self_clone = self.clone_for_task();
+        info!("🚀 [v3.4.8] SLIDING WINDOW SYNC: {} chunks, max {} in-flight at once",
+              total_chunks, max_in_flight_chunks);
+
+        // Helper closure to spawn a chunk download task
+        let spawn_chunk_task = |futures: &mut FuturesUnordered<_>,
+                                chunk_idx: usize, start: u64, end: u64,
+                                peers_list: Vec<PeerId>, self_ref: &TurboSyncManager| {
+            let peer_count = peers_list.len();
+            let self_clone = self_ref.clone_for_task();
 
             futures.push(tokio::spawn(async move {
                 // v1.3.10-beta: Retry logic with DIFFERENT PEER on each attempt
@@ -3457,7 +3523,7 @@ impl TurboSyncManager {
                 loop {
                     // v1.3.10-beta: Select DIFFERENT peer for each retry attempt
                     let peer_idx = (chunk_idx + retry_count as usize) % peer_count;
-                    let peer = peers_for_retry[peer_idx];
+                    let peer = peers_list[peer_idx];
 
                     if retry_count > 0 {
                         info!("🔄 [RETRY] Chunk {}-{}: Using DIFFERENT peer {} (attempt {}/{})",
@@ -3480,21 +3546,32 @@ impl TurboSyncManager {
                             self_clone.metrics.retried_chunks.fetch_add(1, Ordering::Relaxed);
 
                             // v1.5.2-beta: Penalize peer trust on chunk failures
-                            // This helps quickly filter out peers with version mismatches or bad data
                             let peer_str = peer.to_string();
                             self_clone.peer_trust.record_data_failure(&peer_str);
 
-                            // 🚀 v2.3.12-beta: SYNC SPEED FIX - Reduced backoff from 500ms to 50ms base
-                            // Old: 500ms, 1000ms, 1500ms = 3 seconds total
-                            // New: 50ms, 100ms, 150ms = 300ms total (10x faster retries!)
+                            // 🚀 v2.3.12-beta: SYNC SPEED FIX - Reduced backoff
                             tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
                         }
                     }
                 }
             }));
+        };
+
+        // Spawn initial batch of chunks (up to max_in_flight_chunks)
+        let mut spawned_count = 0;
+        while spawned_count < max_in_flight_chunks && !chunks_queue.is_empty() {
+            if let Some((chunk_idx, start, end)) = chunks_queue.pop_front() {
+                let peers_for_retry = if use_warp_peers { priority_peers.clone() } else { peers.clone() };
+                spawn_chunk_task(&mut futures, chunk_idx, start, end, peers_for_retry, self);
+                spawned_count += 1;
+            }
         }
 
+        info!("🚀 [v3.4.8] Spawned initial {} chunks, {} remaining in queue",
+              spawned_count, chunks_queue.len());
+
         // Wait for all chunks to complete with progress reporting
+        // As each chunk completes, spawn the next one from the queue
         let mut last_progress_log = Instant::now();
         let sync_start_time = Instant::now();  // 🚀 v2.1.0-DELTA-V: Track for PID throughput
         while let Some(result) = futures.next().await {
@@ -3502,6 +3579,15 @@ impl TurboSyncManager {
                 Ok((start, end)) => {
                     completed_chunks += 1;
                     let progress = (completed_chunks as f64 / total_chunks as f64) * 100.0;
+
+                    // 🚀 v3.4.8-beta: SLIDING WINDOW - Spawn next chunk when one completes
+                    // This maintains continuous parallelism without spawning ALL chunks at once
+                    if let Some((next_idx, next_start, next_end)) = chunks_queue.pop_front() {
+                        let peers_for_retry = if use_warp_peers { priority_peers.clone() } else { peers.clone() };
+                        spawn_chunk_task(&mut futures, next_idx, next_start, next_end, peers_for_retry, self);
+                        debug!("🚀 [v3.4.8] Spawned chunk {}-{} ({} remaining)",
+                               next_start, next_end, chunks_queue.len());
+                    }
 
                     // 🚀 v2.1.0-DELTA-V: Update APOLLO PID controller with current throughput
                     if self.config.enable_apollo_pid && completed_chunks > 0 {
@@ -3517,8 +3603,9 @@ impl TurboSyncManager {
                         let trusted_peers = self.peer_trust.get_trusted_peers();
                         let trusted_count = trusted_peers.len();
 
-                        info!("📊 [TURBO SYNC] Progress: {}/{} chunks ({:.1}%)",
-                              completed_chunks, total_chunks, progress);
+                        info!("📊 [TURBO SYNC] Progress: {}/{} chunks ({:.1}%) | In-flight: {} | Queue: {}",
+                              completed_chunks, total_chunks, progress,
+                              futures.len(), chunks_queue.len());
                         info!("🔐 [AEGIS-QL] {} trusted peers (>80% trust) | Latest chunk: {}-{}",
                               trusted_count, start, end);
 
@@ -3539,6 +3626,12 @@ impl TurboSyncManager {
                 Err(e) => {
                     self.metrics.failed_chunks.fetch_add(1, Ordering::Relaxed);
                     error!("❌ Chunk failed: {}", e);
+
+                    // 🚀 v3.4.8-beta: Spawn next chunk even on failure to maintain parallelism
+                    if let Some((next_idx, next_start, next_end)) = chunks_queue.pop_front() {
+                        let peers_for_retry = if use_warp_peers { priority_peers.clone() } else { peers.clone() };
+                        spawn_chunk_task(&mut futures, next_idx, next_start, next_end, peers_for_retry, self);
+                    }
                     // Continue with other chunks even if one fails
                 }
             }

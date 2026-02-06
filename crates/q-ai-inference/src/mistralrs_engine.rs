@@ -437,6 +437,93 @@ impl MistralRsEngine {
 
         info!("✅ mistral.rs engine initialized successfully!");
 
+        // v3.2.15-beta FIX: Send a warmup request to ensure scheduler is running
+        // The first request to mistral.rs sometimes hangs because the internal scheduler
+        // hasn't fully started. Sending a tiny warmup request forces it to wake up.
+        info!("🔥 Sending warmup request to mistral.rs scheduler...");
+        {
+            let (warmup_tx, mut warmup_rx) = mpsc::channel::<Response>(100);
+            let warmup_request = Request::Normal(Box::new(NormalRequest {
+                messages: RequestMessage::Chat {
+                    messages: vec![IndexMap::from([
+                        ("role".to_string(), Either::Left("user".to_string())),
+                        ("content".to_string(), Either::Left("Hi".to_string())),
+                    ])],
+                    enable_thinking: None,
+                    reasoning_effort: None,
+                },
+                sampling_params: SamplingParams {
+                    temperature: Some(0.1),
+                    top_k: Some(1),
+                    top_p: Some(0.9),
+                    min_p: Some(0.0),
+                    top_n_logprobs: 0,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repetition_penalty: None,
+                    stop_toks: None,
+                    max_len: Some(5), // Very short - just need to wake up scheduler
+                    logits_bias: None,
+                    n_choices: 1,
+                    dry_params: None,
+                },
+                response: warmup_tx,
+                return_logprobs: false,
+                is_streaming: false, // Non-streaming for simplicity
+                id: 0, // Warmup request ID
+                constraint: Constraint::None,
+                suffix: None,
+                tools: None,
+                tool_choice: None,
+                logits_processors: None,
+                return_raw_logits: false,
+                web_search_options: None,
+                model_id: None,
+                truncate_sequence: false,
+            }));
+
+            if let Ok(sender) = engine.get_sender(None) {
+                if sender.send(warmup_request).await.is_ok() {
+                    // Wait up to 60 seconds for warmup response
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        warmup_rx.recv()
+                    ).await {
+                        Ok(Some(Response::Done(_))) => {
+                            info!("✅ Warmup complete - mistral.rs scheduler is ready!");
+                        }
+                        Ok(Some(Response::Chunk(_))) => {
+                            info!("✅ Warmup received chunk - mistral.rs scheduler is ready!");
+                            // Drain remaining responses
+                            while let Ok(Some(_)) = tokio::time::timeout(
+                                std::time::Duration::from_millis(100),
+                                warmup_rx.recv()
+                            ).await {}
+                        }
+                        Ok(Some(other)) => {
+                            info!("✅ Warmup got response ({:?}) - scheduler is ready!",
+                                  match other {
+                                      Response::ValidationError(_) => "ValidationError",
+                                      Response::InternalError(_) => "InternalError",
+                                      Response::ModelError(_, _) => "ModelError",
+                                      _ => "Other"
+                                  });
+                        }
+                        Ok(None) => {
+                            warn!("⚠️ Warmup channel closed unexpectedly");
+                        }
+                        Err(_) => {
+                            warn!("⚠️ Warmup timed out after 60s - scheduler may be slow");
+                        }
+                    }
+                } else {
+                    warn!("⚠️ Failed to send warmup request");
+                }
+            } else {
+                warn!("⚠️ Failed to get sender for warmup request");
+            }
+        }
+
         // Initialize optional distributed features
         let privacy_layer = if config.enable_distributed {
             info!("🔒 Initializing privacy layer (AEGIS-QL + ZK-STARK)...");
@@ -526,6 +613,20 @@ impl MistralRsEngine {
         let gen_start = std::time::Instant::now();
         // v1.4.12-beta: Changed excessive error!() to debug!() for performance
         debug!("🔍 [generate_stream] Function entered, prompt_len={}, max_tokens={}", prompt.len(), max_tokens);
+
+        // v3.2.15-beta FIX: Input validation to prevent malformed prompts from crashing mistral.rs
+        // Empty or very short prompts can cause the internal scheduler to hang permanently
+        let prompt_trimmed = prompt.trim();
+        if prompt_trimmed.is_empty() {
+            warn!("❌ [generate_stream] Rejecting empty prompt - this would crash mistral.rs");
+            callback(StreamEvent::Error("Prompt cannot be empty".to_string())).await?;
+            return Err(anyhow!("Prompt cannot be empty"));
+        }
+        if prompt_trimmed.len() < 3 {
+            warn!("❌ [generate_stream] Rejecting too-short prompt (len={}) - this may crash mistral.rs", prompt_trimmed.len());
+            callback(StreamEvent::Error(format!("Prompt too short ({} chars, minimum 3)", prompt_trimmed.len()))).await?;
+            return Err(anyhow!("Prompt too short ({} chars, minimum 3 required)", prompt_trimmed.len()));
+        }
 
         // CRITICAL: Acquire semaphore permit to limit concurrent requests
         // This prevents CPU overload from too many simultaneous inferences

@@ -22,34 +22,47 @@ pub struct OraclePriceBridge {
     // Track which pairs have oracle feeds
     oracle_enabled_pairs: Arc<RwLock<Vec<String>>>,
 
-    // Weighting for price aggregation
-    on_chain_weight: f64,  // Weight for DEX prices
-    oracle_weight: f64,     // Weight for Oracle prices
+    // Weighting for price aggregation (stored as basis points for precision)
+    // 7000 = 70%, 3000 = 30%, etc. Must sum to 10000 (100%)
+    on_chain_weight_bps: u16,  // Weight for DEX prices in basis points
+    oracle_weight_bps: u16,     // Weight for Oracle prices in basis points
 }
 
 impl OraclePriceBridge {
     /// Create a new oracle-DEX price bridge
+    ///
+    /// # Arguments
+    /// * `on_chain_weight_bps` - Weight for DEX prices in basis points (e.g., 7000 = 70%)
+    /// * `oracle_weight_bps` - Weight for Oracle prices in basis points (e.g., 3000 = 30%)
+    ///
+    /// # Panics
+    /// Panics if weights don't sum to 10000 (100%)
     pub fn new(
         dex_manager: Arc<QuantumDexManager>,
         oracle: Arc<QuantumOracle>,
-        on_chain_weight: f64,
-        oracle_weight: f64,
+        on_chain_weight_bps: u16,
+        oracle_weight_bps: u16,
     ) -> Self {
+        assert_eq!(
+            on_chain_weight_bps as u32 + oracle_weight_bps as u32,
+            10000,
+            "Oracle bridge weights must sum to 10000 basis points (100%)"
+        );
         Self {
             dex_manager,
             oracle,
             oracle_enabled_pairs: Arc::new(RwLock::new(Vec::new())),
-            on_chain_weight,
-            oracle_weight,
+            on_chain_weight_bps,
+            oracle_weight_bps,
         }
     }
 
     /// Initialize the price bridge
     pub async fn initialize(&self) -> Result<()> {
         info!("🌉 Initializing Oracle-DEX Price Bridge");
-        info!("⚖️  On-chain weight: {}%, Oracle weight: {}%",
-            self.on_chain_weight * 100.0,
-            self.oracle_weight * 100.0
+        info!("⚖️  On-chain weight: {:.2}%, Oracle weight: {:.2}%",
+            self.on_chain_weight_bps as f64 / 100.0,
+            self.oracle_weight_bps as f64 / 100.0
         );
 
         // Register default oracle-enabled pairs
@@ -163,16 +176,23 @@ impl OraclePriceBridge {
         Ok(BigDecimal::from(0))
     }
 
-    /// Calculate weighted average of DEX and Oracle prices
+    /// Calculate weighted average of DEX and Oracle prices using basis points
+    ///
+    /// Formula: (dex_price * weight_dex_bps + oracle_price * weight_oracle_bps) / 10000
+    ///
+    /// Using integer basis points (u16) avoids floating-point precision loss
+    /// that occurs when converting f64 to BigDecimal via string formatting.
     fn calculate_weighted_price(&self, dex_price: &BigDecimal, oracle_price: &BigDecimal) -> Result<BigDecimal> {
-        use std::str::FromStr;
-        // Weighted average: (dex_price * weight_dex + oracle_price * weight_oracle)
-        let weight_dex = BigDecimal::from_str(&self.on_chain_weight.to_string())?;
-        let weight_oracle = BigDecimal::from_str(&self.oracle_weight.to_string())?;
-        let weighted_dex = dex_price * weight_dex;
-        let weighted_oracle = oracle_price * weight_oracle;
+        // Convert basis points to BigDecimal (exact integer conversion, no precision loss)
+        let weight_dex_bps = BigDecimal::from(self.on_chain_weight_bps as i64);
+        let weight_oracle_bps = BigDecimal::from(self.oracle_weight_bps as i64);
+        let divisor = BigDecimal::from(10000_i64);
 
-        Ok(&weighted_dex + &weighted_oracle)
+        // Weighted sum: (price_dex * weight_dex_bps + price_oracle * weight_oracle_bps)
+        let weighted_sum = (dex_price * &weight_dex_bps) + (oracle_price * &weight_oracle_bps);
+
+        // Divide by 10000 to get the final weighted average
+        Ok(weighted_sum / divisor)
     }
 
     /// Update DEX display price (for frontend display, not AMM calculations)
@@ -251,8 +271,8 @@ impl OraclePriceBridge {
             dex_manager: self.dex_manager.clone(),
             oracle: self.oracle.clone(),
             oracle_enabled_pairs: self.oracle_enabled_pairs.clone(),
-            on_chain_weight: self.on_chain_weight,
-            oracle_weight: self.oracle_weight,
+            on_chain_weight_bps: self.on_chain_weight_bps,
+            oracle_weight_bps: self.oracle_weight_bps,
         })
     }
 }
@@ -262,9 +282,10 @@ pub fn create_default_bridge(
     dex_manager: Arc<QuantumDexManager>,
     oracle: Arc<QuantumOracle>,
 ) -> OraclePriceBridge {
-    // 70% weight to on-chain DEX prices (actual market activity)
-    // 30% weight to oracle prices (external data sources)
-    OraclePriceBridge::new(dex_manager, oracle, 0.7, 0.3)
+    // 7000 bps (70%) weight to on-chain DEX prices (actual market activity)
+    // 3000 bps (30%) weight to oracle prices (external data sources)
+    // Total: 10000 bps = 100%
+    OraclePriceBridge::new(dex_manager, oracle, 7000, 3000)
 }
 
 #[cfg(test)]
@@ -306,12 +327,56 @@ mod tests {
                 .unwrap()
         );
 
-        // 70% DEX, 30% Oracle
+        // 7000 bps (70%) DEX, 3000 bps (30%) Oracle
         let bridge = create_default_bridge(dex_manager, oracle);
 
         let weighted = bridge.calculate_weighted_price(&dex_price, &oracle_price).unwrap();
 
-        // Expected: 100 * 0.7 + 110 * 0.3 = 70 + 33 = 103
+        // Expected: (100 * 7000 + 110 * 3000) / 10000
+        //         = (700000 + 330000) / 10000
+        //         = 1030000 / 10000
+        //         = 103
         assert_eq!(weighted, BigDecimal::from(103));
+    }
+
+    #[tokio::test]
+    async fn test_weighted_price_precision() {
+        use std::str::FromStr;
+
+        // Test with prices that would cause floating-point precision issues
+        let dex_price = BigDecimal::from_str("1.23456789012345678901234567890").unwrap();
+        let oracle_price = BigDecimal::from_str("1.98765432109876543210987654321").unwrap();
+
+        let dex_manager = create_test_dex_manager().await;
+        let oracle = Arc::new(
+            QuantumOracle::new([0u8; 32], q_types::Phase::Phase1, Default::default())
+                .await
+                .unwrap()
+        );
+
+        // 7000 bps (70%) DEX, 3000 bps (30%) Oracle
+        let bridge = create_default_bridge(dex_manager, oracle);
+
+        let weighted = bridge.calculate_weighted_price(&dex_price, &oracle_price).unwrap();
+
+        // Verify the calculation maintains full precision
+        // (1.23456789... * 7000 + 1.98765432... * 3000) / 10000
+        let expected_weight_dex = BigDecimal::from(7000);
+        let expected_weight_oracle = BigDecimal::from(3000);
+        let expected = (&dex_price * &expected_weight_dex + &oracle_price * &expected_weight_oracle)
+            / BigDecimal::from(10000);
+
+        assert_eq!(weighted, expected, "Basis point calculation should maintain full BigDecimal precision");
+    }
+
+    #[test]
+    fn test_weight_validation() {
+        // This should panic because weights don't sum to 10000
+        let result = std::panic::catch_unwind(|| {
+            let dex_manager: Arc<QuantumDexManager> = panic!("Should not reach here");
+            let oracle: Arc<QuantumOracle> = panic!("Should not reach here");
+            OraclePriceBridge::new(dex_manager, oracle, 5000, 4000); // 9000 != 10000
+        });
+        assert!(result.is_err(), "Should panic when weights don't sum to 10000");
     }
 }

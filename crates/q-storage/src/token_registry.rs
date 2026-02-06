@@ -65,7 +65,8 @@ pub struct TokenMetadata {
     pub price_usd: BigDecimal,
     pub market_cap: BigDecimal,
     pub volume_24h: BigDecimal,
-    pub price_change_24h: f64,
+    /// Price change in 24h in basis points (e.g., 550 = 5.5%, -200 = -2%)
+    pub price_change_24h_bps: i32,
 
     // Metadata
     pub logo_url: Option<String>,
@@ -275,10 +276,14 @@ impl TokenRegistry {
             token.price_usd = price_usd.clone();
             token.volume_24h = volume_24h;
 
-            // Calculate 24h price change
+            // Calculate 24h price change in basis points
+            // Formula: ((new - old) / old) * 10000 = basis points
             if old_price > BigDecimal::from(0) {
                 let change = &price_usd - &old_price;
-                token.price_change_24h = (change / old_price).to_string().parse().unwrap_or(0.0);
+                let change_ratio = &change / &old_price;
+                // Convert to basis points: multiply by 10000
+                let bps_decimal = change_ratio * BigDecimal::from(10000);
+                token.price_change_24h_bps = bps_decimal.to_string().parse::<f64>().unwrap_or(0.0) as i32;
             }
 
             // Update market cap
@@ -581,7 +586,7 @@ mod tests {
             price_usd: BigDecimal::from(0),
             market_cap: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
-            price_change_24h: 0.0,
+            price_change_24h_bps: 0,
             logo_url: None,
             website: None,
             description: None,

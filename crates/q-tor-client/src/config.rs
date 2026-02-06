@@ -61,7 +61,7 @@ impl Default for TorConfig {
             enable_dandelion: true,
             latency_target_ms: Some(300), // 300ms target
             tor_only: false,
-            socks_proxy_addr: Some("127.0.0.1:9150".parse().unwrap()),
+            socks_proxy_addr: Some("127.0.0.1:9050".parse().unwrap()),
             bootstrap_onions: vec!["bootstrap.qnk.onion:4001".to_string()],
             enable_prometheus_metrics: true,
             use_embedded_arti: false,

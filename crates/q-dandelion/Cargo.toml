@@ -22,6 +22,8 @@ q-types = { path = "../q-types" }
 q-quantum-rng = { path = "../q-quantum-rng" }
 q-lattice-vrf = { path = "../q-lattice-vrf" }
 q-tor-client = { path = "../q-tor-client" }
+# 🌻 v2.5.0-beta: Required for Dandelion++ ↔ libp2p bridge
+q-network = { path = "../q-network" }
 
 # Networking
 libp2p = { workspace = true }
@@ -30,6 +32,11 @@ libp2p = { workspace = true }
 blake3 = "1.5"
 hex = "0.4"
 bincode = "1.3"
+sha3 = "0.10"      # v3.4.2: For v3 onion address generation
+base32 = "0.5"    # v3.4.2: For v3 onion address encoding
+
+# Time handling
+chrono = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

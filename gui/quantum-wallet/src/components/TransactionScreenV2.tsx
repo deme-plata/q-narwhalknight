@@ -1,12 +1,79 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown } from 'lucide-react';
+import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown, Radio, Globe } from 'lucide-react';
 import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG } from '../services/api';
+import { signTransactionForP2P } from '../services/walletAuth';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
 import QuantumMixerVisualization from './QuantumMixerVisualization';
 import AddressBook from './AddressBook';
 import { flashBorderRed } from './AnimatedBorder';
+import { useLibP2P } from '../contexts/LibP2PContext';
+import { useP2PData } from '../hooks/useP2PData';
+import type { SignedTransaction } from '../libp2p/types';
+
+// v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
+// v3.6.7-beta: QUG uses 24 decimals, so max = 21M. Custom tokens can have any decimals (some have huge supplies)
+const MAX_QUG_BALANCE = 21_000_000;
+
+/**
+ * v3.6.13-beta: Format balance showing ALL significant digits
+ * User requested full precision - show all decimals, trim trailing zeros
+ * QUG uses 24 decimals internally but we show all non-zero digits
+ */
+function formatBalanceDisplay(balance: number, _maxDecimals: number = 24): string {
+  if (balance === 0) return '0';
+  if (!isFinite(balance) || isNaN(balance)) return '0';
+
+  // Convert to string with full precision (up to 24 decimals)
+  // toFixed(24) gives us all digits, then we trim trailing zeros
+  let formatted = balance.toFixed(24);
+
+  // Remove trailing zeros after decimal point
+  if (formatted.includes('.')) {
+    formatted = formatted.replace(/\.?0+$/, '');
+  }
+
+  // If the result is just "-0" or empty after decimal, return "0"
+  if (formatted === '-0' || formatted === '' || formatted === '-') {
+    return '0';
+  }
+
+  return formatted;
+}
+
+/**
+ * v3.6.1-beta: Validate balance value to prevent corrupted data from being used
+ * v3.6.7-beta: Token-aware validation - only apply QUG limit to QUG/QUGUSD tokens
+ *              Custom tokens (like PEPEG with 7 decimals) can have much larger display values
+ */
+function isValidBalance(balance: number, symbol?: string): boolean {
+  if (typeof balance !== 'number') return false;
+  if (isNaN(balance) || !isFinite(balance)) return false;
+  if (balance < 0) return false;
+
+  // v3.6.7-beta: Only apply strict limit to QUG and QUGUSD (24 decimal tokens)
+  // Custom tokens with fewer decimals can legitimately have much larger display values
+  const isNativeToken = !symbol || symbol.toUpperCase() === 'QUG' || symbol.toUpperCase() === 'QUGUSD';
+  if (isNativeToken && balance > MAX_QUG_BALANCE) {
+    console.warn(`🚨 [TransactionScreen] Rejected corrupted ${symbol || 'native'} balance: ${balance.toExponential()} > max supply ${MAX_QUG_BALANCE}`);
+    return false;
+  }
+
+  // v3.6.7-beta: For custom tokens, only reject truly invalid values (Infinity, negative)
+  // Large values like 821 quintillion PEPEG are valid for meme tokens with low decimals
+  return true;
+}
+
+// ============================================================================
+// FEATURE FLAG: P2P Transaction Submission
+// ============================================================================
+// Set to true to enable browser-side P2P transaction signing & gossipsub broadcast
+// Set to false to use HTTP API (server signs and broadcasts via P2P gossipsub)
+//
+// v3.5.14-beta: P2P submission enabled - transactions now properly added to production_mempool
+// ============================================================================
+const ENABLE_P2P_TRANSACTION_SUBMISSION = true;
 
 interface WalletBalance {
   symbol: string;
@@ -37,6 +104,18 @@ interface TransactionState {
     estimatedTimeRemaining: string;
     isFinalized: boolean;
   };
+  /** v3.5.x: Track how the transaction was submitted (P2P or HTTP) */
+  submissionMethod?: 'p2p' | 'http';
+  /** v3.5.x: Number of P2P peers the transaction was broadcast to */
+  p2pPeerCount?: number;
+  /** v3.5.24: Multi-peer verification result */
+  p2pVerification?: {
+    verified: boolean;
+    peersConfirmed: number;
+    totalPeers: number;
+    confidence: number;
+    blockHeight?: number;
+  };
 }
 
 interface TransactionScreenV2Props {
@@ -44,6 +123,12 @@ interface TransactionScreenV2Props {
 }
 
 export default function TransactionScreenV2({ currentBalance }: TransactionScreenV2Props) {
+  // v3.5.x: Get P2P context for direct transaction submission
+  const { isReady: p2pReady, peerCount: p2pPeerCount, submitTransaction: submitP2P } = useLibP2P();
+
+  // v3.5.24: P2P data service for multi-peer transaction verification
+  const { verifyTransaction, isP2PReady: p2pDataReady } = useP2PData();
+
   // Get pre-selected coin from localStorage (set by Dashboard)
   const [selectedCoin, setSelectedCoin] = useState<string>(() => {
     const stored = localStorage.getItem('selectedCoinForSend');
@@ -54,12 +139,72 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     return 'QUG'; // Default to QUG
   });
 
+  // v3.6.10-beta: Get custom token contract address from localStorage (set by Dashboard CustomTokensCard)
+  const [selectedTokenContract, setSelectedTokenContract] = useState<string | null>(() => {
+    const stored = localStorage.getItem('selectedTokenContract');
+    if (stored) {
+      localStorage.removeItem('selectedTokenContract'); // Clear after reading
+      console.log('📋 [TransactionScreen v3.6.10] Custom token contract address loaded:', stored);
+      return stored;
+    }
+    return null;
+  });
+
   // Wallet balances state
   const [walletBalances, setWalletBalances] = useState<WalletBalance[]>([]);
 
   // CRITICAL FIX: Track highest known balance per token to prevent showing stale/lower values
   // This prevents the bug where balance jumps from 65 to 0.75 on refresh
   const highestKnownBalancesRef = useRef<Record<string, number>>({});
+
+  // v3.6.9-beta: STABLE balance display - same mechanism as TopBar to prevent flickering
+  const [stableBalance, setStableBalance] = useState<number>(() => {
+    // Initialize from localStorage cache like TopBar does
+    const cached = localStorage.getItem('cachedBalance');
+    if (cached) {
+      const cachedValue = parseFloat(cached);
+      // v3.6.7-beta: This is specifically for QUG balance
+      if (isValidBalance(cachedValue, 'QUG')) {
+        return cachedValue;
+      }
+    }
+    if (isValidBalance(currentBalance, 'QUG')) {
+      return currentBalance;
+    }
+    return 0;
+  });
+  const lastBalanceUpdateRef = useRef<number>(Date.now());
+  const balanceStabilityWindowMs = 2000; // Don't change balance more than once per 2 seconds
+
+  // v3.6.9-beta: Stabilize balance updates to prevent flickering (copied from TopBar)
+  useEffect(() => {
+    const cached = localStorage.getItem('cachedBalance');
+    const cachedValue = cached ? parseFloat(cached) : currentBalance;
+
+    // Only use values that pass sanity check
+    // v3.6.7-beta: This is specifically for QUG balance
+    const validCached = isValidBalance(cachedValue, 'QUG') ? cachedValue : 0;
+    const validCurrent = isValidBalance(currentBalance, 'QUG') ? currentBalance : 0;
+    const validStable = isValidBalance(stableBalance, 'QUG') ? stableBalance : 0;
+
+    const newBalance = validCached || validCurrent;
+
+    // Only update if enough time has passed (prevents rapid flickering)
+    const timeSinceLastUpdate = Date.now() - lastBalanceUpdateRef.current;
+    const balanceDifference = Math.abs(newBalance - validStable);
+
+    // Update if: significant change (>1 QUG) OR stability window passed
+    if (balanceDifference > 1 || timeSinceLastUpdate > balanceStabilityWindowMs) {
+      const candidates = [newBalance, validStable, validCurrent].filter(v => isValidBalance(v, 'QUG'));
+      const bestBalance = candidates.length > 0 ? Math.max(...candidates) : 0;
+
+      if (Math.abs(bestBalance - stableBalance) > 0.0001) {
+        console.log('💰 TransactionScreen: Stable balance update:', stableBalance.toFixed(4), '→', bestBalance.toFixed(4));
+        setStableBalance(bestBalance);
+        lastBalanceUpdateRef.current = Date.now();
+      }
+    }
+  }, [currentBalance, stableBalance]);
 
   // Simple transaction state (no wallet selection complexity)
   const [transaction, setTransaction] = useState<TransactionState>({
@@ -327,17 +472,28 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         } catch (e) { /* ignore */ }
       }
 
-      // Use balance from App.tsx (same as TopBar) for immediate display
-      console.log('✅ TransactionScreenV2: QUG balance from prop:', currentBalance);
+      // v3.6.9-beta: Use stableBalance (same pattern as TopBar) to prevent flickering
+      console.log('✅ TransactionScreenV2: QUG stable balance:', stableBalance, '(raw prop:', currentBalance, ')');
       balances.push({
         symbol: 'QUG',
         name: 'Quillon Graph',
-        balance: currentBalance,
+        balance: stableBalance,  // v3.6.9: Use stable balance instead of raw prop
         icon: 'qug',
         color: 'from-amber-400 to-yellow-500',
       });
 
+      // v3.6.12: Load cached QUGUSD balance from localStorage (same key as Dashboard: cachedQugusdBalance)
+      let cachedQugusdBalance = 0;
+      try {
+        const cachedQugusd = localStorage.getItem('cachedQugusdBalance');
+        if (cachedQugusd) {
+          cachedQugusdBalance = parseFloat(cachedQugusd) || 0;
+          console.log('💾 [TransactionScreen] Loaded cached QUGUSD balance:', cachedQugusdBalance);
+        }
+      } catch (e) { /* ignore */ }
+
       // Fetch QUGUSD balance and custom tokens from multi-token API
+      let foundQugusd = false;
       try {
         const response = await qnkAPI.getMultiTokenBalance();
         if (response.success && response.data && response.data.tokens) {
@@ -355,13 +511,28 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
             // Handle QUGUSD (native USD stablecoin)
             if (upperSymbol === 'QUGUSD') {
+              foundQugusd = true;
               let qugUsdBalance = parseFloat(token.balance || '0');
+
+              // v3.6.12: Also check balance_base_units (Dashboard pattern)
+              if (qugUsdBalance === 0 && token.balance_base_units && token.balance_base_units > 0) {
+                qugUsdBalance = token.balance_base_units / 1e24;
+                console.log('💵 [TransactionScreen] QUGUSD from balance_base_units:', qugUsdBalance);
+              }
+
               // v2.9.16-beta: Use protected balance during cooldown
               const protectedData = protectedBalances[upperSymbol];
               if (isInCooldown && protectedData && protectedData.until > now) {
                 console.log(`🔒 [TransactionScreen v2.9.16] Using protected QUGUSD: ${protectedData.balance} (API: ${qugUsdBalance})`);
                 qugUsdBalance = protectedData.balance;
               }
+
+              // v3.6.12: Use cached balance if API returns 0 but we have a cached value
+              if (qugUsdBalance === 0 && cachedQugusdBalance > 0) {
+                console.log(`💾 [TransactionScreen] API returned 0 QUGUSD, using cached: ${cachedQugusdBalance}`);
+                qugUsdBalance = cachedQugusdBalance;
+              }
+
               balances.push({
                 symbol: 'QUGUSD',
                 name: 'Quillon USD',
@@ -412,6 +583,19 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         console.warn('Failed to fetch multi-token balances:', error);
       }
 
+      // v3.6.12: Add QUGUSD from cache if it wasn't found in API response
+      if (!foundQugusd && cachedQugusdBalance > 0) {
+        console.log(`💾 [TransactionScreen] QUGUSD not in API response, adding from cache: ${cachedQugusdBalance}`);
+        balances.push({
+          symbol: 'QUGUSD',
+          name: 'Quillon USD',
+          balance: cachedQugusdBalance,
+          usdValue: cachedQugusdBalance,
+          icon: 'usd',
+          color: 'from-blue-400 to-cyan-500',
+        });
+      }
+
       // Fetch USD balance
       try {
         const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/payment/balance`, {
@@ -439,6 +623,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
       // CRITICAL FIX: Validate balances against highest known values
       // This prevents showing stale/lower values during race conditions
+      // v3.6.1-beta: Added sanity checks to reject corrupted values
       const validatedBalances = balances.map(wallet => {
         const previousHighest = highestKnownBalancesRef.current[wallet.symbol] || 0;
 
@@ -447,21 +632,32 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         if (wallet.symbol === 'QUG') {
           const cached = localStorage.getItem('cachedBalance');
           if (cached) {
-            cachedValue = parseFloat(cached) || 0;
+            const parsed = parseFloat(cached);
+            // v3.6.1-beta: Only use cached value if it passes sanity check
+            // v3.6.7-beta: Pass symbol for token-aware validation
+            cachedValue = isValidBalance(parsed, wallet.symbol) ? parsed : 0;
           }
         }
 
-        // Use the maximum of: previous highest, cached value, and new value
-        const validBalance = Math.max(previousHighest, cachedValue, wallet.balance);
+        // v3.6.1-beta: Filter to only include valid balance values before comparing
+        // v3.6.7-beta: Pass symbol for token-aware validation
+        const candidates = [
+          isValidBalance(previousHighest, wallet.symbol) ? previousHighest : 0,
+          cachedValue,
+          isValidBalance(wallet.balance, wallet.symbol) ? wallet.balance : 0
+        ].filter(v => v >= 0);
+
+        // Use the maximum of valid values only
+        const validBalance = candidates.length > 0 ? Math.max(...candidates) : 0;
 
         // Only accept significant decreases (> 10% drop is suspicious unless it's a real transaction)
         // Small fluctuations are likely race conditions
-        if (wallet.balance < previousHighest * 0.9 && previousHighest > 0.1) {
+        if (wallet.balance < previousHighest * 0.9 && previousHighest > 0.1 && isValidBalance(previousHighest, wallet.symbol)) {
           console.warn(`⚠️ TransactionScreenV2: ${wallet.symbol} balance drop blocked: ${previousHighest} → ${wallet.balance}, keeping ${validBalance}`);
         }
 
-        // Update the highest known value
-        if (validBalance > previousHighest) {
+        // Update the highest known value (only if valid)
+        if (validBalance > previousHighest && isValidBalance(validBalance, wallet.symbol)) {
           highestKnownBalancesRef.current[wallet.symbol] = validBalance;
         }
 
@@ -475,6 +671,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     fetchBalances();
 
     // Subscribe to SSE balance updates for real-time updates
+    // v3.6.1-beta: Added sanity checks to reject corrupted values
     console.log('📡 TransactionScreenV2: Setting up SSE subscription for:', currentWalletAddress);
     const eventSource = qnkAPI.subscribeToMiningRewards(
       currentWalletAddress,
@@ -486,12 +683,19 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
         const newBalance = update.new_balance;
 
+        // v3.6.1-beta: CRITICAL - Reject corrupted balance values
+        // v3.6.7-beta: Pass 'QUG' for token-aware validation
+        if (!isValidBalance(newBalance, 'QUG')) {
+          console.warn(`🚨 TransactionScreenV2 SSE: Rejected corrupted balance: ${newBalance}`);
+          return;
+        }
+
         // Validate: only accept increase OR small decrease (legitimate transaction)
         let validBalance = newBalance;
-        if (newBalance < previousHighest * 0.9 && previousHighest > 0.1) {
+        if (newBalance < previousHighest * 0.9 && previousHighest > 0.1 && isValidBalance(previousHighest, 'QUG')) {
           console.warn(`⚠️ TransactionScreenV2 SSE: QUG balance drop blocked: ${previousHighest} → ${newBalance}, keeping ${previousHighest}`);
           validBalance = previousHighest;
-        } else if (newBalance > previousHighest) {
+        } else if (newBalance > previousHighest && isValidBalance(newBalance, 'QUG')) {
           highestKnownBalancesRef.current['QUG'] = newBalance;
         }
 
@@ -509,9 +713,17 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
     // v1.4.10-beta: Listen for custom token balance updates via SSE
     // v2.9.17-beta: Added cooldown check to prevent stale data
+    // v3.6.1-beta: Added sanity check to reject corrupted values
     const handleTokenBalanceUpdate = (event: CustomEvent) => {
       const { tokenSymbol, newBalance, reason } = event.detail;
       console.log('🪙 [TransactionScreen v2.9.17] Token balance updated:', { tokenSymbol, newBalance, reason });
+
+      // v3.6.1-beta: CRITICAL - Reject corrupted balance values for QUG
+      // v3.6.7-beta: Pass symbol for token-aware validation
+      if (tokenSymbol?.toUpperCase() === 'QUG' && !isValidBalance(newBalance, 'QUG')) {
+        console.warn(`🚨 [TransactionScreen] Rejected corrupted ${tokenSymbol} balance: ${newBalance}`);
+        return;
+      }
 
       // v2.9.17-beta: Check if this is a DEX swap - only trust DEX swap events during cooldown
       const isDexSwap = reason === 'dex-swap-add' || reason === 'dex-swap-deduct';
@@ -644,7 +856,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     if (balance < totalRequired) {
       return {
         valid: false,
-        error: `Insufficient balance. Required: ${totalRequired.toFixed(8)} ${selectedCoin} (${amount} + ${fee.toFixed(6)} fee), Available: ${balance.toFixed(8)} ${selectedCoin}`
+        // v3.6.10-beta: Show full 24 decimal precision
+        error: `Insufficient balance. Required: ${formatBalanceDisplay(totalRequired)} ${selectedCoin} (${amount} + ${formatBalanceDisplay(fee)} fee), Available: ${formatBalanceDisplay(balance)} ${selectedCoin}`
       };
     }
 
@@ -731,6 +944,14 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               txHash: result.data.transaction_hash || 'fallback_complete',
               starkProof: result.data.stark_proof
             }));
+
+            // v3.6.6-beta: CRITICAL FIX - Dispatch balance-update event for HTTP fallback
+            // Without this, balance doesn't update when P2P gossipsub isn't ready
+            console.log('📤 [HTTP Fallback] Dispatching balance-update event after successful fallback transaction');
+            window.dispatchEvent(new CustomEvent('balance-update', {
+              detail: { refresh: true }
+            }));
+
             return; // Exit early for fallback transactions
           } else if (!result.success) {
             // Fallback transaction also failed
@@ -755,24 +976,105 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
 
           // The backend will complete mixing in 30 seconds automatically
           // No need for polling - the QuantumMixerVisualization handles timing
+
+          // v3.4.16: CRITICAL FIX - Return here to wait for visualization to complete
+          // The onComplete callback in QuantumMixerVisualization will handle success state
+          return;
         }
       } else {
-        // Standard transaction
+        // v3.5.x: P2P-first transaction submission with HTTP fallback
+        // FEATURE FLAG: ENABLE_P2P_TRANSACTION_SUBMISSION controls whether to try P2P first
         console.log('📤 Sending standard transaction:', {
           from: walletAddress,
           to: toAddress,
           amount: parseFloat(amount),
           memo: memo || undefined,
-          tokenType: selectedCoin
+          tokenType: selectedCoin,
+          p2pEnabled: ENABLE_P2P_TRANSACTION_SUBMISSION,
+          p2pReady: p2pReady,
+          p2pPeerCount: p2pPeerCount
         });
 
-        result = await qnkAPI.sendTransaction(
-          walletAddress,
-          toAddress,
-          parseFloat(amount), // Keep as QUG, no unit conversion
-          memo || undefined,
-          selectedCoin // Pass the selected coin (QUG, QUGUSD, or USD)
-        );
+        let submittedViaP2P = false;
+        let p2pPeersSent = 0;
+
+        // Try P2P submission first if ENABLED and node is ready and has peers
+        console.log(`📡 [TX] P2P status check: enabled=${ENABLE_P2P_TRANSACTION_SUBMISSION}, p2pReady=${p2pReady}, peerCount=${p2pPeerCount}`);
+
+        if (ENABLE_P2P_TRANSACTION_SUBMISSION && p2pReady && p2pPeerCount > 0) {
+          console.log('📡 [TX] Attempting P2P submission first...');
+
+          try {
+            // Sign the transaction in the browser
+            console.log('🔐 [TX] Signing transaction locally...');
+            const signingResult = await signTransactionForP2P({
+              from: walletAddress,
+              to: toAddress,
+              amount: parseFloat(amount),
+              memo: memo || undefined,
+              // v3.6.10-beta: Use actual contract address for custom tokens, not symbol
+              tokenAddress: selectedTokenContract || (selectedCoin !== 'QUG' && selectedCoin !== 'QUGUSD' ? undefined : undefined),
+            });
+            console.log('🔐 [TX v3.6.10] Signing with tokenAddress:', selectedTokenContract);
+            console.log(`🔐 [TX] Signing result: success=${signingResult.success}, error=${signingResult.error || 'none'}`);
+
+            if (signingResult.success && signingResult.transaction) {
+              // Submit via P2P gossipsub
+              console.log('📤 [TX] Submitting to gossipsub...');
+              const p2pResult = await submitP2P(signingResult.transaction as SignedTransaction);
+              console.log(`📤 [TX] P2P result: success=${p2pResult.success}, peerCount=${p2pResult.peerCount}, error=${p2pResult.error || 'none'}`);
+
+              if (p2pResult.success) {
+                console.log(`✅ [TX] P2P submission successful! Broadcast to ${p2pResult.peerCount} peers`);
+                submittedViaP2P = true;
+                p2pPeersSent = p2pResult.peerCount || 0;
+
+                // Create a successful result for P2P
+                result = {
+                  success: true,
+                  data: {
+                    transaction_hash: p2pResult.txHash || `p2p_${Date.now().toString(16)}`,
+                    method: 'p2p',
+                    peer_count: p2pResult.peerCount,
+                  },
+                  error: null,
+                  timestamp: new Date().toISOString(),
+                };
+              } else {
+                console.warn(`⚠️ [TX] P2P submission failed: ${p2pResult.error}, falling back to HTTP`);
+              }
+            } else {
+              console.warn(`⚠️ [TX] Transaction signing failed: ${signingResult.error}, falling back to HTTP`);
+            }
+          } catch (p2pError) {
+            console.error('❌ [TX] P2P attempt threw exception:', p2pError);
+          }
+        } else if (!ENABLE_P2P_TRANSACTION_SUBMISSION) {
+          console.log(`📡 [TX] P2P submission DISABLED by feature flag, using HTTP API`);
+        } else {
+          console.log(`📡 [TX] Skipping P2P: p2pReady=${p2pReady}, peerCount=${p2pPeerCount}`);
+        }
+
+        // Fall back to HTTP if P2P didn't work or is disabled
+        if (!submittedViaP2P) {
+          console.log('🌐 [TX] Using HTTP API submission...');
+          result = await qnkAPI.sendTransaction(
+            walletAddress,
+            toAddress,
+            parseFloat(amount), // Keep as QUG, no unit conversion
+            memo || undefined,
+            selectedCoin // Pass the selected coin (QUG, QUGUSD, or USD)
+          );
+        }
+
+        // Track submission method for UI
+        if (result.success) {
+          result.data = {
+            ...result.data,
+            _submissionMethod: submittedViaP2P ? 'p2p' : 'http',
+            _p2pPeerCount: p2pPeersSent,
+          };
+        }
       }
 
       console.log('📥 Transaction result:', result);
@@ -800,14 +1102,45 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         const txValueUsd = parseFloat(amount) * coinPriceUsd;
         const confirmations = calculateConfirmations(txValueUsd);
 
+        // v3.5.x: Determine actual submission method from result
+        // P2P-first: Browser signs and broadcasts via gossipsub
+        // HTTP fallback: Server receives, signs, broadcasts via P2P gossipsub
+        const submissionMethod: 'p2p' | 'http' = result.data?._submissionMethod || 'http';
+        const actualP2PPeerCount = result.data?._p2pPeerCount || 0;
+        console.log(`📡 [TX] Submission method: ${submissionMethod}${submissionMethod === 'p2p' ? ` (broadcast to ${actualP2PPeerCount} peers)` : ' (API → Server → P2P Gossipsub)'}`);
+
         setTransaction(prev => ({
           ...prev,
           success: true, // Always show success for completed transactions
           txHash: result.data.transaction_hash || result.data.mixing_session_id || result.data.tx_hash || 'pending',
           starkProof: result.data.stark_proof,
           validatorCount: validatorCount,
-          confirmations: confirmations
+          confirmations: confirmations,
+          submissionMethod: submissionMethod,
+          p2pPeerCount: submissionMethod === 'p2p' ? actualP2PPeerCount : (p2pReady ? p2pPeerCount : undefined)
         }));
+
+        // v3.5.24: Start P2P verification in background (non-blocking)
+        const txHash = result.data.transaction_hash || result.data.tx_hash;
+        if (p2pDataReady && txHash) {
+          console.log(`🔍 [TX] Starting multi-peer verification for ${txHash}...`);
+          // Run verification in background without blocking UI
+          verifyTransaction(txHash).then(consensus => {
+            console.log(`✅ [TX] Multi-peer verification: ${consensus.confirmed ? 'CONFIRMED' : 'PENDING'} (${consensus.confidence}% confidence, ${consensus.agreementCount}/${consensus.totalPeers} peers)`);
+            setTransaction(prev => ({
+              ...prev,
+              p2pVerification: {
+                verified: consensus.confirmed,
+                peersConfirmed: consensus.agreementCount,
+                totalPeers: consensus.totalPeers,
+                confidence: consensus.confidence,
+                blockHeight: consensus.blockHeight,
+              }
+            }));
+          }).catch(err => {
+            console.warn('⚠️ [TX] P2P verification failed:', err);
+          });
+        }
 
         // Dispatch custom event to update balance
         window.dispatchEvent(new CustomEvent('balance-update', {
@@ -922,8 +1255,9 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               </div>
             </div>
             <div className="text-right">
-              <div className="text-2xl font-bold text-quantum-green">
-                {selectedWallet.balance.toFixed(8)} {selectedWallet.symbol}
+              {/* v3.6.10-beta: Show full 24 decimal precision */}
+              <div className="text-lg font-bold text-quantum-green font-mono break-all">
+                {formatBalanceDisplay(selectedWallet.balance)} {selectedWallet.symbol}
               </div>
               {selectedWallet.usdValue !== undefined && (
                 <div className="text-sm text-gray-400 mt-1">
@@ -944,9 +1278,10 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 onChange={(e) => setSelectedCoin(e.target.value)}
                 className="w-full px-4 py-3 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white focus:outline-none focus:border-quantum-cyan transition-colors"
               >
+                {/* v3.6.10-beta: Show full 24 decimal precision in dropdown */}
                 {walletBalances.map(wallet => (
                   <option key={wallet.symbol} value={wallet.symbol}>
-                    {wallet.symbol} - {wallet.balance.toFixed(8)} {wallet.name}
+                    {wallet.symbol} - {formatBalanceDisplay(wallet.balance)} {wallet.name}
                   </option>
                 ))}
               </select>
@@ -1030,13 +1365,15 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 step="0.00000001"
                 max={selectedWallet?.balance || 0}
               />
+              {/* v3.6.10-beta: Show full 24 decimal precision */}
               <div className="flex justify-between items-center text-sm mt-1">
                 <span className="text-gray-400">
-                  Available: <span className="text-quantum-green font-semibold">{(selectedWallet?.balance || 0).toFixed(8)} {selectedCoin}</span>
+                  Available: <span className="text-quantum-green font-semibold font-mono">{formatBalanceDisplay(selectedWallet?.balance || 0)} {selectedCoin}</span>
                 </span>
                 <span className="text-gray-400">
+                  {/* v3.6.12-beta: Fees are ALWAYS in QUG (native coin), not the selected token */}
                   Fee: <span className={feeReductionActive ? "text-quantum-green" : "text-quantum-yellow"}>
-                    {currentFee.toFixed(6)} {selectedCoin}
+                    {currentFee} QUG
                   </span>
                   {feeReductionActive && (
                     <span className="ml-1 text-quantum-green text-xs">(10x reduced!)</span>
@@ -1088,23 +1425,23 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               />
             </div>
 
-            {/* Quantum Privacy Mixer Toggle */}
-            <div className="rounded-xl p-6"
+            {/* Quantum Privacy Mixer Toggle - Compact Design v3.4.15 */}
+            <div className="rounded-xl p-4 max-h-80 overflow-y-auto"
               style={{
                 background: 'linear-gradient(135deg, rgba(236, 72, 153, 0.1) 0%, rgba(219, 39, 119, 0.05) 100%)',
                 border: '2px solid rgba(236, 72, 153, 0.2)'
               }}
             >
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <Shield className="w-6 h-6 text-quantum-pink" />
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-quantum-pink" />
                   <div>
-                    <h3 className="text-lg font-semibold text-white">Quantum Privacy Mixer</h3>
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm text-gray-400">Enhanced anonymity with decoy transactions</p>
+                    <h3 className="text-sm font-semibold text-white">Quantum Privacy Mixer</h3>
+                    <div className="flex items-center gap-1">
+                      <p className="text-xs text-gray-400">Enhanced anonymity via Dandelion++ Tor</p>
                       {mixerAvailable === false && (
-                        <span className="px-2 py-1 bg-quantum-yellow/20 text-quantum-yellow text-xs rounded">
-                          Development Mode
+                        <span className="px-1.5 py-0.5 bg-quantum-yellow/20 text-quantum-yellow text-[10px] rounded">
+                          Dev
                         </span>
                       )}
                     </div>
@@ -1117,7 +1454,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                     checked={enablePrivacyMixer}
                     onChange={(e) => setEnablePrivacyMixer(e.target.checked)}
                   />
-                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-quantum-pink/25 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-quantum-pink"></div>
+                  <div className="w-10 h-5 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-quantum-pink/25 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-quantum-pink"></div>
                 </label>
               </div>
 
@@ -1127,66 +1464,61 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: 'auto' }}
                     exit={{ opacity: 0, height: 0 }}
-                    className="space-y-4"
+                    className="space-y-3"
                   >
-                    {/* Privacy Level */}
+                    {/* Privacy Level - Compact */}
                     <div>
-                      <label className="block text-sm font-medium text-gray-300 mb-3">
+                      <label className="block text-xs font-medium text-gray-300 mb-2">
                         Privacy Level
                       </label>
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-3 gap-1">
                         {[
-                          { value: 'standard', label: 'Standard', decoys: '15x', time: '15s' },
-                          { value: 'high', label: 'High', decoys: '25x', time: '30s' },
-                          { value: 'maximum', label: 'Maximum', decoys: '50x', time: '60s' }
-                        ].map(({ value, label, decoys, time }) => (
+                          { value: 'standard', label: 'Std', decoys: '15x' },
+                          { value: 'high', label: 'High', decoys: '25x' },
+                          { value: 'maximum', label: 'Max', decoys: '50x' }
+                        ].map(({ value, label, decoys }) => (
                           <button
                             key={value}
                             onClick={() => {
                               setPrivacyLevel(value as any);
                               setDecoyMultiplier(value === 'standard' ? 15 : value === 'high' ? 25 : 50);
                             }}
-                            className={`p-3 rounded-lg border text-center transition-all ${
+                            className={`p-2 rounded-lg border text-center transition-all text-xs ${
                               privacyLevel === value
                                 ? 'border-quantum-pink bg-quantum-pink/20 text-quantum-pink'
                                 : 'border-quantum-purple/30 bg-quantum-dark/30 text-gray-300 hover:border-quantum-pink/50'
                             }`}
                           >
                             <div className="font-medium">{label}</div>
-                            <div className="text-xs opacity-70">{decoys} • {time}</div>
+                            <div className="text-[10px] opacity-70">{decoys}</div>
                           </button>
                         ))}
                       </div>
                     </div>
 
-                    {/* Decoy Multiplier */}
+                    {/* Decoy Slider - Compact */}
                     <div>
-                      <label className="block text-sm font-medium text-gray-300 mb-2">
-                        Decoy Multiplier: {decoyMultiplier}x decoy transactions
-                      </label>
+                      <div className="flex justify-between items-center text-xs text-gray-300 mb-1">
+                        <span>Decoys: {decoyMultiplier}x</span>
+                        <span className="text-gray-500">5-50</span>
+                      </div>
                       <input
                         type="range"
                         min="5"
                         max="50"
                         value={decoyMultiplier}
                         onChange={(e) => setDecoyMultiplier(parseInt(e.target.value))}
-                        className="w-full h-2 bg-quantum-dark rounded-lg appearance-none cursor-pointer slider-thumb"
+                        className="w-full h-1.5 bg-quantum-dark rounded-lg appearance-none cursor-pointer slider-thumb"
                       />
-                      <div className="flex justify-between text-xs text-gray-500 mt-1">
-                        <span>Basic (5x)</span>
-                        <span>Maximum Anonymity (50x)</span>
-                      </div>
                     </div>
 
-                    {/* Privacy Details Toggle */}
+                    {/* Compact Details Toggle */}
                     <button
                       onClick={() => setShowMixingDetails(!showMixingDetails)}
-                      className="flex items-center gap-2 text-quantum-cyan hover:text-quantum-pink transition-colors"
+                      className="flex items-center gap-1 text-quantum-cyan hover:text-quantum-pink transition-colors text-xs"
                     >
-                      {showMixingDetails ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      <span className="text-sm">
-                        {showMixingDetails ? 'Hide' : 'Show'} mixing details
-                      </span>
+                      {showMixingDetails ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                      <span>{showMixingDetails ? 'Hide' : 'Show'} details</span>
                     </button>
 
                     <AnimatePresence>
@@ -1195,34 +1527,30 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                           initial={{ opacity: 0, height: 0 }}
                           animate={{ opacity: 1, height: 'auto' }}
                           exit={{ opacity: 0, height: 0 }}
-                          className="bg-quantum-dark/30 rounded-lg p-4 space-y-3"
+                          className="bg-quantum-dark/30 rounded-lg p-2 space-y-2"
                         >
-                          <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div className="grid grid-cols-2 gap-2 text-xs">
                             <div>
-                              <div className="text-gray-400">Ring Signature Size</div>
-                              <div className="text-quantum-cyan font-mono">{decoyMultiplier + 1} participants</div>
+                              <div className="text-gray-400">Ring Size</div>
+                              <div className="text-quantum-cyan font-mono">{decoyMultiplier + 1}</div>
                             </div>
                             <div>
-                              <div className="text-gray-400">Mixing Time</div>
+                              <div className="text-gray-400">Mix Time</div>
                               <div className="text-quantum-green font-mono">
                                 {privacyLevel === 'standard' ? '15s' : privacyLevel === 'high' ? '30s' : '60s'}
                               </div>
                             </div>
                             <div>
-                              <div className="text-gray-400">ZK-STARK Proof</div>
+                              <div className="text-gray-400">Proof</div>
                               <div className="text-quantum-purple font-mono">Falcon1024</div>
                             </div>
                             <div>
-                              <div className="text-gray-400">Stealth Address</div>
-                              <div className="text-quantum-pink font-mono">Generated</div>
+                              <div className="text-gray-400">Stealth</div>
+                              <div className="text-quantum-pink font-mono">Active</div>
                             </div>
                           </div>
-
-                          <div className="pt-2 border-t border-quantum-purple/20">
-                            <div className="text-xs text-gray-500">
-                              🔒 Your transaction will be mixed with {decoyMultiplier} decoy transactions using
-                              post-quantum cryptography (Dilithium5, Kyber1024, Falcon1024) for maximum privacy.
-                            </div>
+                          <div className="text-[10px] text-gray-500 pt-1 border-t border-quantum-purple/20">
+                            🧅 Routed via Dandelion++ Tor for IP unlinkability
                           </div>
                         </motion.div>
                       )}
@@ -1333,6 +1661,41 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                   <div className="text-sm text-quantum-purple">
                     ✓ Generated ({transaction.starkProof.proving_time_ms}ms)
                   </div>
+                </div>
+              )}
+
+              {/* v3.5.x: Display P2P submission method */}
+              {transaction.submissionMethod && (
+                <div className="flex items-center gap-2 pt-2 border-t border-quantum-green/20 mt-2">
+                  {transaction.submissionMethod === 'p2p' ? (
+                    <>
+                      <Radio className="w-4 h-4 text-quantum-pink" />
+                      <div>
+                        <div className="text-sm text-gray-400">Network Broadcast:</div>
+                        <div className="text-sm text-quantum-pink">
+                          📡 Broadcast via P2P Gossipsub
+                          {transaction.p2pPeerCount !== undefined && transaction.p2pPeerCount > 0 && (
+                            <span className="text-gray-400 ml-1">({transaction.p2pPeerCount} peers)</span>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Globe className="w-4 h-4 text-quantum-cyan" />
+                      <div>
+                        <div className="text-sm text-gray-400">Network Broadcast:</div>
+                        <div className="text-sm text-quantum-cyan">
+                          🌐 API → Server → P2P Gossipsub
+                        </div>
+                        {p2pReady && p2pPeerCount > 0 && (
+                          <div className="text-xs text-gray-500 mt-0.5">
+                            Your browser is also connected to {p2pPeerCount} P2P peer(s)
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 

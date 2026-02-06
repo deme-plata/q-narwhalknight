@@ -74,8 +74,10 @@ pub struct QuantumDexParameters {
 
     // Risk management parameters
     pub max_leverage: f64,
-    pub liquidation_threshold: f64,
-    pub slippage_protection: f64,
+    /// Liquidation threshold in basis points (e.g., 8000 = 80%)
+    pub liquidation_threshold_bps: u16,
+    /// Maximum slippage protection in basis points (e.g., 50 = 0.5%)
+    pub slippage_protection_bps: u16,
 }
 
 impl Default for QuantumDexParameters {
@@ -90,8 +92,8 @@ impl Default for QuantumDexParameters {
             entanglement_strength: 0.707,
             decoherence_time_seconds: 300,
             max_leverage: 10.0,
-            liquidation_threshold: 0.8,
-            slippage_protection: 0.005,
+            liquidation_threshold_bps: 8000, // 80%
+            slippage_protection_bps: 50,     // 0.5%
         }
     }
 }
@@ -176,7 +178,8 @@ pub struct QuantumTradeRequest {
     pub order_type: OrderType,
     pub privacy_level: QuantumPrivacyTier,
     pub zk_proof_required: bool,
-    pub max_slippage: f64,
+    /// Maximum slippage in basis points (e.g., 100 = 1%, 50 = 0.5%)
+    pub max_slippage_bps: u16,
     pub expires_at: Option<DateTime<Utc>>,
 
     // Quantum-specific fields
@@ -271,7 +274,8 @@ pub struct QuantumMarketData {
     pub current_price: BigDecimal,
     pub volume_24h: BigDecimal,
     pub liquidity: BigDecimal,
-    pub price_change_24h: f64,
+    /// Price change in 24h in basis points (e.g., 550 = 5.5%, -200 = -2%)
+    pub price_change_24h_bps: i32,
     pub high_24h: BigDecimal,
     pub low_24h: BigDecimal,
     pub trades_count: u64,
@@ -287,7 +291,7 @@ impl Default for QuantumMarketData {
             current_price: BigDecimal::from(0),
             volume_24h: BigDecimal::from(0),
             liquidity: BigDecimal::from(0),
-            price_change_24h: 0.0,
+            price_change_24h_bps: 0,
             high_24h: BigDecimal::from(0),
             low_24h: BigDecimal::from(0),
             trades_count: 0,
@@ -302,7 +306,8 @@ impl Default for QuantumMarketData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantumPrivacyStats {
     pub total_private_trades: u64,
-    pub zk_proof_success_rate: f64,
+    /// ZK proof success rate in basis points (e.g., 10000 = 100%, 9950 = 99.5%)
+    pub zk_proof_success_rate_bps: u16,
     pub tor_circuits_used: u64,
     pub privacy_level_distribution: std::collections::HashMap<String, u64>,
 }
@@ -311,7 +316,7 @@ impl Default for QuantumPrivacyStats {
     fn default() -> Self {
         Self {
             total_private_trades: 0,
-            zk_proof_success_rate: 1.0,
+            zk_proof_success_rate_bps: 10000, // 100%
             tor_circuits_used: 0,
             privacy_level_distribution: std::collections::HashMap::new(),
         }

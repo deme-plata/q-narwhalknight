@@ -236,11 +236,17 @@ pub async fn get_multi_token_balance(
         }
     };
 
+    // v3.6.14: Count matches for debugging
+    let mut matched_tokens = 0u32;
+    let mut skipped_tokens = 0u32;
+
     for ((wallet_addr, token_addr), balance) in rocksdb_balances.iter() {
         // Only include tokens for this wallet
         if wallet_addr != &addr_bytes {
+            skipped_tokens += 1;
             continue;
         }
+        matched_tokens += 1;
 
         // Skip native tokens (already added above)
         if token_addr == &QUG_TOKEN_ADDRESS || token_addr == &QUGUSD_TOKEN_ADDRESS {
@@ -257,13 +263,42 @@ pub async fn get_multi_token_balance(
                 .get("decimals")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(8) as u8;
-            let balance_display = *balance as f64 / 10f64.powi(decimals as i32);
+
+            // v3.9.5-beta: CORRUPTION DETECTION - Decimal-aware balance validation
+            // Previously used a fixed 1e31 threshold which was WRONG for 24-decimal tokens,
+            // causing legitimate balances to be permanently destroyed.
+            // Fix: Max sane balance depends on token decimals:
+            //   8 decimals:  max ~1e26 base units (10^18 tokens)
+            //   24 decimals: max ~1e42 base units (10^18 tokens)
+            // Use 10^(decimals + 18) as the ceiling (1 quintillion tokens max)
+            let max_sane_balance: u128 = if decimals <= 8 {
+                10u128.pow(26) // 1e26 for 8-decimal tokens
+            } else if decimals <= 24 {
+                // 10^(decimals + 18) but cap to avoid overflow
+                10u128.saturating_pow((decimals as u32) + 18)
+            } else {
+                u128::MAX // Very high decimals - don't validate
+            };
+            let final_balance = if *balance > max_sane_balance {
+                warn!(
+                    "🚨 [v3.9.5] Suspicious balance for {} {}: {} base_units (exceeds max for {} decimals)",
+                    &address_hex[..8], symbol, balance, decimals
+                );
+                // v3.9.5: Do NOT reset to zero - just log the warning.
+                // Previous version permanently destroyed legitimate balances.
+                // Let the user see the balance and investigate.
+                *balance
+            } else {
+                *balance
+            };
+
+            let balance_display = final_balance as f64 / 10f64.powi(decimals as i32);
 
             tokens.insert(
                 symbol.clone(),
                 TokenBalance {
                     balance: format!("{:.8}", balance_display),
-                    balance_base_units: *balance,
+                    balance_base_units: final_balance,
                     usd_value: 0.0, // Custom tokens don't have USD pricing yet
                     name: Some(contract_info.metadata.name.clone()),
                     // v2.4.2: Include qnk prefix so oracle price lookup matches pool addresses
@@ -272,13 +307,29 @@ pub async fn get_multi_token_balance(
                 },
             );
 
-            debug!(
-                "📊 [v2.9.21] Token from RocksDB: {} = {:.8} (contract: {})",
-                symbol,
-                balance_display,
-                hex::encode(&token_addr[..8])
-            );
+            // v3.6.16: Log with corruption status
+            if final_balance != *balance {
+                info!(
+                    "🪙 [v3.6.16] Custom token for {} (CORRECTED): {} = {:.8} (was {} base_units, now 0)",
+                    &address_hex[..8], symbol, balance_display, balance
+                );
+            } else {
+                info!(
+                    "🪙 [v3.6.16] Custom token for {}: {} = {:.8} (balance_base_units={})",
+                    &address_hex[..8], symbol, balance_display, balance
+                );
+            }
         }
+    }
+
+    // v3.6.14: Log match stats
+    if matched_tokens > 0 || skipped_tokens > 0 {
+        info!(
+            "📊 [v3.6.14] Wallet {}: {} tokens matched, {} from other wallets",
+            &address_hex[..8],
+            matched_tokens,
+            skipped_tokens
+        );
     }
 
     let response = MultiTokenBalanceResponse {
@@ -287,11 +338,16 @@ pub async fn get_multi_token_balance(
         total_usd_value,
     };
 
-    // v2.2.4: Privacy fix - don't log actual balances
-    debug!(
-        "✅ Retrieved balances for {} ({} tokens)",
+    // v3.6.14: Count custom tokens (total minus QUG and QUGUSD)
+    let custom_count = response.tokens.len().saturating_sub(2);
+
+    // v3.6.14: INFO level for debugging - shows token count per wallet
+    info!(
+        "📊 [v3.6.14] Retrieved {} tokens for wallet {} ({} custom, {} total in RocksDB)",
+        response.tokens.len(),
         &address_hex[..8],
-        response.tokens.len()
+        custom_count,
+        rocksdb_balances.len()
     );
 
     Ok(Json(ApiResponse::success(response)))
@@ -342,6 +398,19 @@ pub async fn mint_qugusd(
         mint_result.qug_locked as f64 / 1e24
     );
 
+    // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after minting
+    // Without this, minted QUGUSD balances are lost on restart!
+    let vault_clone = vault_write.clone();
+    drop(vault_write); // Release the write lock before async persist
+
+    if let Ok(vault_bytes) = bincode::serialize(&vault_clone) {
+        if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+            warn!("⚠️ Failed to persist CollateralVault after mint: {}", e);
+        } else {
+            info!("💾 CollateralVault persisted after mint (minted_qugusd={})", vault_clone.total_qugusd_minted);
+        }
+    }
+
     Ok(Json(ApiResponse::success(response)))
 }
 
@@ -388,6 +457,18 @@ pub async fn redeem_qug(
         redeem_result.qug_unlocked as f64 / 1e24,
         redeem_result.qugusd_burned as f64 / 1e24
     );
+
+    // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after redeem
+    let vault_clone = vault_write.clone();
+    drop(vault_write); // Release the write lock before async persist
+
+    if let Ok(vault_bytes) = bincode::serialize(&vault_clone) {
+        if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+            warn!("⚠️ Failed to persist CollateralVault after redeem: {}", e);
+        } else {
+            info!("💾 CollateralVault persisted after redeem (minted_qugusd={})", vault_clone.total_qugusd_minted);
+        }
+    }
 
     Ok(Json(ApiResponse::success(response)))
 }
@@ -573,6 +654,18 @@ pub async fn liquidate_position(
         "✅ Liquidated position: seized {:.4} QUG",
         liq_result.qug_seized as f64 / 1e8
     );
+
+    // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after liquidation
+    let vault_clone = vault_write.clone();
+    drop(vault_write); // Release the write lock before async persist
+
+    if let Ok(vault_bytes) = bincode::serialize(&vault_clone) {
+        if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+            warn!("⚠️ Failed to persist CollateralVault after liquidation: {}", e);
+        } else {
+            info!("💾 CollateralVault persisted after liquidation");
+        }
+    }
 
     Ok(Json(ApiResponse::success(response)))
 }

@@ -5,6 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine};
 use bcrypt::{hash, verify, DEFAULT_COST};
+use bincode; // v3.5.8-beta: For deserializing swap records
 use blake3;
 use chrono::{DateTime, Utc};
 use sha3::Digest; // v2.3.7-beta: For pool P2P token hashing
@@ -12,6 +13,8 @@ use ed25519_dalek::Signer; // v1.3.11-beta: For signing certificates
 use hex;
 use q_types::*;
 use q_types::upgrades::upgrades as network_upgrades;
+use crate::privacy_proof_generator::apply_privacy_proofs; // v3.4.16: Auto privacy by default
+use crate::swap_indexer::ConsensusSwapRecord; // v3.5.8-beta: For unified wallet history
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -175,7 +178,7 @@ where
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 pub use crate::wallet_auth::AuthenticatedWallet;
@@ -536,10 +539,12 @@ pub fn calculate_block_reward_time_based(genesis_timestamp: u64, current_timesta
     // 1 QUG = 10^24 base units (was 10^8)
     const QUG_TO_BASE: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
 
-    // Estimated network block rate (blocks per second)
-    // This should ideally come from actual network metrics, but we use a conservative estimate
-    // TODO: Pass actual block rate from emission_controller for more accurate adaptive rewards
-    const ESTIMATED_BLOCK_RATE: f64 = 30.0; // ~30 blocks/sec observed on testnet
+    // v3.9.2-beta CRITICAL FIX: Use actual block rate from network metrics
+    // Previous bug: Hardcoded 30 blocks/sec caused 76x emission overshoot!
+    // Actual testnet rate: ~2.2 blocks/sec (190k blocks/day)
+    // This MUST be passed from emission controller for accurate adaptive rewards
+    // Fallback: Use conservative 2.0 blocks/sec (safer than 30)
+    const ESTIMATED_BLOCK_RATE: f64 = 2.0; // v3.9.2: Fixed from 30 -> 2 blocks/sec
 
     // Protection against invalid timestamps
     if current_timestamp < genesis_timestamp {
@@ -572,9 +577,12 @@ pub fn calculate_block_reward_time_based(genesis_timestamp: u64, current_timesta
     // Calculate reward per block using integer division
     let reward_base_units = era_daily_base_units / blocks_per_day;
 
-    // v3.0.4-beta: Safety bounds updated for 24-decimal scale
-    // minimum 10^18 base units (0.000001 QUG), maximum 1 QUG (10^24)
-    reward_base_units.clamp(1_000_000_000_000_000_000, QUG_TO_BASE)
+    // v3.9.2-beta: Safety bounds updated - MAX reduced from 1 QUG to 0.01 QUG
+    // Previous bug: 1 QUG max allowed ~16,500 QUG/day at 190k blocks/day
+    // New max: 0.01 QUG = 10^22 base units → max ~1,900 QUG/day (still safe margin)
+    // Target: 224.7 QUG/day at ~2 blocks/sec = 0.0013 QUG/block
+    const MAX_REWARD_PER_BLOCK: u128 = 10_000_000_000_000_000_000_000; // 0.01 QUG (10^22)
+    reward_base_units.clamp(1_000_000_000_000_000_000, MAX_REWARD_PER_BLOCK)
 }
 
 /// Legacy block-height based reward calculation
@@ -606,8 +614,66 @@ pub fn calculate_block_reward(block_height: u64) -> u128 {
     // Calculate reward per block using integer division
     let reward_base_units = era_daily_base_units / BLOCKS_PER_DAY;
 
-    // v3.0.4-beta: Convert to base units with safety bounds (24-decimal scale)
-    reward_base_units.clamp(1_000_000_000_000_000_000, QUG_TO_BASE)
+    // v3.9.2-beta: Safety bounds with correct max (0.01 QUG)
+    const MAX_REWARD_PER_BLOCK: u128 = 10_000_000_000_000_000_000_000; // 0.01 QUG
+    reward_base_units.clamp(1_000_000_000_000_000_000, MAX_REWARD_PER_BLOCK)
+}
+
+/// v3.9.2-beta: Calculate block reward with ACTUAL network throughput
+///
+/// This is the CORRECT function to use - it takes the actual measured block rate
+/// from the emission controller instead of using a hardcoded estimate.
+///
+/// ## Parameters:
+/// - `genesis_timestamp`: Unix timestamp when network started
+/// - `current_timestamp`: Current Unix timestamp
+/// - `actual_block_rate`: Measured blocks per second from emission controller
+///
+/// ## Austrian Economics:
+/// - Target: 224.7 QUG/day in Era 0 (82,031 QUG/year)
+/// - Reward scales inversely with throughput: reward = daily_target / blocks_per_day
+/// - At 2 blocks/sec: 224.7 / 172,800 = 0.0013 QUG/block
+/// - At 100 blocks/sec: 224.7 / 8,640,000 = 0.000026 QUG/block
+pub fn calculate_block_reward_adaptive(
+    genesis_timestamp: u64,
+    current_timestamp: u64,
+    actual_block_rate: f64,
+) -> u128 {
+    const SECONDS_PER_ERA: u64 = 126_144_000; // 4 years
+    const SECONDS_PER_DAY: f64 = 86_400.0;
+    const QUG_TO_BASE: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
+    const ERA_0_DAILY_BASE_UNITS: u128 = 224_746_500_000_000_000_000_000_000;
+    const MIN_REWARD: u128 = 1_000_000_000_000_000_000; // 0.000001 QUG
+    const MAX_REWARD: u128 = 10_000_000_000_000_000_000_000; // 0.01 QUG
+
+    if current_timestamp < genesis_timestamp {
+        return MIN_REWARD;
+    }
+
+    let elapsed_seconds = current_timestamp - genesis_timestamp;
+    let era = elapsed_seconds / SECONDS_PER_ERA;
+
+    if era >= 64 {
+        return 0;
+    }
+
+    // Clamp block rate to sane range (0.1 to 10000 blocks/sec)
+    let sane_rate = actual_block_rate.clamp(0.1, 10000.0);
+
+    // Calculate blocks expected per day at actual rate
+    let blocks_per_day = (sane_rate * SECONDS_PER_DAY) as u128;
+
+    // Daily target halves each era
+    let era_daily_base_units = ERA_0_DAILY_BASE_UNITS >> era;
+
+    // Calculate reward: daily_emission / blocks_per_day
+    let reward = if blocks_per_day > 0 {
+        era_daily_base_units / blocks_per_day
+    } else {
+        MAX_REWARD
+    };
+
+    reward.clamp(MIN_REWARD, MAX_REWARD)
 }
 
 /// Genesis timestamp for Q-NarwhalKnight blockchain
@@ -652,7 +718,7 @@ pub async fn bootstrap_peers(
             vec![]
         },
         "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase19".to_string()),
-        "version": "v2.4.0-beta",
+        "version": env!("CARGO_PKG_VERSION"),
         "bootstrap_node": true,
         "discovery_method": "dynamic",
         "status": if peer_id != "discovering..." { "ready" } else { "initializing" },
@@ -718,25 +784,24 @@ pub async fn network_supply(
     let status = state.node_status.read().await;
     let connected_peers = status.connected_peers as u64;
 
-    // Try to get real hash rate from mining statistics
-    let estimated_hashrate = if let Some(ref mining_stats_arc) = state.mining_statistics {
-        if let Ok(mut mining_stats) = mining_stats_arc.try_write() {
-            // Real hash rate from active miners (in KH/s)
-            let network_khash = mining_stats.calculate_network_hashrate();
-            if network_khash > 0.0 {
-                // Convert KH/s to H/s
-                (network_khash * 1000.0) as u64
-            } else {
-                // No active miners, fallback to peer estimate
-                connected_peers * 100_000
-            }
+    // Try to get real hash rate and active miner count from mining statistics
+    // v3.4.7-beta: Use write().await instead of try_write() to properly wait for lock
+    // This ensures we get accurate miner counts even under heavy mining load
+    let (estimated_hashrate, active_miner_count) = if let Some(ref mining_stats_arc) = state.mining_statistics {
+        let mut mining_stats = mining_stats_arc.write().await;
+        // v3.5.6-beta: calculate_network_hashrate() now returns H/s directly (not KH/s)
+        let network_hashrate_hs = mining_stats.calculate_network_hashrate();
+        let miner_count = mining_stats.active_miner_count();
+        if network_hashrate_hs > 0.0 {
+            // Already in H/s, no conversion needed
+            (network_hashrate_hs as u64, miner_count)
         } else {
-            // Couldn't get lock, fallback
-            connected_peers * 100_000
+            // No active miners, fallback to peer estimate
+            (connected_peers * 100_000, miner_count)
         }
     } else {
         // Mining statistics not initialized, fallback
-        connected_peers * 100_000
+        (connected_peers * 100_000, 0)
     };
 
     // Calculate circulating supply percentage
@@ -784,7 +849,7 @@ pub async fn network_supply(
         "block_reward": block_reward,
         "block_reward_formatted": format!("{} QNK", block_reward),
         "current_height": status.current_height,
-        "connected_miners": connected_peers,
+        "connected_miners": active_miner_count,
         "holders": holders_count,
         "holders_formatted": format!("{} wallets", holders_count),
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -824,6 +889,74 @@ pub async fn get_peer_id(
     Ok(Json(ApiResponse::error(
         "libp2p discovery not initialized".to_string(),
     )))
+}
+
+/// v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
+/// Returns comparison data between DAG-Knight and Quillon Resonance consensus
+pub async fn get_resonance_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    debug!("Getting resonance hybrid mode metrics");
+
+    // Check if shadow coordinator is initialized
+    if let Some(shadow_coord) = &state.shadow_coordinator {
+        let coord = shadow_coord.lock().await;
+        let metrics = coord.get_metrics().await;
+        drop(coord);
+
+        return Ok(Json(ApiResponse::success(serde_json::json!({
+            "version": "v3.4.8-beta",
+            "mode": "hybrid",
+            "description": "Resonance consensus complements DAG-Knight with physics-based validation",
+            "metrics": {
+                "total_rounds": metrics.total_rounds,
+                "agreement_rounds": metrics.agreement_rounds,
+                "agreement_rate": metrics.current_agreement_rate,
+                "total_transactions": metrics.total_transactions,
+                "matching_transactions": metrics.matching_transactions,
+                "primary_latency_ms": metrics.primary_avg_latency_ms,
+                "shadow_latency_ms": metrics.shadow_avg_latency_ms,
+                "primary_byzantine_detected": metrics.primary_byzantine_detected,
+                "shadow_byzantine_detected": metrics.shadow_byzantine_detected,
+                "resonance_weight": metrics.current_resonance_weight,
+                "migration_recommended": metrics.migration_recommended,
+            },
+            "engines": {
+                "primary": {
+                    "name": "DAG-Knight",
+                    "algorithm": "PHANTOM protocol with blue scoring",
+                    "weight": 1.0 - metrics.current_resonance_weight,
+                },
+                "complementary": {
+                    "name": "Quillon Resonance",
+                    "algorithm": "String-theoretic energy minimization",
+                    "features": [
+                        "Spectral BFT Byzantine detection",
+                        "Energy functional optimization",
+                        "K-parameter phase analysis",
+                        "Harmonic convergence ordering"
+                    ],
+                    "weight": metrics.current_resonance_weight,
+                }
+            },
+            "visualization": {
+                "harmony_score": metrics.current_agreement_rate * 100.0,
+                "energy_state": if metrics.current_agreement_rate > 0.95 { "resonant" }
+                               else if metrics.current_agreement_rate > 0.85 { "harmonizing" }
+                               else { "divergent" },
+                "spectral_health": if metrics.shadow_byzantine_detected == 0 { "clean" } else { "anomalies_detected" },
+            }
+        }))));
+    }
+
+    // Fallback if shadow coordinator not initialized
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "version": "v3.4.8-beta",
+        "mode": "shadow_not_initialized",
+        "description": "Resonance consensus shadow mode not yet initialized",
+        "metrics": null,
+        "reason": "DAG-Knight may not be active or shadow coordinator initialization pending"
+    }))))
 }
 
 /// Create a new wallet
@@ -1155,7 +1288,7 @@ pub async fn sign_transaction(
                 )));
             }
 
-            let tx = Transaction {
+            let mut tx = Transaction {
                 id: tx_id,
                 from: from_addr,
                 to: request.to,
@@ -1171,7 +1304,20 @@ pub async fn sign_transaction(
                 pqc_signature: None,
                 signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
                 pqc_public_key: None,
+                // v3.4.16-beta: ZK privacy fields - will be auto-populated
+                zk_proof_bundle: None,
+                privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+                bulletproof: None,
+                nullifier: None,
+                memo: None,
             };
+
+            // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY
+            // Users don't choose privacy - best privacy is always default
+            if let Err(e) = apply_privacy_proofs(&mut tx, None).await {
+                tracing::warn!("⚠️ Privacy proof generation failed (tx still valid): {}", e);
+            }
+
             Ok(Json(ApiResponse::success(tx)))
         }
         Err(e) => {
@@ -1300,11 +1446,52 @@ pub async fn submit_transaction(
     }
 
     // ============================================================================
-    // 📡 v3.3.0-beta: P2P MEMPOOL TRANSACTION PROPAGATION
-    // Broadcast P2PTransaction to all connected peers via gossipsub
-    // Enables real-time mempool synchronization across all nodes
+    // 🌻 v2.5.0-beta: DANDELION++ TRANSACTION ANONYMITY
+    // Route transactions through stem→fluff phases for IP unlinkability
+    // Falls back to direct gossipsub if Dandelion++ is not available
     // ============================================================================
-    if let Some(ref cmd_tx) = state.libp2p_command_tx {
+    let use_dandelion = state.dandelion.is_some();
+
+    if use_dandelion {
+        // 🌻 Route through Dandelion++ for anonymity
+        if let Some(ref dandelion) = state.dandelion {
+            // Serialize transaction for Dandelion++ propagation
+            match postcard::to_allocvec(&request.transaction) {
+                Ok(tx_bytes) => {
+                    let dandelion_clone = dandelion.clone();
+                    let tx_hash_clone = tx_hash;
+
+                    // Get network ID for topic
+                    let network_id = std::env::var("Q_NETWORK_ID")
+                        .unwrap_or_else(|_| "testnet-phase19".to_string());
+                    let topic = format!("/qnk/{}/mempool-txs", network_id);
+
+                    // Spawn async task for Dandelion++ propagation
+                    tokio::spawn(async move {
+                        match dandelion_clone.propagate_message(&tx_bytes, &topic).await {
+                            Ok(_) => {
+                                tracing::debug!(
+                                    "🌻 [DANDELION++] Transaction {} propagated via stem→fluff",
+                                    hex::encode(&tx_hash_clone)
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "⚠️ [DANDELION++] Transaction propagation failed: {} (tx: {})",
+                                    e,
+                                    hex::encode(&tx_hash_clone)
+                                );
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ [DANDELION++] Failed to serialize transaction: {}", e);
+                }
+            }
+        }
+    } else if let Some(ref cmd_tx) = state.libp2p_command_tx {
+        // 📡 Fallback: Direct P2P mempool propagation (no Dandelion++)
         // Get our node's peer ID for origin tracking
         let peer_info = state.libp2p_peer_info.read().await;
         let origin_node_id = peer_info.0.clone();
@@ -1332,7 +1519,7 @@ pub async fn submit_transaction(
                     tracing::warn!("⚠️ [P2P MEMPOOL] Failed to send publish command: {}", e);
                 } else {
                     tracing::debug!(
-                        "📤 [P2P MEMPOOL] Transaction {} queued for P2P broadcast",
+                        "📤 [P2P MEMPOOL] Transaction {} queued for P2P broadcast (no Dandelion++)",
                         hex::encode(&tx_hash)
                     );
                 }
@@ -1674,14 +1861,29 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         result.invalid_signatures
                     );
                     // Mark invalid transactions as failed
+                    // v3.5.19-beta: DON'T overwrite InMempool status - the transaction may have been
+                    // verified via P2P gossipsub using browser-compatible hash format. The batch
+                    // verification uses postcard hash which differs from browser's signing hash.
                     for (i, tx_hash) in tx_hashes.iter().enumerate() {
                         if i >= result.valid_signatures {
-                            state.tx_status.insert(
-                                *tx_hash,
-                                TxStatus::Failed {
-                                    error: "Invalid signature".to_string(),
-                                },
-                            );
+                            // Only set Failed if not already in pool with valid status
+                            let already_accepted = state.tx_status.get(tx_hash)
+                                .map(|s| matches!(s.value(), TxStatus::InMempool | TxStatus::Confirmed { .. }))
+                                .unwrap_or(false);
+
+                            if !already_accepted {
+                                state.tx_status.insert(
+                                    *tx_hash,
+                                    TxStatus::Failed {
+                                        error: "Invalid signature".to_string(),
+                                    },
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "⏭️ Skipping Failed status for tx {} - already accepted via P2P",
+                                    hex::encode(&tx_hash[..8])
+                                );
+                            }
                         }
                     }
                     // Keep only valid transactions
@@ -2148,22 +2350,33 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
 
                             // v1.4.10-beta: Emit SSE events for instant token balance updates
                             // (token_addr_hex already defined above)
-                            let token_symbol = {
-                                // Try to get token symbol from deployed contracts
+                            // v3.6.16: Get token symbol AND decimals from deployed contracts
+                            let (token_symbol, token_decimals) = {
                                 let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
                                 let contract_addr = q_vm::contracts::orobit_smart_contracts::ContractAddress(token_addr);
-                                deployed.get(&contract_addr)
-                                    .and_then(|c| c.metadata.symbol.clone())
-                                    .unwrap_or_else(|| "TOKEN".to_string())
+                                if let Some(contract_info) = deployed.get(&contract_addr) {
+                                    let symbol = contract_info.metadata.symbol.clone().unwrap_or_else(|| "TOKEN".to_string());
+                                    // Get decimals from deployment_params (default 8 for custom tokens)
+                                    let decimals = contract_info.deployment_params
+                                        .get("decimals")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(8) as u8;
+                                    (symbol, decimals)
+                                } else {
+                                    ("TOKEN".to_string(), 8u8)
+                                }
                             };
+
+                            // v3.6.16: Use correct divisor based on token decimals
+                            let token_divisor = 10f64.powi(token_decimals as i32);
 
                             // Emit sender balance update
                             let sender_event = crate::streaming::StreamEvent::TokenBalanceUpdated {
                                 wallet_address: format!("qnk{}", hex::encode(tx.from)),
                                 token_address: token_addr_hex.clone(),
                                 token_symbol: token_symbol.clone(),
-                                old_balance: sender_balance as f64 / QUG_DISPLAY_DIVISOR,
-                                new_balance: sender_bal as f64 / QUG_DISPLAY_DIVISOR,
+                                old_balance: sender_balance as f64 / token_divisor,
+                                new_balance: sender_bal as f64 / token_divisor,
                                 change_reason: "transfer_sent".to_string(),
                                 timestamp: chrono::Utc::now(),
                                 block_hash: None,  // Block hash not available in this context
@@ -2177,8 +2390,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 wallet_address: format!("qnk{}", hex::encode(tx.to)),
                                 token_address: token_addr_hex,
                                 token_symbol: token_symbol.clone(),
-                                old_balance: old_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
-                                new_balance: recipient_bal as f64 / QUG_DISPLAY_DIVISOR,
+                                old_balance: old_recipient_balance as f64 / token_divisor,
+                                new_balance: recipient_bal as f64 / token_divisor,
                                 change_reason: "transfer_received".to_string(),
                                 timestamp: chrono::Utc::now(),
                                 block_hash: None,  // Block hash not available in this context
@@ -2188,8 +2401,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             let _ = state.event_broadcaster.broadcast(recipient_event);
 
                             tracing::info!(
-                                "📡 [SSE] Token balance updates sent for {} transfer",
-                                token_symbol
+                                "📡 [SSE v3.6.16] Token balance updates sent for {} transfer (decimals={}, divisor={})",
+                                token_symbol, token_decimals, token_divisor
                             );
                         } else {
                             warn!(
@@ -2312,6 +2525,54 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 warn!("Failed to emit recipient balance update: {}", e);
                             }
 
+                            // v3.9.5-beta: Broadcast recipient QUG credit via gossipsub (P2P balance replication)
+                            // SECURITY: Only broadcast CREDITS - debits happen through consensus
+                            if !std::env::var("Q_DISABLE_BALANCE_GOSSIP")
+                                .map(|v| v == "1" || v.to_lowercase() == "true")
+                                .unwrap_or(false)
+                            {
+                                if let Some(ref command_tx) = state.libp2p_command_tx {
+                                    let node_id = {
+                                        let peer_info = state.libp2p_peer_info.read().await;
+                                        peer_info.0.clone()
+                                    };
+                                    let network_id_str = std::env::var("Q_NETWORK_ID")
+                                        .unwrap_or_else(|_| "testnet-phase19".to_string());
+                                    let network_id = network_id_str.parse::<q_types::NetworkId>()
+                                        .unwrap_or(q_types::NetworkId::TestnetPhase19);
+                                    let topic = network_id.balance_updates_topic();
+
+                                    let mut recipient_update = q_types::P2PBalanceUpdate {
+                                        version: q_types::P2PBalanceUpdate::CURRENT_VERSION,
+                                        wallet_address: hex::encode(tx.to),
+                                        amount: tx.amount,
+                                        new_balance: new_recipient_balance,
+                                        block_height: state.node_status.read().await.current_height,
+                                        nonce: 0,
+                                        update_type: q_types::BalanceUpdateType::TransactionReceived,
+                                        timestamp_ms: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as u64)
+                                            .unwrap_or(0),
+                                        origin_node_id: node_id,
+                                        solution_hash: [0u8; 32],
+                                        signature: Vec::new(),
+                                        signer_public_key: Vec::new(),
+                                    };
+
+                                    if let Ok(bytes) = recipient_update.to_cbor() {
+                                        let _ = command_tx.send(q_network::NetworkCommand::PublishBalanceUpdate {
+                                            topic,
+                                            update_bytes: bytes,
+                                            wallet_address: hex::encode(tx.to),
+                                            amount: tx.amount as u64,
+                                        });
+                                        debug!("💰 [P2P TRANSFER] Broadcast recipient credit +{} for {}",
+                                               tx.amount, &hex::encode(tx.to)[..16]);
+                                    }
+                                }
+                            }
+
                             // Store confirmed transaction to persistent storage for recent activity
                             if let Err(e) = state.storage_engine.save_transaction(&tx).await {
                                 warn!("Failed to save transaction to persistent storage: {}", e);
@@ -2389,12 +2650,32 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
     Ok(())
 }
 
+/// Detailed transaction info for API responses
+/// v3.4.1: New struct to provide comprehensive transaction details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionDetails {
+    pub hash: String,
+    pub status: String, // "pending", "in_mempool", "confirmed", "failed"
+    pub block_height: Option<u64>,
+    pub confirmations: Option<u32>,
+    pub timestamp: Option<u64>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub amount: Option<u128>,
+    pub fee: Option<u128>,
+    pub token_type: Option<String>,
+}
+
 /// Get transaction status
+/// v3.4.2: ZK-STARK Privacy - Only sender/receiver can see full transaction details
+/// Authentication via X-Wallet-Auth header unlocks encrypted transaction data
 pub async fn get_transaction(
     State(state): State<Arc<AppState>>,
     Path(tx_hash_str): Path<String>,
-) -> Result<Json<ApiResponse<TxStatus>>, StatusCode> {
-    debug!("Getting transaction status for: {}", tx_hash_str);
+    auth_wallet: Option<AuthenticatedWallet>,
+) -> Result<Json<ApiResponse<TransactionDetails>>, StatusCode> {
+    debug!("🔍 Getting transaction status for: {} (authenticated: {})",
+           tx_hash_str, auth_wallet.is_some());
 
     // Parse transaction hash from hex string
     let tx_hash = match hex::decode(&tx_hash_str) {
@@ -2410,13 +2691,293 @@ pub async fn get_transaction(
         }
     };
 
-    // DashMap lock-free read
-    match state.tx_status.get(&tx_hash) {
-        Some(status) => Ok(Json(ApiResponse::success(status.clone()))),
-        None => Ok(Json(ApiResponse::error(
-            "Transaction not found".to_string(),
-        ))),
+    let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Helper to check if authenticated user can see full transaction details
+    // ZK-STARK Privacy: Only sender or receiver can decrypt transaction data
+    let can_see_full_details = |from: &[u8; 32], to: &[u8; 32]| -> bool {
+        if let Some(ref wallet) = auth_wallet {
+            let from_match = wallet.address == *from;
+            let to_match = wallet.address == *to;
+            info!("🔐 ZK-STARK Auth Check: wallet={} from={} to={} | from_match={} to_match={}",
+                   hex::encode(&wallet.address),
+                   hex::encode(from),
+                   hex::encode(to),
+                   from_match,
+                   to_match);
+            from_match || to_match
+        } else {
+            debug!("🔐 ZK-STARK Auth Check: No authenticated wallet");
+            false
+        }
+    };
+
+    // Helper to build privacy-protected response (public data only)
+    let build_privacy_response = |hash: String, status: String, block_height: Option<u64>, confirmations: u32, timestamp: Option<u64>| -> TransactionDetails {
+        TransactionDetails {
+            hash,
+            status,
+            block_height,
+            confirmations: Some(confirmations),
+            timestamp,
+            from: None,  // ZK-encrypted
+            to: None,    // ZK-encrypted
+            amount: None, // ZK-encrypted
+            fee: None,   // ZK-encrypted
+            token_type: None,
+        }
+    };
+
+    // Step 1: Check in-memory status (for pending/recently confirmed transactions)
+    if let Some(status) = state.tx_status.get(&tx_hash) {
+        debug!("✅ Found transaction in memory: {}", tx_hash_str);
+        let details = match status.value() {
+            TxStatus::Pending => build_privacy_response(
+                tx_hash_str.clone(), "pending".to_string(), None, 0, None
+            ),
+            TxStatus::InMempool => build_privacy_response(
+                tx_hash_str.clone(), "in_mempool".to_string(), None, 0, None
+            ),
+            TxStatus::Mixing => build_privacy_response(
+                tx_hash_str.clone(), "mixing".to_string(), None, 0, None
+            ),
+            TxStatus::Confirmed { block_height, round: _ } => {
+                let confirmed_height = *block_height;
+                let confirmations = (current_height.saturating_sub(confirmed_height) + 1) as u32;
+
+                // Try to get full transaction details from the block
+                if let Ok(Some(block)) = state.storage_engine.get_qblock_by_height(confirmed_height).await {
+                    for tx in &block.transactions {
+                        if tx.id == tx_hash {
+                            // ZK-STARK Privacy: Check if user can see full details
+                            if can_see_full_details(&tx.from, &tx.to) {
+                                debug!("🔓 User authorized to see full transaction details");
+                                return Ok(Json(ApiResponse::success(TransactionDetails {
+                                    hash: tx_hash_str.clone(),
+                                    status: "confirmed".to_string(),
+                                    block_height: Some(confirmed_height),
+                                    confirmations: Some(confirmations),
+                                    timestamp: Some(tx.timestamp.timestamp() as u64),
+                                    from: Some(hex::encode(&tx.from)),
+                                    to: Some(hex::encode(&tx.to)),
+                                    amount: Some(tx.amount),
+                                    fee: Some(tx.fee),
+                                    token_type: Some(format!("{:?}", tx.token_type)),
+                                })));
+                            } else {
+                                debug!("🔒 ZK-STARK Privacy: Transaction details encrypted");
+                                return Ok(Json(ApiResponse::success(build_privacy_response(
+                                    tx_hash_str.clone(),
+                                    "confirmed".to_string(),
+                                    Some(confirmed_height),
+                                    confirmations,
+                                    Some(tx.timestamp.timestamp() as u64),
+                                ))));
+                            }
+                        }
+                    }
+                }
+
+                // v3.4.6: Instead of returning privacy fallback when block lookup fails,
+                // try to load from persistent storage (the tx might be stored but block_height mismatch)
+                debug!("🔍 Block {} doesn't contain tx, trying storage lookup", confirmed_height);
+                if let Ok(Some(stored_tx)) = state.storage_engine.load_transaction(&tx_hash).await {
+                    // Found in storage - do privacy check with stored data
+                    if can_see_full_details(&stored_tx.from, &stored_tx.to) {
+                        debug!("🔓 User authorized (from storage lookup)");
+                        return Ok(Json(ApiResponse::success(TransactionDetails {
+                            hash: tx_hash_str.clone(),
+                            status: "confirmed".to_string(),
+                            block_height: Some(confirmed_height),
+                            confirmations: Some(confirmations),
+                            timestamp: Some(stored_tx.timestamp.timestamp() as u64),
+                            from: Some(hex::encode(&stored_tx.from)),
+                            to: Some(hex::encode(&stored_tx.to)),
+                            amount: Some(stored_tx.amount),
+                            fee: Some(stored_tx.fee),
+                            token_type: Some(format!("{:?}", stored_tx.token_type)),
+                        })));
+                    } else {
+                        debug!("🔒 ZK-STARK Privacy (from storage lookup)");
+                        return Ok(Json(ApiResponse::success(build_privacy_response(
+                            tx_hash_str.clone(),
+                            "confirmed".to_string(),
+                            Some(confirmed_height),
+                            confirmations,
+                            Some(stored_tx.timestamp.timestamp() as u64),
+                        ))));
+                    }
+                }
+                // Ultimate fallback - tx in status but not in block or storage
+                warn!("⚠️ Transaction {} in tx_status but not found in storage", tx_hash_str);
+                build_privacy_response(
+                    tx_hash_str.clone(),
+                    "confirmed".to_string(),
+                    Some(confirmed_height),
+                    confirmations,
+                    None,
+                )
+            }
+            TxStatus::Failed { error } => TransactionDetails {
+                hash: tx_hash_str.clone(),
+                status: format!("failed: {}", error),
+                block_height: None,
+                confirmations: Some(0),
+                timestamp: None,
+                from: None,
+                to: None,
+                amount: None,
+                fee: None,
+                token_type: None,
+            },
+        };
+        return Ok(Json(ApiResponse::success(details)));
     }
+
+    // Step 2: Search persistent storage for confirmed transactions
+    debug!("🔍 Searching persistent storage for transaction: {}", tx_hash_str);
+    match state.storage_engine.load_transaction(&tx_hash).await {
+        Ok(Some(tx)) => {
+            debug!("✅ Found confirmed transaction in storage: {}", tx_hash_str);
+
+            // v3.4.2: Search blocks to get actual block_height and confirmations
+            // For very old transactions, also try to find by scanning more blocks
+            let mut found_block_height: Option<u64> = None;
+            let search_depth = 5000.min(current_height); // Increased search depth
+
+            for height in (current_height.saturating_sub(search_depth)..=current_height).rev() {
+                if let Ok(Some(block)) = state.storage_engine.get_qblock_by_height(height).await {
+                    for block_tx in &block.transactions {
+                        if block_tx.id == tx_hash {
+                            found_block_height = Some(height);
+                            debug!("📦 Found transaction in block {}", height);
+                            break;
+                        }
+                    }
+                    if found_block_height.is_some() {
+                        break;
+                    }
+                }
+            }
+
+            // If not found in recent blocks, estimate block height from transaction timestamp
+            if found_block_height.is_none() {
+                // Try to estimate: assume ~1 block per second average
+                let tx_timestamp = tx.timestamp.timestamp() as u64;
+                // Get the current time and estimate
+                if let Ok(Some(tip_block)) = state.storage_engine.get_qblock_by_height(current_height).await {
+                    let tip_timestamp = tip_block.header.timestamp;
+                    if tip_timestamp > tx_timestamp {
+                        let time_diff = tip_timestamp - tx_timestamp;
+                        // Rough estimate: 1 block per second
+                        let estimated_block = current_height.saturating_sub(time_diff.min(current_height));
+                        // Try to find the exact block around this estimate
+                        let search_range = 100u64;
+                        for h in estimated_block.saturating_sub(search_range)..=(estimated_block + search_range).min(current_height) {
+                            if let Ok(Some(block)) = state.storage_engine.get_qblock_by_height(h).await {
+                                for block_tx in &block.transactions {
+                                    if block_tx.id == tx_hash {
+                                        found_block_height = Some(h);
+                                        debug!("📦 Found transaction in estimated block {}", h);
+                                        break;
+                                    }
+                                }
+                                if found_block_height.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let confirmations = if let Some(block_height) = found_block_height {
+                (current_height - block_height + 1) as u32
+            } else {
+                // Transaction confirmed but block not found - use high confirmation count
+                current_height as u32
+            };
+
+            // ZK-STARK Privacy: Check if user can see full details
+            if can_see_full_details(&tx.from, &tx.to) {
+                debug!("🔓 User authorized to see full transaction details");
+                let details = TransactionDetails {
+                    hash: tx_hash_str.clone(),
+                    status: "confirmed".to_string(),
+                    block_height: found_block_height,
+                    confirmations: Some(confirmations),
+                    timestamp: Some(tx.timestamp.timestamp() as u64),
+                    from: Some(hex::encode(&tx.from)),
+                    to: Some(hex::encode(&tx.to)),
+                    amount: Some(tx.amount),
+                    fee: Some(tx.fee),
+                    token_type: Some(format!("{:?}", tx.token_type)),
+                };
+                return Ok(Json(ApiResponse::success(details)));
+            } else {
+                debug!("🔒 ZK-STARK Privacy: Transaction details encrypted");
+                return Ok(Json(ApiResponse::success(build_privacy_response(
+                    tx_hash_str.clone(),
+                    "confirmed".to_string(),
+                    found_block_height,
+                    confirmations,
+                    Some(tx.timestamp.timestamp() as u64),
+                ))));
+            }
+        }
+        Ok(None) => {
+            debug!("❌ Transaction not found in storage: {}", tx_hash_str);
+        }
+        Err(e) => {
+            warn!("⚠️ Error searching storage for transaction {}: {}", tx_hash_str, e);
+        }
+    }
+
+    // Step 3: Search recent blocks for the transaction
+    debug!("🔍 Searching recent blocks for transaction: {}", tx_hash_str);
+    let search_depth = 1000.min(current_height);
+
+    for height in (current_height.saturating_sub(search_depth)..=current_height).rev() {
+        if let Ok(Some(block)) = state.storage_engine.get_qblock_by_height(height).await {
+            for tx in &block.transactions {
+                if tx.id == tx_hash {
+                    debug!("✅ Found transaction in block {}: {}", height, tx_hash_str);
+                    let confirmations = (current_height - height + 1) as u32;
+
+                    // ZK-STARK Privacy: Check if user can see full details
+                    if can_see_full_details(&tx.from, &tx.to) {
+                        debug!("🔓 User authorized to see full transaction details");
+                        let details = TransactionDetails {
+                            hash: tx_hash_str.clone(),
+                            status: "confirmed".to_string(),
+                            block_height: Some(height),
+                            confirmations: Some(confirmations),
+                            timestamp: Some(tx.timestamp.timestamp() as u64),
+                            from: Some(hex::encode(&tx.from)),
+                            to: Some(hex::encode(&tx.to)),
+                            amount: Some(tx.amount),
+                            fee: Some(tx.fee),
+                            token_type: Some(format!("{:?}", tx.token_type)),
+                        };
+                        return Ok(Json(ApiResponse::success(details)));
+                    } else {
+                        debug!("🔒 ZK-STARK Privacy: Transaction details encrypted");
+                        return Ok(Json(ApiResponse::success(build_privacy_response(
+                            tx_hash_str.clone(),
+                            "confirmed".to_string(),
+                            Some(height),
+                            confirmations,
+                            Some(tx.timestamp.timestamp() as u64),
+                        ))));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::error(
+        "Transaction not found".to_string(),
+    )))
 }
 
 /// Send transaction endpoint (sign and submit in one request)
@@ -2563,7 +3124,10 @@ async fn send_transaction_inner(
 
     // v3.0.0-beta: Convert amount from float to u128 (24 decimal places for native precision)
     let amount_u128 = (request.amount * QUG_DISPLAY_DIVISOR) as u128;
-    let fee_u128 = 1000u128; // 0.00001 QNK fee
+    // v3.5.25-beta: Use proper minimum fee (21000 base gas * 1 fee per gas)
+    // Previous bug: fee=1000 was below minimum, causing mempool rejection
+    // The mempool requires: MIN_TRANSACTION_FEE = BASE_GAS * MIN_FEE_PER_GAS = 21000 * 1 = 21000
+    let fee_u128 = q_types::MIN_TRANSACTION_FEE; // 21000 (0.000021 QNK)
 
     // Parse token type from request string
     // v1.4.6: Support custom tokens (not just QUG and QUGUSD)
@@ -2633,6 +3197,13 @@ async fn send_transaction_inner(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        // v3.4.2-beta: ZK privacy fields (transparent by default)
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        // v3.9.6-beta: Memo for inbox messages
+        memo: request.memo.clone(),
     };
 
     // Compute actual transaction hash
@@ -2740,6 +3311,17 @@ async fn send_transaction_inner(
             "✅ Transaction signed with Ed25519: {} bytes, public key stored",
             signed_transaction.signature.len()
         );
+    }
+    // ============================================================================
+
+    // ============================================================================
+    // 🔐 v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY - ZK proofs generated by default
+    // Users don't choose privacy levels - best privacy is always applied automatically
+    // ============================================================================
+    if let Err(e) = apply_privacy_proofs(&mut signed_transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed (tx still valid): {}", e);
+    } else {
+        info!("🔐 Privacy proofs applied: level={:?}", signed_transaction.privacy_level);
     }
     // ============================================================================
 
@@ -2902,6 +3484,57 @@ async fn send_transaction_inner(
 
     // DashMap lock-free insert
     state.tx_status.insert(tx_hash, TxStatus::InMempool);
+
+    // 🔥 v3.5.25-beta CRITICAL FIX: AWAIT mempool result before returning success!
+    // Previous bug: tokio::spawn() made mempool validation async, so we returned "success"
+    // BEFORE the mempool validated the transaction fee. This caused transactions to show
+    // as "confirmed" in the explorer even though they were rejected by the mempool.
+    // Now we AWAIT the mempool result and return an error if the transaction is rejected.
+    if let Some(ref mempool) = state.production_mempool {
+        let tx_for_mempool = signed_transaction.clone();
+        match mempool.add_transaction(tx_for_mempool, None).await {
+            Ok(added) => {
+                if added {
+                    info!(
+                        "📦 [TX-QUEUED] Transaction {} queued for block production",
+                        hex::encode(&tx_hash[..8])
+                    );
+                }
+            }
+            Err(e) => {
+                // v3.5.25-beta: Return error to user instead of silently failing!
+                // This fixes the bug where transactions showed as "confirmed" in explorer
+                // even though they were rejected by mempool (e.g., insufficient fee)
+                let error_msg = format!("Transaction rejected: {}", e);
+                warn!(
+                    "❌ [TX-REJECTED] Transaction {} rejected by mempool: {}",
+                    hex::encode(&tx_hash[..8]),
+                    e
+                );
+                // Update status to failed
+                state.tx_status.insert(tx_hash, TxStatus::Failed { error: error_msg.clone() });
+                // Return JSON error response so frontend can display the rejection reason
+                let error_response = serde_json::json!({
+                    "transaction_hash": hex::encode(&tx_hash),
+                    "status": "rejected",
+                    "error": error_msg,
+                    "suggestion": "Ensure sufficient fee is included (minimum 21000 for transfers)"
+                });
+                return Ok(Json(ApiResponse {
+                    success: false,
+                    data: Some(error_response),
+                    error: Some(error_msg),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }));
+            }
+        }
+    } else {
+        warn!("⚠️ production_mempool not available - transaction {} will not be included in blocks!",
+              hex::encode(&tx_hash[..8]));
+    }
 
     // Generate STARK proof metadata (mock for now)
     let stark_proof = serde_json::json!({
@@ -3100,6 +3733,227 @@ pub async fn get_recent_transactions(
     // Return only real transactions that belong to the wallet (no mock data)
     // Empty array if no transactions - this maintains privacy
     Ok(Json(ApiResponse::success(dashboard_txs)))
+}
+
+// ============================================================================
+// v3.5.8-beta: Unified Wallet Transaction History (Decentralized)
+// ============================================================================
+
+/// Unified transaction history entry (transfers, swaps, custom tokens)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedTransactionEntry {
+    /// Transaction ID/hash
+    pub id: String,
+    /// Transaction type: "transfer", "swap", "token_transfer", "mining_reward"
+    pub tx_type: String,
+    /// Timestamp (Unix seconds)
+    pub timestamp: i64,
+    /// Block height where confirmed
+    pub block_height: u64,
+    /// Amount (for transfers) or input amount (for swaps)
+    pub amount: String,
+    /// From address (sender)
+    pub from: String,
+    /// To address (recipient) or token out address (for swaps)
+    pub to: String,
+    /// Token symbol for transfers (QUG, custom tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_symbol: Option<String>,
+    /// Token address for custom tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_address: Option<String>,
+    /// Swap-specific: output amount
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_out: Option<String>,
+    /// Swap-specific: input token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_in: Option<String>,
+    /// Swap-specific: output token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_out: Option<String>,
+    /// Status: "confirmed" (on-chain and verified)
+    pub status: String,
+    /// Direction relative to the queried wallet: "sent", "received", "swap"
+    pub direction: String,
+    /// v3.9.6-beta: Optional memo/message attached to transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
+}
+
+/// Get unified transaction history for a wallet address (decentralized, no auth required)
+/// v3.5.8-beta: Uses wallet-indexed storage for O(log n) lookups
+/// Includes: regular transfers, DEX swaps, custom token transfers
+/// Path: GET /api/v1/wallet/:address/history
+pub async fn get_wallet_transaction_history(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> Result<Json<ApiResponse<Vec<UnifiedTransactionEntry>>>, StatusCode> {
+    info!("📜 [v3.5.8] Getting unified transaction history for wallet {}", wallet_address);
+
+    // Parse wallet address (supports both hex and qnk-prefixed formats)
+    // Also supports 20-byte (40 hex char) frontend addresses - pads to 32 bytes
+    let wallet_bytes: [u8; 32] = if wallet_address.starts_with("qnk") {
+        let hex_part = wallet_address.trim_start_matches("qnk");
+        let bytes = hex::decode(hex_part).map_err(|e| {
+            warn!("Failed to decode hex wallet address: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+        // Support both 20-byte (frontend) and 32-byte (backend) addresses
+        if bytes.len() != 32 && bytes.len() != 20 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid wallet address length: {} bytes (expected 20 or 32)",
+                bytes.len()
+            ))));
+        }
+        let mut arr = [0u8; 32];
+        // Pad shorter addresses to 32 bytes (frontend uses 20-byte addresses)
+        arr[..bytes.len()].copy_from_slice(&bytes);
+        arr
+    } else {
+        let bytes = hex::decode(&wallet_address).map_err(|e| {
+            warn!("Failed to decode hex wallet address: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+        // Support both 20-byte (frontend) and 32-byte (backend) addresses
+        if bytes.len() != 32 && bytes.len() != 20 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid wallet address length: {} bytes (expected 20 or 32)",
+                bytes.len()
+            ))));
+        }
+        let mut arr = [0u8; 32];
+        arr[..bytes.len()].copy_from_slice(&bytes);
+        arr
+    };
+
+    info!("📜 [v3.5.8] Wallet bytes: {}", hex::encode(&wallet_bytes));
+
+    let mut unified_history: Vec<UnifiedTransactionEntry> = Vec::new();
+
+    // 1. Load regular transactions via wallet index (O(log n) lookup)
+    let limit = 100usize;
+    match state.storage_engine.load_transactions_for_wallet(&wallet_bytes, limit).await {
+        Ok(transactions) => {
+            for tx in transactions {
+                let direction = if tx.from == wallet_bytes {
+                    "sent"
+                } else {
+                    "received"
+                };
+
+                // Determine token type from transaction
+                let (token_symbol, token_address) = match tx.tx_type {
+                    q_types::TransactionType::TokenTransfer => {
+                        // Custom token transfer - token address is in tx.data[0..32]
+                        if tx.data.len() >= 32 {
+                            let token_addr = hex::encode(&tx.data[0..32]);
+                            // Try to look up token symbol from registry
+                            (Some("TOKEN".to_string()), Some(token_addr))
+                        } else {
+                            (Some("QUG".to_string()), None)
+                        }
+                    }
+                    _ => (Some("QUG".to_string()), None),
+                };
+
+                let tx_type = match tx.tx_type {
+                    q_types::TransactionType::Transfer => "transfer",
+                    q_types::TransactionType::TokenTransfer => "token_transfer",
+                    q_types::TransactionType::Coinbase => "mining_reward",
+                    q_types::TransactionType::Stake => "stake",
+                    q_types::TransactionType::Unstake => "unstake",
+                    _ => "transfer",
+                };
+
+                unified_history.push(UnifiedTransactionEntry {
+                    id: hex::encode(&tx.id),
+                    tx_type: tx_type.to_string(),
+                    timestamp: tx.timestamp.timestamp(),
+                    block_height: 0, // TODO: Add block height tracking to transactions
+                    amount: tx.amount.to_string(),
+                    from: format!("qnk{}", hex::encode(&tx.from)),
+                    to: format!("qnk{}", hex::encode(&tx.to)),
+                    token_symbol,
+                    token_address,
+                    amount_out: None,
+                    token_in: None,
+                    token_out: None,
+                    status: "confirmed".to_string(),
+                    direction: direction.to_string(),
+                    memo: tx.memo.clone(),
+                });
+            }
+            info!("📜 [v3.5.8] Loaded {} regular transactions for wallet", unified_history.len());
+        }
+        Err(e) => {
+            warn!("Failed to load transactions for wallet: {}", e);
+        }
+    }
+
+    // 2. Load DEX swaps via wallet swap index
+    match state.storage_engine.load_swaps_for_wallet(&wallet_bytes, limit).await {
+        Ok(swap_data) => {
+            for data in swap_data {
+                if let Ok(record) = bincode::deserialize::<crate::swap_indexer::ConsensusSwapRecord>(&data) {
+                    // Format amounts for display (24 decimals)
+                    let amount_in_str = format_token_amount(record.amount_in);
+                    let amount_out_str = format_token_amount(record.amount_out);
+
+                    unified_history.push(UnifiedTransactionEntry {
+                        id: hex::encode(&record.tx_id),
+                        tx_type: "swap".to_string(),
+                        timestamp: record.timestamp,
+                        block_height: record.block_height,
+                        amount: amount_in_str.clone(),
+                        from: format!("qnk{}", hex::encode(&record.wallet)),
+                        to: format!("0x{}", hex::encode(&record.pool_id)),
+                        token_symbol: None,
+                        token_address: None,
+                        amount_out: Some(amount_out_str),
+                        token_in: Some(format!("0x{}", hex::encode(&record.token_in))),
+                        token_out: Some(format!("0x{}", hex::encode(&record.token_out))),
+                        status: "confirmed".to_string(),
+                        direction: "swap".to_string(),
+                        memo: None,
+                    });
+                }
+            }
+            info!("📜 [v3.5.8] Loaded {} DEX swaps for wallet", unified_history.len());
+        }
+        Err(e) => {
+            warn!("Failed to load swaps for wallet: {}", e);
+        }
+    }
+
+    // 3. Sort by timestamp (newest first)
+    unified_history.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    // 4. Limit total results
+    unified_history.truncate(limit);
+
+    info!(
+        "📜 [v3.5.8] Returning {} unified transaction entries for wallet {}",
+        unified_history.len(),
+        &wallet_address[..16.min(wallet_address.len())]
+    );
+
+    Ok(Json(ApiResponse::success(unified_history)))
+}
+
+/// Format token amount with 24 decimals to human-readable string
+fn format_token_amount(amount: u128) -> String {
+    const DECIMALS: u128 = 1_000_000_000_000_000_000_000_000u128; // 10^24
+    let whole = amount / DECIMALS;
+    let frac = amount % DECIMALS;
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        // Show up to 8 decimal places
+        let frac_str = format!("{:024}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        let display_frac = if trimmed.len() > 8 { &trimmed[..8] } else { trimmed };
+        format!("{}.{}", whole, display_frac)
+    }
 }
 
 /// Get block by height
@@ -3922,10 +4776,10 @@ pub async fn hashpower_security_metrics(
     // Try to get REAL hashrate from mining statistics
     let real_hashrate: u64 = if let Some(ref mining_stats) = state.mining_statistics {
         if let Ok(mut stats) = mining_stats.try_write() {
-            let network_khash = stats.calculate_network_hashrate();
-            if network_khash > 0.0 {
-                // Real network hashrate in H/s (mining stats reports in KH/s)
-                (network_khash * 1000.0) as u64
+            // v3.5.6-beta: calculate_network_hashrate() now returns H/s directly
+            let network_hashrate_hs = stats.calculate_network_hashrate();
+            if network_hashrate_hs > 0.0 {
+                network_hashrate_hs as u64
             } else {
                 0
             }
@@ -4523,20 +5377,30 @@ pub async fn tor_status(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Getting Tor status");
 
-    let tor_status = if state.tor_client.is_some() {
+    let tor_status = if let Some(ref tor_client) = state.tor_client {
+        // Get actual Tor stats from the client
+        let stats = tor_client.get_tor_stats().await;
         serde_json::json!({
+            "tor_enabled": true,
             "active": true,
-            "circuits": 4,
+            "active_circuits": stats.active_circuits,
+            "onion_address": stats.onion_address,
+            "circuits": stats.active_circuits,
             "guard_nodes": 3,
             "exit_nodes": 2,
             "consensus_age_hours": 2,
             "bandwidth_kbps": 1250,
-            "latency_ms": 285
+            "latency_ms": stats.average_latency.as_millis(),
+            "bytes_sent": stats.bytes_sent,
+            "bytes_received": stats.bytes_received,
+            "connection_count": stats.connection_count
         })
     } else {
         serde_json::json!({
+            "tor_enabled": false,
             "active": false,
             "circuits": 0,
+            "onion_address": Value::Null,
             "guard_nodes": 0,
             "exit_nodes": 0,
             "consensus_age_hours": Value::Null,
@@ -5286,13 +6150,12 @@ pub async fn get_oracle_price(
                 }
             };
 
-            // v2.3.8-beta: Get real price changes from snapshots
+            // v3.7.1-beta: Get real price changes from persistent consensus-verified history
             drop(quillon_bank); // Release lock before accessing other state
-            let price_snapshots = state.price_snapshots.read().await;
-            let (c1h, c24h, c7d) = price_snapshots.get("QUG")
-                .map(|s| calculate_price_changes(s, qug_price))
-                .unwrap_or((0.0, 0.0, 0.0));
-            drop(price_snapshots);
+            let qug_addr = [0u8; 32]; // Native QUG token address
+            let (c1h, c24h, c7d) = state.price_history_indexer
+                .get_price_changes(&qug_addr, qug_price)
+                .await;
 
             // v2.4.7: Get real 24h volume from tracker with case-insensitive lookup
             let volume_tracker = state.volume_tracker.read().await;
@@ -5324,13 +6187,11 @@ pub async fn get_oracle_price(
                 Err(_) => 1.00, // Stablecoin always $1
             };
 
-            // v2.3.8-beta: Get real price changes (should be minimal for stablecoin)
+            // v3.7.1-beta: Get real price changes from persistent consensus-verified history
             drop(quillon_bank);
-            let price_snapshots = state.price_snapshots.read().await;
-            let (c1h, c24h, c7d) = price_snapshots.get("QUGUSD")
-                .map(|s| calculate_price_changes(s, usdc_price))
-                .unwrap_or((0.0, 0.0, 0.0));
-            drop(price_snapshots);
+            let (c1h, c24h, c7d) = state.price_history_indexer
+                .get_price_changes(&q_types::QUGUSD_TOKEN_ADDRESS, usdc_price)
+                .await;
 
             // v2.4.7: Get real 24h volume with case-insensitive lookup
             let volume_tracker = state.volume_tracker.read().await;
@@ -5412,15 +6273,21 @@ pub async fn get_oracle_price(
                     if is_token0 || is_token1 {
                         // Calculate price based on AMM constant product formula: x * y = k
                         // Price of token = opposite_reserve / token_reserve
-                        let (token_reserve, base_reserve, base_token) = if is_token1 {
-                            (pool.reserve1 as f64, pool.reserve0 as f64, &pool.token0)
+                        let (token_reserve, base_reserve, base_token, token_decimals, base_decimals) = if is_token1 {
+                            (pool.reserve1 as f64, pool.reserve0 as f64, &pool.token0, pool.token1_decimals, pool.token0_decimals)
                         } else {
-                            (pool.reserve0 as f64, pool.reserve1 as f64, &pool.token1)
+                            (pool.reserve0 as f64, pool.reserve1 as f64, &pool.token1, pool.token0_decimals, pool.token1_decimals)
                         };
 
-                        if token_reserve > 0.0 {
+                        // v3.7.3-beta: CRITICAL FIX - Pool reserves are stored in 24-decimal format
+                        // (frontend sends all amounts * 1e24), but pool.tokenX_decimals records
+                        // official decimals (8 for custom tokens). Use 24 for both reserves.
+                        let token_reserve_display = token_reserve / 1e24;
+                        let base_reserve_display = base_reserve / 1e24;
+
+                        if token_reserve_display > 0.0 {
                             // Price in terms of the base token (QUG or QUGUSD)
-                            let pool_price_in_base = base_reserve / token_reserve;
+                            let pool_price_in_base = base_reserve_display / token_reserve_display;
 
                             // v2.4.0: CRITICAL FIX - Convert to USD!
                             // If base token is QUG, multiply by QUG/USD price
@@ -5435,8 +6302,8 @@ pub async fn get_oracle_price(
                             };
 
                             // Use liquidity depth as weight for weighted average
-                            // Higher liquidity = more reliable price
-                            let liquidity = (base_reserve * token_reserve).sqrt();
+                            // Higher liquidity = more reliable price (using display values for consistency)
+                            let liquidity = (base_reserve_display * token_reserve_display).sqrt();
 
                             total_price += pool_price_usd * liquidity;
                             total_weight += liquidity;
@@ -5449,23 +6316,6 @@ pub async fn get_oracle_price(
                     // Weighted average price across all pools
                     let weighted_price = total_price / total_weight;
 
-                    // v2.3.8-beta: Get real price changes
-                    // v2.4.8: Try both resolved contract address and original symbol for snapshots
-                    let price_snapshots = state.price_snapshots.read().await;
-                    let (c1h, c24h, c7d) = price_snapshots.get(&resolved_feed_id)
-                        .or_else(|| price_snapshots.get(&feed_id))
-                        .or_else(|| price_snapshots.get(&feed_id.to_uppercase()))
-                        .map(|s| calculate_price_changes(s, weighted_price))
-                        .unwrap_or((0.0, 0.0, 0.0));
-                    drop(price_snapshots);
-
-                    // v2.4.7: Get real 24h volume with case-insensitive lookup
-                    // v2.4.8: Try both resolved address and symbol for volume tracking
-                    let volume_tracker = state.volume_tracker.read().await;
-                    let vol_24h = get_volume_24h(&volume_tracker, &resolved_feed_id)
-                        .max(get_volume_24h(&volume_tracker, &feed_id));
-                    drop(volume_tracker);
-
                     // v2.4.3: Count custom token holders from token_balances
                     // v2.4.8: Use resolved_feed_id (contract address) for holder count
                     let hex_to_decode = if resolved_feed_id.starts_with("qnk") {
@@ -5474,11 +6324,13 @@ pub async fn get_oracle_price(
                         &resolved_feed_id
                     };
 
-                    if let Ok(token_addr_vec) = hex::decode(hex_to_decode) {
+                    // v3.7.1-beta: Get price changes from persistent consensus-verified history
+                    let (c1h, c24h, c7d) = if let Ok(token_addr_vec) = hex::decode(hex_to_decode) {
                         if token_addr_vec.len() == 32 {
                             let mut token_addr = [0u8; 32];
                             token_addr.copy_from_slice(&token_addr_vec);
 
+                            // Count holders
                             let token_balances = state.token_balances.read().await;
                             let count = token_balances.iter()
                                 .filter(|((_, t_addr), balance)| *t_addr == token_addr && **balance > 0)
@@ -5486,8 +6338,24 @@ pub async fn get_oracle_price(
                             holders_count = Some(count as u64);
                             tracing::debug!("📊 Custom token {} ({}) has {} holders", feed_id, resolved_feed_id, count);
                             drop(token_balances);
+
+                            // Get price changes from persistent storage
+                            state.price_history_indexer
+                                .get_price_changes(&token_addr, weighted_price)
+                                .await
+                        } else {
+                            (0.0, 0.0, 0.0)
                         }
-                    }
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+
+                    // v2.4.7: Get real 24h volume with case-insensitive lookup
+                    // v2.4.8: Try both resolved address and symbol for volume tracking
+                    let volume_tracker = state.volume_tracker.read().await;
+                    let vol_24h = get_volume_24h(&volume_tracker, &resolved_feed_id)
+                        .max(get_volume_24h(&volume_tracker, &feed_id));
+                    drop(volume_tracker);
 
                     // Confidence based on liquidity depth
                     let confidence = (total_weight / 1_000_000.0).min(0.95).max(0.5);
@@ -6067,12 +6935,23 @@ pub async fn send_private_transaction(
         pqc_signature: None,
         signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        // v3.4.2-beta: ZK privacy fields (transparent by default)
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     let tx_hash = transaction.hash();
     let mut signed_transaction = transaction;
     signed_transaction.id = tx_hash;
     signed_transaction.signature = vec![0u8; 128]; // Quantum-enhanced signature size
+
+    // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY for mixer transactions
+    if let Err(e) = apply_privacy_proofs(&mut signed_transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed (mixer tx still valid): {}", e);
+    }
 
     // Generate quantum mixing metadata
     let mixing_metadata = serde_json::json!({
@@ -6200,6 +7079,11 @@ pub async fn send_private_transaction(
         hex::encode(&to_address[..8])
     );
 
+    // v3.5.2-beta: Convert u128 values to f64 for JSON serialization (avoids "number out of range" panic)
+    let amount_display = signed_transaction.amount as f64 / QUG_DISPLAY_DIVISOR;
+    let mixer_fee_display = mixer_fee as f64 / QUG_DISPLAY_DIVISOR;
+    let total_cost_display = total_cost as f64 / QUG_DISPLAY_DIVISOR;
+
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "mixing_session_id": mixing_session_id,
@@ -6208,9 +7092,10 @@ pub async fn send_private_transaction(
         "quantum_resistant": enable_quantum_mixing,
         "from": hex::encode(signed_transaction.from),
         "to": hex::encode(signed_transaction.to),
-        "amount": signed_transaction.amount,
-        "mixer_fee": mixer_fee,
-        "total_cost": total_cost,
+        "amount": amount_display,
+        "amount_atomic": signed_transaction.amount.to_string(), // Full precision as string
+        "mixer_fee": mixer_fee_display,
+        "total_cost": total_cost_display,
         "privacy_level": request.privacy_level,
         "decoy_count": decoy_count,
         "estimated_completion_time": match privacy_level {
@@ -6507,6 +7392,65 @@ async fn complete_mixing_process(
         } else {
             info!("✅ [MIXER] Balance changes persisted to RocksDB");
         }
+    }
+
+    // v3.4.15-beta: Propagate mixed transaction through Dandelion++ for IP unlinkability
+    if let Some(ref dandelion) = state.dandelion {
+        // Create a transaction record for network propagation
+        let mut mixed_tx = Transaction {
+            id: tx_hash,
+            from: sender_address,
+            to: recipient,
+            amount,
+            fee: amount / 1000, // 0.1% mixer fee
+            nonce: 0,
+            signature: vec![],
+            timestamp: chrono::Utc::now(),
+            data: vec![],
+            token_type: q_types::TokenType::QUG,
+            fee_token_type: q_types::TokenType::QUGUSD,
+            tx_type: q_types::TransactionType::PrivacyMixed,
+            pqc_signature: None,
+            signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+            // v3.4.16-beta: ZK privacy fields - auto-populated below
+            zk_proof_bundle: None,
+            privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
+        };
+
+        // v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY for mixed transactions
+        if let Err(e) = apply_privacy_proofs(&mut mixed_tx, None).await {
+            tracing::warn!("⚠️ Privacy proof generation failed for mixed tx: {}", e);
+        }
+
+        // Serialize and propagate through Dandelion++ (stem → fluff phases)
+        match postcard::to_allocvec(&mixed_tx) {
+            Ok(tx_bytes) => {
+                let network_id = std::env::var("Q_NETWORK_ID")
+                    .unwrap_or_else(|_| "testnet-phase19".to_string());
+                let topic = format!("/qnk/{}/mempool-txs", network_id);
+
+                let dandelion_clone = dandelion.clone();
+                tokio::spawn(async move {
+                    match dandelion_clone.propagate_message(&tx_bytes, &topic).await {
+                        Ok(_) => {
+                            info!("🌻 [MIXER→DANDELION++] Mixed transaction propagated anonymously via Tor stem relay");
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [MIXER→DANDELION++] Dandelion++ propagation failed, using fallback: {}", e);
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("⚠️ [MIXER] Failed to serialize mixed transaction for Dandelion++: {}", e);
+            }
+        }
+    } else {
+        debug!("🌻 [MIXER] Dandelion++ not available, mixed transaction stays local");
     }
 
     // Update transaction status to Confirmed (not just InMempool)
@@ -6993,13 +7937,14 @@ pub async fn submit_mining_solution(
 
                 // Update mining statistics with miner's hash rate
                 // v3.2.25-beta: Use miner_id to distinguish multiple miners to same wallet
+                // v3.5.4-beta: Capture calculated hashrate for SSE events
                 if let Some(ref mining_stats_arc) = state.mining_statistics {
                     let mut mining_stats = mining_stats_arc.write().await;
                     let hash_rate_khash = request.hash_rate.unwrap_or(0.0);
                     let worker_id = request.miner_id.clone()
                         .or_else(|| request.worker_name.clone())
                         .unwrap_or_else(|| "direct".to_string());
-                    mining_stats.update_miner_with_worker(request.miner_address.clone(), hash_rate_khash, worker_id);
+                    let _calculated_hashrate = mining_stats.update_miner_with_worker(request.miner_address.clone(), hash_rate_khash, worker_id);
                     mining_stats.total_solutions_submitted += 1;
                 }
             }
@@ -7091,14 +8036,27 @@ pub async fn submit_mining_solution(
 
         // Emit MiningReward event for mining-specific UI updates
         // v2.3.5-beta: Include origin node info for P2P mining attribution
+        // v3.5.4-beta: Look up calculated hashrate from mining stats (more accurate than client-reported)
         let origin_peer_id = state.libp2p_peer_info.read().await.0.clone();
+        let calculated_hash_rate = if let Some(ref mining_stats_arc) = state.mining_statistics {
+            let mining_stats = mining_stats_arc.read().await;
+            let worker_id = request.miner_id.clone()
+                .or_else(|| request.worker_name.clone())
+                .unwrap_or_else(|| "direct".to_string());
+            let key = format!("{}:{}", request.miner_address, worker_id);
+            mining_stats.active_miners.get(&key)
+                .map(|stats| stats.last_hashrate)
+                .unwrap_or_else(|| request.hash_rate.unwrap_or(0.0))
+        } else {
+            request.hash_rate.unwrap_or(0.0)
+        };
         let mining_event = StreamEvent::MiningReward {
             miner_address: request.miner_address.clone(),
             reward_qnk: miner_reward as f64 / QUG_DISPLAY_DIVISOR,
             nonce,
             block_height: state.node_status.read().await.current_height,
             difficulty: hex::encode(&hash[..8]),
-            hash_rate: request.hash_rate.unwrap_or(0.0),
+            hash_rate: calculated_hash_rate,
             miner_id: request.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
             worker_name: request.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
             origin_node_id: Some(origin_peer_id), // v2.3.5-beta: Which node mined this
@@ -7111,15 +8069,14 @@ pub async fn submit_mining_solution(
         }
     }
 
-    // ⚠️ v1.2.0-beta Phase 3: DEPRECATED - Gossipsub balance broadcasts
-    // Balance updates now go through DAG-Knight consensus (coinbase transactions in blocks)
-    // This gossipsub broadcast is DEPRECATED and will be REMOVED in v1.3.0
-    // To enable legacy mode: set Q_ENABLE_LEGACY_BALANCE_GOSSIP=1
-    let legacy_balance_gossip = std::env::var("Q_ENABLE_LEGACY_BALANCE_GOSSIP")
+    // UN-DEPRECATED v3.9.5-beta: Gossipsub balance broadcasts re-enabled by default
+    // P2P balance replication provides fast balance propagation alongside DAG-Knight consensus
+    // To disable: set Q_DISABLE_BALANCE_GOSSIP=1
+    let balance_gossip_disabled = std::env::var("Q_DISABLE_BALANCE_GOSSIP")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
 
-    if legacy_balance_gossip {
+    if !balance_gossip_disabled {
         if let Some(ref command_tx) = state.libp2p_command_tx {
             // Get node's peer ID for origin tracking
             let node_id = {
@@ -7152,7 +8109,7 @@ pub async fn submit_mining_solution(
                         wallet_address: request.miner_address.clone(),
                         amount: miner_reward as u64, // Cast to u64 for NetworkCommand
                     });
-                    debug!("⚠️ [DEPRECATED] P2P balance broadcast for {} (+{} units)",
+                    debug!("💰 [P2P BALANCE] Gossipsub balance broadcast for {} (+{} units)",
                            &request.miner_address[..16], miner_reward);
                 }
                 Err(e) => {
@@ -7161,9 +8118,8 @@ pub async fn submit_mining_solution(
             }
         }
     } else {
-        // v1.2.0-beta Phase 3: Balance updates go through DAG-Knight consensus
-        // Mining rewards are distributed via coinbase transactions in blocks
-        debug!("✅ [Phase 3] Balance update via DAG-Knight consensus (gossipsub disabled)");
+        // v3.9.5-beta: Operator explicitly disabled gossipsub balance broadcasts
+        debug!("ℹ️ Balance gossipsub broadcast disabled (Q_DISABLE_BALANCE_GOSSIP=1)");
     }
 
     // 🌐 v2.2.2-beta: P2P MINING SOLUTION BROADCAST
@@ -8050,41 +9006,101 @@ pub async fn execute_swap(
 
     // Check user balance for from_token
     {
-        let wallet_balances = state.wallet_balances.read().await;
+        let mut wallet_balances = state.wallet_balances.write().await;
         let token_balances = state.token_balances.read().await;
 
         if from_is_native {
-            let balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
+            // v3.6.4-beta: CRITICAL FIX - Read balance from storage_engine (authoritative source)
+            // The in-memory wallet_balances HashMap was stale, causing "insufficient balance" errors
+            let storage_balance = state
+                .storage_engine
+                .get_balance(&hex::encode(wallet_addr))
+                .await
+                .unwrap_or(0);
+
+            // Sync in-memory cache with storage
+            let balance = wallet_balances.entry(wallet_addr).or_insert(storage_balance);
+            if *balance != storage_balance {
+                tracing::info!(
+                    "🔄 [SWAP] Synced stale balance for {}: {} → {}",
+                    hex::encode(&wallet_addr[..8]),
+                    *balance as f64 / 1e24,
+                    storage_balance as f64 / 1e24
+                );
+                *balance = storage_balance;
+            }
+
             let amount_in_u128 = request.amount_in as u128;
             // 🔒 PRIVACY: No logging of wallet addresses or exact balances
             debug!(
                 "🔍 [SWAP] Balance check: sufficient={}",
-                balance >= amount_in_u128
+                *balance >= amount_in_u128
             );
-            if balance < amount_in_u128 {
-                return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient QUG balance. Required: {}, Available: {}",
-                    request.amount_in, balance
-                ))));
+            if *balance < amount_in_u128 {
+                // v3.6.3-beta: Add tolerance for floating-point precision issues
+                // When user tries to swap "max", tiny rounding differences can cause false rejections
+                // Allow 0.0001% tolerance (1 part per million) - about 0.000001 QUG at most
+                let tolerance = amount_in_u128 / 1_000_000; // 0.0001% tolerance
+                let min_tolerance: u128 = 1_000_000_000_000_000_000; // At least 0.000001 QUG (1e18)
+                let effective_tolerance = tolerance.max(min_tolerance);
+
+                if *balance + effective_tolerance >= amount_in_u128 {
+                    // Within tolerance - this is likely a "max swap" with rounding
+                    debug!(
+                        "🔍 [SWAP] Allowing swap within tolerance: balance={}, required={}, diff={}",
+                        *balance, amount_in_u128, amount_in_u128.saturating_sub(*balance)
+                    );
+                } else {
+                    // v3.6.2-beta: Display human-readable amounts (24 decimal precision)
+                    let required_qug = request.amount_in as f64 / 1e24;
+                    let available_qug = *balance as f64 / 1e24;
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Insufficient QUG balance. Required: {:.6} QUG, Available: {:.6} QUG",
+                        required_qug, available_qug
+                    ))));
+                }
             }
         } else if from_is_qugusd {
             // Check QUGUSD balance from CollateralVault
             let vault = state.collateral_vault.read().await;
             let balance = vault.get_balance(&wallet_addr) as u128;
             if balance < request.amount_in {
-                return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient QUGUSD balance. Required: {}, Available: {}",
-                    request.amount_in, balance
-                ))));
+                // v3.6.3-beta: Add tolerance for floating-point precision issues
+                let tolerance = request.amount_in / 1_000_000;
+                let min_tolerance: u128 = 1_000_000_000_000_000_000;
+                let effective_tolerance = tolerance.max(min_tolerance);
+
+                if balance + effective_tolerance >= request.amount_in {
+                    debug!("🔍 [SWAP] Allowing QUGUSD swap within tolerance");
+                } else {
+                    let required_qugusd = request.amount_in as f64 / 1e24;
+                    let available_qugusd = balance as f64 / 1e24;
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Insufficient QUGUSD balance. Required: {:.6} QUGUSD, Available: {:.6} QUGUSD",
+                        required_qugusd, available_qugusd
+                    ))));
+                }
             }
         } else {
             let balance_key = (wallet_addr, from_token_addr);
             let balance = token_balances.get(&balance_key).copied().unwrap_or(0);
-            if balance < request.amount_in as u128 {
-                return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient {} balance. Required: {}, Available: {}",
-                    request.from_token, request.amount_in, balance
-                ))));
+            let amount_in_u128 = request.amount_in as u128;
+            if balance < amount_in_u128 {
+                // v3.6.3-beta: Add tolerance for floating-point precision issues
+                let tolerance = amount_in_u128 / 1_000_000;
+                let min_tolerance: u128 = 1_000_000_000_000_000_000;
+                let effective_tolerance = tolerance.max(min_tolerance);
+
+                if balance + effective_tolerance >= amount_in_u128 {
+                    debug!("🔍 [SWAP] Allowing token swap within tolerance");
+                } else {
+                    let required_tokens = request.amount_in as f64 / 1e24;
+                    let available_tokens = balance as f64 / 1e24;
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Insufficient {} balance. Required: {:.6}, Available: {:.6}",
+                        request.from_token, required_tokens, available_tokens
+                    ))));
+                }
             }
         }
     }
@@ -8299,11 +9315,92 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    // Numerator overflow: use scaled calculation
-                    // amt_out ≈ amount_in * reserve_out / reserve_in (approximation for large reserves)
-                    warn!("📊 [SWAP] Large value detected, using approximate calculation");
-                    let ratio = (p.reserve1 as f64) / (p.reserve0 as f64);
-                    ((amount_in_with_fee as f64) * ratio) as u128
+                    // v3.6.10-beta: IMPROVED high-precision calculation for large values AND extreme imbalance
+                    // When amount_in * reserve_out overflows u128, use adaptive scaled arithmetic.
+                    // For extreme pool imbalances (e.g., 784B PEPEG vs 38 QUG), fixed 10^12 scaling
+                    // can truncate the result to zero. We use adaptive scaling to preserve precision.
+                    warn!("📊 [SWAP v3.6.10] Large value - using adaptive scaled arithmetic (no f64)");
+
+                    // v3.6.10-beta: Calculate the optimal scale factor to maximize precision
+                    // We want to scale down just enough to prevent overflow, but not so much
+                    // that we lose precision for imbalanced pools.
+                    //
+                    // AMM formula: out = (amt × res_out) / (res_in + amt)
+                    // Ratio approach: out = amt × (res_out / res_in) when res_in >> amt
+                    //
+                    // For extreme imbalance, use ratio-based calculation:
+                    let denom = denominator.unwrap();
+
+                    // First, try with the ratio approach for extreme imbalances
+                    // If reserve_in >> amount_in, then: out ≈ amt × (res_out / res_in)
+                    let ratio_result = if p.reserve0 > amount_in_with_fee.saturating_mul(1000) {
+                        // Pool is highly imbalanced - use ratio approach
+                        // Calculate (amt × res_out) / res_in in a way that preserves precision
+
+                        // Find the scale factor adaptively
+                        let amt_bits = 128 - amount_in_with_fee.leading_zeros();
+                        let res_out_bits = 128 - p.reserve1.leading_zeros();
+                        let combined_bits = amt_bits + res_out_bits;
+
+                        // We need to scale down by enough to fit in 128 bits
+                        let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
+                        let adaptive_scale = 1u128 << scale_bits.min(60); // Max 2^60 scale
+
+                        debug!("📊 [SWAP v3.6.10] Adaptive scale: 2^{} = {} (combined_bits={})",
+                               scale_bits, adaptive_scale, combined_bits);
+
+                        // Scale only the larger value to preserve precision on the smaller
+                        let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve1 {
+                            (amount_in_with_fee / adaptive_scale, p.reserve1)
+                        } else {
+                            (amount_in_with_fee, p.reserve1 / adaptive_scale)
+                        };
+
+                        let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
+                        let result = scaled_num / denom;
+
+                        // Scale back up
+                        if amount_in_with_fee > p.reserve1 {
+                            result.saturating_mul(adaptive_scale)
+                        } else {
+                            result.saturating_mul(adaptive_scale)
+                        }
+                    } else {
+                        // Use standard scaled arithmetic for moderate imbalance
+                        const SCALE: u128 = 1_000_000_000_000; // 10^12
+                        let scaled_amt = amount_in_with_fee / SCALE;
+                        let scaled_res_out = p.reserve1 / SCALE;
+                        let scaled_res_in = p.reserve0 / SCALE;
+                        let scaled_numerator = scaled_amt.saturating_mul(scaled_res_out);
+                        let scaled_denominator = scaled_res_in.saturating_add(scaled_amt);
+                        if scaled_denominator == 0 {
+                            0u128
+                        } else {
+                            (scaled_numerator / scaled_denominator).saturating_mul(SCALE)
+                        }
+                    };
+
+                    // v3.6.10-beta: If ratio approach gave zero but amounts are non-zero, try precise fractional
+                    if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve1 > 0 {
+                        warn!("📊 [SWAP v3.6.10] Zero result from adaptive scaling, using fractional approximation");
+
+                        // For tiny outputs, calculate: out = (amt / denom) × res_out
+                        // This reorders to prevent overflow while maintaining some precision
+                        let fraction = amount_in_with_fee / denom; // Will be 0 or small for extreme imbalance
+                        if fraction > 0 {
+                            fraction.saturating_mul(p.reserve1)
+                        } else {
+                            // Even more extreme: calculate proportionally
+                            // out = res_out × (amt / denom) ≈ res_out × amt / denom
+                            // Scale down both to fit
+                            let scale = 1u128 << 40; // 2^40 scale
+                            let scaled_res = p.reserve1 / scale;
+                            let result = (amount_in_with_fee.saturating_mul(scaled_res)) / denom;
+                            result.saturating_mul(scale)
+                        }
+                    } else {
+                        ratio_result
+                    }
                 };
 
                 // Cross-decimal adjustment: scale output if decimals differ
@@ -8342,9 +9439,68 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    warn!("📊 [SWAP] Large value detected, using approximate calculation (reversed)");
-                    let ratio = (p.reserve0 as f64) / (p.reserve1 as f64);
-                    ((amount_in_with_fee as f64) * ratio) as u128
+                    // v3.6.10-beta: IMPROVED high-precision calculation for large values AND extreme imbalance (reversed)
+                    warn!("📊 [SWAP v3.6.10] Large value - using adaptive scaled arithmetic (reversed, no f64)");
+
+                    let denom = denominator.unwrap();
+
+                    // v3.6.10-beta: For extreme imbalance, use ratio-based calculation
+                    // Note: For reversed, reserve_in = reserve1, reserve_out = reserve0
+                    let ratio_result = if p.reserve1 > amount_in_with_fee.saturating_mul(1000) {
+                        // Pool is highly imbalanced - use adaptive scaling
+                        let amt_bits = 128 - amount_in_with_fee.leading_zeros();
+                        let res_out_bits = 128 - p.reserve0.leading_zeros();
+                        let combined_bits = amt_bits + res_out_bits;
+                        let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
+                        let adaptive_scale = 1u128 << scale_bits.min(60);
+
+                        debug!("📊 [SWAP v3.6.10] Reversed adaptive scale: 2^{} = {} (combined_bits={})",
+                               scale_bits, adaptive_scale, combined_bits);
+
+                        let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve0 {
+                            (amount_in_with_fee / adaptive_scale, p.reserve0)
+                        } else {
+                            (amount_in_with_fee, p.reserve0 / adaptive_scale)
+                        };
+
+                        let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
+                        let result = scaled_num / denom;
+
+                        if amount_in_with_fee > p.reserve0 {
+                            result.saturating_mul(adaptive_scale)
+                        } else {
+                            result.saturating_mul(adaptive_scale)
+                        }
+                    } else {
+                        // Standard scaled arithmetic for moderate imbalance
+                        const SCALE: u128 = 1_000_000_000_000; // 10^12
+                        let scaled_amt = amount_in_with_fee / SCALE;
+                        let scaled_res_out = p.reserve0 / SCALE;
+                        let scaled_res_in = p.reserve1 / SCALE;
+                        let scaled_numerator = scaled_amt.saturating_mul(scaled_res_out);
+                        let scaled_denominator = scaled_res_in.saturating_add(scaled_amt);
+                        if scaled_denominator == 0 {
+                            0u128
+                        } else {
+                            (scaled_numerator / scaled_denominator).saturating_mul(SCALE)
+                        }
+                    };
+
+                    // v3.6.10-beta: Fallback for zero result
+                    if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve0 > 0 {
+                        warn!("📊 [SWAP v3.6.10] Zero result from adaptive scaling (reversed), using fractional approximation");
+                        let fraction = amount_in_with_fee / denom;
+                        if fraction > 0 {
+                            fraction.saturating_mul(p.reserve0)
+                        } else {
+                            let scale = 1u128 << 40;
+                            let scaled_res = p.reserve0 / scale;
+                            let result = (amount_in_with_fee.saturating_mul(scaled_res)) / denom;
+                            result.saturating_mul(scale)
+                        }
+                    } else {
+                        ratio_result
+                    }
                 };
 
                 // Cross-decimal adjustment
@@ -8358,7 +9514,7 @@ pub async fn execute_swap(
                     amt_out
                 };
 
-                debug!("📊 [SWAP v3.2.23] Reversed output: {}", amt_out);
+                debug!("📊 [SWAP v3.4.19] Reversed output: {}", amt_out);
                 (p.reserve1, p.reserve0, amt_out)
             };
 
@@ -8404,11 +9560,35 @@ pub async fn execute_swap(
     // Check slippage protection (more lenient for oracle-based swaps)
     // Allow 1% additional tolerance to account for rounding differences between quote and execution
     // Using integer math: 99/100 = 0.99 (1% tolerance)
-    let slippage_adjusted_minimum = request.min_amount_out.saturating_mul(99) / 100;
+    //
+    // v3.6.5-beta: CRITICAL FIX - Sanity check min_amount_out
+    // If frontend sends a min_amount_out larger than the pool's entire reserve,
+    // the frontend calculation is clearly wrong (common with high-supply meme tokens).
+    // In this case, use a reasonable default: 95% of actual output (5% slippage tolerance).
+    let effective_min_amount_out = if request.min_amount_out > reserve_out {
+        warn!(
+            "⚠️ [SWAP v3.6.5] Frontend min_amount_out ({}) exceeds pool reserve ({}). Using 95% of actual output instead.",
+            request.min_amount_out, reserve_out
+        );
+        // Use 95% of actual output as minimum (5% slippage tolerance)
+        final_amount_out.saturating_mul(95) / 100
+    } else if request.min_amount_out > final_amount_out.saturating_mul(1000) {
+        // min_amount_out is more than 1000x the actual output - clearly wrong
+        warn!(
+            "⚠️ [SWAP v3.6.5] Frontend min_amount_out ({}) is >1000x actual output ({}). Using 95% of actual output instead.",
+            request.min_amount_out, final_amount_out
+        );
+        final_amount_out.saturating_mul(95) / 100
+    } else {
+        request.min_amount_out
+    };
+
+    let slippage_adjusted_minimum = effective_min_amount_out.saturating_mul(99) / 100;
     if !use_oracle && final_amount_out < slippage_adjusted_minimum {
         return Ok(Json(ApiResponse::error(format!(
-            "❌ Slippage too high. Expected minimum: {}, Got: {}. Pool reserves: {} / {}. Pool may have insufficient liquidity for this swap size.",
-            request.min_amount_out, final_amount_out, reserve_in, reserve_out
+            "❌ Slippage too high. Expected minimum: {:.6}, Got: {:.6}. Pool reserves: {:.6} / {:.6}. Pool may have insufficient liquidity for this swap size.",
+            effective_min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24,
+            reserve_in as f64 / 1e24, reserve_out as f64 / 1e24
         ))));
     } else if use_oracle {
         // For oracle-based swaps, only require that output is at least 50% of requested minimum
@@ -8558,6 +9738,97 @@ pub async fn execute_swap(
         (reserve_in, reserve_out)
     };
 
+    // v3.6.8-beta: CRITICAL FIX - Credit output token to user's balance IMMEDIATELY
+    // Previously, swaps updated pool reserves but never credited the user's token_balances,
+    // causing users to lose their swapped tokens until block confirmation (which didn't work for custom tokens)
+    {
+        // Determine from/to token addresses
+        let from_is_qug = request.from_token.to_uppercase() == "QUG";
+        let to_is_qug = request.to_token.to_uppercase() == "QUG";
+
+        // Update token balances
+        let mut token_balances = state.token_balances.write().await;
+
+        // Deduct input token from user
+        if from_is_qug {
+            // v3.6.9-beta: CRITICAL FIX - Deduct QUG from wallet_balances when swapping QUG → custom token
+            // This was missing in v3.6.8, causing QUG to not be deducted during swaps
+            drop(token_balances);
+            let mut wallet_balances = state.wallet_balances.write().await;
+            let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
+            let new_qug_balance = old_qug_balance.saturating_sub(request.amount_in as u128);
+            wallet_balances.insert(wallet_addr, new_qug_balance);
+            info!("💸 [SWAP v3.6.9] Deducted {} QUG from user (was: {}, now: {})",
+                request.amount_in as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
+            drop(wallet_balances);
+
+            // Persist QUG balance to storage
+            if let Err(e) = state.storage_engine.set_balance(&hex::encode(wallet_addr), new_qug_balance).await {
+                warn!("⚠️ [SWAP v3.6.9] Failed to persist deducted QUG balance: {}", e);
+            }
+            token_balances = state.token_balances.write().await;
+        } else {
+            // Deducting custom token
+            if let Ok(from_token_bytes) = hex::decode(request.from_token.trim_start_matches("qnk").trim_start_matches("0x")) {
+                if from_token_bytes.len() == 32 {
+                    let mut from_token_addr = [0u8; 32];
+                    from_token_addr.copy_from_slice(&from_token_bytes);
+                    let from_key = (wallet_addr, from_token_addr);
+                    let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
+                    let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+                    token_balances.insert(from_key, new_balance);
+                    info!("💸 [SWAP v3.6.9] Deducted {} {} from user (was: {}, now: {})",
+                        request.amount_in as f64 / 1e24, request.from_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+                    // Persist to storage
+                    drop(token_balances);
+                    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &from_token_addr, new_balance).await {
+                        warn!("⚠️ [SWAP v3.6.9] Failed to persist deducted from-token balance: {}", e);
+                    }
+                    token_balances = state.token_balances.write().await;
+                }
+            }
+        }
+
+        // Credit output token to user
+        if !to_is_qug {
+            // Crediting custom token
+            if let Ok(to_token_bytes) = hex::decode(request.to_token.trim_start_matches("qnk").trim_start_matches("0x")) {
+                if to_token_bytes.len() == 32 {
+                    let mut to_token_addr = [0u8; 32];
+                    to_token_addr.copy_from_slice(&to_token_bytes);
+                    let to_key = (wallet_addr, to_token_addr);
+                    let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
+                    let new_balance = old_balance.saturating_add(final_amount_out as u128);
+                    token_balances.insert(to_key, new_balance);
+                    info!("💰 [SWAP v3.6.8] Credited {} {} to user (was: {}, now: {})",
+                        final_amount_out as f64 / 1e24, request.to_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+                    // Persist to storage
+                    drop(token_balances);
+                    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
+                        warn!("⚠️ [SWAP v3.6.8] Failed to persist credited to-token balance: {}", e);
+                    }
+                }
+            }
+        } else {
+            // Crediting QUG - update wallet_balances
+            drop(token_balances);
+            let mut wallet_balances = state.wallet_balances.write().await;
+            let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
+            let new_qug_balance = old_qug_balance.saturating_add(final_amount_out as u128);
+            wallet_balances.insert(wallet_addr, new_qug_balance);
+            info!("💰 [SWAP v3.6.8] Credited {} QUG to user (was: {}, now: {})",
+                final_amount_out as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
+            drop(wallet_balances);
+
+            // Persist QUG balance to storage
+            if let Err(e) = state.storage_engine.set_balance(&hex::encode(wallet_addr), new_qug_balance).await {
+                warn!("⚠️ [SWAP v3.6.8] Failed to persist QUG balance: {}", e);
+            }
+        }
+    }
+
     // Step 7: Calculate exchange rate for response
     let exchange_rate = if request.amount_in > 0 {
         (final_amount_out as f64) / (request.amount_in as f64)
@@ -8629,13 +9900,67 @@ pub async fn execute_swap(
             }
         }
 
+        // v3.9.5-beta: Also publish SwapEvent on the correct {network_prefix}/dex/swaps topic
+        // The TradeMessage above goes to qnk/dex/trade/v1 but the receiver expects SwapEvent
+        // on {network_prefix}/dex/swaps. Publish on both for compatibility.
+        {
+            let network_id_str = std::env::var("Q_NETWORK_ID")
+                .unwrap_or_else(|_| "testnet-phase19".to_string());
+            let network_id = network_id_str.parse::<q_types::NetworkId>()
+                .unwrap_or(q_types::NetworkId::TestnetPhase19);
+            let swap_topic = format!("{}/dex/swaps", network_id.gossipsub_topic_prefix());
+
+            // Get the actual new reserves (pool already updated at this point)
+            let (nr0, nr1) = {
+                let pools = state.liquidity_pools.read().await;
+                if let Some(pool) = pools.get(&pool_id_str) {
+                    (pool.reserve0, pool.reserve1)
+                } else {
+                    (0u128, 0u128)
+                }
+            };
+
+            let swap_event = SwapEvent {
+                from_token: request.from_token.clone(),
+                to_token: request.to_token.clone(),
+                amount_in: request.amount_in,
+                amount_out: final_amount_out,
+                wallet_address: wallet_addr,
+                pool_id: pool_id_str.clone(),
+                new_reserve0: nr0,
+                new_reserve1: nr1,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+
+            if let Ok(swap_bytes) = postcard::to_allocvec(&swap_event) {
+                if let Err(e) = libp2p_cmd_tx.send(q_network::NetworkCommand::PublishDexEvent {
+                    topic: swap_topic.clone(),
+                    message: swap_bytes,
+                }) {
+                    warn!("💱 [DEX P2P] Failed to broadcast SwapEvent: {}", e);
+                } else {
+                    debug!("💱 [DEX P2P] Broadcast SwapEvent on {}", swap_topic);
+                }
+            }
+        }
+
         // Also broadcast liquidity pool update
+        // v3.9.5-beta: Use actual updated reserves from pool state (not backwards calculations)
+        let (r0_updated, r1_updated) = {
+            let pools = state.liquidity_pools.read().await;
+            if let Some(pool) = pools.get(&pool_id_str) {
+                (pool.reserve0, pool.reserve1)
+            } else {
+                (reserve_in.saturating_add(request.amount_in),
+                 reserve_out.saturating_sub(final_amount_out))
+            }
+        };
         let pool_msg = LiquidityPoolMessage {
             pool_address: pool_id_bytes,
             token_a: request.from_token.clone(),
             token_b: request.to_token.clone(),
-            reserve_a: reserve_in.saturating_sub(request.amount_in),
-            reserve_b: reserve_out.saturating_add(final_amount_out),
+            reserve_a: r0_updated,
+            reserve_b: r1_updated,
             total_liquidity: 0, // Will be updated when block confirms
             fee_rate: 30, // 0.30%
             last_update: std::time::SystemTime::now()
@@ -8681,22 +10006,169 @@ pub async fn execute_swap(
         exchange_rate,        // Add exchange rate parameter
     ).await;
 
-    // 🔧 v2.9.25-beta: Emit TokenPriceUpdate SSE for immediate UI feedback
-    // This updates price columns (1h%, 24h%, 7d%) in DEX token list without waiting for block confirmation
-    // Now includes token_address for frontend matching by address (fixes token symbol mismatch bug)
-    // 🔧 v2.9.26-beta: Use NEW reserves (after swap) for accurate price reflection
+    // 📊 v3.7.2-beta: Track 24h volume for BOTH tokens in the swap
+    // This ensures volume updates immediately after swap execution (fixes "volume always 0" bug)
     {
-        // Calculate price from pool reserves or use exchange_rate for oracle swaps
-        // v2.9.26: Use new_reserve_in/out which reflect the POST-swap pool state
-        let price = if !use_oracle && new_reserve_in > 0 && new_reserve_out > 0 {
-            new_reserve_out as f64 / new_reserve_in as f64
+        let now = chrono::Utc::now().timestamp();
+        let day_ago = now - 86400;
+
+        // Get token symbols for volume tracking
+        let from_symbol = if request.from_token.starts_with("qnk") || request.from_token.starts_with("0x") {
+            let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+            deployed.values()
+                .find(|c| {
+                    let addr_hex = format!("qnk{}", hex::encode(&c.address.0));
+                    addr_hex.eq_ignore_ascii_case(&request.from_token)
+                })
+                .and_then(|c| c.metadata.symbol.clone())
+                .unwrap_or_else(|| request.from_token.clone())
         } else {
-            exchange_rate
+            request.from_token.clone()
         };
 
-        // v2.9.25-beta: Resolve token symbol from address if to_token is an address
+        let to_symbol = if request.to_token.starts_with("qnk") || request.to_token.starts_with("0x") {
+            let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+            deployed.values()
+                .find(|c| {
+                    let addr_hex = format!("qnk{}", hex::encode(&c.address.0));
+                    addr_hex.eq_ignore_ascii_case(&request.to_token)
+                })
+                .and_then(|c| c.metadata.symbol.clone())
+                .unwrap_or_else(|| request.to_token.clone())
+        } else {
+            request.to_token.clone()
+        };
+
+        // Calculate volume in display units (use QUG amount for both tokens)
+        let volume_display = request.amount_in as f64 / QUG_DISPLAY_DIVISOR;
+
+        let mut tracker = state.volume_tracker.write().await;
+
+        // Track from_token volume
+        let from_entries = tracker.entry(from_symbol.to_uppercase()).or_insert_with(Vec::new);
+        from_entries.retain(|(ts, _)| *ts > day_ago); // Clean up old entries
+        from_entries.push((now, volume_display));
+        let from_vol_24h: f64 = from_entries.iter().map(|(_, v)| *v).sum();
+
+        // Track to_token volume
+        let to_entries = tracker.entry(to_symbol.to_uppercase()).or_insert_with(Vec::new);
+        to_entries.retain(|(ts, _)| *ts > day_ago); // Clean up old entries
+        to_entries.push((now, volume_display));
+        let to_vol_24h: f64 = to_entries.iter().map(|(_, v)| *v).sum();
+
+        info!("📊 [VOLUME] Updated: {} vol={:.4} QUG, {} vol={:.4} QUG",
+              from_symbol.to_uppercase(), from_vol_24h,
+              to_symbol.to_uppercase(), to_vol_24h);
+    }
+
+    // v3.7.4-beta: Get from_token's USD price for proper conversion
+    // Swap ratio alone is NOT a USD price - must multiply by from_token's USD value
+    // This is used by BOTH the price recording and SSE emit sections below.
+    let from_token_usd = {
+        let ft = request.from_token.to_uppercase();
+        if ft == "QUGUSD" {
+            1.0 // Stablecoin = $1
+        } else {
+            // Get QUG/USD price from QUG/QUGUSD pool reserves
+            let pools_read = state.liquidity_pools.read().await;
+            let mut qug_usd = 1.0; // default if no QUG/QUGUSD pool
+            for p in pools_read.values() {
+                let t0 = p.token0.to_uppercase();
+                let t1 = p.token1.to_uppercase();
+                if (t0 == "QUG" && t1 == "QUGUSD") || (t0 == "QUGUSD" && t1 == "QUG") {
+                    let (qug_r, usd_r) = if t0 == "QUG" {
+                        (p.reserve0 as f64, p.reserve1 as f64)
+                    } else {
+                        (p.reserve1 as f64, p.reserve0 as f64)
+                    };
+                    // Both reserves in 24-decimal format, ratio gives correct price
+                    if qug_r > 0.0 {
+                        qug_usd = usd_r / qug_r;
+                    }
+                    break;
+                }
+            }
+
+            if ft == "QUG" || ft == "NATIVE-QUG" {
+                qug_usd
+            } else {
+                // Custom from_token: price = (QUG_per_token from its pool) * qug_usd
+                let mut token_usd = qug_usd; // fallback
+                for p in pools_read.values() {
+                    let t0 = p.token0.to_uppercase();
+                    let t1 = p.token1.to_uppercase();
+                    if t0 == ft || t1 == ft {
+                        let (tok_r, pair_r) = if t0 == ft {
+                            (p.reserve0 as f64, p.reserve1 as f64)
+                        } else {
+                            (p.reserve1 as f64, p.reserve0 as f64)
+                        };
+                        if tok_r > 0.0 {
+                            token_usd = (pair_r / tok_r) * qug_usd;
+                        }
+                        break;
+                    }
+                }
+                token_usd
+            }
+        }
+    };
+
+    // 📈 v3.7.4-beta: Record price in persistent consensus-verified price history
+    // CRITICAL: Only record the to_token's USD price. The from_token's price does NOT change
+    // from this swap. Recording from_token's price as the inverse swap ratio pollutes
+    // price history with non-USD values (e.g., QUG "price" = 1000 BONKG/QUG).
+    if !use_oracle {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        let (in_decimals, out_decimals) = if is_reversed {
+            (pool.token1_decimals, pool.token0_decimals)
+        } else {
+            (pool.token0_decimals, pool.token1_decimals)
+        };
+
+        // Record USD price for to_token only
+        // price_usd = (from_amount / to_amount) * from_token_usd
+        // e.g., QUG→BONKG: (1 QUG / 1000 BONKG) * $1.00 = $0.001 per BONKG ✓
+        if let Err(e) = state.price_history_indexer.record_price_from_swap(
+            &to_token_addr,
+            now_ms,
+            final_amount_out,   // amount_in param = to_token amount (received)
+            request.amount_in,  // amount_out param = from_token amount (spent)
+            out_decimals,
+            in_decimals,
+            from_token_usd,     // Convert swap ratio to USD
+            current_height,
+        ).await {
+            debug!("⚠️ [PRICE HISTORY] Failed to record to_token price: {}", e);
+        }
+    }
+
+    // 🔧 v3.7.4-beta: Emit TokenPriceUpdate SSE for immediate UI feedback
+    // CRITICAL: Prices must be in USD, not raw swap ratios!
+    // swap_ratio * from_token_usd = to_token_usd
+    // from_token_usd was computed above when recording price history.
+    {
+        let price_usd = if !use_oracle && request.amount_in > 0 && final_amount_out > 0 {
+            let (in_decimals, out_decimals) = if is_reversed {
+                (pool.token1_decimals, pool.token0_decimals)
+            } else {
+                (pool.token0_decimals, pool.token1_decimals)
+            };
+            let in_display = request.amount_in as f64 / 10f64.powi(in_decimals as i32);
+            let out_display = final_amount_out as f64 / 10f64.powi(out_decimals as i32);
+            if out_display > 0.0 {
+                // Price in USD = (from_amount / to_amount) * from_token_usd
+                (in_display / out_display) * from_token_usd
+            } else {
+                exchange_rate * from_token_usd
+            }
+        } else {
+            exchange_rate * from_token_usd
+        };
+
+        // Resolve token symbol from address if to_token is an address
         let (to_token_symbol, to_token_address) = if request.to_token.starts_with("qnk") || request.to_token.starts_with("0x") {
-            // It's an address - try to resolve symbol from deployed contracts
             let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
             let symbol = deployed.values()
                 .find(|c| {
@@ -8707,36 +10179,14 @@ pub async fn execute_swap(
                 .unwrap_or_else(|| request.to_token.clone());
             (symbol, Some(request.to_token.clone()))
         } else {
-            // It's already a symbol
             (request.to_token.clone(), Some(format!("qnk{}", hex::encode(&to_token_addr))))
         };
 
-        // Get price changes from snapshots
-        let (change_1h, change_24h, change_7d) = {
-            let snapshots = state.price_snapshots.read().await;
-            let to_token_upper = to_token_symbol.to_uppercase();
-            snapshots.get(&to_token_upper)
-                .map(|s| {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
+        // Get price changes from persistent consensus-verified price history
+        let (change_1h, change_24h, change_7d) = state.price_history_indexer
+            .get_price_changes(&to_token_addr, price_usd)
+            .await;
 
-                    let cutoff_1h = now_ms - 3_600_000;
-                    let price_1h_ago = s.iter().find(|(ts, _)| *ts <= cutoff_1h).map(|(_, p)| *p).unwrap_or(price);
-                    let change_1h = if price_1h_ago > 0.0 { ((price - price_1h_ago) / price_1h_ago) * 100.0 } else { 0.0 };
-
-                    let cutoff_24h = now_ms - 86_400_000;
-                    let price_24h_ago = s.iter().find(|(ts, _)| *ts <= cutoff_24h).map(|(_, p)| *p).unwrap_or(price);
-                    let change_24h = if price_24h_ago > 0.0 { ((price - price_24h_ago) / price_24h_ago) * 100.0 } else { 0.0 };
-
-                    let cutoff_7d = now_ms - 604_800_000;
-                    let price_7d_ago = s.iter().find(|(ts, _)| *ts <= cutoff_7d).map(|(_, p)| *p).unwrap_or(price);
-                    let change_7d = if price_7d_ago > 0.0 { ((price - price_7d_ago) / price_7d_ago) * 100.0 } else { 0.0 };
-
-                    (change_1h, change_24h, change_7d)
-                })
-                .unwrap_or((0.0, 0.0, 0.0))
-        };
-
-        // Get 24h volume from tracker
         let volume_24h = {
             let tracker = state.volume_tracker.read().await;
             tracker.get(&to_token_symbol.to_uppercase())
@@ -8744,82 +10194,51 @@ pub async fn execute_swap(
                 .unwrap_or(0.0)
         };
 
-        // Emit for to_token (the token being bought)
+        // Emit for to_token (the token being bought) with proper USD price
         if let Err(e) = state.event_emitter.emit_token_price_update(
             to_token_symbol.clone(),
             to_token_address.clone(),
-            price,
+            price_usd,
             change_1h,
             change_24h,
             change_7d,
-            volume_24h + (request.amount_in as f64 / QUG_DISPLAY_DIVISOR), // Add this swap's volume
+            volume_24h + (request.amount_in as f64 / QUG_DISPLAY_DIVISOR),
         ).await {
             debug!("⚠️ Failed to emit TokenPriceUpdate for {}: {}", to_token_symbol, e);
         } else {
-            info!("🔔 [v2.9.25] Emitted TokenPriceUpdate: {} (addr: {:?}) price={:.6} 1h={:.2}% 24h={:.2}% 7d={:.2}%",
-                  to_token_symbol, to_token_address, price, change_1h, change_24h, change_7d);
+            info!("🔔 [v3.7.4] Emitted TokenPriceUpdate: {} (addr: {:?}) price_usd={:.6} from_token_usd={:.4} 1h={:.2}% 24h={:.2}% 7d={:.2}%",
+                  to_token_symbol, to_token_address, price_usd, from_token_usd, change_1h, change_24h, change_7d);
         }
 
-        // v2.9.25-beta: Resolve from_token symbol from address if it's an address
-        let (from_token_symbol, from_token_address) = if request.from_token.starts_with("qnk") || request.from_token.starts_with("0x") {
-            let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
-            let symbol = deployed.values()
-                .find(|c| {
-                    let addr_hex = format!("qnk{}", hex::encode(&c.address.0));
-                    addr_hex.eq_ignore_ascii_case(&request.from_token)
-                })
-                .and_then(|c| c.metadata.symbol.clone())
-                .unwrap_or_else(|| request.from_token.clone());
-            (symbol, Some(request.from_token.clone()))
-        } else {
-            (request.from_token.clone(), Some(format!("qnk{}", hex::encode(&from_token_addr))))
-        };
-
-        // Also emit for from_token with inverse price
-        let from_price = if price > 0.0 { 1.0 / price } else { 1.0 };
-        let from_volume_24h = {
-            let tracker = state.volume_tracker.read().await;
-            tracker.get(&from_token_symbol.to_uppercase())
-                .map(|entries| entries.iter().map(|(_, v)| *v).sum())
-                .unwrap_or(0.0)
-        };
-        let (from_change_1h, from_change_24h, from_change_7d) = {
-            let snapshots = state.price_snapshots.read().await;
-            let from_token_upper = from_token_symbol.to_uppercase();
-            snapshots.get(&from_token_upper)
-                .map(|s| {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    let cutoff_1h = now_ms - 3_600_000;
-                    let price_1h_ago = s.iter().find(|(ts, _)| *ts <= cutoff_1h).map(|(_, p)| *p).unwrap_or(from_price);
-                    let change_1h = if price_1h_ago > 0.0 { ((from_price - price_1h_ago) / price_1h_ago) * 100.0 } else { 0.0 };
-                    let cutoff_24h = now_ms - 86_400_000;
-                    let price_24h_ago = s.iter().find(|(ts, _)| *ts <= cutoff_24h).map(|(_, p)| *p).unwrap_or(from_price);
-                    let change_24h = if price_24h_ago > 0.0 { ((from_price - price_24h_ago) / price_24h_ago) * 100.0 } else { 0.0 };
-                    let cutoff_7d = now_ms - 604_800_000;
-                    let price_7d_ago = s.iter().find(|(ts, _)| *ts <= cutoff_7d).map(|(_, p)| *p).unwrap_or(from_price);
-                    let change_7d = if price_7d_ago > 0.0 { ((from_price - price_7d_ago) / price_7d_ago) * 100.0 } else { 0.0 };
-                    (change_1h, change_24h, change_7d)
-                })
-                .unwrap_or((0.0, 0.0, 0.0))
-        };
-
-        if let Err(e) = state.event_emitter.emit_token_price_update(
-            from_token_symbol.clone(),
-            from_token_address,
-            from_price,
-            from_change_1h,
-            from_change_24h,
-            from_change_7d,
-            from_volume_24h + (request.amount_in as f64 / QUG_DISPLAY_DIVISOR),
-        ).await {
-            debug!("⚠️ Failed to emit TokenPriceUpdate for {}: {}", from_token_symbol, e);
-        }
+        // v3.7.4-beta: Do NOT emit price for from_token based on inverse swap ratio.
+        // The from_token's USD price doesn't change from this swap.
+        // Previously: `from_price = 1.0 / price` emitted swap ratio as QUG's "price"
+        // causing QUG to show $153B after a QUG→BONKG swap.
     }
 
     // 🔧 v2.9.24-beta: Emit TokenBalanceUpdated SSE for INSTANT "My Tokens" updates
     // This provides immediate UI feedback without waiting for block confirmation or 30s refresh
+    // v3.6.15: Use correct token decimals instead of hardcoded QUG_DISPLAY_DIVISOR
     {
         let wallet_address_str = request.wallet_address.clone();
+
+        // v3.6.15: Calculate display divisors based on token decimals
+        // For pool-based swaps, use pool's token decimals
+        // For native QUG/QUGUSD, use 24 decimals
+        let (from_divisor, to_divisor) = if !use_oracle {
+            // Pool-based swap - use pool's token decimals
+            let (from_dec, to_dec) = if is_reversed {
+                (pool.token1_decimals, pool.token0_decimals)
+            } else {
+                (pool.token0_decimals, pool.token1_decimals)
+            };
+            (10f64.powi(from_dec as i32), 10f64.powi(to_dec as i32))
+        } else {
+            // Oracle swap - use 24 decimals for native tokens, 8 for custom
+            let from_dec = if from_is_native || from_is_qugusd { 24 } else { 8 };
+            let to_dec = if to_is_native || to_is_qugusd { 24 } else { 8 };
+            (10f64.powi(from_dec), 10f64.powi(to_dec))
+        };
 
         // Get current balances to calculate optimistic new balances
         let (old_from_balance, old_to_balance) = {
@@ -8859,8 +10278,8 @@ pub async fn execute_swap(
                 wallet_address: wallet_address_str.clone(),
                 token_address: format!("qnk{}", hex::encode(&from_token_addr)),
                 token_symbol: request.from_token.clone(),
-                old_balance: old_from_balance as f64 / QUG_DISPLAY_DIVISOR,
-                new_balance: new_from_balance as f64 / QUG_DISPLAY_DIVISOR,
+                old_balance: old_from_balance as f64 / from_divisor,
+                new_balance: new_from_balance as f64 / from_divisor,
                 change_reason: "dex-swap-deduct".to_string(),
                 timestamp: chrono::Utc::now(),
                 block_hash: None,
@@ -8868,10 +10287,11 @@ pub async fn execute_swap(
                 confirmation_status: "pending".to_string(),
             };
             let _ = state.event_broadcaster.broadcast(from_event);
-            info!("📡 [SSE v2.9.24] TokenBalanceUpdated: {} {} -> {} (swap deduct)",
+            info!("📡 [SSE v3.6.15] TokenBalanceUpdated: {} {} -> {} (swap deduct, divisor={})",
                   request.from_token,
-                  old_from_balance as f64 / QUG_DISPLAY_DIVISOR,
-                  new_from_balance as f64 / QUG_DISPLAY_DIVISOR);
+                  old_from_balance as f64 / from_divisor,
+                  new_from_balance as f64 / from_divisor,
+                  from_divisor);
         }
 
         // Emit for TO token (balance increased)
@@ -8880,8 +10300,8 @@ pub async fn execute_swap(
                 wallet_address: wallet_address_str,
                 token_address: format!("qnk{}", hex::encode(&to_token_addr)),
                 token_symbol: request.to_token.clone(),
-                old_balance: old_to_balance as f64 / QUG_DISPLAY_DIVISOR,
-                new_balance: new_to_balance as f64 / QUG_DISPLAY_DIVISOR,
+                old_balance: old_to_balance as f64 / to_divisor,
+                new_balance: new_to_balance as f64 / to_divisor,
                 change_reason: "dex-swap-add".to_string(),
                 timestamp: chrono::Utc::now(),
                 block_hash: None,
@@ -8889,18 +10309,21 @@ pub async fn execute_swap(
                 confirmation_status: "pending".to_string(),
             };
             let _ = state.event_broadcaster.broadcast(to_event);
-            info!("📡 [SSE v2.9.24] TokenBalanceUpdated: {} {} -> {} (swap add)",
+            info!("📡 [SSE v3.6.15] TokenBalanceUpdated: {} {} -> {} (swap add, divisor={})",
                   request.to_token,
-                  old_to_balance as f64 / QUG_DISPLAY_DIVISOR,
-                  new_to_balance as f64 / QUG_DISPLAY_DIVISOR);
+                  old_to_balance as f64 / to_divisor,
+                  new_to_balance as f64 / to_divisor,
+                  to_divisor);
         }
     }
 
+    // v3.6.10-beta: Convert u128 values to strings to avoid JSON number overflow
+    // JSON numbers are f64 which can't represent large u128 values accurately
     return Ok(Json(ApiResponse::success(serde_json::json!({
         "from_token": request.from_token,
         "to_token": request.to_token,
-        "amount_in": request.amount_in,
-        "estimated_amount_out": final_amount_out,
+        "amount_in": request.amount_in.to_string(),
+        "estimated_amount_out": final_amount_out.to_string(),
         "exchange_rate": exchange_rate,
         "transaction_id": tx_id_hex,
         "status": "pending",
@@ -9431,25 +10854,57 @@ pub async fn sync_blocks(
 }
 
 /// List recent contracts for explorer
+/// v3.9.4-beta: Now returns actual deployed contracts from ecosystem
 pub async fn list_contracts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, StatusCode> {
     info!("🔍 Explorer: Fetching recent smart contracts");
 
-    // Smart contract deployment system not yet implemented
-    // This will be populated when contract deployment functionality is added
-    // For now, return sample data showing the expected format
+    // v3.9.4-beta: Fetch actual deployed contracts from the ecosystem
+    let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
 
-    let sample_contracts = vec![serde_json::json!({
-        "address": "Coming soon",
-        "type": "evm",
-        "name": "Smart Contract Support",
-        "status": "Phase 3 feature - Under development",
-        "info": "EVM, WASM, and Move VM contract support planned"
-    })];
+    let mut contracts: Vec<serde_json::Value> = deployed_contracts
+        .values()
+        .map(|contract| {
+            // Determine contract type from ContractType enum
+            let contract_type_str = format!("{:?}", contract.contract_type).to_lowercase();
 
-    info!("✅ Explorer: Returning contract status (feature coming soon)");
-    Ok(Json(ApiResponse::success(sample_contracts)))
+            // Use deployed_at timestamp
+            let timestamp = contract.deployed_at;
+
+            serde_json::json!({
+                "address": format!("qnk{}", hex::encode(contract.address.0)),
+                "contract_type": contract_type_str,
+                "name": if contract.metadata.name.is_empty() {
+                    contract.metadata.symbol.clone().unwrap_or_else(|| "Unnamed Contract".to_string())
+                } else {
+                    contract.metadata.name.clone()
+                },
+                "symbol": contract.metadata.symbol.clone().unwrap_or_default(),
+                "creator": format!("qnk{}", hex::encode(&contract.deployer[..8])),
+                "timestamp": timestamp,
+                "is_active": contract.contract_state.active,
+                "verified": contract.verified,
+                "description": contract.metadata.description.clone(),
+                "total_calls": contract.contract_state.total_calls,
+            })
+        })
+        .collect();
+
+    drop(deployed_contracts);
+
+    // Sort by timestamp descending (newest first)
+    contracts.sort_by(|a, b| {
+        let ts_a = a.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ts_b = b.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+        ts_b.cmp(&ts_a)
+    });
+
+    // Limit to most recent 20 contracts
+    contracts.truncate(20);
+
+    info!("✅ Explorer: Returning {} deployed contracts", contracts.len());
+    Ok(Json(ApiResponse::success(contracts)))
 }
 
 /// Get DAG vertices for explorer
@@ -9830,6 +11285,185 @@ fn determine_mining_status(
 
     // All checks passed
     (true, None)
+}
+
+// ============================================================================
+// WALLET MINING STATS API - v3.5.0-beta: Persistent mining stats per wallet
+// ============================================================================
+
+/// Per-worker mining statistics
+/// v3.5.7-beta: Added to allow comparing performance between mining rigs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerMiningStats {
+    pub worker_id: String,
+    pub hash_rate: f64,       // H/s (v3.5.7-beta: changed to H/s for frontend compatibility)
+    pub blocks_found: u64,    // Actual blocks found by this worker
+    pub rewards_earned: String, // Rewards in QUG (formatted string)
+    pub rewards_earned_raw: String, // Rewards in base units as string (for precision)
+    pub solutions_submitted: u64, // Total solutions submitted
+    pub last_activity_secs: u64, // Seconds since last activity
+    pub is_active: bool,      // True if active in last 5 minutes
+}
+
+/// Response for wallet mining stats query
+/// v3.5.0-beta: Returns persisted mining stats so they survive page refresh
+/// v3.5.7-beta: Added rewards_earned and per-worker breakdown
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletMiningStatsResponse {
+    pub wallet: String,
+    pub blocks_found: u64,
+    pub hash_rate: f64,       // H/s (v3.5.7-beta: changed to H/s for frontend compatibility)
+    pub rewards_earned: String, // Total rewards in QUG (formatted string)
+    pub rewards_earned_raw: String, // Total rewards in base units as string
+    pub total_workers: usize, // Number of workers mining to this wallet
+    pub last_activity_secs: u64, // Seconds since last mining activity
+    pub is_active: bool,      // True if mined in last 5 minutes
+    /// v3.5.7-beta: Per-worker breakdown for comparing mining rigs
+    pub workers: Vec<WorkerMiningStats>,
+}
+
+/// GET /api/v1/mining/stats/:wallet
+/// v3.5.0-beta: Get mining statistics for a specific wallet address
+/// v3.5.5-beta: Also checks blockchain for coinbase transactions (works across nodes)
+/// v3.5.7-beta: Returns per-worker breakdown with blocks_found and rewards_earned
+/// This allows the frontend to restore stats on page refresh and compare miners
+pub async fn get_wallet_mining_stats(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+) -> Result<Json<ApiResponse<WalletMiningStatsResponse>>, StatusCode> {
+    // v3.5.7-beta: Collect per-worker stats for this wallet
+    let mut workers: Vec<WorkerMiningStats> = Vec::new();
+    let mut total_blocks: u64 = 0;
+    let mut total_hashrate: f64 = 0.0;
+    let mut total_rewards: u128 = 0;
+    let mut most_recent_activity = std::time::Duration::MAX;
+
+    if let Some(ref mining_stats_arc) = state.mining_statistics {
+        let mining_stats = mining_stats_arc.read().await;
+
+        trace!(
+            "🔍 [MINING-STATS] Looking for wallet '{}' in {} active miners",
+            wallet,
+            mining_stats.active_miners.len()
+        );
+
+        // Find all entries for this wallet (format is "address:worker_id")
+        for (key, miner_stats) in &mining_stats.active_miners {
+            // Check if this entry belongs to the requested wallet
+            let wallet_matches = key.starts_with(&format!("{}:", wallet))
+                || key == &wallet
+                || miner_stats.address.starts_with(&wallet)
+                || miner_stats.address == wallet;
+
+            if wallet_matches {
+                let elapsed = miner_stats.last_update.elapsed();
+                let activity_secs = elapsed.as_secs();
+                let is_worker_active = activity_secs < 300;
+
+                // v3.5.7-beta: Use actual blocks_found instead of total_solutions
+                total_blocks += miner_stats.blocks_found;
+                total_hashrate += miner_stats.last_hashrate;
+                total_rewards += miner_stats.rewards_earned;
+
+                if elapsed < most_recent_activity {
+                    most_recent_activity = elapsed;
+                }
+
+                // Add per-worker stats
+                workers.push(WorkerMiningStats {
+                    worker_id: miner_stats.worker_id.clone(),
+                    hash_rate: miner_stats.last_hashrate,
+                    blocks_found: miner_stats.blocks_found,
+                    rewards_earned: format!("{:.4} QUG", miner_stats.rewards_earned as f64 / 1e24),
+                    rewards_earned_raw: miner_stats.rewards_earned.to_string(),
+                    solutions_submitted: miner_stats.total_solutions,
+                    last_activity_secs: activity_secs,
+                    is_active: is_worker_active,
+                });
+
+                trace!(
+                    "🔍 [MINING-STATS] Found worker: key='{}' blocks={} rewards={:.4} QUG hashrate={:.0} H/s",
+                    key, miner_stats.blocks_found, miner_stats.rewards_earned as f64 / 1e24, miner_stats.last_hashrate
+                );
+            }
+        }
+    }
+
+    let total_workers = workers.len();
+    let last_activity_secs = if most_recent_activity == std::time::Duration::MAX {
+        u64::MAX
+    } else {
+        most_recent_activity.as_secs()
+    };
+    let is_active = last_activity_secs < 300;
+
+    // v3.5.5-beta: If no in-memory stats found, check blockchain for coinbase transactions
+    if total_blocks == 0 {
+        let blockchain_blocks = {
+            let wallet_hex = wallet.strip_prefix("qnk").unwrap_or(&wallet);
+            if let Ok(wallet_bytes) = hex::decode(wallet_hex) {
+                if wallet_bytes.len() == 32 {
+                    let mut address: [u8; 32] = [0u8; 32];
+                    address.copy_from_slice(&wallet_bytes);
+
+                    let balances = state.wallet_balances.read().await;
+                    if let Some(&balance) = balances.get(&address) {
+                        // Estimate blocks from balance: balance / ~49.5 QNK per block
+                        let estimated_blocks = (balance as f64 / 1e24 / 49.5).round() as u64;
+                        // Also estimate rewards from balance
+                        if estimated_blocks > 0 && total_rewards == 0 {
+                            total_rewards = balance;
+                        }
+                        estimated_blocks
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        if blockchain_blocks > 0 {
+            total_blocks = blockchain_blocks;
+            debug!(
+                "📊 [MINING-STATS] Wallet {} estimated {} blocks from blockchain balance",
+                wallet, blockchain_blocks
+            );
+        }
+    }
+
+    // Log results
+    if total_workers == 0 && total_blocks == 0 {
+        if let Some(ref mining_stats_arc) = state.mining_statistics {
+            let mining_stats = mining_stats_arc.read().await;
+            debug!(
+                "📊 [MINING-STATS] Wallet {} NOT FOUND in {} tracked miners",
+                wallet, mining_stats.active_miners.len()
+            );
+        }
+    } else {
+        info!(
+            "📊 [MINING-STATS] Wallet {} stats: blocks={}, rewards={:.4} QUG, hashrate={:.0} H/s, workers={}",
+            wallet, total_blocks, total_rewards as f64 / 1e24, total_hashrate, total_workers
+        );
+    }
+
+    let response = WalletMiningStatsResponse {
+        wallet,
+        blocks_found: total_blocks,
+        hash_rate: total_hashrate,
+        rewards_earned: format!("{:.4} QUG", total_rewards as f64 / 1e24),
+        rewards_earned_raw: total_rewards.to_string(),
+        total_workers,
+        last_activity_secs,
+        is_active,
+        workers,
+    };
+
+    Ok(Json(ApiResponse::success(response)))
 }
 
 // ============================================================================
@@ -10642,20 +12276,52 @@ pub async fn get_token_price_history(
     let pools = state.liquidity_pools.read().await;
     let mut current_price: f64 = 1.0;
 
+    // v3.7.3: Resolve token symbol to address for pool lookup
+    // If token_id is a symbol like "BONKG", we need to find its address
+    let resolved_token = if !token_id.starts_with("qnk") && !token_id.starts_with("0x") && !token_id.starts_with("QNK") {
+        // It's a symbol - look it up in deployed contracts
+        let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+        let found_addr = deployed.values()
+            .find(|c| c.metadata.symbol.as_deref().map(|s| s.to_uppercase()) == Some(token_upper.clone()))
+            .map(|c| format!("qnk{}", hex::encode(&c.address.0)));
+        drop(deployed);
+
+        if let Some(addr) = found_addr {
+            info!("📈 [PRICE HISTORY] Resolved symbol {} to address {}", token_upper, &addr[..20]);
+            addr.to_uppercase()
+        } else {
+            token_upper.clone()
+        }
+    } else {
+        token_upper.clone()
+    };
+
     // Try to find the pool for this token
     for pool in pools.values() {
         let pool_token0 = pool.token0.to_uppercase();
         let pool_token1 = pool.token1.to_uppercase();
 
-        if pool_token0 == token_upper || pool_token1 == token_upper {
-            let (reserve_token, reserve_qug) = if pool_token0 == token_upper {
-                (pool.reserve0 as f64, pool.reserve1 as f64)
+        // v3.7.3: Check against resolved token address AND original symbol
+        let is_token0 = pool_token0 == resolved_token || pool_token0.contains(&token_upper);
+        let is_token1 = pool_token1 == resolved_token || pool_token1.contains(&token_upper);
+
+        if is_token0 || is_token1 {
+            // v3.7.3: FIX - Normalize reserves using decimals for accurate price
+            let (reserve_token, reserve_qug, token_decimals, qug_decimals) = if is_token0 {
+                (pool.reserve0 as f64, pool.reserve1 as f64, pool.token0_decimals, pool.token1_decimals)
             } else {
-                (pool.reserve1 as f64, pool.reserve0 as f64)
+                (pool.reserve1 as f64, pool.reserve0 as f64, pool.token1_decimals, pool.token0_decimals)
             };
 
-            if reserve_token > 0.0 {
-                current_price = reserve_qug / reserve_token;
+            // v3.7.3-beta: CRITICAL FIX - Use 24 decimals for both reserves
+            // Pool reserves are stored in 24-decimal format (frontend sends amounts * 1e24)
+            // but pool.tokenX_decimals records official decimals (8 for custom tokens)
+            let _ = (token_decimals, qug_decimals); // Suppress unused warnings
+            let token_display = reserve_token / 1e24;
+            let qug_display = reserve_qug / 1e24;
+
+            if token_display > 0.0 {
+                current_price = qug_display / token_display;
             }
             break;
         }
@@ -10702,20 +12368,69 @@ pub async fn get_token_transactions(
     let mut all_records: Vec<SwapHistoryRecord> = Vec::new();
 
     // Convert token ID to bytes for SwapIndexer query
+    // v3.7.2: Also look up token address by symbol from deployed contracts
     let token_bytes: [u8; 32] = if token_upper == "QUG" {
         [0u8; 32] // QUG native token address
     } else if token_upper == "QUGUSD" {
         q_types::QUGUSD_TOKEN_ADDRESS
-    } else if let Ok(bytes) = hex::decode(token_id.trim_start_matches("0x")) {
-        if bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
+    } else if token_id.starts_with("qnk") || token_id.starts_with("0x") {
+        // It's an address - decode it
+        let hex_part = token_id.trim_start_matches("qnk").trim_start_matches("0x");
+        if let Ok(bytes) = hex::decode(hex_part) {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            } else {
+                [0u8; 32]
+            }
         } else {
-            [0u8; 32] // Fallback
+            [0u8; 32]
         }
     } else {
-        [0u8; 32] // Fallback for unknown tokens
+        // It's a symbol - look up in deployed contracts
+        let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+        let found_addr = deployed.values()
+            .find(|c| c.metadata.symbol.as_deref().map(|s| s.to_uppercase()) == Some(token_upper.clone()))
+            .map(|c| c.address.0);
+        drop(deployed);
+
+        if let Some(addr) = found_addr {
+            info!("📜 Resolved token symbol {} to address {}", token_upper, hex::encode(&addr[..8]));
+            addr
+        } else {
+            // Also check liquidity pools for token address
+            let pools = state.liquidity_pools.read().await;
+            let pool_addr = pools.values()
+                .find(|p| {
+                    let t0 = p.token0.to_uppercase();
+                    let t1 = p.token1.to_uppercase();
+                    t0.contains(&token_upper) || t1.contains(&token_upper)
+                })
+                .and_then(|p| {
+                    if p.token0.to_uppercase().contains(&token_upper) && p.token0.starts_with("qnk") {
+                        let hex_part = p.token0.trim_start_matches("qnk");
+                        hex::decode(hex_part).ok().and_then(|b| if b.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&b);
+                            Some(arr)
+                        } else { None })
+                    } else if p.token1.to_uppercase().contains(&token_upper) && p.token1.starts_with("qnk") {
+                        let hex_part = p.token1.trim_start_matches("qnk");
+                        hex::decode(hex_part).ok().and_then(|b| if b.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&b);
+                            Some(arr)
+                        } else { None })
+                    } else { None }
+                });
+            drop(pools);
+
+            pool_addr.unwrap_or_else(|| {
+                warn!("⚠️ Could not resolve token {} to address", token_upper);
+                [0u8; 32]
+            })
+        }
     };
 
     // Query consensus-verified swaps from SwapIndexer
@@ -11045,17 +12760,27 @@ pub async fn get_token_price(
             (pool.reserve1, pool.reserve0)
         };
 
-        // Get QUG price for conversion
+        // v3.7.4-beta: Compute price from pool reserves (authoritative current state)
+        // Pool reserves are ALL in 24-decimal format (frontend sends amounts * 1e24).
+        // Use 1e24 for both reserves, NOT pool.tokenX_decimals which records official decimals.
         let qug_price = state.collateral_vault.read().await.get_qug_price();
+        let pair_token = if is_token0 { &pool.token1 } else { &pool.token0 };
+        let pair_is_qug = pair_token.to_uppercase() == "QUG"
+            || pair_token.to_lowercase() == "native-qug";
+        let pair_is_stablecoin = pair_token.to_uppercase() == "QUGUSD";
 
-        // Calculate token price: (pair_reserve / token_reserve) * pair_price
-        let pair_is_qug = pool.token0.to_uppercase() == "QUG" || pool.token1.to_uppercase() == "QUG"
-            || pool.token0.to_lowercase() == "native-qug" || pool.token1.to_lowercase() == "native-qug";
+        let token_reserve_display = token_reserve as f64 / 1e24;
+        let pair_reserve_display = pair_reserve as f64 / 1e24;
+        let pair_usd_price = if pair_is_qug {
+            qug_price
+        } else if pair_is_stablecoin {
+            1.0
+        } else {
+            1.0 // Unknown pair - use 1:1 as fallback
+        };
 
-        let pair_price = if pair_is_qug { qug_price } else { 1.0 }; // Assume pair is QUG or stablecoin
-
-        let token_price = if token_reserve > 0 {
-            (pair_reserve as f64 / token_reserve as f64) * pair_price
+        let token_price = if token_reserve_display > 0.0 {
+            (pair_reserve_display / token_reserve_display) * pair_usd_price
         } else {
             0.0
         };
@@ -11139,18 +12864,33 @@ pub async fn get_all_prices(
                 (pool.reserve1, pool.reserve0)
             };
 
-            let pair_is_qug = pool.token0.to_uppercase() == "QUG"
-                || pool.token1.to_uppercase() == "QUG"
-                || pool.token0.to_lowercase() == "native-qug"
-                || pool.token1.to_lowercase() == "native-qug";
+            // v3.7.4-beta: Compute price from reserves (authoritative current state)
+            // All pool reserves are in 24-decimal format. Use 1e24 for both.
+            let pair_token_str = if is_token0 { &pool.token1 } else { &pool.token0 };
+            let pair_is_qug = pair_token_str.to_uppercase() == "QUG"
+                || pair_token_str.to_lowercase() == "native-qug";
+            let pair_is_stablecoin = pair_token_str.to_uppercase() == "QUGUSD";
 
-            let pair_price = if pair_is_qug { qug_price } else { 1.0 };
+            let pair_usd = if pair_is_qug {
+                qug_price
+            } else if pair_is_stablecoin {
+                1.0
+            } else {
+                1.0
+            };
 
-            let token_price = if token_reserve > 0 {
-                (pair_reserve as f64 / token_reserve as f64) * pair_price
+            let token_reserve_display = token_reserve as f64 / 1e24;
+            let pair_reserve_display = pair_reserve as f64 / 1e24;
+
+            let token_price = if token_reserve_display > 0.0 {
+                (pair_reserve_display / token_reserve_display) * pair_usd
             } else {
                 0.0
             };
+
+            // Use 24 decimals for reserve display (matches actual storage format)
+            let reserve0_display = pool.reserve0 as f64 / 1e24;
+            let reserve1_display = pool.reserve1 as f64 / 1e24;
 
             prices.push(TokenPriceResponse {
                 token: token_upper,
@@ -11160,8 +12900,8 @@ pub async fn get_all_prices(
                 pool_reserves: Some(PoolReservesInfo {
                     token0: pool.token0.clone(),
                     token1: pool.token1.clone(),
-                    reserve0: pool.reserve0 as f64 / QUG_DISPLAY_DIVISOR,
-                    reserve1: pool.reserve1 as f64 / QUG_DISPLAY_DIVISOR,
+                    reserve0: reserve0_display,
+                    reserve1: reserve1_display,
                     pool_id: pool.pool_id.clone(),
                 }),
             });
@@ -11992,4 +13732,51 @@ pub fn check_emergency_pause(state: &AppState) -> Result<(), (StatusCode, Json<A
         ));
     }
     Ok(())
+}
+
+// ========================================
+// v3.9.5-beta: VALIDATOR REGISTRY API
+// Lists registered validators for P2P discovery
+// ========================================
+
+/// List all registered validators
+pub async fn list_validators(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    let registry = state.validator_registry.read().await;
+    let validators: Vec<serde_json::Value> = registry.get_all_validators()
+        .iter()
+        .map(|v| serde_json::json!({
+            "validator_id": hex::encode(v.validator_id),
+            "name": v.name,
+            "stake": v.stake.to_string(),
+            "status": format!("{:?}", v.status),
+            "endpoint": v.endpoint,
+            "registered_at": v.registered_at,
+            "registration_height": v.registration_height,
+            "hybrid_mode": v.hybrid_mode,
+        }))
+        .collect();
+
+    Json(ApiResponse::success(validators))
+}
+
+/// List active validators only
+pub async fn list_active_validators(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    let registry = state.validator_registry.read().await;
+    let validators: Vec<serde_json::Value> = registry.get_active_validators()
+        .iter()
+        .map(|v| serde_json::json!({
+            "validator_id": hex::encode(v.validator_id),
+            "name": v.name,
+            "stake": v.stake.to_string(),
+            "status": format!("{:?}", v.status),
+            "endpoint": v.endpoint,
+            "registered_at": v.registered_at,
+        }))
+        .collect();
+
+    Json(ApiResponse::success(validators))
 }

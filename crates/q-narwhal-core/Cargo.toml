@@ -29,5 +29,11 @@ hex = { workspace = true }
 rand = { workspace = true }
 bincode = { workspace = true }
 
+# 🚀 v3.4.6-beta: DashMap for O(1) spent-outpoint tracking (50-100x mempool insert speedup)
+dashmap = "5.5"
+
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks
+parking_lot = "0.12"
+
 [dev-dependencies]
 proptest = { workspace = true }

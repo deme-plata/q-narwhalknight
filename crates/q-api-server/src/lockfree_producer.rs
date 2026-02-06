@@ -161,6 +161,20 @@ pub enum ProducerCommand {
         dag_knight: Arc<q_dag_knight::DAGKnightConsensus>,
     },
 
+    /// 📦 v3.5.14-beta: Set production mempool for user transaction inclusion
+    /// When set, blocks will include fee-ordered user transactions from the mempool
+    /// This is CRITICAL for P2P transaction propagation to work!
+    SetProductionMempool {
+        mempool: Arc<q_narwhal_core::production_mempool::ProductionMempool>,
+    },
+
+    /// 📦 v3.5.20-beta: Set transaction status tracker for P2P transaction confirmations
+    /// When set, transactions will be marked as Confirmed after block inclusion
+    /// This is CRITICAL for P2P transactions to show as confirmed in explorer!
+    SetTxStatus {
+        tx_status: Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>,
+    },
+
     /// Shutdown the producer task gracefully
     Shutdown,
 }
@@ -360,6 +374,22 @@ impl LockFreeProducer {
                     producer.set_dag_knight(dag_knight);
                     info!(
                         "⚔️  Producer #{}: DAG-Knight consensus set for dag_parents population",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetProductionMempool { mempool } => {
+                    producer.set_production_mempool(mempool);
+                    info!(
+                        "📦 Producer #{}: Production mempool set for user transaction inclusion",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetTxStatus { tx_status } => {
+                    producer.set_tx_status(tx_status);
+                    info!(
+                        "📦 Producer #{}: Transaction status tracker set for P2P confirmations",
                         producer_id
                     );
                 }
@@ -599,6 +629,22 @@ impl LockFreeProducer {
                     producer.set_dag_knight(dag_knight);
                     info!(
                         "⚔️  Producer #{}: DAG-Knight consensus set for dag_parents population (storage loop)",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetProductionMempool { mempool } => {
+                    producer.set_production_mempool(mempool);
+                    info!(
+                        "📦 Producer #{}: Production mempool set for user transaction inclusion (storage loop)",
+                        producer_id
+                    );
+                }
+
+                ProducerCommand::SetTxStatus { tx_status } => {
+                    producer.set_tx_status(tx_status);
+                    info!(
+                        "📦 Producer #{}: Transaction status tracker set for P2P confirmations (storage loop)",
                         producer_id
                     );
                 }
@@ -1015,6 +1061,50 @@ impl LockFreeProducer {
         } else {
             info!(
                 "🔔 Producer #{}: Sent SetEventEmitter command",
+                self.producer_id
+            );
+        }
+    }
+
+    /// Set production mempool for user transaction inclusion
+    /// 📦 v3.5.14-beta: Enable P2P transaction propagation
+    ///
+    /// When a production mempool is set, blocks will include fee-ordered user transactions.
+    /// This is CRITICAL for P2P transaction propagation to work - without it, user transactions
+    /// received via gossipsub will be queued but never included in blocks!
+    pub fn set_production_mempool(&self, mempool: Arc<q_narwhal_core::production_mempool::ProductionMempool>) {
+        let cmd = ProducerCommand::SetProductionMempool { mempool };
+
+        if let Err(e) = self.command_tx.try_send(cmd) {
+            error!(
+                "Producer #{}: Failed to send SetProductionMempool command: {:?}",
+                self.producer_id, e
+            );
+        } else {
+            info!(
+                "📦 Producer #{}: Sent SetProductionMempool command",
+                self.producer_id
+            );
+        }
+    }
+
+    /// Set transaction status tracker for P2P transaction confirmations
+    /// 📦 v3.5.20-beta: Enable transaction status updates after block inclusion
+    ///
+    /// When a tx_status tracker is set, transactions will be marked as Confirmed
+    /// after they are included in a block. This is CRITICAL for P2P transactions
+    /// to show as confirmed in the explorer!
+    pub fn set_tx_status(&self, tx_status: Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>) {
+        let cmd = ProducerCommand::SetTxStatus { tx_status };
+
+        if let Err(e) = self.command_tx.try_send(cmd) {
+            error!(
+                "Producer #{}: Failed to send SetTxStatus command: {:?}",
+                self.producer_id, e
+            );
+        } else {
+            info!(
+                "📦 Producer #{}: Sent SetTxStatus command",
                 self.producer_id
             );
         }
@@ -1964,6 +2054,39 @@ impl LockFreeProducerPool {
             producer.set_event_emitter(emitter.clone());
         }
         info!("✅ [SSE] Event emitter sent to all producers");
+    }
+
+    /// Set production mempool for all producers
+    /// 📦 v3.5.14-beta: Enable P2P transaction propagation across all producers
+    ///
+    /// This sends the SetProductionMempool command to all producer tasks,
+    /// enabling user transactions from the mempool to be included in produced blocks.
+    /// This is CRITICAL for P2P transaction propagation to work!
+    pub fn set_production_mempool(&self, mempool: Arc<q_narwhal_core::production_mempool::ProductionMempool>) {
+        info!(
+            "📦 [MEMPOOL] Setting production mempool for all {} producers...",
+            self.num_producers
+        );
+        for producer in &self.producers {
+            producer.set_production_mempool(mempool.clone());
+        }
+        info!("✅ [MEMPOOL] Production mempool sent to all producers - user transactions will be included in blocks!");
+    }
+
+    /// 📦 v3.5.20-beta: Enable P2P transaction status tracking across all producers
+    ///
+    /// This sends the tx_status map to all producer tasks, enabling
+    /// transactions to be marked as Confirmed after block inclusion.
+    /// This is CRITICAL for P2P transactions to show as confirmed in explorer!
+    pub fn set_tx_status(&self, tx_status: Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>) {
+        info!(
+            "📦 [TX-STATUS] Setting transaction status tracker for all {} producers...",
+            self.num_producers
+        );
+        for producer in &self.producers {
+            producer.set_tx_status(tx_status.clone());
+        }
+        info!("✅ [TX-STATUS] Transaction status tracker sent to all producers - P2P transactions will be confirmed!");
     }
 
     /// Shutdown all producers gracefully

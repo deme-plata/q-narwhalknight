@@ -150,6 +150,12 @@ impl TransactionBuilder {
             pqc_signature: None,
             signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            // v3.4.2-beta: ZK privacy fields (transparent by default)
+            zk_proof_bundle: None,
+            privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         };
 
         // Compute cryptographic transaction ID (SHA3-256 of canonical content)

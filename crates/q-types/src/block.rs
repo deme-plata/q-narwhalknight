@@ -25,10 +25,19 @@ mod u128_as_string {
     where
         S: Serializer,
     {
-        // v3.2.8-beta: RESTORED native u128 for Bincode storage compatibility
-        // Blocks are stored with Bincode which handles u128 natively
-        // P2P uses MessagePack which truncates u128, but blocks are sent as raw bytes
-        // so this doesn't affect P2P block transmission
+        // v3.4.14-beta: Fixed serialization to use native u128 for Bincode
+        //
+        // The issue: Different serializers handle u128 differently:
+        // - Bincode: Supports native u128 (16 bytes) - MUST use serialize_u128
+        // - CBOR: Does NOT support u128 natively - would need string
+        // - JSON: Uses string representation for large numbers
+        //
+        // Solution: Use native u128 serialization for all formats.
+        // For CBOR/P2P, we handle this at the transport layer by using
+        // MessagePack (rmp_serde) instead of CBOR for block sync.
+        //
+        // Bincode is_human_readable() = false and expects native types.
+        // Using serialize_str breaks Bincode deserialization completely!
         serializer.serialize_u128(*value)
     }
 
@@ -176,7 +185,9 @@ pub struct BlockHeader {
     #[serde(default)]
     pub producer_id: u8,
 
-    /// Total difficulty accumulated to this block (Bincode native u128)
+    /// Total difficulty accumulated to this block
+    /// v3.4.13: CRITICAL - Use u128_as_string for CBOR compatibility during P2P sync
+    #[serde(with = "u128_as_string")]
     pub total_difficulty: u128,
 
     // ============================================================================
@@ -305,15 +316,24 @@ pub struct MiningSolution {
 /// Balance update (v0.9.0-beta: Balance Consensus, v2.5.0: u128)
 /// Represents a deterministic balance state transition
 /// MUST be applied in order when processing blocks
+///
+/// v3.4.13-beta: CRITICAL FIX - Added u128_as_string for CBOR compatibility
+/// The BlockPackCodec uses CBOR serialization, which does NOT support u128 natively.
+/// Without this fix, syncing blocks with BalanceUpdate fails with:
+/// "The number can't be stored in CBOR"
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BalanceUpdate {
     /// Wallet address being updated
     pub address: super::Address,
 
-    /// v2.5.0: Balance before this update (u128 for extreme precision, Bincode native)
+    /// v2.5.0: Balance before this update (u128 for extreme precision)
+    /// v3.4.13: CRITICAL - Use u128_as_string for CBOR compatibility during P2P sync
+    #[serde(with = "u128_as_string")]
     pub old_balance: u128,
 
-    /// v2.5.0: Balance after this update (u128 for extreme precision, Bincode native)
+    /// v2.5.0: Balance after this update (u128 for extreme precision)
+    /// v3.4.13: CRITICAL - Use u128_as_string for CBOR compatibility during P2P sync
+    #[serde(with = "u128_as_string")]
     pub new_balance: u128,
 
     /// Reason for balance change

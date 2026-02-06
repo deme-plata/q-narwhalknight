@@ -2,9 +2,31 @@
 ///
 /// Comprehensive plugin architecture for the quantum consensus VM
 /// Adapted from Orobit Chimeras plugin system with Q-NarwhalKnight integration
+///
+/// ## Modules
+///
+/// - **plugin**: Core plugin types, management, and lifecycle
+/// - **vm**: VM integration, state management, and consensus context
+/// - **network**: P2P distribution protocol for plugin sharing
+/// - **persistence**: RocksDB-backed decentralized storage with consensus verification
+///
+/// ## Decentralized Plugin Architecture
+///
+/// Every node in the Q-NarwhalKnight network:
+/// 1. **Stores** plugins in local RocksDB with hash verification
+/// 2. **Verifies** plugin state using Ed25519/Dilithium5 signatures
+/// 3. **Replicates** via P2P gossipsub to all peers
+/// 4. **Achieves consensus** through DAG-Knight inclusion
+///
+/// This ensures truly decentralized plugin execution where every node
+/// independently verifies and stores plugin state.
+pub mod network;
+pub mod persistence;
 pub mod plugin;
 pub mod vm;
 
+pub use network::*;
+pub use persistence::*;
 pub use plugin::*;
 pub use vm::*;
 

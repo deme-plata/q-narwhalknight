@@ -528,6 +528,58 @@ pub async fn deploy_contract(
                 // v2.7.9-beta: Changed from u64 to u128 for larger token supplies (up to 10^38)
                 let decimal_multiplier = 10u128.pow(decimals);
 
+                // v3.6.18: Helper to parse scientific notation WITHOUT f64 to preserve precision
+                // Uses integer math to avoid floating-point errors on large numbers like 1e30
+                let parse_scientific_notation = |s: &str| -> Option<u128> {
+                    // Try direct u128 parse first (handles regular integers)
+                    if let Ok(n) = s.parse::<u128>() {
+                        return Some(n);
+                    }
+
+                    // v3.6.18: Parse scientific notation using integer math (no f64!)
+                    // This preserves full precision for numbers like "1e30"
+                    let s_lower = s.to_lowercase();
+                    let parts: Vec<&str> = s_lower.split('e').collect();
+                    if parts.len() == 2 {
+                        let mantissa_str = parts[0];
+                        let exp_str = parts[1].trim_start_matches('+');
+                        if let Ok(exponent) = exp_str.parse::<i32>() {
+                            if exponent >= 0 {
+                                // Parse mantissa, handling decimal point
+                                let mantissa_parts: Vec<&str> = mantissa_str.split('.').collect();
+                                let whole_part = mantissa_parts[0];
+                                let frac_part = if mantissa_parts.len() > 1 { mantissa_parts[1] } else { "" };
+
+                                // Combine whole and fractional parts, then adjust exponent
+                                let combined = format!("{}{}", whole_part, frac_part);
+                                let adjusted_exp = (exponent as usize).saturating_sub(frac_part.len());
+
+                                // Build the final number string
+                                let mut result_str = combined.trim_start_matches('0').to_string();
+                                if result_str.is_empty() {
+                                    result_str = "0".to_string();
+                                }
+
+                                // Add zeros for the exponent
+                                result_str.push_str(&"0".repeat(adjusted_exp));
+
+                                if let Ok(n) = result_str.parse::<u128>() {
+                                    tracing::info!("✅ [v3.6.18] Parsed scientific '{}' → {} (integer math, no f64)", s, n);
+                                    return Some(n);
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback: try f64 only for small values where precision doesn't matter
+                    if let Ok(f) = s.parse::<f64>() {
+                        if f >= 0.0 && f < 1e15 && f.is_finite() {  // Only use f64 for small values
+                            return Some(f as u128);
+                        }
+                    }
+                    None
+                };
+
                 let initial_supply_result: Option<u128> = if let Some(supply_u64) =
                     initial_supply_val.as_u64()
                 {
@@ -540,19 +592,69 @@ pub async fn deploy_contract(
                         base_units
                     );
                     Some(base_units)
+                } else if let Some(supply_f64) = initial_supply_val.as_f64() {
+                    // v3.6.18: Handle f64 values (scientific notation from JSON)
+                    // WARNING: JSON numbers like 1e30 are parsed as f64 by serde, causing precision loss!
+                    // f64 can only represent ~15-17 significant digits, so 1e30 becomes 1.000000019884624e30
+                    if supply_f64 >= 0.0 && supply_f64 <= u128::MAX as f64 && supply_f64.is_finite() {
+                        // v3.6.18: For large values (>1e15), round to nearest power of 10 to recover user intent
+                        // This assumes users enter round numbers like 1e30, not 1.234567890123456e30
+                        let supply_value = if supply_f64 >= 1e15 {
+                            // Find the exponent and round to nearest power of 10
+                            let log_val = supply_f64.log10();
+                            let exponent = log_val.round() as u32;
+                            let rounded = 10u128.pow(exponent.min(38)); // u128 max is ~3.4e38
+                            tracing::warn!(
+                                "⚠️ [v3.6.18] Large f64 value {} has precision loss! Rounded to 1e{} = {}",
+                                supply_f64, exponent, rounded
+                            );
+                            rounded
+                        } else {
+                            supply_f64 as u128
+                        };
+
+                        let base_units = supply_value.saturating_mul(decimal_multiplier);
+                        tracing::info!(
+                            "✅ Token supply (f64): {} display tokens × 10^{} = {} base units",
+                            supply_value,
+                            decimals,
+                            base_units
+                        );
+                        Some(base_units)
+                    } else {
+                        tracing::warn!("⚠️ Invalid f64 supply value: {}", supply_f64);
+                        None
+                    }
                 } else if let Some(supply_str) = initial_supply_val.as_str() {
-                    // v3.2.19-beta: String values are ALREADY in base units from frontend
-                    // Frontend does: displayUnits * 10^decimals before sending
-                    // So we should NOT multiply again here
-                    match supply_str.parse::<u128>() {
-                        Ok(base_units) => {
+                    // v3.6.19: String values - handle scientific notation properly
+                    // Frontend may send "1e+30" (display units) or "100000000000000000000000000000000000000" (base units)
+                    match parse_scientific_notation(supply_str) {
+                        Some(parsed_value) => {
+                            // v3.6.19: CRITICAL FIX - If string contains 'e' or 'E', it's ALWAYS display units
+                            // User typed "1e30" meaning 1e30 tokens, NOT 1e30 base units
+                            // Only long numeric strings (no 'e') from frontend are base units
+                            let is_scientific_notation = supply_str.to_lowercase().contains('e');
+                            let is_already_base_units = !is_scientific_notation &&
+                                parsed_value > 1_000_000_000_000_000_000u128; // > 1e18
+
+                            let base_units = if is_already_base_units {
+                                // Long numeric string from frontend (already converted)
+                                parsed_value
+                            } else {
+                                // Scientific notation OR small number = display units, need conversion
+                                parsed_value.saturating_mul(decimal_multiplier)
+                            };
+
                             tracing::info!(
-                                "✅ Token supply received: {} base units (frontend already converted)",
-                                base_units
+                                "✅ [v3.6.19] Token supply: '{}' → {} base units (scientific={}, already_base={})",
+                                supply_str,
+                                base_units,
+                                is_scientific_notation,
+                                is_already_base_units
                             );
                             Some(base_units)
                         }
-                        Err(_) => {
+                        None => {
                             tracing::warn!(
                                 "⚠️ Could not parse initial supply string: {}",
                                 supply_str

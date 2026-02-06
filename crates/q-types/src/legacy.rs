@@ -61,6 +61,12 @@ impl From<LegacyTransaction> for Transaction {
             pqc_signature: None,
             signature_phase: crate::TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            // v3.4.2-beta: Default ZK privacy fields for legacy transactions (transparent)
+            zk_proof_bundle: None,
+            privacy_level: crate::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         }
     }
 }
@@ -221,6 +227,12 @@ impl From<LegacyTransactionV2> for Transaction {
             pqc_signature: legacy.pqc_signature,
             signature_phase: legacy.signature_phase,
             pqc_public_key: legacy.pqc_public_key,
+            // v3.4.2-beta: Default ZK privacy fields for legacy transactions (transparent)
+            zk_proof_bundle: None,
+            privacy_level: crate::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         }
     }
 }

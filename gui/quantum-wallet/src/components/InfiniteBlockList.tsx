@@ -153,14 +153,14 @@ function BlockCard({ block, isNew }: BlockCardProps) {
 }
 
 /**
- * P2P Activity Indicator
+ * Network Activity Indicator
+ *
+ * NOTE: js-libp2p browser P2P is currently DISABLED.
+ * Shows HTTP/SSE mode status instead of misleading P2P stats.
  */
 function P2PActivityIndicator() {
-  const { isReady, peerCount, error } = useLibP2P()
+  const { isReady, error } = useLibP2P()
   const { stats } = useInfiniteBlockScroll()
-
-  const p2pPercentage =
-    stats.totalLoaded > 0 ? (stats.p2pSuccesses / stats.totalLoaded) * 100 : 0
 
   return (
     <motion.div
@@ -170,37 +170,31 @@ function P2PActivityIndicator() {
     >
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-          {isReady ? (
-            <Wifi className="w-4 h-4 text-quantum-green" />
-          ) : (
-            <WifiOff className="w-4 h-4 text-red-500" />
-          )}
-          P2P Network Status
+          <Wifi className="w-4 h-4 text-blue-400" />
+          Network Status
         </h3>
 
-        {isReady && (
-          <motion.div
-            animate={{
-              scale: [1, 1.2, 1],
-              opacity: [0.5, 1, 0.5],
-            }}
-            transition={{
-              duration: 2,
-              repeat: Infinity,
-              ease: 'easeInOut',
-            }}
-            className="w-2 h-2 rounded-full bg-quantum-green"
-          />
-        )}
+        <motion.div
+          animate={{
+            scale: [1, 1.2, 1],
+            opacity: [0.5, 1, 0.5],
+          }}
+          transition={{
+            duration: 2,
+            repeat: Infinity,
+            ease: 'easeInOut',
+          }}
+          className="w-2 h-2 rounded-full bg-blue-400"
+        />
       </div>
 
       <div className="grid grid-cols-2 gap-4 text-xs">
-        {/* Peer Count */}
+        {/* Connection Mode */}
         <div>
-          <div className="text-gray-400 mb-1">Connected Peers</div>
+          <div className="text-gray-400 mb-1">Mode</div>
           <div className="text-white font-semibold flex items-center gap-1">
-            <Users className="w-3 h-3 text-quantum-cyan" />
-            {peerCount}
+            <Zap className="w-3 h-3 text-blue-400" />
+            HTTP/SSE
           </div>
         </div>
 
@@ -213,19 +207,11 @@ function P2PActivityIndicator() {
           </div>
         </div>
 
-        {/* P2P Success Rate */}
+        {/* Connection Status */}
         <div>
-          <div className="text-gray-400 mb-1">P2P Success Rate</div>
+          <div className="text-gray-400 mb-1">Status</div>
           <div className="flex items-center gap-2">
-            <div className="flex-1 bg-quantum-indigo/40 rounded-full h-2 overflow-hidden">
-              <motion.div
-                initial={{ width: 0 }}
-                animate={{ width: `${p2pPercentage}%` }}
-                transition={{ duration: 0.5 }}
-                className="h-full bg-gradient-to-r from-quantum-cyan to-quantum-green"
-              />
-            </div>
-            <span className="text-white font-semibold">{p2pPercentage.toFixed(0)}%</span>
+            <span className="text-quantum-green font-semibold">Connected</span>
           </div>
         </div>
 
@@ -239,15 +225,13 @@ function P2PActivityIndicator() {
         </div>
       </div>
 
-      {/* HTTP Fallback Notice */}
-      {stats.httpFallbacks > 0 && stats.httpFallbacks === stats.totalLoaded && (
-        <div className="mt-3 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded text-xs text-yellow-500">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="w-3 h-3" />
-            <span>Using HTTP fallback (P2P not available)</span>
-          </div>
+      {/* Mode Explanation */}
+      <div className="mt-3 p-2 bg-blue-500/10 border border-blue-500/20 rounded text-xs text-blue-400">
+        <div className="flex items-center gap-2">
+          <Wifi className="w-3 h-3" />
+          <span>Real-time updates via Server-Sent Events</span>
         </div>
-      )}
+      </div>
 
       {/* Error State */}
       {error && (

@@ -35,8 +35,11 @@ pub const BASE_ANNUAL_EMISSION: u128 = 82_031_000_000_000_000_000_000_000_000_00
 /// Minimum reward per block (0.000001 QUG with 24 decimals) - prevents division by zero
 pub const MIN_REWARD: u128 = 1_000_000_000_000_000_000;
 
-/// Maximum reward per block (1 QUG with 24 decimals) - safety cap
-pub const MAX_REWARD_PER_BLOCK: u128 = 1_000_000_000_000_000_000_000_000;
+/// Maximum reward per block (0.01 QUG with 24 decimals) - safety cap
+/// v3.4.6: CRITICAL FIX - Previous 1 QUG cap was 100x too high!
+/// At 1 block/sec, 1 QUG/block = 31.5M QUG/year (should be 82,031)
+/// New cap: 0.01 QUG = 315,576 QUG/year worst case (still ~4x safety margin)
+pub const MAX_REWARD_PER_BLOCK: u128 = 10_000_000_000_000_000_000_000; // 0.01 QUG
 
 /// Fixed-point precision for intermediate calculations (6 decimal places)
 const PRECISION: u128 = 1_000_000;
@@ -133,18 +136,20 @@ impl EmissionController {
     }
 
     /// Add a new block to tracking
+    /// v3.9.2-beta: Fixed window tracking - create time-based windows (10 second intervals)
+    /// Previous bug: Single window extended forever, causing stale rate measurements
     pub fn add_block(&mut self, height: u64, timestamp: u64, has_transactions: bool) {
-        // Create or update current window
-        if let Some(last_window) = self.block_windows.back_mut() {
-            // Extend existing window
-            last_window.end_height = height;
-            last_window.end_timestamp = timestamp;
-            last_window.block_count += 1;
-            if has_transactions {
-                last_window.non_empty_blocks += 1;
-            }
+        const WINDOW_DURATION_SECS: u64 = 10; // Create new window every 10 seconds
+
+        let should_create_new_window = if let Some(last_window) = self.block_windows.back() {
+            // Create new window if >10 seconds since window start
+            timestamp.saturating_sub(last_window.start_timestamp) >= WINDOW_DURATION_SECS
         } else {
-            // Create first window
+            true // No windows exist, create first one
+        };
+
+        if should_create_new_window {
+            // Create new time-based window
             self.block_windows.push_back(BlockWindow {
                 start_height: height,
                 end_height: height,
@@ -153,11 +158,19 @@ impl EmissionController {
                 block_count: 1,
                 non_empty_blocks: if has_transactions { 1 } else { 0 },
             });
-        }
 
-        // Limit window size
-        if self.block_windows.len() > RATE_WINDOW_SIZE {
-            self.block_windows.pop_front();
+            // v3.9.2: Limit to recent windows only (last ~100 windows = 1000 seconds)
+            while self.block_windows.len() > RATE_WINDOW_SIZE {
+                self.block_windows.pop_front();
+            }
+        } else if let Some(last_window) = self.block_windows.back_mut() {
+            // Extend current window
+            last_window.end_height = height;
+            last_window.end_timestamp = timestamp;
+            last_window.block_count += 1;
+            if has_transactions {
+                last_window.non_empty_blocks += 1;
+            }
         }
     }
 
@@ -280,15 +293,23 @@ impl EmissionController {
         reward = reward.clamp(MIN_REWARD, MAX_REWARD_PER_BLOCK);
 
         // Safety 5: Don't exceed remaining era emission
+        // v3.4.6: Fixed overly permissive calculation
+        // Old: remaining / 1000 = 328 QUG/block (way too high!)
+        // New: remaining / expected_blocks_remaining for this year
         let remaining_era_emission = self.era_target_emission.saturating_sub(self.total_emitted_this_era);
-        let conservative_max = remaining_era_emission / 1000; // Conservative estimate
+        // Use at least 1M expected blocks to prevent division by small numbers
+        let expected_blocks_remaining = expected_blocks_this_year.max(1_000_000);
+        let conservative_max = remaining_era_emission / expected_blocks_remaining;
         reward = reward.min(conservative_max);
 
-        debug!(
-            "💰 Adaptive reward calculated: {} QUG (rate: {:.2} blocks/sec, era: {})",
+        // v3.4.6: Enhanced logging for emission debugging
+        info!(
+            "💰 Adaptive reward: {:.6} QUG | rate: {:.4} blocks/sec | expected_blocks: {} | era: {} | annual_target: {:.2} QUG",
             reward as f64 / 1e24,
             sane_block_rate,
-            self.current_era
+            expected_blocks_this_year,
+            self.current_era,
+            annual_target as f64 / 1e24
         );
 
         Ok(reward)

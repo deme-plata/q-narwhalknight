@@ -73,7 +73,7 @@ pub use circuit_manager::CircuitManager;
 pub use config::TorConfig;
 pub use dandelion::{DandelionConfig, DandelionProtocol, DandelionStatistics};
 pub use metrics::TorMetrics;
-pub use onion_service::OnionService;
+pub use onion_service::{OnionKeypair, OnionService};
 pub use prometheus_metrics::{
     MetricsSummary,
     OperationMetricEntry,
@@ -345,7 +345,7 @@ impl QTorClient {
 
         // Default Tor SOCKS proxy address (updated to 9150 to avoid conflict with P2P)
         let socks_proxy = config.socks_proxy_addr.unwrap_or_else(|| {
-            "127.0.0.1:9150"
+            "127.0.0.1:9050"
                 .parse()
                 .expect("Valid default SOCKS address")
         });
@@ -474,7 +474,7 @@ impl QTorClient {
             .context("Failed to start Arti background tasks")?;
 
         // Use a placeholder SOCKS address (not actually used with embedded client)
-        let socks_proxy = "127.0.0.1:9150"
+        let socks_proxy = "127.0.0.1:9050"
             .parse()
             .expect("Valid placeholder address");
 
@@ -1335,6 +1335,21 @@ impl TorConnection {
 
     pub fn get_peer_onion(&self) -> &str {
         &self.peer_onion
+    }
+
+    /// 🌻 v2.5.0-beta: Get mutable reference to stream for Dandelion++ stem relay
+    pub fn stream_mut(&mut self) -> &mut TcpStream {
+        &mut self.stream
+    }
+
+    /// 🌻 v2.5.0-beta: Get immutable reference to stream for reading
+    pub fn stream(&self) -> &TcpStream {
+        &self.stream
+    }
+
+    /// 🌻 v2.5.0-beta: Consume connection and return the underlying stream
+    pub fn into_stream(self) -> TcpStream {
+        self.stream
     }
 }
 

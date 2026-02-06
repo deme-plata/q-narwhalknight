@@ -306,6 +306,16 @@ impl RocksDBKV {
             Self::create_perp_trades_cf(),       // Perpetual futures trade history
             Self::create_perp_funding_cf(),      // Perpetual funding rate history
             Self::create_perp_liquidations_cf(), // Perpetual liquidation records
+            // ========== v3.5.8-beta: Wallet Transaction History ==========
+            Self::create_wallet_tx_index_cf(),   // Wallet-indexed transaction history
+            Self::create_wallet_swap_index_cf(), // Wallet-indexed DEX swap history
+            // ========== v3.6.0-beta: Price History ==========
+            Self::create_price_history_cf(),     // Consensus-verified price history
+            // ========== v3.9.1-beta: Bank Messaging & Identity ==========
+            Self::create_bank_messages_cf(),     // Bank messages storage
+            Self::create_bank_msg_index_cf(),    // Bank message index by wallet
+            Self::create_user_identities_cf(),   // User identity records
+            Self::create_death_certificates_cf(), // Death certificates for inheritance
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -900,6 +910,82 @@ impl RocksDBKV {
         opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - smaller, less frequent
         opts.set_max_write_buffer_number(2);
         ColumnFamilyDescriptor::new(crate::CF_PERP_LIQUIDATIONS, opts)
+    }
+
+    /// v3.5.8-beta: Wallet transaction index for decentralized history
+    fn create_wallet_tx_index_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_max_write_buffer_number(3);
+        // Optimize for prefix scans (first 32 bytes are wallet address)
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        ColumnFamilyDescriptor::new(crate::CF_WALLET_TX_INDEX, opts)
+    }
+
+    /// v3.5.8-beta: Wallet swap index for decentralized DEX history
+    fn create_wallet_swap_index_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        // Optimize for prefix scans (first 32 bytes are wallet address)
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        ColumnFamilyDescriptor::new(crate::CF_WALLET_SWAP_INDEX, opts)
+    }
+
+    /// v3.6.0-beta: Consensus-verified price history for tokens
+    /// Key format: [token_address:32][inverted_timestamp:8] for reverse chronological order
+    fn create_price_history_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB - many small price snapshots
+        opts.set_max_write_buffer_number(2);
+        // Optimize for prefix scans (first 32 bytes are token address)
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        ColumnFamilyDescriptor::new(crate::CF_PRICE_HISTORY, opts)
+    }
+
+    /// v3.9.1-beta: Bank messages storage
+    /// Key format: msg_id (string), Value: BankMessage JSON
+    fn create_bank_messages_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_BANK_MESSAGES, opts)
+    }
+
+    /// v3.9.1-beta: Bank message index by wallet
+    /// Key format: [wallet:32][inverted_timestamp:8], Value: msg_id
+    fn create_bank_msg_index_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        // Optimize for prefix scans (first 32 bytes are wallet address)
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        ColumnFamilyDescriptor::new(crate::CF_BANK_MSG_INDEX, opts)
+    }
+
+    /// v3.9.1-beta: User identity records
+    /// Key format: wallet_address (string), Value: UserIdentity JSON
+    fn create_user_identities_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_USER_IDENTITIES, opts)
+    }
+
+    /// v3.9.1-beta: Death certificates for inheritance
+    /// Key format: cert_id (string), Value: DeathCertificate JSON
+    fn create_death_certificates_cf() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB - smaller, less frequent
+        opts.set_max_write_buffer_number(2);
+        ColumnFamilyDescriptor::new(crate::CF_DEATH_CERTIFICATES, opts)
     }
 
     /// Get column family handle (public for transactions - v0.8.1-beta)

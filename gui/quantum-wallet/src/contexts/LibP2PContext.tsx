@@ -4,6 +4,8 @@
  * Provides the libp2p node to the entire React application.
  * This makes the P2P node accessible from any component via useLibP2P hook.
  *
+ * v3.4.2-browser: Re-enabled browser P2P with correct PeerID and network config
+ *
  * Usage:
  * ```tsx
  * import { useLibP2P } from '../contexts/LibP2PContext'
@@ -18,34 +20,58 @@
  * ```
  */
 
+console.log('📦 [LIBP2P] LibP2PContext.tsx module loading...')
+
+// ⚡ v3.5.22: Start connection pre-warming immediately on module load
+// This warms TCP/TLS connections to bootstrap peers before the node is created
+// giving us a head start on connection establishment
+setTimeout(() => {
+  console.log('⚡ [LIBP2P] Starting early connection pre-warming...')
+  prewarmConnections()
+}, 100) // Small delay to not block initial render
+
 import React, {
   createContext,
   useContext,
   useState,
   useEffect,
+  useCallback,
+  useRef,
 } from 'react'
 import type { ReactNode } from 'react'
 import type { Libp2p } from 'libp2p'
-import { createBrowserNode, getNodeStats, stopNode, exposeDebugUtilities } from '../libp2p/node'
-import { BOOTSTRAP_PEERS } from '../libp2p/config'
+import { createBrowserNode, getNodeStats, stopNode, exposeDebugUtilities, prewarmConnections } from '../libp2p/node'
+import { BOOTSTRAP_PEERS, NETWORK_ID } from '../libp2p/config'
 import { multiaddr } from '@multiformats/multiaddr'
+import { submitTransactionWithFallback, getTransactionStats } from '../libp2p/transactionSubmitter'
+import { getTelemetryStats, telemetryReporter } from '../libp2p/telemetry'
+import { getBlockCacheStats, blockCache } from '../libp2p/blockCache'
+import { verificationReporter, getReporterStats } from '../libp2p/verificationReporter'
+import type { SignedTransaction, TelemetryReport, BlockCacheStats } from '../libp2p/types'
+import type { TransactionSubmitResult, TransactionStats } from '../libp2p/transactionSubmitter'
+import type { ReporterStats } from '../libp2p/verificationReporter'
 
 /**
  * Force reconnection to bootstrap peers
  */
-async function forceReconnect(node: Libp2p): Promise<void> {
+async function forceReconnect(node: Libp2p): Promise<boolean> {
   console.log('🔄 [CONTEXT] Force reconnecting to bootstrap peers...')
+  let connected = false
 
   for (const peerAddr of BOOTSTRAP_PEERS) {
     try {
       const ma = multiaddr(peerAddr)
       console.log(`🔌 [CONTEXT] Dialing ${peerAddr}...`)
-      await node.dial(ma)
+      // v3.5.5: Reduced timeout from 30s to 10s for faster connection
+      await node.dial(ma, { signal: AbortSignal.timeout(10000) })
       console.log(`✅ [CONTEXT] Successfully dialed ${peerAddr}`)
+      connected = true
     } catch (err) {
       console.warn(`⚠️  [CONTEXT] Failed to dial ${peerAddr}:`, err)
     }
   }
+
+  return connected
 }
 
 /**
@@ -70,6 +96,13 @@ interface LibP2PContextState {
 
   // Functions
   refresh: () => void
+
+  // v3.5.x: Browser P2P Network Contribution functions
+  submitTransaction: (tx: SignedTransaction) => Promise<TransactionSubmitResult>
+  getTelemetryStats: () => Omit<TelemetryReport, 'peerId' | 'timestamp'>
+  getBlockCacheStats: () => BlockCacheStats
+  getTransactionStats: () => TransactionStats
+  getVerificationReporterStats: () => ReporterStats
 }
 
 /**
@@ -85,6 +118,12 @@ const defaultContextValue: LibP2PContextState = {
   isConnecting: false,
   error: null,
   refresh: () => {},
+  // v3.5.x: Default implementations for P2P contribution functions
+  submitTransaction: async () => ({ success: false, method: 'none' as const, error: 'Node not ready', timestamp: Date.now() }),
+  getTelemetryStats: () => getTelemetryStats(),
+  getBlockCacheStats: () => getBlockCacheStats(),
+  getTransactionStats: () => getTransactionStats(),
+  getVerificationReporterStats: () => getReporterStats(),
 }
 
 /**
@@ -104,8 +143,10 @@ interface LibP2PProviderProps {
 /**
  * LibP2P Provider Component
  *
- * Wraps the application and provides P2P functionality to all child components.
- * Automatically creates and starts the libp2p node on mount.
+ * v3.4.2-browser: Browser P2P ENABLED
+ * - Connects to Server Beta via WebSocket (wss://quillon.xyz:9443)
+ * - Uses correct PeerID: 12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx
+ * - Network: testnet-phase19
  *
  * @param props - Provider props
  */
@@ -113,6 +154,7 @@ export function LibP2PProvider({
   children,
   autoStart = true,
 }: LibP2PProviderProps) {
+  // State with proper setters for P2P mode
   const [node, setNode] = useState<Libp2p | null>(null)
   const [peerId, setPeerId] = useState<string | null>(null)
   const [peerCount, setPeerCount] = useState(0)
@@ -121,102 +163,159 @@ export function LibP2PProvider({
   const [isReady, setIsReady] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [error, setError] = useState<Error | null>(null)
-  const [lastBlockTime, setLastBlockTime] = useState(Date.now())
-  const [networkPartitioned, setNetworkPartitioned] = useState(false)
+
+  // Refs for cleanup
+  const nodeRef = useRef<Libp2p | null>(null)
+  const statsIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const reconnectAttemptRef = useRef<number>(0)
 
   /**
    * Initialize the libp2p node
    */
   useEffect(() => {
-    if (!autoStart) return
+    console.log('🔄 [CONTEXT] LibP2PProvider useEffect running, autoStart:', autoStart)
+
+    if (!autoStart) {
+      console.log('📡 [CONTEXT] P2P autoStart disabled, waiting for manual start')
+      return
+    }
 
     let mounted = true
-    let statsInterval: ReturnType<typeof setInterval> | null = null
+
+    /**
+     * 🔄 v3.5.4-browser: Schedule reconnection with exponential backoff
+     * Automatically reconnects when bootstrap node restarts
+     */
+    function scheduleReconnect(browserNode: Libp2p) {
+      // Clear any existing reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+
+      // Exponential backoff: 2s, 4s, 8s, 16s, 30s max
+      const attempt = reconnectAttemptRef.current
+      const delay = Math.min(2000 * Math.pow(2, attempt), 30000)
+      reconnectAttemptRef.current += 1
+
+      console.log(`🔄 [CONTEXT] Reconnect attempt ${attempt + 1} scheduled in ${delay / 1000}s...`)
+
+      reconnectTimeoutRef.current = setTimeout(async () => {
+        if (!mounted) return
+
+        try {
+          console.log('🔄 [CONTEXT] Attempting to reconnect to bootstrap peers...')
+          const connected = await forceReconnect(browserNode)
+
+          if (connected) {
+            console.log('✅ [CONTEXT] Reconnected successfully!')
+            reconnectAttemptRef.current = 0 // Reset backoff on success
+          } else {
+            console.warn('⚠️  [CONTEXT] Reconnect failed, will retry...')
+            scheduleReconnect(browserNode) // Try again with longer delay
+          }
+        } catch (err) {
+          console.error('❌ [CONTEXT] Reconnect error:', err)
+          scheduleReconnect(browserNode) // Try again
+        }
+      }, delay)
+    }
 
     async function initNode() {
+      console.log('🚀 [CONTEXT] Initializing browser P2P node...')
+      console.log(`   Network: ${NETWORK_ID}`)
+      console.log(`   Bootstrap peers: ${BOOTSTRAP_PEERS.length}`)
+
+      setIsConnecting(true)
+      setError(null)
+
       try {
-        setIsConnecting(true)
-        setError(null)
-
-        console.log('🚀 [CONTEXT] Initializing libp2p node...')
-
-        // Create and start the node
-        const newNode = await createBrowserNode()
+        // Create the browser libp2p node
+        const browserNode = await createBrowserNode()
 
         if (!mounted) {
-          // Component unmounted during initialization
-          await stopNode(newNode)
+          console.log('🛑 [CONTEXT] Component unmounted during init, stopping node')
+          await stopNode(browserNode)
           return
         }
 
-        setNode(newNode)
-        setPeerId(newNode.peerId.toString())
-        setIsReady(true)
-        setIsConnecting(false)
+        nodeRef.current = browserNode
+        setNode(browserNode)
+        setPeerId(browserNode.peerId.toString())
 
-        // Expose debug utilities in development mode
-        exposeDebugUtilities(newNode)
+        console.log(`✅ [CONTEXT] Node created with PeerId: ${browserNode.peerId}`)
 
-        console.log('✅ [CONTEXT] Node initialized successfully')
+        // Expose debug utilities (always - needed for Tor status monitoring)
+        exposeDebugUtilities(browserNode)
+        console.log('🔧 [CONTEXT] Debug utilities exposed on window.libp2pDebug')
 
-        // Listen for block-received events to update lastBlockTime
-        blockReceivedHandler = () => {
-          setLastBlockTime(Date.now())
-          if (networkPartitioned) {
-            console.log('✅ [CONTEXT] Block received - network partition resolved')
-            setNetworkPartitioned(false)
-            setError(null)
+        // Set up connection event listeners
+        browserNode.addEventListener('peer:connect', (evt) => {
+          console.log(`🔗 [CONTEXT] Peer connected: ${evt.detail}`)
+          updateStats(browserNode)
+        })
+
+        browserNode.addEventListener('peer:disconnect', (evt) => {
+          console.log(`🔌 [CONTEXT] Peer disconnected: ${evt.detail}`)
+          updateStats(browserNode)
+
+          // 🔄 v3.5.4-browser: Auto-reconnect when all connections lost
+          const connections = browserNode.getConnections()
+          if (connections.length === 0) {
+            console.log('⚠️  [CONTEXT] All connections lost - scheduling auto-reconnect...')
+            scheduleReconnect(browserNode)
           }
+        })
+
+        // Try to connect to bootstrap peers
+        console.log('🌐 [CONTEXT] Connecting to bootstrap peers...')
+        const connected = await forceReconnect(browserNode)
+
+        if (!mounted) return
+
+        if (connected) {
+          console.log('✅ [CONTEXT] Connected to at least one bootstrap peer!')
+          setIsReady(true)
+        } else {
+          console.warn('⚠️  [CONTEXT] Failed to connect to any bootstrap peers')
+          console.log('   Browser will retry automatically via DHT discovery')
+          // Still mark as ready - node is running, just no peers yet
+          setIsReady(true)
         }
-        window.addEventListener('block-received', blockReceivedHandler as EventListener)
 
-        // Update stats periodically
-        statsInterval = setInterval(() => {
-          if (!mounted) return
+        // Update initial stats
+        updateStats(browserNode)
 
-          const stats = getNodeStats(newNode)
-          setPeerCount(stats.peerCount)
-          setConnectionCount(stats.connectionCount)
-          setTopics(stats.topics)
-
-          // Network partition detection
-          const timeSinceLastBlock = Date.now() - lastBlockTime
-          const NO_BLOCKS_TIMEOUT = 60000 // 60 seconds
-          const partitioned = timeSinceLastBlock > NO_BLOCKS_TIMEOUT && stats.peerCount === 0
-
-          if (partitioned && !networkPartitioned) {
-            console.error(
-              '🚨 [CONTEXT] Network partition detected:',
-              `\n  - No blocks for ${(timeSinceLastBlock / 1000).toFixed(0)}s`,
-              `\n  - Peer count: ${stats.peerCount}`,
-              '\n  - Attempting reconnection...'
-            )
-            setNetworkPartitioned(true)
-            setError(new Error('Network partition detected - reconnecting...'))
-
-            // Force reconnect by dialing bootstrap peers
-            forceReconnect(newNode).catch((err) => {
-              console.error('❌ [CONTEXT] Reconnection failed:', err)
-            })
-          } else if (!partitioned && networkPartitioned) {
-            console.log('✅ [CONTEXT] Network partition resolved')
-            setNetworkPartitioned(false)
-            setError(null)
+        // Set up periodic stats refresh
+        statsIntervalRef.current = setInterval(() => {
+          if (nodeRef.current) {
+            updateStats(nodeRef.current)
           }
-        }, 5000) // Update every 5 seconds
-      } catch (err) {
-        console.error('❌ [CONTEXT] Failed to initialize node:', err)
+        }, 5000)
 
+      } catch (err) {
+        console.error('❌ [CONTEXT] Failed to initialize P2P node:', err)
         if (mounted) {
           setError(err instanceof Error ? err : new Error(String(err)))
-          setIsConnecting(false)
           setIsReady(false)
+        }
+      } finally {
+        if (mounted) {
+          setIsConnecting(false)
         }
       }
     }
 
-    // Store handleBlockReceived in a ref so cleanup can access it
-    let blockReceivedHandler: (() => void) | null = null
+    function updateStats(n: Libp2p) {
+      try {
+        const stats = getNodeStats(n)
+        setPeerCount(stats.peerCount)
+        setConnectionCount(stats.connectionCount)
+        setTopics(stats.topics)
+      } catch (err) {
+        console.warn('[CONTEXT] Failed to get node stats:', err)
+      }
+    }
 
     initNode()
 
@@ -224,35 +323,49 @@ export function LibP2PProvider({
     return () => {
       mounted = false
 
-      if (statsInterval) {
-        clearInterval(statsInterval)
+      // Clear reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+        reconnectTimeoutRef.current = null
       }
 
-      // Remove block-received event listener (proper cleanup)
-      if (blockReceivedHandler) {
-        window.removeEventListener('block-received', blockReceivedHandler as EventListener)
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current)
+        statsIntervalRef.current = null
       }
 
-      if (node) {
-        console.log('🛑 [CONTEXT] Cleaning up node...')
-        stopNode(node).catch((err) => {
-          console.error('❌ [CONTEXT] Error during cleanup:', err)
+      if (nodeRef.current) {
+        console.log('🛑 [CONTEXT] Stopping P2P node on cleanup...')
+        stopNode(nodeRef.current).catch(err => {
+          console.warn('[CONTEXT] Error stopping node:', err)
         })
+        nodeRef.current = null
       }
     }
-  }, [autoStart]) // Only depend on autoStart - networkPartitioned is handled via state updates
+  }, [autoStart])
 
   /**
    * Manually refresh statistics
    */
-  const refresh = () => {
+  const refresh = useCallback(() => {
     if (!node) return
 
-    const stats = getNodeStats(node)
-    setPeerCount(stats.peerCount)
-    setConnectionCount(stats.connectionCount)
-    setTopics(stats.topics)
-  }
+    try {
+      const stats = getNodeStats(node)
+      setPeerCount(stats.peerCount)
+      setConnectionCount(stats.connectionCount)
+      setTopics(stats.topics)
+    } catch (err) {
+      console.warn('[CONTEXT] Failed to refresh stats:', err)
+    }
+  }, [node])
+
+  /**
+   * v3.5.x: Submit transaction via P2P
+   */
+  const submitTransaction = useCallback(async (tx: SignedTransaction): Promise<TransactionSubmitResult> => {
+    return submitTransactionWithFallback(node, tx)
+  }, [node])
 
   /**
    * Context value
@@ -267,6 +380,12 @@ export function LibP2PProvider({
     isConnecting,
     error,
     refresh,
+    // v3.5.x: Browser P2P Network Contribution functions
+    submitTransaction,
+    getTelemetryStats,
+    getBlockCacheStats,
+    getTransactionStats,
+    getVerificationReporterStats: getReporterStats,
   }
 
   return (

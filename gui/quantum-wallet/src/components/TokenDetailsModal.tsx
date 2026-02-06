@@ -5,14 +5,24 @@ import { createPortal } from 'react-dom';
 import { qnkAPI } from '../services/api';
 
 // v3.1.1: Helper to safely parse u128 values that may come as strings from the API
+// v3.6.14: Also handles base unit conversion - if value is absurdly large, divide by 1e8
 const parseU128 = (value: string | number | undefined): number => {
   if (value === undefined || value === null) return 0;
-  if (typeof value === 'number') return value;
-  if (typeof value === 'string') {
-    const parsed = parseFloat(value);
-    return isNaN(parsed) ? 0 : parsed;
+  let parsed: number;
+  if (typeof value === 'number') {
+    parsed = value;
+  } else if (typeof value === 'string') {
+    parsed = parseFloat(value);
+    if (isNaN(parsed)) return 0;
+  } else {
+    return 0;
   }
-  return 0;
+  // v3.6.14: If value is absurdly large (>1e15), it's likely in base units (8 decimals)
+  // Convert to human-readable format
+  if (parsed > 1e15) {
+    return parsed / 1e8;
+  }
+  return parsed;
 };
 
 // v2.7.7-beta: Social links interface for token metadata
@@ -184,14 +194,19 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
             source: priceData.source,
           });
         } else if (!data.success) {
-          // No pool data available - set reasonable defaults instead of mock billions
-          console.log('📊 No pool data for token, using defaults');
+          // v3.6.14: No oracle data available - USE TOKEN PROP VALUES (from DexScreen)
+          // These already have correct data from the API, don't reset to zero!
+          console.log('📊 No oracle data for token, using token prop values:', {
+            price: token.price,
+            marketCap: token.marketCap,
+            liquidity: token.liquidity,
+          });
           setRealMarketStats({
-            price: 0,
-            marketCap: 0,
-            liquidity: 0,
-            totalSupply: token.totalSupply > 0 ? token.totalSupply : 0,
-            holders: token.holders > 0 ? token.holders : 0,
+            price: token.price || 0,
+            marketCap: token.marketCap || 0,
+            liquidity: token.liquidity || 0,
+            totalSupply: token.totalSupply || 0,
+            holders: token.holders || 0,
           });
         }
       } catch (error) {

@@ -32,6 +32,7 @@ pub mod wallet_integration;
 pub mod blockchain_payment;
 pub mod distributed_ai_production;
 pub mod gguf_sharing;
+pub mod resonance_swarm; // 🎭🌊 v3.4.15: Resonance consensus for water robot swarms
 
 // DEACTIVATED: use q_bitcoin_bridge::*;
 use q_types::*;
@@ -141,6 +142,8 @@ pub struct WaterRobotCoordinator {
     wallet_manager: Arc<wallet_integration::WalletManager>,
     blockchain_life: Arc<blockchain_life::BlockchainLifeManager>,
     tor_coordinator: Arc<tor_coordination::TorCoordinator>,
+    /// 🎭🌊 v3.4.15: Resonance swarm coordinator for string-theoretic consensus
+    resonance_coordinator: Arc<tokio::sync::RwLock<resonance_swarm::SwarmResonanceCoordinator>>,
     coordination_state: Arc<RwLock<CoordinationState>>,
     statistics: Arc<CoordinationStatistics>,
     active: Arc<AtomicBool>,
@@ -253,6 +256,10 @@ impl WaterRobotCoordinator {
     pub async fn new() -> Result<Self> {
         let coordinator_id = Uuid::new_v4();
 
+        // 🎭🌊 Initialize resonance swarm coordinator with default config
+        let resonance_config = resonance_swarm::SwarmResonanceConfig::default();
+        let resonance_coordinator = resonance_swarm::SwarmResonanceCoordinator::new(resonance_config);
+
         Ok(Self {
             coordinator_id,
             fleet_manager: Arc::new(fleet_management::FleetManager::new().await?),
@@ -267,6 +274,7 @@ impl WaterRobotCoordinator {
             wallet_manager: Arc::new(wallet_integration::WalletManager::new().await?),
             blockchain_life: Arc::new(blockchain_life::BlockchainLifeManager::new().await?),
             tor_coordinator: Arc::new(tor_coordination::TorCoordinator::new().await?),
+            resonance_coordinator: Arc::new(tokio::sync::RwLock::new(resonance_coordinator)),
             coordination_state: Arc::new(RwLock::new(CoordinationState::default())),
             statistics: Arc::new(CoordinationStatistics::default()),
             active: Arc::new(AtomicBool::new(false)),
@@ -354,19 +362,83 @@ impl WaterRobotCoordinator {
         Ok(())
     }
 
+    /// 🎭🌊 Start DAG-BFT participation with resonance shadow consensus
     async fn start_dag_bft_participation(&self) -> Result<()> {
-        let _coordination_state = Arc::clone(&self.coordination_state);
+        let coordination_state = Arc::clone(&self.coordination_state);
+        let resonance_coordinator = Arc::clone(&self.resonance_coordinator);
+        let statistics = Arc::clone(&self.statistics);
         let active = Arc::clone(&self.active);
 
         tokio::spawn(async move {
+            tracing::info!("🎭🌊 Starting DAG-BFT participation with Resonance shadow consensus");
+
             while active.load(Ordering::SeqCst) {
-                // Participate in DAG-BFT consensus rounds
-                // TODO: Integrate with DAG-Knight consensus engine
+                // Get current coordination state
+                let state = {
+                    let guard = coordination_state.read().unwrap();
+                    guard.clone()
+                };
+
+                // Skip if no robots are active
+                if state.active_robots.is_empty() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+
+                // 🎭 Process swarm through resonance consensus (shadow mode)
+                let resonance = resonance_coordinator.read().await;
+                match resonance.process_swarm_resonance(&state).await {
+                    Ok(result) => {
+                        // Update consensus statistics
+                        statistics.consensus_rounds_participated.fetch_add(1, Ordering::SeqCst);
+
+                        // Log resonance result periodically
+                        if result.round % 100 == 0 {
+                            tracing::info!("🎭🌊 Resonance Round {}: Energy={:.4}, Coherence={:.1}%, K={:.4}",
+                                result.round,
+                                result.swarm_energy,
+                                result.coherence * 100.0,
+                                result.k_parameter
+                            );
+
+                            if let Some(leader) = &result.recommended_leader {
+                                tracing::info!("   🏆 Resonance recommends leader: {}", leader.0);
+                            }
+
+                            if !result.byzantine_suspects.is_empty() {
+                                tracing::warn!("   ⚠️ Byzantine suspects: {:?}", result.byzantine_suspects);
+                            }
+                        }
+
+                        // Update coordination state with resonance recommendations
+                        if let Some(leader) = result.recommended_leader {
+                            let mut state_guard = coordination_state.write().unwrap();
+                            state_guard.consensus_leader = Some(leader);
+                            state_guard.dag_bft_state.consensus_round = result.round;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("🎭 Resonance processing failed: {}", e);
+                    }
+                }
+
+                // DAG-BFT consensus runs every 100ms
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
 
         Ok(())
+    }
+
+    /// 🎭 Get resonance swarm metrics
+    pub async fn get_resonance_metrics(&self) -> resonance_swarm::SwarmShadowMetrics {
+        self.resonance_coordinator.read().await.get_metrics().await
+    }
+
+    /// 🎭 Set resonance weight (0.0 = pure DAG-BFT, 1.0 = pure resonance)
+    pub async fn set_resonance_weight(&self, weight: f64) {
+        let mut coordinator = self.resonance_coordinator.write().await;
+        coordinator.set_resonance_weight(weight);
     }
 
     pub async fn register_water_robot(&self, robot: WaterRobotState) -> Result<()> {

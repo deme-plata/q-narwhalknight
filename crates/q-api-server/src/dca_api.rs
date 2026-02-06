@@ -1139,7 +1139,13 @@ async fn execute_dca_swap(
             return Err(anyhow::anyhow!("Insufficient token balance"));
         }
         *balance -= amount;
+        let new_balance = *balance;
         drop(token_balances);
+
+        // Persist token balance debit to disk
+        if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &token_addr, new_balance).await {
+            tracing::warn!("Failed to persist token balance after DCA debit: {}", e);
+        }
     }
 
     // Update to_token balance (credit)
@@ -1166,7 +1172,13 @@ async fn execute_dca_swap(
         let key = (wallet_addr, token_addr);
         let balance = token_balances.entry(key).or_insert(0);
         *balance += amount_out;
+        let new_balance = *balance;
         drop(token_balances);
+
+        // Persist token balance credit to disk
+        if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &token_addr, new_balance).await {
+            tracing::warn!("Failed to persist token balance after DCA credit: {}", e);
+        }
     }
 
     // Update pool reserves

@@ -114,13 +114,21 @@ impl AsRef<str> for BlockPackProtocol {
     }
 }
 
-/// v1.1.28-beta: Hybrid CBOR/JSON codec for block pack request/response
-/// Supports both CBOR (preferred) and JSON (legacy) for backward compatibility
+/// v3.4.15-beta: Bincode codec for block pack request/response
+/// CRITICAL FIX: Switched from CBOR to bincode because CBOR cannot serialize u128 values.
+/// The migration from u64 to u128 for token amounts caused "The number can't be stored in CBOR"
+/// errors which completely broke sync for blocks 199,002+.
+///
+/// Bincode benefits:
+/// - Native u128 support (CBOR lacks this!)
+/// - Compact binary format (more efficient than CBOR for numeric data)
+/// - Already used for block storage (proven to work)
+/// - Faster serialization/deserialization
 #[derive(Debug, Clone, Default)]
 pub struct BlockPackCodec;
 
 impl BlockPackCodec {
-    /// Try to parse as CBOR first, then JSON for backward compatibility
+    /// Parse request - try bincode first, then CBOR/JSON for backward compatibility
     fn parse_request(buf: &[u8]) -> io::Result<BlockPackRequest> {
         if buf.is_empty() {
             return Err(io::Error::new(
@@ -129,33 +137,32 @@ impl BlockPackCodec {
             ));
         }
 
-        // CBOR messages typically start with 0xa0-0xbf (map) or 0x80-0x9f (array)
-        // JSON messages typically start with '{' (0x7b) or '[' (0x5b)
-        let first_byte = buf[0];
+        // Try bincode first (v3.4.15+ format with u128 support)
+        if let Ok(req) = bincode::deserialize::<BlockPackRequest>(buf) {
+            return Ok(req);
+        }
 
-        // Try CBOR first (preferred format)
+        // Fall back to CBOR for legacy peers (pre-v3.4.15)
+        // Note: CBOR works for requests since BlockPackRequest only has u64 fields
         if let Ok(req) = serde_cbor::from_slice::<BlockPackRequest>(buf) {
             return Ok(req);
         }
 
-        // Fall back to JSON for legacy compatibility
+        // Fall back to JSON for very old peers
+        let first_byte = buf[0];
         if first_byte == b'{' || first_byte == b'[' {
             if let Ok(req) = serde_json::from_slice::<BlockPackRequest>(buf) {
-                // Log legacy format usage for debugging
-                #[cfg(feature = "tracing")]
-                tracing::debug!("[BLOCK-PACK] Received legacy JSON request, consider upgrading peer");
                 return Ok(req);
             }
         }
 
-        // Neither format worked
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to parse request: not valid CBOR or JSON (first byte: 0x{:02x}, len: {})", first_byte, buf.len()),
+            format!("Failed to parse request: not valid bincode, CBOR or JSON (first byte: 0x{:02x}, len: {})", buf[0], buf.len()),
         ))
     }
 
-    /// Try to parse as CBOR first, then JSON for backward compatibility
+    /// Parse response - try bincode first, then CBOR/JSON for backward compatibility
     fn parse_response(buf: &[u8]) -> io::Result<BlockPackResponse> {
         if buf.is_empty() {
             return Err(io::Error::new(
@@ -164,26 +171,28 @@ impl BlockPackCodec {
             ));
         }
 
-        let first_byte = buf[0];
+        // Try bincode first (v3.4.15+ format with u128 support)
+        // This is the only format that can handle blocks with u128 token amounts
+        if let Ok(res) = bincode::deserialize::<BlockPackResponse>(buf) {
+            return Ok(res);
+        }
 
-        // Try CBOR first (preferred format)
+        // Fall back to CBOR for legacy peers (only works for old blocks without u128)
         if let Ok(res) = serde_cbor::from_slice::<BlockPackResponse>(buf) {
             return Ok(res);
         }
 
-        // Fall back to JSON for legacy compatibility
+        // Fall back to JSON for very old peers
+        let first_byte = buf[0];
         if first_byte == b'{' || first_byte == b'[' {
             if let Ok(res) = serde_json::from_slice::<BlockPackResponse>(buf) {
-                #[cfg(feature = "tracing")]
-                tracing::debug!("[BLOCK-PACK] Received legacy JSON response, consider upgrading peer");
                 return Ok(res);
             }
         }
 
-        // Neither format worked
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to parse response: not valid CBOR or JSON (first byte: 0x{:02x}, len: {})", first_byte, buf.len()),
+            format!("Failed to parse response: not valid bincode, CBOR or JSON (first byte: 0x{:02x}, len: {})", buf[0], buf.len()),
         ))
     }
 }
@@ -231,8 +240,8 @@ impl Codec for BlockPackCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        // v1.1.28-beta: Use CBOR (compact, efficient)
-        let bytes = serde_cbor::to_vec(&req)
+        // v3.4.15-beta: Use bincode (native u128 support)
+        let bytes = bincode::serialize(&req)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         io.write_all(&bytes).await?;
@@ -248,11 +257,11 @@ impl Codec for BlockPackCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        // 🚀 v1.6.0-SCRAMJET: Switch to CBOR for ~40% bandwidth reduction
-        // BREAKING CHANGE: Old clients (pre-v1.1.28) will fail to parse CBOR responses.
-        // Network-wide upgrade required. Legacy JSON support removed for performance.
-        // CBOR is more compact than JSON (no field names repeated, binary encoding).
-        let bytes = serde_cbor::to_vec(&res)
+        // v3.4.15-beta: CRITICAL FIX - Use bincode instead of CBOR
+        // CBOR cannot serialize u128 values, causing "The number can't be stored in CBOR"
+        // errors for blocks 199,002+ after the u64→u128 migration.
+        // Bincode natively supports u128 and is already used for block storage.
+        let bytes = bincode::serialize(&res)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         io.write_all(&bytes).await?;

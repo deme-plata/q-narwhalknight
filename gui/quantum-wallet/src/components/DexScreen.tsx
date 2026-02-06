@@ -23,27 +23,70 @@ const parseU128 = (value: string | number | undefined): number => {
 };
 
 // v2.9.27-beta: Helper to format prices, especially very small ones
+// v3.9.5-beta: Subscript zero notation for tiny prices (like DEXScreener)
+// $0.000000038 → $0.0₇38 (subscript 7 = count of consecutive zeros after "0.0")
+const SUBSCRIPT_DIGITS = ['₀','₁','₂','₃','₄','₅','₆','₇','₈','₉'];
+const toSubscript = (n: number): string => {
+  return String(n).split('').map(d => SUBSCRIPT_DIGITS[parseInt(d)] || d).join('');
+};
+
 const formatPrice = (price: number): string => {
   if (price === 0) return '0';
-  if (price >= 1) {
-    // Normal prices: $42.50
+  if (price >= 1000) {
+    return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } else if (price >= 1) {
     return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   } else if (price >= 0.01) {
-    // Small prices: $0.0382
     return price.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
   } else if (price >= 0.0001) {
-    // Very small: $0.000038
     return price.toFixed(6);
   } else {
-    // Tiny prices: show in scientific notation or as "< $0.0001"
-    // Use toExponential for very small numbers
-    if (price < 0.00000001) {
-      return price.toExponential(2);
+    // Tiny prices: use subscript zero notation
+    // Count zeros after "0." and show as subscript
+    const str = price.toFixed(20);
+    const afterDot = str.split('.')[1] || '';
+    let zeroCount = 0;
+    for (const ch of afterDot) {
+      if (ch === '0') zeroCount++;
+      else break;
     }
-    // Show up to 8 decimal places for micro-prices
-    return price.toFixed(8).replace(/\.?0+$/, '');
+    // Get 2-4 significant digits after the zeros
+    const sigDigits = afterDot.slice(zeroCount, zeroCount + 4).replace(/0+$/, '') || '0';
+    if (zeroCount >= 2) {
+      return `0.0${toSubscript(zeroCount)}${sigDigits}`;
+    }
+    return price.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
   }
 };
+
+// v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
+// Any balance exceeding this is corrupted data and must be rejected
+const MAX_SANE_BALANCE = 21_000_000; // 21 million QUG
+
+/**
+ * v3.6.1-beta: Validate balance value to prevent corrupted data from being cached
+ */
+function isValidBalance(balance: number): boolean {
+  if (typeof balance !== 'number') return false;
+  if (isNaN(balance) || !isFinite(balance)) return false;
+  if (balance < 0) return false;
+  if (balance > MAX_SANE_BALANCE) {
+    console.warn(`🚨 [DexScreen] Rejected corrupted balance: ${balance.toExponential()} > max supply ${MAX_SANE_BALANCE}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * v3.6.1-beta: Safe localStorage set for cachedBalance - validates before storing
+ */
+function safeCacheBalance(balance: number): void {
+  if (isValidBalance(balance)) {
+    localStorage.setItem('cachedBalance', balance.toString());
+  } else {
+    console.warn(`🚨 [DexScreen] safeCacheBalance: Refusing to cache invalid balance: ${balance}`);
+  }
+}
 
 // v3.2.22-beta: BigInt helpers for handling large token amounts without precision loss
 // JavaScript Number.MAX_SAFE_INTEGER is ~9e15, but tokens can have 1e28+ amounts with 24 decimals
@@ -117,6 +160,33 @@ const reserveToDisplay = (rawReserve: number | string, tokenSymbol: string, toke
   const raw = typeof rawReserve === 'string' ? parseFloat(rawReserve) : rawReserve;
   const decimals = getTokenDecimals(tokenSymbol, tokenList);
   return raw / Math.pow(10, decimals);
+};
+
+// v3.6.5-beta: Get display name for a token (symbol if known, shortened address otherwise)
+const getTokenDisplayName = (tokenIdOrSymbol: string, tokenList?: Token[]): string => {
+  // If it's already a short symbol (like "QUG", "ETH"), return as-is
+  if (!tokenIdOrSymbol || tokenIdOrSymbol.length <= 10) {
+    return tokenIdOrSymbol || 'Unknown';
+  }
+
+  // Try to find the token in the list by ID or symbol
+  if (tokenList) {
+    const token = tokenList.find(t =>
+      t.id === tokenIdOrSymbol ||
+      t.id.toLowerCase() === tokenIdOrSymbol.toLowerCase() ||
+      t.symbol.toLowerCase() === tokenIdOrSymbol.toLowerCase()
+    );
+    if (token) {
+      return token.symbol;
+    }
+  }
+
+  // For long addresses, extract a readable short form
+  // Format: first 6 chars + "..." (e.g., "qnk241..." from "qnk2411fd4ac0061a852f5c3aa122f4a3a...")
+  if (tokenIdOrSymbol.startsWith('qnk')) {
+    return tokenIdOrSymbol.slice(0, 9) + '...';
+  }
+  return tokenIdOrSymbol.slice(0, 6) + '...';
 };
 
 // DEX Settings Interface
@@ -204,7 +274,7 @@ export default function DexScreen() {
   const [swapTo, setSwapTo] = useState('QUGUSD');
   const [swapAmount, setSwapAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change24h' | 'volume24h' | 'liquidity' | 'marketCap'>('volume24h');
+  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change1h' | 'change24h' | 'change7d' | 'volume24h' | 'liquidity' | 'marketCap' | 'holders'>('volume24h');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [filterBy, setFilterBy] = useState<'all' | 'gainers' | 'losers'>('all');
   const [selectedToken, setSelectedToken] = useState<Token | null>(null);
@@ -1520,6 +1590,9 @@ export default function DexScreen() {
                 holders: customHolders,
                 icon: '🪙',
                 logoUrl: apiToken.logo_url || localStorage.getItem(`token_logo_${apiToken.address}`) || undefined,
+                // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
+                // Without this, custom tokens default to 24 decimals which causes U128 overflow
+                decimals: decimals,
                 features: {
                   reflection: false,
                   autoLiquidity: false,
@@ -1654,6 +1727,9 @@ export default function DexScreen() {
               circulatingSupply: actualSupply || 0,
               holders: customHolders,
               icon: '🪙',
+              // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
+              // Without this, custom tokens default to 24 decimals which causes U128 overflow
+              decimals: decimals,
               features: {
                 reflection: false,
                 autoLiquidity: false,
@@ -2748,13 +2824,30 @@ export default function DexScreen() {
                   <div className="p-4 bg-white/5 rounded-xl">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-gray-400">Pool:</span>
-                      <span className="text-white font-bold">{removingPool.token0} / {removingPool.token1}</span>
+                      <span className="text-white font-bold">{getTokenDisplayName(removingPool.token0, tokens)} / {getTokenDisplayName(removingPool.token1, tokens)}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-gray-400">Your Reserves:</span>
                       <div className="text-right">
-                        <div className="text-white text-sm">{(parseU128(removingPool.reserve0) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token0}</div>
-                        <div className="text-white text-sm">{(parseU128(removingPool.reserve1) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })} {removingPool.token1}</div>
+                        {/* v3.6.7-beta: Pools always use 24 decimals */}
+                        <div className="text-white text-sm">
+                          {(() => {
+                            const raw = parseU128(removingPool.reserve0);
+                            const display = raw / 1e24;
+                            if (display >= 1e12) return (display / 1e12).toFixed(2) + 'T';
+                            if (display >= 1e9) return (display / 1e9).toFixed(2) + 'B';
+                            if (display >= 1e6) return (display / 1e6).toFixed(2) + 'M';
+                            if (display >= 1e3) return (display / 1e3).toFixed(2) + 'K';
+                            return display.toFixed(display < 1 ? 6 : 2);
+                          })()} {getTokenDisplayName(removingPool.token0, tokens)}
+                        </div>
+                        <div className="text-white text-sm">
+                          {(() => {
+                            const raw = parseU128(removingPool.reserve1);
+                            const display = raw / 1e24;
+                            return display.toFixed(display < 1 ? 8 : 2);
+                          })()} {getTokenDisplayName(removingPool.token1, tokens)}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -2785,12 +2878,28 @@ export default function DexScreen() {
                     <div className="text-sm text-gray-300 mb-2">You will receive:</div>
                     <div className="space-y-1">
                       <div className="flex justify-between">
-                        <span className="text-gray-400">{removingPool.token0}:</span>
-                        <span className="text-white font-bold">{((parseU128(removingPool.reserve0) / 1e24) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
+                        <span className="text-gray-400">{getTokenDisplayName(removingPool.token0, tokens)}:</span>
+                        <span className="text-white font-bold">
+                          {(() => {
+                            const raw = parseU128(removingPool.reserve0);
+                            const display = (raw / 1e24) * removePercentage / 100;
+                            if (display >= 1e12) return (display / 1e12).toFixed(2) + 'T';
+                            if (display >= 1e9) return (display / 1e9).toFixed(2) + 'B';
+                            if (display >= 1e6) return (display / 1e6).toFixed(2) + 'M';
+                            if (display >= 1e3) return (display / 1e3).toFixed(2) + 'K';
+                            return display.toFixed(display < 1 ? 6 : 2);
+                          })()}
+                        </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-400">{removingPool.token1}:</span>
-                        <span className="text-white font-bold">{((parseU128(removingPool.reserve1) / 1e24) * removePercentage / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}</span>
+                        <span className="text-gray-400">{getTokenDisplayName(removingPool.token1, tokens)}:</span>
+                        <span className="text-white font-bold">
+                          {(() => {
+                            const raw = parseU128(removingPool.reserve1);
+                            const display = (raw / 1e24) * removePercentage / 100;
+                            return display.toFixed(display < 1 ? 8 : 2);
+                          })()}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -3733,7 +3842,7 @@ export default function DexScreen() {
                   />
                   <button
                     onClick={() => setIsFromTokenSelectorOpen(true)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-all flex items-center gap-2"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-colors flex items-center gap-2"
                   >
                     {/* Proper Logo for QUG */}
                     {swapFrom === 'QUG' ? (
@@ -3869,9 +3978,15 @@ export default function DexScreen() {
                       key={percentage}
                       onClick={() => {
                         const fromToken = findToken(swapFrom);
+                        console.log(`🔢 [DEX v3.6.9] ${percentage}% clicked:`, {
+                          swapFrom,
+                          fromToken: fromToken ? { symbol: fromToken.symbol, balance: fromToken.balance } : null,
+                          calculatedAmount: fromToken ? fromToken.balance * (percentage / 100) : 'N/A'
+                        });
                         if (fromToken) {
                           const amount = fromToken.balance * (percentage / 100);
                           setSwapAmount(amount.toFixed(8));
+                          console.log(`✅ [DEX v3.6.9] Set swapAmount to:`, amount.toFixed(8));
                         }
                       }}
                       whileHover={{ scale: 1.05 }}
@@ -3954,7 +4069,7 @@ export default function DexScreen() {
                   />
                   <button
                     onClick={() => setIsToTokenSelectorOpen(true)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-all flex items-center gap-2"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-colors flex items-center gap-2"
                   >
                     {/* Proper Logo for QUG */}
                     {swapTo === 'QUG' ? (
@@ -4285,11 +4400,14 @@ export default function DexScreen() {
                         console.log('🔒 [DEX] PRE-SWAP (USD→QUG): Set PRELIMINARY locked balance:', preliminaryQugBalance);
                       }
 
+                      // v3.4.19-beta: Use correct decimal scaling for each token
+                      const fromDec = 24; // QUGUSD always has 24 decimals
+                      const toDec = toToken.decimals ?? 24; // Use toToken's decimals for output
                       const swapResponse = await qnkAPI.executeSwap({
                         from_token: 'QUGUSD',
                         to_token: toTokenFormatted,
-                        amount_in: Math.floor(qugusdAmount * 1e24),
-                        min_amount_out: Math.floor(minOutput * 1e24),
+                        amount_in: Math.floor(qugusdAmount * Math.pow(10, fromDec)),
+                        min_amount_out: Math.floor(minOutput * Math.pow(10, toDec)), // v3.4.19: Use toToken decimals
                         wallet_address: walletAddress
                       });
 
@@ -4310,7 +4428,7 @@ export default function DexScreen() {
                           const currentQug = tokens.find(t => t.symbol === 'QUG');
                           if (currentQug) {
                             const newQugBalance = currentQug.balance + outputAmount;
-                            localStorage.setItem('cachedBalance', newQugBalance.toString());
+                            safeCacheBalance(newQugBalance);
                             localStorage.setItem('dexLockedBalance', newQugBalance.toString()); // Update with actual amount
                             console.log(`🔒 [DEX] Updated LOCKED balance (USD→QUG): ${currentQug.balance} -> ${newQugBalance}`);
                           }
@@ -4404,8 +4522,23 @@ export default function DexScreen() {
 
                       // Determine if we're swapping forward or reverse in the pool
                       const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
-                      const reserveIn = isForward ? parseU128(matchingPool.reserve0) / 1e24 : parseU128(matchingPool.reserve1) / 1e24;
-                      const reserveOut = isForward ? parseU128(matchingPool.reserve1) / 1e24 : parseU128(matchingPool.reserve0) / 1e24;
+
+                      // v3.6.10-beta: CRITICAL FIX - Use correct decimals for each token!
+                      // Previously both reserves were divided by 1e24, causing massive errors when swapping
+                      // between tokens with different decimals (e.g., QUG 24 decimals vs custom token 8 decimals)
+                      const fromDec = fromToken.decimals ?? 24;
+                      const toDec = toToken.decimals ?? 24;
+                      const fromDivisor = Math.pow(10, fromDec);
+                      const toDivisor = Math.pow(10, toDec);
+
+                      const reserveIn = isForward
+                        ? parseU128(matchingPool.reserve0) / fromDivisor
+                        : parseU128(matchingPool.reserve1) / fromDivisor;
+                      const reserveOut = isForward
+                        ? parseU128(matchingPool.reserve1) / toDivisor
+                        : parseU128(matchingPool.reserve0) / toDivisor;
+
+                      console.log(`🔢 [DEX v3.6.10] Reserve decimals: from=${fromDec}, to=${toDec}, reserveIn=${reserveIn}, reserveOut=${reserveOut}`);
 
                       // v2.4.0: Add NaN protection for zero reserves
                       if (reserveIn <= 0 || reserveOut <= 0) {
@@ -4500,8 +4633,11 @@ export default function DexScreen() {
                     // v3.2.22-beta: Use BigInt for precision-safe amount calculation
                     // Determine decimals based on token type (QUG/QUGUSD use 24, custom tokens use their decimals)
                     const fromDecimals = fromToken.decimals ?? 24; // Default to 24 for native tokens
+                    const toDecimals = toToken.decimals ?? 24; // v3.4.19-beta: Fix - output uses toToken's decimals
                     const amountInBigInt = parseAmountToBigInt(swapAmount, fromDecimals);
-                    const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), fromDecimals);
+                    // v3.4.19-beta: CRITICAL FIX - minOutput must use toToken's decimals, not fromToken's!
+                    // This was causing slippage errors when swapping between tokens with different decimals
+                    const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), toDecimals);
 
                     // Validate amount doesn't exceed u128 max
                     if (amountInBigInt > U128_MAX) {
@@ -4514,7 +4650,17 @@ export default function DexScreen() {
                     const amountInNum = Number(amountInBigInt);
                     const minOutputNum = Number(minOutputBigInt);
 
-                    console.log(`🔢 [DEX v3.2.22] Swap amounts: input="${swapAmount}", bigint=${amountInBigInt.toString()}, num=${amountInNum}`);
+                    console.log(`🔢 [DEX v3.6.9] Swap amounts:`, {
+                      swapAmount,
+                      fromDecimals,
+                      toDecimals,
+                      amountInBigInt: amountInBigInt.toString(),
+                      amountInNum,
+                      expectedOutput,
+                      minOutput,
+                      minOutputBigInt: minOutputBigInt.toString(),
+                      minOutputNum
+                    });
 
                     const response = await qnkAPI.executeSwap({
                       from_token: fromTokenFormatted,
@@ -4526,8 +4672,11 @@ export default function DexScreen() {
 
                     if (response.success && response.data) {
                       // v2.4.0: NaN protection for amount_out
+                      // v3.7.2-beta: CRITICAL FIX - Use toToken's actual decimals instead of hardcoded 1e24
+                      // Previously: rawAmountOut / 1e24 caused astronomical prices for custom tokens (8 decimals)
                       const rawAmountOut = response.data.amount_out;
-                      const amountOut = (rawAmountOut && isFinite(rawAmountOut)) ? rawAmountOut / 1e24 : expectedOutput;
+                      const divisor = Math.pow(10, toDecimals);
+                      const amountOut = (rawAmountOut && isFinite(rawAmountOut)) ? rawAmountOut / divisor : expectedOutput;
                       const amountIn = parseFloat(swapAmount) || 0;
 
                       console.log('📊 [DEX] Swap response:', { rawAmountOut, amountOut, amountIn, expectedOutput });
@@ -4597,7 +4746,7 @@ export default function DexScreen() {
                       if (swapFrom === 'QUG') {
                         const newBal = newFromBalance;
                         // Set both regular and LOCKED balance
-                        localStorage.setItem('cachedBalance', newBal.toString());
+                        safeCacheBalance(newBal);
                         localStorage.setItem('dexLockedBalance', newBal.toString()); // LOCKED - TopBar uses this
                         localStorage.setItem('balanceTimestamp', Date.now().toString());
                         console.log('🔒 [DEX] SET LOCKED BALANCE (QUG deducted):', newBal);
@@ -4606,7 +4755,7 @@ export default function DexScreen() {
                       } else if (swapTo === 'QUG') {
                         const newBal = newToBalance;
                         // Set both regular and LOCKED balance
-                        localStorage.setItem('cachedBalance', newBal.toString());
+                        safeCacheBalance(newBal);
                         localStorage.setItem('dexLockedBalance', newBal.toString()); // LOCKED - TopBar uses this
                         localStorage.setItem('balanceTimestamp', Date.now().toString());
                         console.log('🔒 [DEX] SET LOCKED BALANCE (QUG received):', newBal);
@@ -4675,9 +4824,9 @@ export default function DexScreen() {
 
                       // Update localStorage for QUG
                       if (swapFrom === 'QUG') {
-                        localStorage.setItem('cachedBalance', newFromBalance.toString());
+                        safeCacheBalance(newFromBalance);
                       } else if (swapTo === 'QUG') {
-                        localStorage.setItem('cachedBalance', newToBalance.toString());
+                        safeCacheBalance(newToBalance);
                       }
 
                       // Update localStorage for QUGUSD
@@ -4889,7 +5038,19 @@ export default function DexScreen() {
           </div>
 
           {/* My Liquidity Pools Section */}
-          {liquidityPools.length > 0 && (
+          {/* v3.4.17-beta: PRIVACY FIX - Only show pools owned by current user */}
+          {(() => {
+            const walletAddr = localStorage.getItem('walletAddress') || '';
+            const myPools = liquidityPools.filter(pool => {
+              // Match provider address (case-insensitive)
+              const poolProvider = (pool.provider || '').toLowerCase();
+              const myAddress = walletAddr.toLowerCase();
+              return poolProvider === myAddress ||
+                     poolProvider === `qnk${myAddress}` ||
+                     poolProvider === myAddress.replace(/^qnk/, '') ||
+                     `qnk${poolProvider}` === myAddress;
+            });
+            return myPools.length > 0 && (
             <div className="relative group mt-6">
               {/* Glow effect */}
               <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-cyan to-quantum-green rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
@@ -4902,7 +5063,7 @@ export default function DexScreen() {
 
                 {/* Pools List */}
                 <div className="space-y-3">
-                  {liquidityPools.map((pool, index) => (
+                  {myPools.map((pool, index) => (
                     <motion.div
                       key={pool.pool_id}
                       initial={{ opacity: 0, y: 10 }}
@@ -4910,31 +5071,60 @@ export default function DexScreen() {
                       transition={{ delay: index * 0.1 }}
                       className="bg-white/5 border border-white/10 rounded-xl p-4 hover:border-quantum-cyan/50 transition-all"
                     >
-                      {/* Pool Header */}
+                      {/* Pool Header - v3.6.5-beta: Show token symbols instead of addresses */}
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                           <div className="text-2xl">💧</div>
                           <div>
-                            <div className="font-bold text-white">
-                              {pool.token0} / {pool.token1}
+                            <div className="font-bold text-white text-lg">
+                              {getTokenDisplayName(pool.token0, tokens)} / {getTokenDisplayName(pool.token1, tokens)}
                             </div>
-                            <div className="text-xs text-gray-400">Pool ID: {pool.pool_id.slice(0, 20)}...</div>
+                            <div className="text-xs text-gray-400">
+                              Pool ID: {pool.pool_id.slice(0, 16)}...
+                              {pool.token0.length > 10 && (
+                                <span className="ml-2 text-gray-500">
+                                  ({pool.token0.slice(0, 12)}...)
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
 
-                      {/* Pool Stats */}
+                      {/* Pool Stats - v3.6.7-beta: Pools always use 24 decimals internally */}
                       <div className="grid grid-cols-2 gap-3">
                         <div className="bg-quantum-cyan/10 border border-quantum-cyan/20 rounded-lg p-3">
-                          <div className="text-xs text-gray-400 mb-1">Reserve {pool.token0}</div>
-                          <div className="text-sm font-bold text-white">
-                            {(parseU128(pool.reserve0) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
+                          <div className="text-xs text-gray-400 mb-1 truncate">
+                            {getTokenDisplayName(pool.token0, tokens)} Reserve
+                          </div>
+                          <div className="text-sm font-bold text-white truncate">
+                            {(() => {
+                              const raw = parseU128(pool.reserve0);
+                              // Pools always store in 24-decimal format
+                              const display = raw / 1e24;
+                              if (display >= 1e12) return (display / 1e12).toFixed(2) + 'T';
+                              if (display >= 1e9) return (display / 1e9).toFixed(2) + 'B';
+                              if (display >= 1e6) return (display / 1e6).toFixed(2) + 'M';
+                              if (display >= 1e3) return (display / 1e3).toFixed(2) + 'K';
+                              return display.toFixed(display < 1 ? 6 : 2);
+                            })()}
                           </div>
                         </div>
                         <div className="bg-quantum-purple/10 border border-quantum-purple/20 rounded-lg p-3">
-                          <div className="text-xs text-gray-400 mb-1">Reserve {pool.token1}</div>
-                          <div className="text-sm font-bold text-white">
-                            {(parseU128(pool.reserve1) / 1e24).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })}
+                          <div className="text-xs text-gray-400 mb-1 truncate">
+                            {getTokenDisplayName(pool.token1, tokens)} Reserve
+                          </div>
+                          <div className="text-sm font-bold text-white truncate">
+                            {(() => {
+                              const raw = parseU128(pool.reserve1);
+                              // Pools always store in 24-decimal format
+                              const display = raw / 1e24;
+                              if (display >= 1e12) return (display / 1e12).toFixed(2) + 'T';
+                              if (display >= 1e9) return (display / 1e9).toFixed(2) + 'B';
+                              if (display >= 1e6) return (display / 1e6).toFixed(2) + 'M';
+                              if (display >= 1e3) return (display / 1e3).toFixed(2) + 'K';
+                              return display.toFixed(display < 1 ? 8 : 2);
+                            })()}
                           </div>
                         </div>
                         <div className="bg-quantum-green/10 border border-quantum-green/20 rounded-lg p-3">
@@ -5131,8 +5321,31 @@ export default function DexScreen() {
                           Add More
                         </button>
                         <button
-                          onClick={() => {
-                            setRemovingPool(pool);
+                          onClick={async () => {
+                            // v3.6.6-beta: Fetch fresh pool data before opening modal
+                            // to ensure reserves are up-to-date after adding liquidity
+                            try {
+                              const response = await qnkAPI.getLiquidityPools();
+                              if (response.success && response.data) {
+                                const freshPool = response.data.find((p: any) => p.address === pool.pool_id || p.pool_id === pool.pool_id);
+                                if (freshPool) {
+                                  console.log('🔄 [REMOVE] Fetched fresh pool data:', freshPool);
+                                  setRemovingPool({
+                                    ...pool,
+                                    reserve0: freshPool.reserve0,
+                                    reserve1: freshPool.reserve1,
+                                    total_liquidity: freshPool.total_liquidity
+                                  });
+                                } else {
+                                  setRemovingPool(pool);
+                                }
+                              } else {
+                                setRemovingPool(pool);
+                              }
+                            } catch (e) {
+                              console.warn('Failed to refresh pool, using cached data:', e);
+                              setRemovingPool(pool);
+                            }
                             setRemovePercentage(50);
                           }}
                           className="flex-1 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white text-sm font-medium transition-all"
@@ -5147,12 +5360,12 @@ export default function DexScreen() {
                 {/* Info Box */}
                 <div className="p-3 bg-quantum-cyan/10 border border-quantum-cyan/20 rounded-xl">
                   <p className="text-xs text-gray-400">
-                    <strong className="text-quantum-cyan">Total Pools:</strong> {liquidityPools.length} active liquidity pools
+                    <strong className="text-quantum-cyan">Your Pools:</strong> {myPools.length} active liquidity pool{myPools.length !== 1 ? 's' : ''}
                   </p>
                 </div>
               </div>
             </div>
-          )}
+          );})()}
         </motion.div>
 
         {/* Token Table */}
@@ -5213,10 +5426,10 @@ export default function DexScreen() {
                         Price {sortBy === 'price' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
-                        onClick={() => handleSort('change24h')}
+                        onClick={() => handleSort('change1h')}
                         className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
                       >
-                        1h % {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                        1h % {sortBy === 'change1h' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
                         onClick={() => handleSort('change24h')}
@@ -5225,9 +5438,10 @@ export default function DexScreen() {
                         24h % {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
+                        onClick={() => handleSort('change7d')}
                         className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
                       >
-                        7d %
+                        7d % {sortBy === 'change7d' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
                         onClick={() => handleSort('volume24h')}
@@ -5242,15 +5456,22 @@ export default function DexScreen() {
                         Market Cap {sortBy === 'marketCap' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
+                        title="Fully Diluted Valuation (Total Supply × Price)"
+                      >
+                        FDV
+                      </th>
+                      <th
                         onClick={() => handleSort('liquidity')}
                         className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
                       >
                         Liquidity {sortBy === 'liquidity' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm"
+                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
+                        onClick={() => handleSort('holders')}
                       >
-                        Makers
+                        Holders {sortBy === 'holders' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
                       <th className="text-right py-3 px-4 text-gray-400 font-medium text-sm">Actions</th>
                     </tr>
@@ -5413,12 +5634,17 @@ export default function DexScreen() {
                           ${formatNumber(token.marketCap)}
                         </td>
 
+                        {/* FDV (Fully Diluted Valuation) - v3.7.1 */}
+                        <td className="py-4 px-4 text-right text-gray-400 font-medium" title="Total Supply × Price">
+                          ${formatNumber(token.totalSupply * token.price)}
+                        </td>
+
                         {/* Liquidity */}
                         <td className="py-4 px-4 text-right text-white font-medium">
                           ${formatNumber(token.liquidity)}
                         </td>
 
-                        {/* Makers */}
+                        {/* Holders */}
                         <td className="py-4 px-4 text-right text-gray-400 font-medium">
                           {token.holders?.toLocaleString() || '0'}
                         </td>
