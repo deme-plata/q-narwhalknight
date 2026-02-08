@@ -48,13 +48,14 @@ tokio-test = "0.4"
 
 # Platform-specific dependencies
 # Hardware interfaces are Linux-only (require udev, hidapi for USB devices)
+# Only compiled when "hardware" feature is enabled (not needed for cross-compilation)
 [target.'cfg(target_os = "linux")'.dependencies]
-serialport = "4.2"
-hidapi = "2.4"
-udev = "0.7"
+serialport = { version = "4.2", optional = true }
+hidapi = { version = "2.4", optional = true }
+udev = { version = "0.7", optional = true }
 
 [features]
 default = ["simulation"]
 simulation = []          # Use simulated QRNG for Phase 0/1
-hardware = []           # Enable actual QRNG hardware support (Linux only)
+hardware = ["serialport", "hidapi", "udev"]  # Enable actual QRNG hardware support (Linux only)
 entropy-analysis = []   # Enable quantum entropy quality analysis

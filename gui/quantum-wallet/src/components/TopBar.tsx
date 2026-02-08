@@ -297,6 +297,32 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     };
   }, []);
 
+  // Fetch total personal hashrate from API (sums all workers for this wallet)
+  useEffect(() => {
+    const walletAddress = localStorage.getItem('walletAddress') || '';
+    if (!walletAddress) return;
+
+    const fetchMiningHashrate = async () => {
+      try {
+        const res = await qnkAPI.getMiningStats(walletAddress);
+        if (res.success && res.data) {
+          // Only show hashrate if miner is actually active
+          if (res.data.is_active && res.data.hash_rate > 0) {
+            setPersonalHashrate(res.data.hash_rate);
+          } else {
+            setPersonalHashrate(0);
+          }
+        }
+      } catch {
+        // Mining stats endpoint may not be available
+      }
+    };
+
+    fetchMiningHashrate();
+    const interval = setInterval(fetchMiningHashrate, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
   // v3.4.16-beta: Detect Tor connection (.onion domain)
   useEffect(() => {
     if (typeof window !== 'undefined' && window.location) {
@@ -339,10 +365,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     });
 
     // Listen for mining stats updates (personal hashrate)
+    // The periodic API fetch is authoritative for total; SSE just provides instant updates.
     eventSource.addEventListener('miner-stats', (e: MessageEvent) => {
       try {
         const data: MiningStatsEvent = JSON.parse(e.data);
-        // Check if this is for our wallet
         const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
         const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
         if (normalizedMiner === normalizedWallet && data.avg_hash_rate) {

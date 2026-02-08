@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::DB;
 use std::sync::Arc;
 use std::time::Instant;

@@ -37,7 +37,19 @@ impl RocksDBKV {
         let path = path.as_ref();
         info!("💾 Opening sled database (Windows) at {:?} for {:?}", path, phase);
 
-        let db = sled::open(path).context("Failed to open sled database")?;
+        // Limit Sled's page cache to 256MB to prevent OOM on long-running nodes
+        // Without this, Sled's cache grows unbounded and eventually tries a 2GB+ allocation
+        let cache_mb: u64 = std::env::var("SLED_CACHE_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+        info!("💾 Sled page cache limit: {} MB", cache_mb);
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(cache_mb * 1024 * 1024)
+            .flush_every_ms(Some(1000))
+            .open()
+            .context("Failed to open sled database")?;
 
         let qrng = if matches!(phase, Phase::Phase2 | Phase::Phase3 | Phase::Phase4) {
             info!("🌌 Initializing quantum RNG for storage encryption");
@@ -74,7 +86,13 @@ impl RocksDBKV {
         let path = path.as_ref();
         info!("🧊 Opening sled cold database (Windows) at {:?}", path);
 
-        let db = sled::open(path).context("Failed to open sled cold database")?;
+        // Cold DB uses smaller cache (64MB) since it's accessed less frequently
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(64u64 * 1024 * 1024)
+            .flush_every_ms(Some(5000))
+            .open()
+            .context("Failed to open sled cold database")?;
 
         Ok(Self {
             db: Arc::new(db),
@@ -88,6 +106,11 @@ impl RocksDBKV {
         self.db
             .open_tree(cf)
             .context(format!("Failed to open tree '{}'", cf))
+    }
+
+    /// Get a raw database handle (returns Arc<()> on Windows since there's no RocksDB)
+    pub fn get_raw_db(&self) -> Arc<()> {
+        Arc::new(())
     }
 
     pub async fn get_stats(&self) -> Result<SledStats> {
@@ -212,6 +235,46 @@ impl KVStore for RocksDBKV {
 
     async fn get_db_size(&self) -> Result<u64> {
         Ok(self.db.size_on_disk().unwrap_or(0))
+    }
+
+    async fn write_batch_turbo(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        // Sled has no separate turbo mode - delegate to regular write_batch
+        self.write_batch(batch).await
+    }
+
+    async fn create_checkpoint(&self, _checkpoint_dir: &str) -> Result<()> {
+        // Sled doesn't support native checkpoints - flush to disk instead
+        self.db.flush_async().await.context("sled flush failed during checkpoint")?;
+        info!("💾 sled checkpoint (flush) completed");
+        Ok(())
+    }
+
+    async fn sync_wal(&self) -> Result<()> {
+        // Sled manages its own WAL - flush to ensure persistence
+        self.db.flush_async().await.context("sled flush failed during WAL sync")?;
+        Ok(())
+    }
+
+    async fn shutdown_gracefully(&self) -> Result<()> {
+        // Flush all pending writes before shutdown
+        self.db.flush_async().await.context("sled flush failed during shutdown")?;
+        info!("💾 sled graceful shutdown completed");
+        Ok(())
+    }
+
+    async fn verify_checkpoint(&self, _checkpoint_dir: &str) -> Result<bool> {
+        // Sled doesn't have checkpoint verification - return true as no-op
+        Ok(true)
+    }
+
+    async fn multi_get(&self, cf: &str, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
+        let tree = self.get_tree(cf)?;
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            let result = tree.get(key).context("sled multi_get failed")?;
+            results.push(result.map(|ivec| ivec.to_vec()));
+        }
+        Ok(results)
     }
 }
 

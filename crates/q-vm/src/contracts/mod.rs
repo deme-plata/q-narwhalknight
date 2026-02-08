@@ -16,8 +16,8 @@ pub mod decentralized_identity;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{
-    ContractAddress, ContractType, DeployedSmartContract, DeploymentOptions, FormDefinition,
-    OrobitSmartContractEcosystem, SmartContractTemplate,
+    ContractAddress, ContractMetadata, ContractState, ContractType, DeployedSmartContract,
+    DeploymentOptions, FormDefinition, OrobitSmartContractEcosystem, SmartContractTemplate,
 };
 
 // Re-export security types

@@ -135,15 +135,15 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v3.9.3-beta"
+              href="/downloads/q-api-server-v4.1.2-beta"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v3.5.14-beta)
+              Download Linux Binary (v4.1.2-beta)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 181 MB | WarpSync + ZK Privacy + Ring-LWE VRF + Genus-2 VDF
+              Size: 162 MB | WarpSync + ZK Privacy + Ring-LWE VRF + Genus-2 VDF
             </p>
           </div>
 
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v3.9.3-beta
-chmod +x q-api-server-v3.9.3-beta
-./q-api-server-v3.9.3-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v4.1.2-beta
+chmod +x q-api-server-v4.1.2-beta
+./q-api-server-v4.1.2-beta --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -183,28 +183,36 @@ chmod +x q-api-server-v3.9.3-beta
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Complete Windows Package</p>
-                <p className="text-sm text-gray-400">Includes all required DLL dependencies</p>
+                <p className="text-sm text-gray-400">All-in-one ZIP with node binary + required DLLs</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Full Consensus Support</p>
-                <p className="text-sm text-gray-400">Validator & mining capabilities</p>
+                <p className="text-white font-medium">Full Node + P2P Sync</p>
+                <p className="text-sm text-gray-400">Block validation, wallet, DEX, mining - all included</p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <CheckCircle className="w-5 h-5 text-quantum-cyan flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-white font-medium">Post-Quantum Cryptography</p>
+                <p className="text-sm text-gray-400">Dilithium5 + Kyber1024 signatures built-in</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-windows-x64.exe"
+              href="/downloads/q-narwhalknight-windows-x64.zip"
+              download="q-narwhalknight-windows-x64.zip"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Windows Binary
+              Download Windows Package (ZIP)
             </a>
             <p className="text-center text-sm text-gray-400">
-              Size: 76 MB | Standalone executable
+              Size: 77 MB (compressed) | Node + DLLs included
             </p>
           </div>
 
@@ -212,8 +220,14 @@ chmod +x q-api-server-v3.9.3-beta
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
-{`q-api-server-windows-x64.exe --port 8080`}
+{`# 1. Extract the ZIP to a folder
+# 2. Open PowerShell in that folder
+# 3. Run:
+.\\q-api-server-windows-x64.exe --port 9090 --p2p-port 9001`}
             </pre>
+            <p className="text-xs text-gray-500 mt-2">
+              Tip: Use port 9090 to avoid permission issues, or run as Administrator for port 8080
+            </p>
           </div>
         </motion.div>
       </div>

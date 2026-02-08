@@ -87,7 +87,7 @@ export default function AIChatScreen() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState(''); // Kimi K2 reasoning (v1.0.5)
-  const [maxTokens, setMaxTokens] = useState(512); // Default 512 tokens
+  const [maxTokens, setMaxTokens] = useState(2048); // Default 2048 tokens for full responses
   const [showSettings, setShowSettings] = useState(false);
   const [showCostsUsage, setShowCostsUsage] = useState(false);
   const [showMetrics, setShowMetrics] = useState(false);
@@ -109,8 +109,8 @@ export default function AIChatScreen() {
   const [topP, setTopP] = useState(0.9);
   const [frequencyPenalty, setFrequencyPenalty] = useState(0.0);
   const [presencePenalty, setPresencePenalty] = useState(0.0);
-  // v2.5.0-beta: Default to Ministral-3B for native function calling (agentic)
-  const [selectedModel, setSelectedModel] = useState('Ministral-3B-Instruct');
+  // v4.0.5: Default to BitNet b1.58-2B-4T (1-bit quantized, fast inference via llama-server)
+  const [selectedModel, setSelectedModel] = useState('BitNet-b1.58-2B-4T');
   const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [modelSwitchStatus, setModelSwitchStatus] = useState<string | null>(null);
 
@@ -787,6 +787,14 @@ export default function AIChatScreen() {
     setIsSwitchingModel(true);
     setModelSwitchStatus(`Switching to ${modelName}...`);
 
+    // BitNet uses external API - no backend model switch needed
+    if (modelName === 'BitNet-b1.58-2B-4T') {
+      setModelSwitchStatus(`✅ Switched to BitNet b1.58-2B (1-bit quantized, via llama-server)`);
+      setTimeout(() => setModelSwitchStatus(null), 3000);
+      setIsSwitchingModel(false);
+      return;
+    }
+
     // If no chat exists yet, just update the state for future use
     if (!currentChatId) {
       setModelSwitchStatus(`✅ Model set to ${modelName}`);
@@ -1037,8 +1045,148 @@ export default function AIChatScreen() {
     backgroundGenerationRef.current = false;
   };
 
+  // BitNet b1.58-2B-4T streaming via OpenAI-compatible API (temporary)
+  const sendBitNetMessage = async (userMessage: string) => {
+    setIsGenerating(true);
+    setStreamingMessage('');
+    setStreamingReasoning('');
+
+    // Build conversation history from current messages for context
+    const conversationMessages: { role: string; content: string }[] = [
+      {
+        role: 'system',
+        content: 'You are an advanced AI assistant powered by BitNet b1.58 (1-bit quantized 2B parameter model by Microsoft). You help users with blockchain, cryptocurrency, and general questions. Be concise and helpful.'
+      },
+      ...messages.map(m => ({
+        role: m.role,
+        content: m.content
+      })),
+      { role: 'user', content: userMessage }
+    ];
+
+    // Add user message to UI immediately
+    const tempUserMessage: Message = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content: userMessage,
+      timestamp: Date.now() / 1000,
+    };
+    setMessages(prev => [...prev, tempUserMessage]);
+
+    try {
+      const response = await fetch('/bitnet-api/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'bitnet-b1.58-2B-4T',
+          messages: conversationMessages,
+          stream: true,
+          max_tokens: maxTokens,
+          temperature: temperature,
+          top_p: topP,
+          stop: ['<|end|>', '<|user|>', '<|assistant|>', '<|endoftext|>']
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`BitNet API error: HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('ReadableStream not supported');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let cumulativeText = '';
+      const startTime = Date.now();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+          const data = trimmed.substring(5).trim();
+          if (data === '[DONE]') {
+            // Stream complete
+            const elapsed = Date.now() - startTime;
+            const tokensEstimate = cumulativeText.split(/\s+/).length;
+            console.log(`✅ BitNet complete: ~${tokensEstimate} tokens in ${elapsed}ms`);
+
+            const assistantMessage: Message = {
+              id: `bitnet-${Date.now()}`,
+              role: 'assistant',
+              content: cumulativeText,
+              timestamp: Date.now() / 1000,
+              stats: {
+                tokens: tokensEstimate,
+                latency_ms: elapsed,
+                tokens_per_second: (tokensEstimate / elapsed) * 1000
+              }
+            };
+            setMessages(prev => [...prev, assistantMessage]);
+            setStreamingMessage('');
+            setIsGenerating(false);
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta;
+            if (delta?.content) {
+              // Filter BitNet special tokens
+              let content = delta.content;
+              content = content.replace(/<\|end\|>/g, '');
+              content = content.replace(/<\|user\|>/g, '');
+              content = content.replace(/<\|assistant\|>/g, '');
+              content = content.replace(/<\|endoftext\|>/g, '');
+              if (content) {
+                cumulativeText += content;
+                setStreamingMessage(cumulativeText);
+              }
+            }
+          } catch {
+            // Skip unparseable lines
+          }
+        }
+      }
+
+      // Stream ended without [DONE] - save what we have
+      if (cumulativeText) {
+        const assistantMessage: Message = {
+          id: `bitnet-${Date.now()}`,
+          role: 'assistant',
+          content: cumulativeText,
+          timestamp: Date.now() / 1000,
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+      }
+    } catch (error) {
+      console.error('BitNet streaming error:', error);
+      setStreamingMessage(`BitNet Error: ${error}`);
+      setTimeout(() => setStreamingMessage(''), 5000);
+    } finally {
+      setIsGenerating(false);
+      setStreamingMessage('');
+    }
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || isGenerating) return;
+
+    // BitNet uses its own streaming path (OpenAI-compatible API)
+    if (selectedModel === 'BitNet-b1.58-2B-4T') {
+      const userMessage = input;
+      setInput('');
+      await sendBitNetMessage(userMessage);
+      return;
+    }
 
     // ✅ v0.9.36-beta - Check if this is a transaction request
     const isTransaction = await detectAndPrepareTransaction(input);
@@ -2088,7 +2236,7 @@ export default function AIChatScreen() {
                         AI Model
                       </label>
                       <span className="text-amber-400 font-mono text-xs px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                        {selectedModel.includes('Small') ? '24B params' : selectedModel.includes('Ministral-3B') ? '3B params' : selectedModel.includes('Qwen3') ? '8B params' : '7B params'}
+                        {selectedModel.includes('BitNet') ? '2B 1-bit' : selectedModel.includes('Small') ? '24B params' : selectedModel.includes('Ministral-3B') ? '3B params' : selectedModel.includes('Qwen3') ? '8B params' : '7B params'}
                       </span>
                     </div>
                     <select
@@ -2100,7 +2248,8 @@ export default function AIChatScreen() {
                         boxShadow: '0 0 20px rgba(212, 175, 55, 0.1)',
                       }}
                     >
-                      <option value="Ministral-3B-Instruct">⚡🔧 Ministral 3B (2.1 GB) - Agentic + Functions</option>
+                      <option value="BitNet-b1.58-2B-4T">⚡ BitNet b1.58 2B (0.4 GB) - 1-Bit Quantized</option>
+                      <option value="Ministral-3B-Instruct">🔧 Ministral 3B (2.1 GB) - Agentic + Functions</option>
                       <option value="Mistral-7B-Instruct-v0.3">Mistral 7B Instruct (4.3 GB) - Fast</option>
                       <option value="Qwen3-VL-8B-Instruct">🖼️ Qwen3 VL 8B (5.1 GB) - Vision & Language</option>
                       <option value="Mistral-Small-3.2-24B-Instruct">Mistral Small 24B (14 GB) - Higher Quality</option>

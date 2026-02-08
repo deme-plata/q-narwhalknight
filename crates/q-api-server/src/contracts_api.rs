@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::AppState;
 use crate::ContractEventRecord;
+use crate::wallet_auth::AuthenticatedWallet;
 use crate::transaction_utils::{TransactionBuilder, submit_transaction};
 use q_types::{Transaction, TxStatus, TokenAnnouncement};
 use q_network::unified_network_manager::NetworkCommand;
@@ -65,6 +66,54 @@ pub type TokenReflectionStore = Arc<RwLock<HashMap<String, u64>>>;
 
 /// Global storage for total burned amounts per token
 pub type TokenBurnStore = Arc<RwLock<HashMap<String, u64>>>;
+
+// ============================================================================
+// v4.2.0-beta: VAULT RWA Token — Physical Device Redemption System
+// ============================================================================
+
+/// A redemption request for a physical Quillon Vault device
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultRedemption {
+    pub redemption_id: String,
+    pub buyer_wallet: String,
+    pub shipping_name: String,
+    pub shipping_address: String,
+    pub city: String,
+    pub state_province: String,
+    pub zip: String,
+    pub country: String,
+    pub phone: String,
+    pub email: String,
+    pub color_variant: String,
+    pub quantity: u32,
+    pub status: String, // "pending", "processing", "shipped", "delivered"
+    pub tracking_number: Option<String>,
+    pub serial_number: Option<String>,
+    pub created_at: u64,
+    pub fulfilled_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VaultRedeemRequest {
+    pub shipping_name: String,
+    pub shipping_address: String,
+    pub city: String,
+    pub state_province: String,
+    pub zip: String,
+    pub country: String,
+    pub phone: String,
+    pub email: String,
+    pub color_variant: String,
+    pub quantity: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VaultFulfillRequest {
+    pub redemption_id: String,
+    pub tracking_number: Option<String>,
+    pub serial_number: Option<String>,
+    pub status: String,
+}
 
 impl<T> ApiResponse<T> {
     pub fn success(data: T) -> Self {
@@ -122,6 +171,7 @@ pub struct ContractInfo {
     #[serde(serialize_with = "serialize_option_u128_as_string")]
     pub total_supply: Option<u128>, // v3.0.4: Migrated from u64 to u128
     pub decimals: Option<u32>,     // Add decimals for display
+    pub deployment_params: Option<serde_json::Value>, // v4.0.3: RWA configuration parameters
 }
 
 /// Helper to serialize Option<u128> as string for JSON (avoids JS 2^53 overflow)
@@ -242,6 +292,8 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/deployments", get(get_user_deployments))
         // Contract management endpoints
         .route("/deployed", get(get_contracts))
+        // RWA marketplace listing endpoint
+        .route("/rwa/marketplace", get(get_rwa_marketplace))
         .route("/:address", get(get_contract_details))
         .route("/:address/interact", post(interact_with_contract))
         .route(
@@ -271,6 +323,18 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         // v2.4.8: Social media profile endpoints
         .route("/:contract_address/social", get(get_social_profile))
         .route("/:contract_address/social", post(update_social_profile))
+        // v4.1.0: RWA Portfolio & Collateralization endpoints
+        .route("/rwa/portfolio", get(get_rwa_portfolio))
+        .route("/rwa/collateral/borrow", post(rwa_collateral_borrow))
+        .route("/rwa/collateral/repay", post(rwa_collateral_repay))
+        .route("/rwa/distribution/schedule", post(rwa_schedule_distribution))
+        .route("/rwa/distribution/toggle", post(rwa_toggle_distribution))
+        .route("/rwa/compliance/check", post(rwa_compliance_check))
+        // v4.2.0: VAULT RWA Physical Device Redemption endpoints
+        .route("/vault/redeem", post(vault_redeem))
+        .route("/vault/redemptions", get(vault_get_redemptions))
+        .route("/vault/fulfill", post(vault_fulfill))
+        .route("/vault/stats", get(vault_get_stats))
 }
 
 /// Get all available contract templates
@@ -580,13 +644,18 @@ pub async fn deploy_contract(
                     None
                 };
 
+                // v4.1.0: Normalize to 10^(2*decimals) format for backward compatibility
+                // Frontend sends base_units = display × 10^decimals
+                // We multiply by 10^decimals again so storage format = display × 10^(2*decimals)
+                // This matches the existing balance format expected by all display code
                 let initial_supply_result: Option<u128> = if let Some(supply_u64) =
                     initial_supply_val.as_u64()
                 {
-                    // Convert to base units: multiply by 10^decimals
+                    // Frontend sent a JSON number - this is likely display units (NOT base units)
+                    // because JSON numbers are typically human-entered values
                     let base_units = (supply_u64 as u128) * decimal_multiplier;
                     tracing::info!(
-                        "✅ Token supply: {} display tokens × 10^{} = {} base units",
+                        "✅ Token supply: {} × 10^{} = {} base units (u64 path)",
                         supply_u64,
                         decimals,
                         base_units
@@ -854,6 +923,26 @@ pub async fn get_user_contracts(
                 .map(|d| d as u32)
                 .or(Some(8)); // Default to 8 decimals (Bitcoin standard)
 
+            // v4.0.3: Merge RWA boolean deployment params into features map
+            // so the frontend controls can check contract.features.kyc_required etc.
+            let mut features = contract.metadata.features.clone();
+            let rwa_bool_keys = [
+                "kyc_required", "accredited_only", "dividend_enabled", "transfer_restrictions",
+                "voting_rights", "callable", "convertible", "delivery_option",
+                "insurance_enabled", "retirement_enabled", "offset_tracking",
+                "provenance_verified", "redemption_enabled", "sublicensing_allowed",
+                "serial_number_tracking", "supply_chain_verified", "shipping_included",
+            ];
+            for key in &rwa_bool_keys {
+                if let Some(val) = contract.deployment_params.get(*key) {
+                    if let Some(b) = val.as_bool() {
+                        if b {
+                            features.insert(key.to_string(), true);
+                        }
+                    }
+                }
+            }
+
             ContractInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)), // Add qnk prefix to match wallet format
                 contract_type: format!("{:?}", contract.contract_type),
@@ -863,10 +952,11 @@ pub async fn get_user_contracts(
                 deployed_at: contract.deployed_at,
                 verified: contract.verified,
                 has_security_features: true, // From template security features
-                features: contract.metadata.features,
+                features,
                 deployment_tx: contract.deployment_tx,
                 total_supply,
                 decimals,
+                deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
             }
         })
         .collect();
@@ -924,6 +1014,25 @@ pub async fn get_contract_details(
                 .map(|d| d as u32)
                 .or(Some(8)); // Default to 8 decimals (Bitcoin standard)
 
+            // v4.0.3: Merge RWA boolean deployment params into features
+            let mut features = contract.metadata.features.clone();
+            let rwa_bool_keys = [
+                "kyc_required", "accredited_only", "dividend_enabled", "transfer_restrictions",
+                "voting_rights", "callable", "convertible", "delivery_option",
+                "insurance_enabled", "retirement_enabled", "offset_tracking",
+                "provenance_verified", "redemption_enabled", "sublicensing_allowed",
+                "serial_number_tracking", "supply_chain_verified", "shipping_included",
+            ];
+            for key in &rwa_bool_keys {
+                if let Some(val) = contract.deployment_params.get(*key) {
+                    if let Some(b) = val.as_bool() {
+                        if b {
+                            features.insert(key.to_string(), true);
+                        }
+                    }
+                }
+            }
+
             let contract_info = ContractInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)),
                 contract_type: format!("{:?}", contract.contract_type),
@@ -933,10 +1042,11 @@ pub async fn get_contract_details(
                 deployed_at: contract.deployed_at,
                 verified: contract.verified,
                 has_security_features: true,
-                features: contract.metadata.features.clone(),
+                features,
                 deployment_tx: contract.deployment_tx.clone(),
                 total_supply,
                 decimals,
+                deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
             };
             Ok(Json(ApiResponse::success(contract_info)))
         }
@@ -947,17 +1057,260 @@ pub async fn get_contract_details(
     }
 }
 
-/// Interact with deployed contract
+/// Interact with deployed contract - execute RWA and token actions
 pub async fn interact_with_contract(
     Path(address): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    // Implementation would execute contract function
-    // For now, return success
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if action.is_empty() {
+        return Ok(Json(ApiResponse::error("Missing 'action' field".to_string())));
+    }
+
+    let addr_bytes = match hex::decode(address.trim_start_matches("0x")) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        Ok(b) if b.len() < 32 => {
+            let mut arr = [0u8; 32];
+            arr[32 - b.len()..].copy_from_slice(&b);
+            arr
+        }
+        _ => return Ok(Json(ApiResponse::error("Invalid contract address".to_string()))),
+    };
+
+    let ecosystem = &state.orobit_ecosystem;
+    let contract_key = ContractAddress(addr_bytes);
+
+    // Check contract exists
+    {
+        let contracts = ecosystem.deployed_contracts.read().await;
+        if !contracts.contains_key(&contract_key) {
+            return Ok(Json(ApiResponse::error("Contract not found".to_string())));
+        }
+    }
+
+    // Generate a transaction hash for this interaction
+    let tx_hash = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        format!("0x{:064x}", ts)
+    };
+
+    // Process action and update contract state
+    let result: serde_json::Value = match action {
+        // ─── Real Estate Actions ───────────────────────────────
+        "update_property_valuation" => {
+            let valuation = payload.get("valuation_usd").and_then(|v| v.as_str()).unwrap_or("0");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("total_valuation_usd".to_string(), serde_json::json!(valuation));
+                tracing::info!("📊 RWA: Updated property valuation to ${} for {}", valuation, address);
+            }
+            serde_json::json!({ "action": "update_property_valuation", "valuation_usd": valuation })
+        }
+        "update_occupancy" => {
+            let occupancy = payload.get("occupancy_rate").and_then(|v| v.as_str()).unwrap_or("");
+            let rental_yield = payload.get("rental_yield_percent").and_then(|v| v.as_str()).unwrap_or("");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                if !occupancy.is_empty() {
+                    contract.deployment_params.insert("occupancy_rate".to_string(), serde_json::json!(occupancy));
+                }
+                if !rental_yield.is_empty() {
+                    contract.deployment_params.insert("rental_yield_percent".to_string(), serde_json::json!(rental_yield));
+                }
+                tracing::info!("📊 RWA: Updated occupancy={}% yield={}% for {}", occupancy, rental_yield, address);
+            }
+            serde_json::json!({ "action": "update_occupancy", "occupancy_rate": occupancy, "rental_yield_percent": rental_yield })
+        }
+
+        // ─── Revenue / Dividend Distribution ───────────────────
+        "distribute_revenue" | "distribute_dividend" | "distribute_dividends" | "distribute_royalties" => {
+            let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
+            tracing::info!("💰 RWA: Revenue distribution of ${} for contract {}", amount, address);
+            serde_json::json!({ "action": action, "amount_usd": amount, "distributed_to": "all_holders" })
+        }
+
+        // ─── Compliance / KYC Actions ──────────────────────────
+        "toggle_kyc" | "configure_kyc" => {
+            let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("kyc_required".to_string(), serde_json::json!(enabled));
+                contract.metadata.features.insert("kyc_required".to_string(), enabled);
+                tracing::info!("🔐 RWA: KYC {} for {}", if enabled { "enabled" } else { "disabled" }, address);
+            }
+            serde_json::json!({ "action": action, "kyc_required": enabled })
+        }
+        "toggle_accredited" => {
+            let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("accredited_only".to_string(), serde_json::json!(enabled));
+                contract.metadata.features.insert("accredited_only".to_string(), enabled);
+            }
+            serde_json::json!({ "action": action, "accredited_only": enabled })
+        }
+        "manage_whitelist" => {
+            let addresses = payload.get("addresses").and_then(|v| v.as_str()).unwrap_or("");
+            let operation = payload.get("operation").and_then(|v| v.as_str()).unwrap_or("add");
+            tracing::info!("📋 RWA: Whitelist {} for {}: {}", operation, address, addresses);
+            serde_json::json!({ "action": "manage_whitelist", "operation": operation, "count": addresses.split(',').filter(|s| !s.is_empty()).count() })
+        }
+
+        // ─── Equity / Governance Actions ───────────────────────
+        "create_proposal" => {
+            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("New Proposal");
+            let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("🗳️ RWA: Proposal created for {}: {}", address, title);
+            serde_json::json!({ "action": "create_proposal", "title": title, "description": description, "proposal_id": format!("prop_{}", chrono::Utc::now().timestamp()) })
+        }
+        "vote_proposal" => {
+            let proposal_id = payload.get("proposal_id").and_then(|v| v.as_str()).unwrap_or("");
+            let vote = payload.get("vote").and_then(|v| v.as_str()).unwrap_or("for");
+            serde_json::json!({ "action": "vote_proposal", "proposal_id": proposal_id, "vote": vote })
+        }
+
+        // ─── Bond / Fixed Income Actions ───────────────────────
+        "call_bond" => {
+            let call_price = payload.get("call_price").and_then(|v| v.as_str()).unwrap_or("0");
+            tracing::info!("🏦 RWA: Bond called at ${} for {}", call_price, address);
+            serde_json::json!({ "action": "call_bond", "call_price_usd": call_price })
+        }
+        "convert_bond" | "convert_to_equity" => {
+            let conversion_ratio = payload.get("conversion_ratio").and_then(|v| v.as_str()).unwrap_or("1.0");
+            tracing::info!("🔄 RWA: Bond conversion at ratio {} for {}", conversion_ratio, address);
+            serde_json::json!({ "action": "convert_to_equity", "conversion_ratio": conversion_ratio })
+        }
+        "pay_coupon" | "issue_coupon" => {
+            let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
+            tracing::info!("💵 RWA: Coupon payment of ${} for {}", amount, address);
+            serde_json::json!({ "action": "pay_coupon", "amount_usd": amount, "distributed_to": "all_bondholders" })
+        }
+        "update_credit_rating" => {
+            let rating = payload.get("rating").and_then(|v| v.as_str()).unwrap_or("BBB");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("credit_rating".to_string(), serde_json::json!(rating));
+            }
+            serde_json::json!({ "action": "update_credit_rating", "rating": rating })
+        }
+
+        // ─── Commodity Actions ─────────────────────────────────
+        "update_storage_proof" | "update_inventory" => {
+            let proof_hash = payload.get("proof_hash").and_then(|v| v.as_str()).unwrap_or("");
+            let quantity = payload.get("quantity").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("📦 RWA: Storage proof updated for {}", address);
+            serde_json::json!({ "action": action, "proof_hash": proof_hash, "quantity": quantity })
+        }
+        "process_delivery" | "process_redemption" | "process_redemptions" => {
+            let request_id = payload.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+            let recipient = payload.get("recipient").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("🚚 RWA: Processing delivery/redemption for {}", address);
+            serde_json::json!({ "action": action, "request_id": request_id, "recipient": recipient, "status": "processing" })
+        }
+
+        // ─── Carbon Credit Actions ─────────────────────────────
+        "update_verification" | "update_verification_status" => {
+            let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("verified");
+            let verifier = payload.get("verifier").and_then(|v| v.as_str()).unwrap_or("");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("verification_status".to_string(), serde_json::json!(status));
+                if !verifier.is_empty() {
+                    contract.deployment_params.insert("verification_body".to_string(), serde_json::json!(verifier));
+                }
+            }
+            serde_json::json!({ "action": action, "verification_status": status, "verifier": verifier })
+        }
+        "issue_offset_certificate" | "retire_credits" => {
+            let tonnes = payload.get("tonnes_co2").and_then(|v| v.as_str()).unwrap_or("0");
+            let beneficiary = payload.get("beneficiary").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("🌱 RWA: Offset certificate for {} tonnes CO2, beneficiary: {}", tonnes, beneficiary);
+            serde_json::json!({ "action": action, "tonnes_co2": tonnes, "beneficiary": beneficiary, "certificate_id": format!("cert_{}", chrono::Utc::now().timestamp()) })
+        }
+
+        // ─── Art & Collectible Actions ─────────────────────────
+        "update_appraisal" | "update_appraisal_value" => {
+            let value = payload.get("appraisal_value_usd").and_then(|v| v.as_str()).unwrap_or("0");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("appraisal_value_usd".to_string(), serde_json::json!(value));
+                tracing::info!("🎨 RWA: Appraisal updated to ${} for {}", value, address);
+            }
+            serde_json::json!({ "action": action, "appraisal_value_usd": value })
+        }
+        "update_custody" | "update_custody_location" => {
+            let location = payload.get("custody_location").and_then(|v| v.as_str()).unwrap_or("");
+            let custody_type = payload.get("custody_type").and_then(|v| v.as_str()).unwrap_or("vault");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.deployment_params.insert("physical_custody".to_string(), serde_json::json!(custody_type));
+                if !location.is_empty() {
+                    contract.deployment_params.insert("custody_location".to_string(), serde_json::json!(location));
+                }
+            }
+            serde_json::json!({ "action": action, "custody_type": custody_type, "custody_location": location })
+        }
+
+        // ─── IP & Royalty Actions ──────────────────────────────
+        "manage_sublicenses" => {
+            let licensee = payload.get("licensee").and_then(|v| v.as_str()).unwrap_or("");
+            let terms = payload.get("terms").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("📜 RWA: Sublicense managed for {}: licensee={}", address, licensee);
+            serde_json::json!({ "action": "manage_sublicenses", "licensee": licensee, "terms": terms })
+        }
+
+        // ─── Insurance Actions ─────────────────────────────────
+        "update_insurance" => {
+            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let coverage = payload.get("coverage_usd").and_then(|v| v.as_str()).unwrap_or("");
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.metadata.features.insert("insurance_enabled".to_string(), true);
+                if !provider.is_empty() {
+                    contract.deployment_params.insert("insurance_provider".to_string(), serde_json::json!(provider));
+                }
+                if !coverage.is_empty() {
+                    contract.deployment_params.insert("insurance_coverage_usd".to_string(), serde_json::json!(coverage));
+                }
+            }
+            serde_json::json!({ "action": "update_insurance", "provider": provider, "coverage_usd": coverage })
+        }
+
+        // ─── Generic / Token Actions ───────────────────────────
+        "pause" => {
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.contract_state.paused = true;
+            }
+            serde_json::json!({ "action": "pause", "paused": true })
+        }
+        "unpause" => {
+            let mut contracts = ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&contract_key) {
+                contract.contract_state.paused = false;
+            }
+            serde_json::json!({ "action": "unpause", "paused": false })
+        }
+
+        _ => {
+            tracing::warn!("⚠️ Unknown contract action: {} for {}", action, address);
+            serde_json::json!({ "action": action, "status": "unknown_action" })
+        }
+    };
+
+    tracing::info!("✅ Contract interaction: action={} contract={} tx={}", action, address, tx_hash);
+
     Ok(Json(ApiResponse::success(serde_json::json!({
         "result": "success",
-        "transaction_hash": "0xmockresult123456789"
+        "action": action,
+        "transaction_hash": tx_hash,
+        "data": result
     }))))
 }
 
@@ -1017,17 +1370,44 @@ pub async fn estimate_deployment_cost(
 }
 
 // Helper functions
-fn parse_contract_type(contract_type_str: &str) -> Result<ContractType, String> {
+pub fn parse_contract_type(contract_type_str: &str) -> Result<ContractType, String> {
     match contract_type_str.to_lowercase().as_str() {
+        // Core Token Contracts
         "secure_token" => Ok(ContractType::SecureToken),
         "advanced_token" => Ok(ContractType::AdvancedToken),
         "rwa_token" => Ok(ContractType::RwaToken),
         "orbusd_stablecoin" => Ok(ContractType::OrbusdStablecoin),
+        // DeFi Infrastructure
         "multisig_wallet" => Ok(ContractType::MultisigWallet),
         "governance" => Ok(ContractType::Governance),
         "private_dex" => Ok(ContractType::PrivateDex),
         "timelock_vault" => Ok(ContractType::TimelockVault),
         "oracle_feed" => Ok(ContractType::OracleFeed),
+        // Advanced DeFi
+        "lending_pool" => Ok(ContractType::LendingPool),
+        "liquidity_pool" => Ok(ContractType::LiquidityPool),
+        "yield_farming" => Ok(ContractType::YieldFarming),
+        "staking_contract" => Ok(ContractType::StakingContract),
+        "insurance_protocol" => Ok(ContractType::InsuranceProtocol),
+        // Real World Assets
+        "real_estate_token" => Ok(ContractType::RealEstateToken),
+        "commodity_token" => Ok(ContractType::CommodityToken),
+        "carbon_credit_token" => Ok(ContractType::CarbonCreditToken),
+        "art_collectible_token" => Ok(ContractType::ArtCollectibleToken),
+        "equity_token" => Ok(ContractType::EquityToken),
+        "fixed_income_token" => Ok(ContractType::FixedIncomeToken),
+        "ip_revenue_token" => Ok(ContractType::IPRevenueToken),
+        "physical_goods_token" => Ok(ContractType::PhysicalGoodsToken),
+        // Derivatives & Trading
+        "options_contract" => Ok(ContractType::OptionsContract),
+        "prediction_market" => Ok(ContractType::PredictionMarket),
+        "derivatives_platform" => Ok(ContractType::DerivativesPlatform),
+        "synthetic_assets" => Ok(ContractType::SyntheticAssets),
+        // Utility & Infrastructure
+        "nft_marketplace" => Ok(ContractType::NftMarketplace),
+        "identity_contract" => Ok(ContractType::IdentityContract),
+        "bridge_contract" => Ok(ContractType::BridgeContract),
+        "proxy_contract" => Ok(ContractType::ProxyContract),
         _ => Err(format!("Unknown contract type: {}", contract_type_str)),
     }
 }
@@ -2537,4 +2917,589 @@ pub async fn update_social_profile(
         logo_url: request.logo_url,
         updated_at: profile.updated_at,
     })))
+}
+
+// ============ RWA MARKETPLACE ============
+
+/// RWA marketplace listing entry
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RwaMarketplaceListing {
+    pub address: String,
+    pub name: String,
+    pub symbol: String,
+    pub contract_type: String,
+    pub category: String,
+    pub description: String,
+    pub deployed_at: u64,
+    pub verified: bool,
+    pub features: HashMap<String, bool>,
+    pub total_value_usd: String,
+    pub shares_available: String,
+    pub kyc_required: bool,
+    pub dividend_enabled: bool,
+}
+
+/// Map a ContractType to a human-readable RWA category name
+pub fn rwa_category_name(ct: &ContractType) -> String {
+    match ct {
+        ContractType::RealEstateToken => "Real Estate".to_string(),
+        ContractType::EquityToken => "Equity & Shares".to_string(),
+        ContractType::FixedIncomeToken => "Fixed Income".to_string(),
+        ContractType::CommodityToken => "Commodities".to_string(),
+        ContractType::CarbonCreditToken => "Carbon Credits".to_string(),
+        ContractType::ArtCollectibleToken => "Art & Collectibles".to_string(),
+        ContractType::IPRevenueToken => "IP & Royalties".to_string(),
+        ContractType::PhysicalGoodsToken => "Physical Goods".to_string(),
+        ContractType::RwaToken => "General RWA".to_string(),
+        _ => "Other".to_string(),
+    }
+}
+
+/// List all deployed RWA contracts as a marketplace
+///
+/// Query parameters:
+///   - `category`: Optional filter by RWA category (e.g. "real_estate", "equity",
+///     "fixed_income", "commodity", "carbon_credit", "art_collectible",
+///     "ip_revenue", "physical_goods")
+pub async fn get_rwa_marketplace(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<ApiResponse<Vec<RwaMarketplaceListing>>>, StatusCode> {
+    let category_filter = params.get("category").map(|s| s.as_str());
+
+    let ecosystem = &state.orobit_ecosystem;
+    let contracts = ecosystem.deployed_contracts.read().await;
+
+    let rwa_types = vec![
+        ContractType::RwaToken,
+        ContractType::RealEstateToken,
+        ContractType::EquityToken,
+        ContractType::FixedIncomeToken,
+        ContractType::CommodityToken,
+        ContractType::CarbonCreditToken,
+        ContractType::ArtCollectibleToken,
+        ContractType::IPRevenueToken,
+        ContractType::PhysicalGoodsToken,
+    ];
+
+    let listings: Vec<RwaMarketplaceListing> = contracts
+        .iter()
+        .filter(|(_, contract)| rwa_types.contains(&contract.contract_type))
+        .filter(|(_, contract)| {
+            if let Some(cat) = category_filter {
+                match cat {
+                    "real_estate" => contract.contract_type == ContractType::RealEstateToken,
+                    "equity" => contract.contract_type == ContractType::EquityToken,
+                    "fixed_income" => contract.contract_type == ContractType::FixedIncomeToken,
+                    "commodity" => contract.contract_type == ContractType::CommodityToken,
+                    "carbon_credit" => contract.contract_type == ContractType::CarbonCreditToken,
+                    "art_collectible" => contract.contract_type == ContractType::ArtCollectibleToken,
+                    "ip_revenue" => contract.contract_type == ContractType::IPRevenueToken,
+                    "physical_goods" => contract.contract_type == ContractType::PhysicalGoodsToken,
+                    _ => true,
+                }
+            } else {
+                true
+            }
+        })
+        .map(|(addr, contract)| {
+            RwaMarketplaceListing {
+                address: hex::encode(addr.0),
+                name: contract.metadata.name.clone(),
+                symbol: contract.metadata.symbol.clone().unwrap_or_default(),
+                contract_type: format!("{:?}", contract.contract_type),
+                category: rwa_category_name(&contract.contract_type),
+                description: contract.metadata.description.clone(),
+                deployed_at: contract.deployed_at,
+                verified: contract.verified,
+                features: contract.metadata.features.clone(),
+                total_value_usd: contract
+                    .deployment_params
+                    .get("total_value_usd")
+                    .or(contract.deployment_params.get("total_valuation_usd"))
+                    .or(contract.deployment_params.get("face_value_usd"))
+                    .or(contract.deployment_params.get("appraisal_value_usd"))
+                    .or(contract.deployment_params.get("minimum_guarantee_usd"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string(),
+                shares_available: contract
+                    .deployment_params
+                    .get("shares_count")
+                    .or(contract.deployment_params.get("total_shares"))
+                    .or(contract.deployment_params.get("total_tokens"))
+                    .or(contract.deployment_params.get("total_units"))
+                    .or(contract.deployment_params.get("total_fractions"))
+                    .or(contract.deployment_params.get("total_credits_tonnes"))
+                    .or(contract.deployment_params.get("quantity_per_token"))
+                    .or(contract.deployment_params.get("initialSupply"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string(),
+                kyc_required: contract
+                    .deployment_params
+                    .get("kyc_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                dividend_enabled: contract
+                    .deployment_params
+                    .get("dividend_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(listings)))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v4.1.0: RWA Portfolio, Collateralization, Distribution, Compliance
+// ═══════════════════════════════════════════════════════════════════
+
+/// Get RWA portfolio summary including collateral positions and distribution schedules
+pub async fn get_rwa_portfolio(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = params.get("wallet").cloned().unwrap_or_default();
+    tracing::info!("📊 RWA Portfolio request for wallet: {}", wallet);
+
+    let ecosystem = &state.orobit_ecosystem;
+    let collateral = {
+        let positions = ecosystem.collateral_positions.read().await;
+        positions.get(&wallet).cloned().unwrap_or_default()
+    };
+    let schedules = {
+        let scheds = ecosystem.distribution_schedules.read().await;
+        scheds.get(&wallet).cloned().unwrap_or_default()
+    };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "wallet": wallet,
+        "collateral_positions": collateral,
+        "distribution_schedules": schedules,
+    }))))
+}
+
+/// Borrow against RWA collateral
+pub async fn rwa_collateral_borrow(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let contract_address = payload.get("contract_address").and_then(|v| v.as_str()).unwrap_or("");
+    let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
+    let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
+
+    tracing::info!("🏦 RWA Collateral Borrow: {} borrows ${} against {}", wallet, amount, contract_address);
+
+    let position_id = format!("pos_{}_{}", &wallet[..8.min(wallet.len())], chrono::Utc::now().timestamp());
+    let position = serde_json::json!({
+        "id": position_id,
+        "contractAddress": contract_address,
+        "borrowedAmount": amount.parse::<f64>().unwrap_or(0.0),
+        "borrowedCurrency": "QUG",
+        "interestRate": 5.5,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "status": "healthy"
+    });
+
+    let ecosystem = &state.orobit_ecosystem;
+    {
+        let mut positions = ecosystem.collateral_positions.write().await;
+        positions.entry(wallet.to_string())
+            .or_insert_with(Vec::new)
+            .push(position.clone());
+    }
+
+    let tx_hash = format!("0x{:016x}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "position_id": position_id,
+        "transaction_hash": tx_hash,
+        "status": "active"
+    }))))
+}
+
+/// Repay collateral loan
+pub async fn rwa_collateral_repay(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let position_id = payload.get("position_id").and_then(|v| v.as_str()).unwrap_or("");
+    let amount = payload.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
+
+    tracing::info!("💰 RWA Collateral Repay: {} repays ${} on position {}", wallet, amount, position_id);
+
+    let ecosystem = &state.orobit_ecosystem;
+    {
+        let mut positions = ecosystem.collateral_positions.write().await;
+        if let Some(wallet_positions) = positions.get_mut(wallet) {
+            wallet_positions.retain(|p| {
+                p.get("id").and_then(|v| v.as_str()).unwrap_or("") != position_id
+                    || p.get("borrowedAmount").and_then(|v| v.as_f64()).unwrap_or(0.0) > amount
+            });
+        }
+    }
+
+    let tx_hash = format!("0x{:016x}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "repaid": amount,
+        "transaction_hash": tx_hash,
+        "status": "repaid"
+    }))))
+}
+
+/// Schedule automatic revenue distribution
+pub async fn rwa_schedule_distribution(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let contract_address = payload.get("contract_address").and_then(|v| v.as_str()).unwrap_or("");
+    let frequency = payload.get("frequency").and_then(|v| v.as_str()).unwrap_or("monthly");
+    let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
+    let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
+
+    tracing::info!("📅 RWA Distribution Schedule: {} sets {} ${} distribution for {}", wallet, frequency, amount, contract_address);
+
+    let schedule_id = format!("sched_{}_{}", &wallet[..8.min(wallet.len())], chrono::Utc::now().timestamp());
+    let freq_days: i64 = match frequency {
+        "weekly" => 7,
+        "monthly" => 30,
+        "quarterly" => 90,
+        "annually" => 365,
+        _ => 30,
+    };
+    let next_dist = chrono::Utc::now() + chrono::Duration::days(freq_days);
+
+    let schedule = serde_json::json!({
+        "id": schedule_id,
+        "contractAddress": contract_address,
+        "frequency": frequency,
+        "amount": amount.parse::<f64>().unwrap_or(0.0),
+        "next_distribution": next_dist.to_rfc3339(),
+        "totalDistributed": 0,
+        "recipientCount": 0,
+        "enabled": true
+    });
+
+    let ecosystem = &state.orobit_ecosystem;
+    {
+        let mut scheds = ecosystem.distribution_schedules.write().await;
+        scheds.entry(wallet.to_string())
+            .or_insert_with(Vec::new)
+            .push(schedule.clone());
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "schedule_id": schedule_id,
+        "next_distribution": next_dist.to_rfc3339(),
+        "status": "active"
+    }))))
+}
+
+/// Toggle distribution schedule on/off
+pub async fn rwa_toggle_distribution(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let schedule_id = payload.get("schedule_id").and_then(|v| v.as_str()).unwrap_or("");
+    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
+
+    tracing::info!("🔄 RWA Distribution Toggle: {} {} schedule {}", wallet, if enabled { "enables" } else { "pauses" }, schedule_id);
+
+    let ecosystem = &state.orobit_ecosystem;
+    {
+        let mut scheds = ecosystem.distribution_schedules.write().await;
+        if let Some(wallet_schedules) = scheds.get_mut(wallet) {
+            for s in wallet_schedules.iter_mut() {
+                if s.get("id").and_then(|v| v.as_str()) == Some(schedule_id) {
+                    s.as_object_mut().map(|obj| obj.insert("enabled".to_string(), serde_json::json!(enabled)));
+                }
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "schedule_id": schedule_id,
+        "enabled": enabled
+    }))))
+}
+
+/// Check compliance status for RWA token trading
+pub async fn rwa_compliance_check(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
+    let token_address = payload.get("token_address").and_then(|v| v.as_str()).unwrap_or("");
+
+    tracing::info!("🔍 RWA Compliance Check: wallet {} for token {}", wallet, token_address);
+
+    let ecosystem = &state.orobit_ecosystem;
+
+    // Parse token address to ContractAddress key
+    let addr_bytes = match hex::decode(token_address.trim_start_matches("0x")) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        Ok(b) if b.len() < 32 => {
+            let mut arr = [0u8; 32];
+            arr[32 - b.len()..].copy_from_slice(&b);
+            arr
+        }
+        _ => [0u8; 32],
+    };
+    let contract_key = ContractAddress(addr_bytes);
+
+    let (kyc_required, accredited_only, transfer_restricted, whitelisted) = {
+        let contracts = ecosystem.deployed_contracts.read().await;
+        if let Some(contract) = contracts.get(&contract_key) {
+            let kyc = contract.metadata.features.get("kyc_required").copied().unwrap_or(false);
+            let accredited = contract.metadata.features.get("accredited_only").copied().unwrap_or(false);
+            let restricted = contract.metadata.features.get("transfer_restrictions").copied().unwrap_or(false);
+            (kyc, accredited, restricted, true)
+        } else {
+            (false, false, false, true)
+        }
+    };
+
+    // Compliance check result
+    let kyc_passed = true; // Testnet: all pass
+    let accreditation_passed = true; // Testnet: all pass
+    let can_trade = (!kyc_required || kyc_passed) && (!accredited_only || accreditation_passed) && (!transfer_restricted || whitelisted);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "wallet": wallet,
+        "token_address": token_address,
+        "can_trade": can_trade,
+        "kyc_required": kyc_required,
+        "kyc_passed": kyc_passed,
+        "accredited_only": accredited_only,
+        "accreditation_passed": accreditation_passed,
+        "transfer_restricted": transfer_restricted,
+        "whitelisted": whitelisted,
+        "compliance_level": if can_trade { "full" } else { "restricted" }
+    }))))
+}
+
+// ============================================================================
+// v4.2.0-beta: VAULT RWA Token — Physical Device Redemption Handlers
+// ============================================================================
+
+/// POST /api/v1/contracts/vault/redeem — Burn 1 VAULT token and create redemption order
+pub async fn vault_redeem(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<VaultRedeemRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+    let wallet_hex = hex::encode(wallet);
+    let quantity = request.quantity.unwrap_or(1).max(1);
+
+    // Check VAULT token balance
+    let vault_addr = q_types::VAULT_TOKEN_ADDRESS;
+    let balance_key = (wallet, vault_addr);
+
+    {
+        let token_balances = state.token_balances.read().await;
+        let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+        if current_balance < quantity as u128 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Insufficient VAULT balance. You have {}, need {} to redeem.",
+                current_balance, quantity
+            ))));
+        }
+    }
+
+    // Burn the tokens
+    {
+        let mut token_balances = state.token_balances.write().await;
+        if let Some(balance) = token_balances.get_mut(&balance_key) {
+            *balance -= quantity as u128;
+            tracing::info!(
+                "🔥 [VAULT] Burned {} VAULT token(s) from wallet {} (remaining: {})",
+                quantity, &wallet_hex[..16], *balance
+            );
+        }
+    }
+
+    // Persist burned balance
+    {
+        let token_balances = state.token_balances.read().await;
+        let new_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+        drop(token_balances);
+        if let Err(e) = state.storage_engine.save_token_balance(&wallet, &vault_addr, new_balance).await {
+            tracing::warn!("⚠️ [VAULT] Failed to persist burned balance: {}", e);
+        }
+    }
+
+    // Create redemption order
+    let redemption_id = format!("VR-{}-{}", chrono::Utc::now().timestamp(), &wallet_hex[..8]);
+    let redemption = VaultRedemption {
+        redemption_id: redemption_id.clone(),
+        buyer_wallet: format!("qnk{}", wallet_hex),
+        shipping_name: request.shipping_name,
+        shipping_address: request.shipping_address,
+        city: request.city,
+        state_province: request.state_province,
+        zip: request.zip,
+        country: request.country,
+        phone: request.phone,
+        email: request.email,
+        color_variant: request.color_variant,
+        quantity,
+        status: "pending".to_string(),
+        tracking_number: None,
+        serial_number: None,
+        created_at: chrono::Utc::now().timestamp() as u64,
+        fulfilled_at: None,
+    };
+
+    {
+        let mut redemptions = state.vault_redemptions.write().await;
+        redemptions.push(redemption.clone());
+    }
+
+    tracing::info!(
+        "📦 [VAULT] Redemption {} created: {} device(s), color: {}, wallet: qnk{}",
+        redemption_id, quantity, redemption.color_variant, &wallet_hex[..16]
+    );
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "redemption_id": redemption_id,
+        "quantity": quantity,
+        "status": "pending",
+        "message": format!("Successfully burned {} VAULT token(s). Your physical device order has been placed.", quantity)
+    }))))
+}
+
+/// GET /api/v1/contracts/vault/redemptions — Get all redemptions (admin) or user's own
+pub async fn vault_get_redemptions(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+    let wallet_hex = hex::encode(wallet);
+    let is_admin = wallet == q_types::BANK_MASTER_ACCOUNT;
+
+    let redemptions = state.vault_redemptions.read().await;
+
+    let filtered: Vec<&VaultRedemption> = if is_admin {
+        // Admin sees all redemptions
+        redemptions.iter().collect()
+    } else {
+        // Regular users only see their own
+        let full_addr = format!("qnk{}", wallet_hex);
+        redemptions.iter().filter(|r| r.buyer_wallet == full_addr).collect()
+    };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "redemptions": filtered,
+        "total": filtered.len(),
+        "is_admin": is_admin,
+    }))))
+}
+
+/// POST /api/v1/contracts/vault/fulfill — Admin updates redemption status/tracking
+pub async fn vault_fulfill(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<VaultFulfillRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+
+    // Only BANK_MASTER_ACCOUNT or the operator wallet can fulfill
+    let operator_wallet_hex = "4fff16bc7d825a3d2e3ae0b15c6e70e91dc18dce1c55ec22543a8e4ae9e6c7b2";
+    let is_admin = wallet == q_types::BANK_MASTER_ACCOUNT
+        || hex::encode(wallet) == operator_wallet_hex;
+
+    if !is_admin {
+        return Ok(Json(ApiResponse::error(
+            "Only the VAULT admin can fulfill redemptions".to_string(),
+        )));
+    }
+
+    let valid_statuses = ["pending", "processing", "shipped", "delivered"];
+    if !valid_statuses.contains(&request.status.as_str()) {
+        return Ok(Json(ApiResponse::error(format!(
+            "Invalid status '{}'. Must be one of: {:?}",
+            request.status, valid_statuses
+        ))));
+    }
+
+    let mut redemptions = state.vault_redemptions.write().await;
+    if let Some(redemption) = redemptions.iter_mut().find(|r| r.redemption_id == request.redemption_id) {
+        redemption.status = request.status.clone();
+        if let Some(ref tracking) = request.tracking_number {
+            redemption.tracking_number = Some(tracking.clone());
+        }
+        if let Some(ref serial) = request.serial_number {
+            redemption.serial_number = Some(serial.clone());
+        }
+        if request.status == "shipped" || request.status == "delivered" {
+            redemption.fulfilled_at = Some(chrono::Utc::now().timestamp() as u64);
+        }
+
+        tracing::info!(
+            "📦 [VAULT] Redemption {} updated: status={}, tracking={:?}, serial={:?}",
+            request.redemption_id, request.status, request.tracking_number, request.serial_number
+        );
+
+        Ok(Json(ApiResponse::success(serde_json::json!({
+            "redemption_id": request.redemption_id,
+            "status": request.status,
+            "tracking_number": request.tracking_number,
+            "serial_number": request.serial_number,
+            "message": "Redemption updated successfully"
+        }))))
+    } else {
+        Ok(Json(ApiResponse::error(format!(
+            "Redemption '{}' not found",
+            request.redemption_id
+        ))))
+    }
+}
+
+/// GET /api/v1/contracts/vault/stats — Get VAULT token supply statistics
+pub async fn vault_get_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let vault_addr = q_types::VAULT_TOKEN_ADDRESS;
+    let total_supply: u128 = 1000; // Fixed supply
+
+    // Count circulating tokens (all balances with VAULT_TOKEN_ADDRESS)
+    let token_balances = state.token_balances.read().await;
+    let circulating: u128 = token_balances.iter()
+        .filter(|((_, contract), _)| *contract == vault_addr)
+        .map(|(_, balance)| *balance)
+        .sum();
+
+    let burned = total_supply.saturating_sub(circulating);
+
+    // Count redemptions by status
+    let redemptions = state.vault_redemptions.read().await;
+    let pending = redemptions.iter().filter(|r| r.status == "pending").count();
+    let processing = redemptions.iter().filter(|r| r.status == "processing").count();
+    let shipped = redemptions.iter().filter(|r| r.status == "shipped").count();
+    let delivered = redemptions.iter().filter(|r| r.status == "delivered").count();
+    let total_redeemed: u32 = redemptions.iter().map(|r| r.quantity).sum();
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "total_supply": total_supply,
+        "circulating": circulating,
+        "burned": burned,
+        "remaining": circulating,
+        "redemptions": {
+            "total_orders": redemptions.len(),
+            "total_devices_redeemed": total_redeemed,
+            "pending": pending,
+            "processing": processing,
+            "shipped": shipped,
+            "delivered": delivered,
+        }
+    }))))
 }

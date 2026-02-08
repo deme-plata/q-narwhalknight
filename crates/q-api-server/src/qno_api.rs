@@ -1005,7 +1005,7 @@ pub async fn submit_oracle_outcome(
     }
 
     // Resolve all pending predictions for this domain
-    let results = match storage.resolve_domain_predictions(&outcome).await {
+    let results: Vec<(String, f64, Option<SlashingRecord>)> = match storage.resolve_domain_predictions(&outcome).await {
         Ok(r) => r,
         Err(e) => {
             warn!("⚠️ [QNO Oracle] Failed to resolve predictions: {}", e);

@@ -2848,10 +2848,18 @@ pub async fn mark_price_loop(app_state: Arc<AppState>) {
 
             // Look for QUG-QUGUSD pool to get spot price
             let mut found_price = None;
+            let qug_zero_hex = hex::encode([0u8; 32]);
+            let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS);
             for pool in pools.values() {
-                if (pool.token0 == "QUG" && pool.token1 == "QUGUSD") ||
-                   (pool.token0 == "QUGUSD" && pool.token1 == "QUG") {
-                    let price = if pool.token0 == "QUG" {
+                // v4.0.4: Match both symbol format AND hex address format (P2P pools use hex)
+                let t0 = pool.token0.to_uppercase();
+                let t1 = pool.token1.to_uppercase();
+                let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG" || pool.token0 == qug_zero_hex;
+                let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG" || pool.token1 == qug_zero_hex;
+                let t0_is_qugusd = t0 == "QUGUSD" || pool.token0 == qugusd_hex;
+                let t1_is_qugusd = t1 == "QUGUSD" || pool.token1 == qugusd_hex;
+                if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                    let price = if t0_is_qug {
                         // price = reserve1 / reserve0
                         ((pool.reserve1 as f64 / pool.reserve0 as f64) * 1e24) as u64
                     } else {

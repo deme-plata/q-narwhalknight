@@ -6,6 +6,7 @@
 use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Duration, Utc};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{IteratorMode, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,6 +101,7 @@ pub enum TradeSide {
 }
 
 /// Price history manager
+#[cfg(not(target_os = "windows"))]
 pub struct PriceHistoryManager {
     db: Arc<DB>,
 
@@ -110,6 +112,16 @@ pub struct PriceHistoryManager {
     active_candles: Arc<RwLock<HashMap<String, HashMap<CandleInterval, OHLCVCandle>>>>,
 }
 
+#[cfg(target_os = "windows")]
+pub struct PriceHistoryManager {
+    // In-memory cache for recent candles (last 24 hours)
+    recent_candles: Arc<RwLock<HashMap<String, HashMap<CandleInterval, Vec<OHLCVCandle>>>>>,
+
+    // Active candles being built (not yet closed)
+    active_candles: Arc<RwLock<HashMap<String, HashMap<CandleInterval, OHLCVCandle>>>>,
+}
+
+#[cfg(not(target_os = "windows"))]
 impl PriceHistoryManager {
     /// Create a new price history manager
     pub fn new(db: Arc<DB>) -> Self {
@@ -427,6 +439,46 @@ impl PriceHistoryManager {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl PriceHistoryManager {
+    /// Create a new price history manager (Windows stub - in-memory only)
+    pub fn new(_db: Arc<()>) -> Self {
+        Self::new_stub()
+    }
+
+    pub fn new_stub() -> Self {
+        Self {
+            recent_candles: Arc::new(RwLock::new(HashMap::new())),
+            active_candles: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn initialize(&self) -> Result<()> { Ok(()) }
+
+    pub async fn record_trade(&self, _trade: TradeRecord) -> Result<()> { Ok(()) }
+
+    pub fn get_candle_timestamp(&self, timestamp: &DateTime<Utc>, interval: CandleInterval) -> DateTime<Utc> {
+        let secs = timestamp.timestamp();
+        let interval_secs = interval.duration_seconds();
+        let aligned = (secs / interval_secs) * interval_secs;
+        DateTime::from_timestamp(aligned, 0).unwrap_or(*timestamp)
+    }
+
+    pub async fn get_historical_candles(&self, _pair_id: &str, _interval: CandleInterval, _start: DateTime<Utc>, _end: DateTime<Utc>, _limit: Option<usize>) -> Result<Vec<OHLCVCandle>> {
+        Ok(vec![])
+    }
+
+    pub async fn get_recent_candles(&self, _pair_id: &str, _interval: CandleInterval, _count: usize) -> Result<Vec<OHLCVCandle>> {
+        Ok(vec![])
+    }
+
+    pub async fn get_latest_price(&self, _pair_id: &str) -> Result<Option<BigDecimal>> { Ok(None) }
+
+    pub async fn get_24h_stats(&self, _pair_id: &str) -> Result<Option<DayStatistics>> { Ok(None) }
+
+    pub async fn cleanup_old_candles(&self, _retention_days: i64) -> Result<u64> { Ok(0) }
+}
+
 /// 24-hour trading statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DayStatistics {
@@ -442,6 +494,7 @@ pub struct DayStatistics {
 }
 
 #[cfg(test)]
+#[cfg(not(target_os = "windows"))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

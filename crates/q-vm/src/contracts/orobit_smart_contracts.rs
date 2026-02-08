@@ -20,6 +20,10 @@ pub struct OrobitSmartContractEcosystem {
     pub wasm_runtime: Arc<OrobitWasmRuntime>,
     pub security_suite: Arc<SecuritySuite>,
     pub storage_engine: Option<Arc<q_storage::StorageEngine>>,
+    /// v4.1.0: RWA collateral positions per wallet
+    pub collateral_positions: Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>,
+    /// v4.1.0: RWA auto-distribution schedules per wallet
+    pub distribution_schedules: Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>,
 }
 
 /// All contract types from VirtualMachine.tsx
@@ -50,6 +54,10 @@ pub enum ContractType {
     CommodityToken,
     CarbonCreditToken,
     ArtCollectibleToken,
+    EquityToken,
+    FixedIncomeToken,
+    IPRevenueToken,
+    PhysicalGoodsToken,
 
     // Derivatives & Trading
     OptionsContract,
@@ -432,6 +440,8 @@ impl OrobitSmartContractEcosystem {
             wasm_runtime: Arc::new(OrobitWasmRuntime::new()?),
             security_suite: Arc::new(SecuritySuite::new()),
             storage_engine: storage_engine.clone(),
+            collateral_positions: Arc::new(RwLock::new(HashMap::new())),
+            distribution_schedules: Arc::new(RwLock::new(HashMap::new())),
         };
 
         eprintln!("📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚");
@@ -495,6 +505,11 @@ impl OrobitSmartContractEcosystem {
         self.load_real_estate_template().await?;
         self.load_commodity_template().await?;
         self.load_carbon_credit_template().await?;
+        self.load_equity_template().await?;
+        self.load_fixed_income_template().await?;
+        self.load_ip_revenue_template().await?;
+        self.load_physical_goods_template().await?;
+        self.load_art_collectible_template().await?;
 
         // Load derivatives and trading
         self.load_options_contract_template().await?;
@@ -2528,19 +2543,2269 @@ impl OrobitSmartContractEcosystem {
         Ok(())
     }
     async fn load_real_estate_template(&self) -> Result<()> {
-        Ok(())
+        let template = SmartContractTemplate {
+            contract_type: ContractType::RealEstateToken,
+            name: "Real Estate Token".to_string(),
+            description: "Tokenize real estate properties with fractional ownership, rental yield distribution, occupancy tracking, and full regulatory compliance".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("real_estate_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("RealEstateToken.sol"),
+            abi: self.create_real_estate_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "property_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the property".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Downtown Office Tower")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Property name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter property name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "property_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol for the property token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("REDT")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Property token symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "property_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Type of real estate property".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("commercial")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "residential".to_string(), label: "Residential".to_string(), description: Some("Houses, apartments, condos".to_string()) },
+                            DropdownOption { value: "commercial".to_string(), label: "Commercial".to_string(), description: Some("Office buildings, retail spaces".to_string()) },
+                            DropdownOption { value: "industrial".to_string(), label: "Industrial".to_string(), description: Some("Warehouses, factories, logistics".to_string()) },
+                            DropdownOption { value: "land".to_string(), label: "Land".to_string(), description: Some("Undeveloped land parcels".to_string()) },
+                            DropdownOption { value: "mixed_use".to_string(), label: "Mixed Use".to_string(), description: Some("Combined residential and commercial".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "location".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Property location (city, state/country)".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("New York, NY, USA")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter property location".to_string() },
+                },
+                DeploymentParameter {
+                    name: "total_valuation_usd".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total property valuation in USD".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("5000000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(10000), error_message: "Minimum valuation is $10,000".to_string() }],
+                    ui_component: UIComponent::TokenAmountInput,
+                },
+                DeploymentParameter {
+                    name: "total_shares".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total number of fractional shares".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1000000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(100), error_message: "Minimum 100 shares".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(100.0), max: Some(1000000000.0) },
+                },
+                DeploymentParameter {
+                    name: "rental_yield_percent".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Expected annual rental yield percentage".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("5")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::PercentageInput,
+                },
+                DeploymentParameter {
+                    name: "occupancy_rate".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Current occupancy rate percentage".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("95")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::PercentageInput,
+                },
+                DeploymentParameter {
+                    name: "property_area_sqft".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Property area in square feet".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("50000")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(100.0), max: Some(10000000.0) },
+                },
+                DeploymentParameter {
+                    name: "kyc_required".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Require KYC verification for token holders".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "accredited_only".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Restrict to accredited investors only".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "dividend_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable rental income dividend distributions".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "transfer_restrictions".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable transfer restrictions for regulatory compliance".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_500_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("distributeDividend".to_string(), 160_000),
+                    ("updateValuation".to_string(), 75_000),
+                    ("updateOccupancy".to_string(), 55_000),
+                    ("verifyKYC".to_string(), 65_000),
+                    ("freezeAccount".to_string(), 45_000),
+                    ("getPropertyDetails".to_string(), 25_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("kyc_required".to_string(), 300_000),
+                    ("accredited_only".to_string(), 200_000),
+                    ("dividend_enabled".to_string(), 400_000),
+                    ("transfer_restrictions".to_string(), 250_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Real Estate Token".to_string(),
+                description: "Tokenize a real estate property with fractional ownership and rental yield distribution".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Property Details".to_string(),
+                        description: "Basic property information".to_string(),
+                        fields: vec!["property_name".to_string(), "property_symbol".to_string(), "property_type".to_string(), "location".to_string(), "property_area_sqft".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Valuation & Shares".to_string(),
+                        description: "Financial configuration".to_string(),
+                        fields: vec!["total_valuation_usd".to_string(), "total_shares".to_string(), "rental_yield_percent".to_string(), "occupancy_rate".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Compliance & Features".to_string(),
+                        description: "Regulatory and feature settings".to_string(),
+                        fields: vec!["kyc_required".to_string(), "accredited_only".to_string(), "dividend_enabled".to_string(), "transfer_restrictions".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Property Verification".to_string(), description: "Verify property ownership and documentation".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Compliance Check".to_string(), description: "Validate regulatory compliance for jurisdiction".to_string(), estimated_time_seconds: 120, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy real estate token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Asset Linking".to_string(), description: "Link token to property records".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_500_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0045".to_string(),
+                    usd_equivalent: Some("$4.50".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Commercial Office Building".to_string(),
+                description: "Tokenize a commercial office building with rental income".to_string(),
+                parameters: [
+                    ("property_name".to_string(), serde_json::json!("Midtown Office Tower")),
+                    ("property_symbol".to_string(), serde_json::json!("MDTWN")),
+                    ("property_type".to_string(), serde_json::json!("commercial")),
+                    ("location".to_string(), serde_json::json!("Manhattan, NY, USA")),
+                    ("total_valuation_usd".to_string(), serde_json::json!("25000000")),
+                    ("total_shares".to_string(), serde_json::json!("2500000")),
+                    ("rental_yield_percent".to_string(), serde_json::json!("6")),
+                    ("occupancy_rate".to_string(), serde_json::json!("92")),
+                ].into_iter().collect(),
+                use_case: "Fractional commercial real estate investment with quarterly dividends".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Real Estate Tokens enable fractional ownership of properties with automated rental yield distribution, occupancy tracking, and full regulatory compliance including KYC/AML".to_string(),
+                usage_guide: "1. Verify property ownership\n2. Set property details and valuation\n3. Configure compliance settings\n4. Deploy and link to property records\n5. Distribute shares to investors".to_string(),
+                security_considerations: "Includes reentrancy protection, multisig admin controls, transfer restrictions, KYC verification, and timelock for critical operations".to_string(),
+                api_reference: "ERC20 with extensions: distributeDividend(), updateValuation(), updateOccupancy(), verifyKYC(), freezeAccount(), getPropertyDetails()".to_string(),
+                faq: vec![
+                    FAQ { question: "How are rental dividends distributed?".to_string(), answer: "The contract owner calls distributeDividend() with the rental income amount, which is proportionally distributed to all token holders based on their share.".to_string() },
+                    FAQ { question: "Can transfer restrictions be modified after deployment?".to_string(), answer: "Yes, the multisig admin can update transfer restriction rules, subject to the timelock delay.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::RealEstateToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "property_name": { "type": "string", "title": "Property Name" },
+                    "property_symbol": { "type": "string", "title": "Token Symbol" },
+                    "property_type": { "type": "string", "title": "Property Type", "enum": ["residential", "commercial", "industrial", "land", "mixed_use"] },
+                    "location": { "type": "string", "title": "Location" },
+                    "total_valuation_usd": { "type": "string", "title": "Total Valuation (USD)" },
+                    "total_shares": { "type": "string", "title": "Total Shares" },
+                    "rental_yield_percent": { "type": "string", "title": "Rental Yield (%)" },
+                    "occupancy_rate": { "type": "string", "title": "Occupancy Rate (%)" },
+                    "property_area_sqft": { "type": "string", "title": "Area (sq ft)" },
+                    "kyc_required": { "type": "boolean", "title": "KYC Required" },
+                    "accredited_only": { "type": "boolean", "title": "Accredited Investors Only" },
+                    "dividend_enabled": { "type": "boolean", "title": "Dividend Distributions" },
+                    "transfer_restrictions": { "type": "boolean", "title": "Transfer Restrictions" }
+                },
+                "required": ["property_name", "property_symbol", "property_type", "location", "total_valuation_usd", "total_shares"]
+            }),
+            validation_schema: serde_json::json!({
+                "property_name": { "minLength": 3, "maxLength": 100 },
+                "property_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "total_valuation_usd": { "minimum": 10000 }
+            }),
+            ui_schema: serde_json::json!({
+                "property_type": { "ui:widget": "select" },
+                "kyc_required": { "ui:widget": "checkbox" },
+                "accredited_only": { "ui:widget": "checkbox" },
+                "dividend_enabled": { "ui:widget": "checkbox" },
+                "transfer_restrictions": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
     }
     async fn load_commodity_template(&self) -> Result<()> {
-        Ok(())
+        let template = SmartContractTemplate {
+            contract_type: ContractType::CommodityToken,
+            name: "Commodity Token".to_string(),
+            description: "Tokenize physical commodities with storage verification, delivery options, spot price oracle integration, and insurance coverage".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("commodity_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("CommodityToken.sol"),
+            abi: self.create_commodity_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "commodity_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the commodity".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Gold Bullion")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Commodity name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter commodity name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "commodity_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("TGOLD")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Commodity token symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "commodity_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Category of commodity".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("precious_metals")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "precious_metals".to_string(), label: "Precious Metals".to_string(), description: Some("Gold, silver, platinum, palladium".to_string()) },
+                            DropdownOption { value: "energy".to_string(), label: "Energy".to_string(), description: Some("Oil, natural gas, uranium".to_string()) },
+                            DropdownOption { value: "agriculture".to_string(), label: "Agriculture".to_string(), description: Some("Wheat, corn, coffee, soybeans".to_string()) },
+                            DropdownOption { value: "industrial_metals".to_string(), label: "Industrial Metals".to_string(), description: Some("Copper, aluminum, zinc, nickel".to_string()) },
+                            DropdownOption { value: "livestock".to_string(), label: "Livestock".to_string(), description: Some("Cattle, hogs, poultry".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "unit_of_measurement".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Unit of measurement per token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("troy_oz")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "troy_oz".to_string(), label: "Troy Ounce".to_string(), description: Some("Standard for precious metals".to_string()) },
+                            DropdownOption { value: "barrel".to_string(), label: "Barrel".to_string(), description: Some("Standard for oil (42 US gallons)".to_string()) },
+                            DropdownOption { value: "bushel".to_string(), label: "Bushel".to_string(), description: Some("Standard for grain/agriculture".to_string()) },
+                            DropdownOption { value: "metric_ton".to_string(), label: "Metric Ton".to_string(), description: Some("1,000 kilograms".to_string()) },
+                            DropdownOption { value: "pound".to_string(), label: "Pound".to_string(), description: Some("Standard weight measure".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "quantity_per_token".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Quantity of commodity represented per token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(0.001), max: Some(1000000.0) },
+                },
+                DeploymentParameter {
+                    name: "total_tokens".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total number of tokens to mint".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("10000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Must create at least 1 token".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(1000000000.0) },
+                },
+                DeploymentParameter {
+                    name: "storage_provider".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the custodial storage provider".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Brinks Global Services")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Storage provider name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "storage_location".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Physical storage location".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Zurich, Switzerland")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Storage facility location".to_string() },
+                },
+                DeploymentParameter {
+                    name: "delivery_option".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable physical delivery option for token holders".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "insurance_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable insurance coverage on stored commodities".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "kyc_required".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Require KYC verification".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "spot_price_oracle".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Oracle address for spot price feeds".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::AddressInput,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_500_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("requestDelivery".to_string(), 180_000),
+                    ("updateSpotPrice".to_string(), 65_000),
+                    ("verifyStorage".to_string(), 95_000),
+                    ("getStorageProof".to_string(), 30_000),
+                    ("redeemPhysical".to_string(), 200_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("delivery_option".to_string(), 350_000),
+                    ("insurance_enabled".to_string(), 200_000),
+                    ("kyc_required".to_string(), 300_000),
+                    ("spot_price_oracle".to_string(), 250_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Commodity Token".to_string(),
+                description: "Tokenize physical commodities with storage verification and delivery options".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Commodity Details".to_string(),
+                        description: "Basic commodity information".to_string(),
+                        fields: vec!["commodity_name".to_string(), "commodity_symbol".to_string(), "commodity_type".to_string(), "unit_of_measurement".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Supply & Storage".to_string(),
+                        description: "Token supply and storage configuration".to_string(),
+                        fields: vec!["quantity_per_token".to_string(), "total_tokens".to_string(), "storage_provider".to_string(), "storage_location".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Features & Compliance".to_string(),
+                        description: "Delivery, insurance, and compliance settings".to_string(),
+                        fields: vec!["delivery_option".to_string(), "insurance_enabled".to_string(), "kyc_required".to_string(), "spot_price_oracle".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Storage Verification".to_string(), description: "Verify commodity storage and custody".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Oracle Setup".to_string(), description: "Configure spot price oracle feed".to_string(), estimated_time_seconds: 60, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy commodity token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Storage Linking".to_string(), description: "Link token to storage proof records".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_500_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0045".to_string(),
+                    usd_equivalent: Some("$4.50".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Gold-Backed Token".to_string(),
+                description: "Tokenize gold bullion stored in a Swiss vault".to_string(),
+                parameters: [
+                    ("commodity_name".to_string(), serde_json::json!("Swiss Gold Bullion")),
+                    ("commodity_symbol".to_string(), serde_json::json!("SGOLD")),
+                    ("commodity_type".to_string(), serde_json::json!("precious_metals")),
+                    ("unit_of_measurement".to_string(), serde_json::json!("troy_oz")),
+                    ("quantity_per_token".to_string(), serde_json::json!("1")),
+                    ("total_tokens".to_string(), serde_json::json!("50000")),
+                    ("storage_provider".to_string(), serde_json::json!("Brinks Global Services")),
+                    ("storage_location".to_string(), serde_json::json!("Zurich, Switzerland")),
+                ].into_iter().collect(),
+                use_case: "Gold-backed digital asset with physical delivery option".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Commodity Tokens represent fractional or whole ownership of physical commodities stored in verified custody, with oracle price feeds and optional physical delivery".to_string(),
+                usage_guide: "1. Select commodity type and unit\n2. Configure storage provider details\n3. Set up oracle price feed\n4. Deploy and verify storage proof\n5. Enable trading".to_string(),
+                security_considerations: "Storage proof verification, insurance coverage, oracle manipulation protection, and delivery escrow mechanisms ensure asset backing integrity".to_string(),
+                api_reference: "ERC20 with extensions: requestDelivery(), updateSpotPrice(), verifyStorage(), getStorageProof(), redeemPhysical()".to_string(),
+                faq: vec![
+                    FAQ { question: "How is the commodity storage verified?".to_string(), answer: "Storage providers submit regular cryptographic proofs of custody which are verified on-chain via the verifyStorage() function.".to_string() },
+                    FAQ { question: "Can I take physical delivery?".to_string(), answer: "If delivery_option is enabled, holders can call requestDelivery() to initiate physical delivery of the underlying commodity.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::CommodityToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "commodity_name": { "type": "string", "title": "Commodity Name" },
+                    "commodity_symbol": { "type": "string", "title": "Token Symbol" },
+                    "commodity_type": { "type": "string", "title": "Commodity Type", "enum": ["precious_metals", "energy", "agriculture", "industrial_metals", "livestock"] },
+                    "unit_of_measurement": { "type": "string", "title": "Unit of Measurement", "enum": ["troy_oz", "barrel", "bushel", "metric_ton", "pound"] },
+                    "quantity_per_token": { "type": "string", "title": "Quantity per Token" },
+                    "total_tokens": { "type": "string", "title": "Total Tokens" },
+                    "storage_provider": { "type": "string", "title": "Storage Provider" },
+                    "storage_location": { "type": "string", "title": "Storage Location" },
+                    "delivery_option": { "type": "boolean", "title": "Physical Delivery" },
+                    "insurance_enabled": { "type": "boolean", "title": "Insurance Coverage" },
+                    "kyc_required": { "type": "boolean", "title": "KYC Required" },
+                    "spot_price_oracle": { "type": "string", "title": "Spot Price Oracle Address" }
+                },
+                "required": ["commodity_name", "commodity_symbol", "commodity_type", "unit_of_measurement", "quantity_per_token", "total_tokens", "storage_provider", "storage_location"]
+            }),
+            validation_schema: serde_json::json!({
+                "commodity_name": { "minLength": 3, "maxLength": 100 },
+                "commodity_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "total_tokens": { "minimum": 1 }
+            }),
+            ui_schema: serde_json::json!({
+                "commodity_type": { "ui:widget": "select" },
+                "unit_of_measurement": { "ui:widget": "select" },
+                "delivery_option": { "ui:widget": "checkbox" },
+                "insurance_enabled": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
     }
     async fn load_carbon_credit_template(&self) -> Result<()> {
-        Ok(())
+        let template = SmartContractTemplate {
+            contract_type: ContractType::CarbonCreditToken,
+            name: "Carbon Credit Token".to_string(),
+            description: "Tokenize verified carbon credits with retirement tracking, project verification, and offset certification for environmental sustainability".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("carbon_credit_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("CarbonCreditToken.sol"),
+            abi: self.create_carbon_credit_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "project_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the carbon offset project".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Amazon Reforestation Project")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Project name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter project name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "credit_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol for the carbon credit token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("CARB")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Carbon credit symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "credit_standard".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Verification standard for the carbon credits".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("verra_vcs")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "verra_vcs".to_string(), label: "Verra VCS".to_string(), description: Some("Verified Carbon Standard by Verra".to_string()) },
+                            DropdownOption { value: "gold_standard".to_string(), label: "Gold Standard".to_string(), description: Some("Gold Standard for the Global Goals".to_string()) },
+                            DropdownOption { value: "american_carbon".to_string(), label: "American Carbon Registry".to_string(), description: Some("ACR standard".to_string()) },
+                            DropdownOption { value: "clean_development".to_string(), label: "Clean Development Mechanism".to_string(), description: Some("UN CDM standard".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "project_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Type of carbon offset project".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("forestry")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "renewable_energy".to_string(), label: "Renewable Energy".to_string(), description: Some("Solar, wind, hydro projects".to_string()) },
+                            DropdownOption { value: "forestry".to_string(), label: "Forestry".to_string(), description: Some("Reforestation and forest conservation".to_string()) },
+                            DropdownOption { value: "methane_capture".to_string(), label: "Methane Capture".to_string(), description: Some("Landfill and agricultural methane capture".to_string()) },
+                            DropdownOption { value: "direct_air_capture".to_string(), label: "Direct Air Capture".to_string(), description: Some("Mechanical CO2 removal from atmosphere".to_string()) },
+                            DropdownOption { value: "blue_carbon".to_string(), label: "Blue Carbon".to_string(), description: Some("Mangrove and coastal ecosystem restoration".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "vintage_year".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Year the carbon credits were generated".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("2025")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(2000), error_message: "Vintage year must be 2000 or later".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(2000.0), max: Some(2030.0) },
+                },
+                DeploymentParameter {
+                    name: "total_credits_tonnes".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total carbon credits in tonnes of CO2 equivalent".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("100000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Must have at least 1 tonne".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(100000000.0) },
+                },
+                DeploymentParameter {
+                    name: "verification_body".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Third-party verification body".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("SGS SA")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Verification body name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "project_location".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Geographic location of the project".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Para, Brazil")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Project location".to_string() },
+                },
+                DeploymentParameter {
+                    name: "retirement_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable credit retirement (permanent offset)".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "offset_tracking".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable detailed offset tracking and reporting".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 3_800_000,
+                function_calls: [
+                    ("transfer".to_string(), 75_000),
+                    ("retireCredits".to_string(), 120_000),
+                    ("verifyProject".to_string(), 95_000),
+                    ("getRetirementCertificate".to_string(), 30_000),
+                    ("updateVerification".to_string(), 80_000),
+                    ("getProjectImpact".to_string(), 25_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("retirement_enabled".to_string(), 300_000),
+                    ("offset_tracking".to_string(), 250_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Carbon Credit Token".to_string(),
+                description: "Tokenize verified carbon credits with retirement and offset tracking".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Project Details".to_string(),
+                        description: "Carbon offset project information".to_string(),
+                        fields: vec!["project_name".to_string(), "credit_symbol".to_string(), "credit_standard".to_string(), "project_type".to_string(), "project_location".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Credit Configuration".to_string(),
+                        description: "Credit issuance settings".to_string(),
+                        fields: vec!["vintage_year".to_string(), "total_credits_tonnes".to_string(), "verification_body".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Features".to_string(),
+                        description: "Retirement and tracking features".to_string(),
+                        fields: vec!["retirement_enabled".to_string(), "offset_tracking".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Project Verification".to_string(), description: "Verify carbon offset project credentials".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Standard Compliance".to_string(), description: "Validate compliance with selected carbon standard".to_string(), estimated_time_seconds: 120, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy carbon credit token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Registry Linking".to_string(), description: "Link to carbon credit registry".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 3_800_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0038".to_string(),
+                    usd_equivalent: Some("$3.80".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Reforestation Carbon Credits".to_string(),
+                description: "Verified carbon credits from an Amazon reforestation project".to_string(),
+                parameters: [
+                    ("project_name".to_string(), serde_json::json!("Amazon Canopy Restoration")),
+                    ("credit_symbol".to_string(), serde_json::json!("AMZC")),
+                    ("credit_standard".to_string(), serde_json::json!("verra_vcs")),
+                    ("project_type".to_string(), serde_json::json!("forestry")),
+                    ("vintage_year".to_string(), serde_json::json!("2025")),
+                    ("total_credits_tonnes".to_string(), serde_json::json!("500000")),
+                    ("verification_body".to_string(), serde_json::json!("SGS SA")),
+                    ("project_location".to_string(), serde_json::json!("Para, Brazil")),
+                ].into_iter().collect(),
+                use_case: "Verified forest carbon credits for corporate offset programs".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Carbon Credit Tokens represent verified carbon offsets from environmental projects, with on-chain retirement tracking and third-party verification".to_string(),
+                usage_guide: "1. Register carbon offset project\n2. Submit verification documentation\n3. Deploy credit tokens\n4. Enable trading and retirement\n5. Track offset impact".to_string(),
+                security_considerations: "Double-retirement prevention, verification body authentication, vintage year validation, and immutable retirement records ensure carbon credit integrity".to_string(),
+                api_reference: "ERC20 with extensions: retireCredits(), verifyProject(), getRetirementCertificate(), updateVerification(), getProjectImpact()".to_string(),
+                faq: vec![
+                    FAQ { question: "What happens when credits are retired?".to_string(), answer: "Retired credits are permanently burned and a retirement certificate is generated on-chain. They cannot be traded or transferred after retirement.".to_string() },
+                    FAQ { question: "How is double-counting prevented?".to_string(), answer: "Each credit has a unique serial number linked to the registry. Once retired on-chain, the corresponding registry entry is marked as used.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::CarbonCreditToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project_name": { "type": "string", "title": "Project Name" },
+                    "credit_symbol": { "type": "string", "title": "Credit Symbol" },
+                    "credit_standard": { "type": "string", "title": "Credit Standard", "enum": ["verra_vcs", "gold_standard", "american_carbon", "clean_development"] },
+                    "project_type": { "type": "string", "title": "Project Type", "enum": ["renewable_energy", "forestry", "methane_capture", "direct_air_capture", "blue_carbon"] },
+                    "vintage_year": { "type": "string", "title": "Vintage Year" },
+                    "total_credits_tonnes": { "type": "string", "title": "Total Credits (tonnes CO2e)" },
+                    "verification_body": { "type": "string", "title": "Verification Body" },
+                    "project_location": { "type": "string", "title": "Project Location" },
+                    "retirement_enabled": { "type": "boolean", "title": "Retirement Enabled" },
+                    "offset_tracking": { "type": "boolean", "title": "Offset Tracking" }
+                },
+                "required": ["project_name", "credit_symbol", "credit_standard", "project_type", "vintage_year", "total_credits_tonnes", "verification_body", "project_location"]
+            }),
+            validation_schema: serde_json::json!({
+                "project_name": { "minLength": 3, "maxLength": 100 },
+                "credit_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "vintage_year": { "minimum": 2000, "maximum": 2030 },
+                "total_credits_tonnes": { "minimum": 1 }
+            }),
+            ui_schema: serde_json::json!({
+                "credit_standard": { "ui:widget": "select" },
+                "project_type": { "ui:widget": "select" },
+                "retirement_enabled": { "ui:widget": "checkbox" },
+                "offset_tracking": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
     }
     async fn load_options_contract_template(&self) -> Result<()> {
         Ok(())
     }
     async fn load_prediction_market_template(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Load Equity Token template (private equity / stock tokenization)
+    async fn load_equity_template(&self) -> Result<()> {
+        let template = SmartContractTemplate {
+            contract_type: ContractType::EquityToken,
+            name: "Equity Token".to_string(),
+            description: "Tokenize private equity or company stock with voting rights, dividend schedules, vesting, and lockup periods for regulatory-compliant share issuance".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("equity_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("EquityToken.sol"),
+            abi: self.create_equity_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "company_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the issuing company".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Acme Corporation")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(2), error_message: "Company name must be at least 2 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter company name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "ticker_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Ticker symbol for the equity token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("ACME")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Ticker must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Ticker symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "share_class".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Class of shares being issued".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("common")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "common".to_string(), label: "Common".to_string(), description: Some("Standard voting shares".to_string()) },
+                            DropdownOption { value: "preferred".to_string(), label: "Preferred".to_string(), description: Some("Priority dividend and liquidation rights".to_string()) },
+                            DropdownOption { value: "restricted".to_string(), label: "Restricted".to_string(), description: Some("Shares subject to vesting and transfer restrictions".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "total_shares".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total authorized shares".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("10000000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(100), error_message: "Minimum 100 shares".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(100.0), max: Some(10000000000.0) },
+                },
+                DeploymentParameter {
+                    name: "price_per_share_usd".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Initial price per share in USD".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("10")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TokenAmountInput,
+                },
+                DeploymentParameter {
+                    name: "voting_rights".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable voting rights for shareholders".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "dividend_schedule".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Dividend payment schedule".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("quarterly")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "quarterly".to_string(), label: "Quarterly".to_string(), description: Some("Every 3 months".to_string()) },
+                            DropdownOption { value: "semi_annual".to_string(), label: "Semi-Annual".to_string(), description: Some("Every 6 months".to_string()) },
+                            DropdownOption { value: "annual".to_string(), label: "Annual".to_string(), description: Some("Once per year".to_string()) },
+                            DropdownOption { value: "none".to_string(), label: "None".to_string(), description: Some("No dividends".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "vesting_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable share vesting schedules".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "vesting_period_months".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Vesting period in months".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("48")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(120.0) },
+                },
+                DeploymentParameter {
+                    name: "lockup_period_days".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Lockup period in days after issuance".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("365")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(0.0), max: Some(1825.0) },
+                },
+                DeploymentParameter {
+                    name: "kyc_required".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Require KYC verification for shareholders".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "accredited_only".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Restrict to accredited investors".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "board_seats_per_share".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Number of shares required per board seat nomination".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("1000000")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(100000000.0) },
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_500_000,
+                function_calls: [
+                    ("transfer".to_string(), 90_000),
+                    ("vote".to_string(), 80_000),
+                    ("distributeDividend".to_string(), 160_000),
+                    ("vest".to_string(), 95_000),
+                    ("lockShares".to_string(), 65_000),
+                    ("unlockShares".to_string(), 65_000),
+                    ("getShareholderInfo".to_string(), 25_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("voting_rights".to_string(), 350_000),
+                    ("vesting_enabled".to_string(), 400_000),
+                    ("kyc_required".to_string(), 300_000),
+                    ("accredited_only".to_string(), 200_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Equity Token".to_string(),
+                description: "Tokenize private equity or company stock with corporate governance features".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Company Details".to_string(),
+                        description: "Issuing company information".to_string(),
+                        fields: vec!["company_name".to_string(), "ticker_symbol".to_string(), "share_class".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Share Configuration".to_string(),
+                        description: "Share supply and pricing".to_string(),
+                        fields: vec!["total_shares".to_string(), "price_per_share_usd".to_string(), "voting_rights".to_string(), "dividend_schedule".to_string(), "board_seats_per_share".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Vesting & Lockup".to_string(),
+                        description: "Vesting and lockup configuration".to_string(),
+                        fields: vec!["vesting_enabled".to_string(), "vesting_period_months".to_string(), "lockup_period_days".to_string()],
+                        conditional_logic: Some(ConditionalLogic { depends_on_field: "vesting_enabled".to_string(), condition: "equals".to_string(), value: serde_json::json!(true) }),
+                    },
+                    FormSection {
+                        title: "Compliance".to_string(),
+                        description: "Regulatory compliance settings".to_string(),
+                        fields: vec!["kyc_required".to_string(), "accredited_only".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Corporate Verification".to_string(), description: "Verify company registration and authorization".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Securities Compliance".to_string(), description: "Validate securities regulations compliance".to_string(), estimated_time_seconds: 180, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy equity token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Cap Table Setup".to_string(), description: "Initialize capitalization table".to_string(), estimated_time_seconds: 30, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_500_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0045".to_string(),
+                    usd_equivalent: Some("$4.50".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Series A Preferred Stock".to_string(),
+                description: "Issue preferred shares for a Series A funding round".to_string(),
+                parameters: [
+                    ("company_name".to_string(), serde_json::json!("TechStartup Inc.")),
+                    ("ticker_symbol".to_string(), serde_json::json!("TSUP")),
+                    ("share_class".to_string(), serde_json::json!("preferred")),
+                    ("total_shares".to_string(), serde_json::json!("5000000")),
+                    ("price_per_share_usd".to_string(), serde_json::json!("2")),
+                    ("voting_rights".to_string(), serde_json::json!(true)),
+                    ("dividend_schedule".to_string(), serde_json::json!("quarterly")),
+                ].into_iter().collect(),
+                use_case: "Series A preferred stock issuance with investor protections".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Equity Tokens represent ownership shares in a company with full corporate governance features including voting, dividends, vesting, and lockup periods".to_string(),
+                usage_guide: "1. Register company details\n2. Configure share class and pricing\n3. Set up governance rules\n4. Deploy and distribute shares\n5. Manage cap table on-chain".to_string(),
+                security_considerations: "Securities regulation compliance, accredited investor verification, transfer restrictions, vesting cliff enforcement, and multisig corporate actions".to_string(),
+                api_reference: "ERC20 with extensions: vote(), distributeDividend(), vest(), lockShares(), unlockShares(), getShareholderInfo()".to_string(),
+                faq: vec![
+                    FAQ { question: "How do voting rights work?".to_string(), answer: "Each share grants one vote. Shareholders call vote() on active proposals. Votes are weighted by share balance at the snapshot block.".to_string() },
+                    FAQ { question: "Can shares be transferred during the lockup period?".to_string(), answer: "No. Shares are non-transferable until the lockup period expires. After lockup, transfers follow the configured restrictions.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::EquityToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "company_name": { "type": "string", "title": "Company Name" },
+                    "ticker_symbol": { "type": "string", "title": "Ticker Symbol" },
+                    "share_class": { "type": "string", "title": "Share Class", "enum": ["common", "preferred", "restricted"] },
+                    "total_shares": { "type": "string", "title": "Total Shares" },
+                    "price_per_share_usd": { "type": "string", "title": "Price per Share (USD)" },
+                    "voting_rights": { "type": "boolean", "title": "Voting Rights" },
+                    "dividend_schedule": { "type": "string", "title": "Dividend Schedule", "enum": ["quarterly", "semi_annual", "annual", "none"] },
+                    "vesting_enabled": { "type": "boolean", "title": "Vesting Enabled" },
+                    "vesting_period_months": { "type": "string", "title": "Vesting Period (months)" },
+                    "lockup_period_days": { "type": "string", "title": "Lockup Period (days)" },
+                    "kyc_required": { "type": "boolean", "title": "KYC Required" },
+                    "accredited_only": { "type": "boolean", "title": "Accredited Only" },
+                    "board_seats_per_share": { "type": "string", "title": "Shares per Board Seat" }
+                },
+                "required": ["company_name", "ticker_symbol", "share_class", "total_shares", "price_per_share_usd"]
+            }),
+            validation_schema: serde_json::json!({
+                "company_name": { "minLength": 2, "maxLength": 100 },
+                "ticker_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "total_shares": { "minimum": 100 }
+            }),
+            ui_schema: serde_json::json!({
+                "share_class": { "ui:widget": "select" },
+                "dividend_schedule": { "ui:widget": "select" },
+                "voting_rights": { "ui:widget": "checkbox" },
+                "vesting_enabled": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
+    }
+
+    /// Load Fixed Income Token template (bonds, treasury notes, debt instruments)
+    async fn load_fixed_income_template(&self) -> Result<()> {
+        let template = SmartContractTemplate {
+            contract_type: ContractType::FixedIncomeToken,
+            name: "Fixed Income Token".to_string(),
+            description: "Tokenize bonds, treasury notes, and debt instruments with coupon payments, maturity tracking, callable/convertible features, and credit rating integration".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("fixed_income_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("FixedIncomeToken.sol"),
+            abi: self.create_fixed_income_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "instrument_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the debt instrument".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Corporate Bond Series A")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Instrument name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter instrument name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "instrument_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("BONDA")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Instrument symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "instrument_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Type of fixed income instrument".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("corporate_bond")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "corporate_bond".to_string(), label: "Corporate Bond".to_string(), description: Some("Debt issued by a corporation".to_string()) },
+                            DropdownOption { value: "government_bond".to_string(), label: "Government Bond".to_string(), description: Some("Sovereign debt instrument".to_string()) },
+                            DropdownOption { value: "treasury_note".to_string(), label: "Treasury Note".to_string(), description: Some("Short-to-medium term government debt".to_string()) },
+                            DropdownOption { value: "municipal_bond".to_string(), label: "Municipal Bond".to_string(), description: Some("Debt issued by local government".to_string()) },
+                            DropdownOption { value: "convertible_bond".to_string(), label: "Convertible Bond".to_string(), description: Some("Bond convertible to equity shares".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "face_value_usd".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Face value (par value) per unit in USD".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Face value must be at least $1".to_string() }],
+                    ui_component: UIComponent::TokenAmountInput,
+                },
+                DeploymentParameter {
+                    name: "coupon_rate_percent".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Annual coupon rate percentage".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("5")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::PercentageInput,
+                },
+                DeploymentParameter {
+                    name: "maturity_date".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Bond maturity date".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("2030-01-01")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::DateTimeInput,
+                },
+                DeploymentParameter {
+                    name: "payment_frequency".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Coupon payment frequency".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("semi_annual")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "monthly".to_string(), label: "Monthly".to_string(), description: None },
+                            DropdownOption { value: "quarterly".to_string(), label: "Quarterly".to_string(), description: None },
+                            DropdownOption { value: "semi_annual".to_string(), label: "Semi-Annual".to_string(), description: None },
+                            DropdownOption { value: "annual".to_string(), label: "Annual".to_string(), description: None },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "credit_rating".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Credit rating of the instrument".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("A")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "AAA".to_string(), label: "AAA".to_string(), description: Some("Highest quality, lowest risk".to_string()) },
+                            DropdownOption { value: "AA".to_string(), label: "AA".to_string(), description: Some("High quality".to_string()) },
+                            DropdownOption { value: "A".to_string(), label: "A".to_string(), description: Some("Upper medium grade".to_string()) },
+                            DropdownOption { value: "BBB".to_string(), label: "BBB".to_string(), description: Some("Lower medium grade (investment grade)".to_string()) },
+                            DropdownOption { value: "BB".to_string(), label: "BB".to_string(), description: Some("Speculative".to_string()) },
+                            DropdownOption { value: "B".to_string(), label: "B".to_string(), description: Some("Highly speculative".to_string()) },
+                            DropdownOption { value: "CCC".to_string(), label: "CCC".to_string(), description: Some("Substantial risk".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "total_units".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total number of bond units to issue".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("10000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Must issue at least 1 unit".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(1000000000.0) },
+                },
+                DeploymentParameter {
+                    name: "callable".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Allow issuer to call (redeem early) the bond".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "convertible".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Allow conversion to equity tokens".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "kyc_required".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Require KYC verification".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_000_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("payCoupon".to_string(), 140_000),
+                    ("redeem".to_string(), 120_000),
+                    ("call".to_string(), 100_000),
+                    ("convert".to_string(), 150_000),
+                    ("getCouponSchedule".to_string(), 25_000),
+                    ("getYieldToMaturity".to_string(), 30_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("callable".to_string(), 250_000),
+                    ("convertible".to_string(), 350_000),
+                    ("kyc_required".to_string(), 300_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Fixed Income Token".to_string(),
+                description: "Tokenize bonds and debt instruments with coupon payments and maturity tracking".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Instrument Details".to_string(),
+                        description: "Bond and debt instrument information".to_string(),
+                        fields: vec!["instrument_name".to_string(), "instrument_symbol".to_string(), "instrument_type".to_string(), "credit_rating".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Financial Terms".to_string(),
+                        description: "Pricing, coupon, and maturity terms".to_string(),
+                        fields: vec!["face_value_usd".to_string(), "coupon_rate_percent".to_string(), "maturity_date".to_string(), "payment_frequency".to_string(), "total_units".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Features & Compliance".to_string(),
+                        description: "Optional features and compliance".to_string(),
+                        fields: vec!["callable".to_string(), "convertible".to_string(), "kyc_required".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Issuer Verification".to_string(), description: "Verify issuer credentials and authorization".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Terms Validation".to_string(), description: "Validate financial terms and compliance".to_string(), estimated_time_seconds: 120, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy fixed income token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Coupon Scheduler".to_string(), description: "Initialize coupon payment schedule".to_string(), estimated_time_seconds: 30, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_000_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0040".to_string(),
+                    usd_equivalent: Some("$4.00".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "5-Year Corporate Bond".to_string(),
+                description: "Issue a 5-year corporate bond with semi-annual coupon payments".to_string(),
+                parameters: [
+                    ("instrument_name".to_string(), serde_json::json!("Acme Corp 5Y Bond")),
+                    ("instrument_symbol".to_string(), serde_json::json!("ACM5Y")),
+                    ("instrument_type".to_string(), serde_json::json!("corporate_bond")),
+                    ("face_value_usd".to_string(), serde_json::json!("1000")),
+                    ("coupon_rate_percent".to_string(), serde_json::json!("5")),
+                    ("maturity_date".to_string(), serde_json::json!("2031-01-01")),
+                    ("payment_frequency".to_string(), serde_json::json!("semi_annual")),
+                    ("credit_rating".to_string(), serde_json::json!("A")),
+                    ("total_units".to_string(), serde_json::json!("50000")),
+                ].into_iter().collect(),
+                use_case: "Corporate debt issuance with regular coupon payments".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Fixed Income Tokens represent tokenized debt instruments including bonds, treasury notes, and convertible bonds with automated coupon payments and maturity redemption".to_string(),
+                usage_guide: "1. Define instrument type and terms\n2. Set coupon rate and payment schedule\n3. Configure maturity and optional features\n4. Deploy and issue units\n5. Automated coupon distribution".to_string(),
+                security_considerations: "Coupon payment escrow, maturity date enforcement, callable bond protections, credit rating oracle integration, and issuer default safeguards".to_string(),
+                api_reference: "ERC20 with extensions: payCoupon(), redeem(), call(), convert(), getCouponSchedule(), getYieldToMaturity()".to_string(),
+                faq: vec![
+                    FAQ { question: "How are coupon payments automated?".to_string(), answer: "The issuer deposits coupon funds which are automatically distributed to bondholders based on the payment_frequency schedule.".to_string() },
+                    FAQ { question: "What happens at maturity?".to_string(), answer: "At the maturity date, bondholders can call redeem() to receive the face value. The contract ensures sufficient funds are available.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::FixedIncomeToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "instrument_name": { "type": "string", "title": "Instrument Name" },
+                    "instrument_symbol": { "type": "string", "title": "Symbol" },
+                    "instrument_type": { "type": "string", "title": "Instrument Type", "enum": ["corporate_bond", "government_bond", "treasury_note", "municipal_bond", "convertible_bond"] },
+                    "face_value_usd": { "type": "string", "title": "Face Value (USD)" },
+                    "coupon_rate_percent": { "type": "string", "title": "Coupon Rate (%)" },
+                    "maturity_date": { "type": "string", "title": "Maturity Date" },
+                    "payment_frequency": { "type": "string", "title": "Payment Frequency", "enum": ["monthly", "quarterly", "semi_annual", "annual"] },
+                    "credit_rating": { "type": "string", "title": "Credit Rating", "enum": ["AAA", "AA", "A", "BBB", "BB", "B", "CCC"] },
+                    "total_units": { "type": "string", "title": "Total Units" },
+                    "callable": { "type": "boolean", "title": "Callable" },
+                    "convertible": { "type": "boolean", "title": "Convertible" },
+                    "kyc_required": { "type": "boolean", "title": "KYC Required" }
+                },
+                "required": ["instrument_name", "instrument_symbol", "instrument_type", "face_value_usd", "coupon_rate_percent", "maturity_date", "payment_frequency", "credit_rating", "total_units"]
+            }),
+            validation_schema: serde_json::json!({
+                "instrument_name": { "minLength": 3, "maxLength": 100 },
+                "instrument_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "face_value_usd": { "minimum": 1 },
+                "total_units": { "minimum": 1 }
+            }),
+            ui_schema: serde_json::json!({
+                "instrument_type": { "ui:widget": "select" },
+                "payment_frequency": { "ui:widget": "select" },
+                "credit_rating": { "ui:widget": "select" },
+                "maturity_date": { "ui:widget": "date" },
+                "callable": { "ui:widget": "checkbox" },
+                "convertible": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
+    }
+
+    /// Load IP Revenue Token template (intellectual property, patents, royalties)
+    async fn load_ip_revenue_template(&self) -> Result<()> {
+        let template = SmartContractTemplate {
+            contract_type: ContractType::IPRevenueToken,
+            name: "IP Revenue Token".to_string(),
+            description: "Tokenize intellectual property revenue streams including patents, copyrights, trademarks, and royalty streams with automated revenue distribution".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("ip_revenue_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("IPRevenueToken.sol"),
+            abi: self.create_ip_revenue_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "ip_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the intellectual property".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Quantum Encryption Patent")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "IP name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter IP name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "ip_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("QPAT")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "IP token symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "ip_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Type of intellectual property".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("patent")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "patent".to_string(), label: "Patent".to_string(), description: Some("Granted patent or patent application".to_string()) },
+                            DropdownOption { value: "copyright".to_string(), label: "Copyright".to_string(), description: Some("Copyright on creative works".to_string()) },
+                            DropdownOption { value: "trademark".to_string(), label: "Trademark".to_string(), description: Some("Registered trademark".to_string()) },
+                            DropdownOption { value: "trade_secret".to_string(), label: "Trade Secret".to_string(), description: Some("Proprietary trade secret".to_string()) },
+                            DropdownOption { value: "royalty_stream".to_string(), label: "Royalty Stream".to_string(), description: Some("Existing royalty revenue stream".to_string()) },
+                            DropdownOption { value: "licensing_agreement".to_string(), label: "Licensing Agreement".to_string(), description: Some("Revenue from licensing deal".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "jurisdiction".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Legal jurisdiction of IP registration".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("United States")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Jurisdiction (e.g., United States)".to_string() },
+                },
+                DeploymentParameter {
+                    name: "registration_number".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Official registration or patent number".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("US-PAT-12345678")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Registration/patent number".to_string() },
+                },
+                DeploymentParameter {
+                    name: "revenue_share_percent".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Percentage of IP revenue shared with token holders".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("80")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::PercentageInput,
+                },
+                DeploymentParameter {
+                    name: "expiry_date".to_string(),
+                    param_type: "string".to_string(),
+                    description: "IP expiry or end date".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("2040-01-01")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::DateTimeInput,
+                },
+                DeploymentParameter {
+                    name: "total_tokens".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total tokens representing revenue share".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1000000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(100), error_message: "Minimum 100 tokens".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(100.0), max: Some(1000000000.0) },
+                },
+                DeploymentParameter {
+                    name: "licensor".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the IP licensor or owner".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Quantum Labs Inc.")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "IP licensor name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "revenue_distribution_frequency".to_string(),
+                    param_type: "string".to_string(),
+                    description: "How often revenue is distributed".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("quarterly")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "monthly".to_string(), label: "Monthly".to_string(), description: None },
+                            DropdownOption { value: "quarterly".to_string(), label: "Quarterly".to_string(), description: None },
+                            DropdownOption { value: "annual".to_string(), label: "Annual".to_string(), description: None },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "minimum_guarantee_usd".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Minimum guaranteed annual revenue distribution in USD".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!("0")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TokenAmountInput,
+                },
+                DeploymentParameter {
+                    name: "sublicensing_allowed".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Allow sublicensing of the IP".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_200_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("distributeRevenue".to_string(), 160_000),
+                    ("updateRevenueReport".to_string(), 80_000),
+                    ("verifyRegistration".to_string(), 95_000),
+                    ("getLicenseTerms".to_string(), 25_000),
+                    ("getRevenueHistory".to_string(), 30_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("sublicensing_allowed".to_string(), 250_000),
+                    ("minimum_guarantee_usd".to_string(), 200_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy IP Revenue Token".to_string(),
+                description: "Tokenize intellectual property revenue streams with automated distribution".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "IP Details".to_string(),
+                        description: "Intellectual property information".to_string(),
+                        fields: vec!["ip_name".to_string(), "ip_symbol".to_string(), "ip_type".to_string(), "jurisdiction".to_string(), "registration_number".to_string(), "licensor".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Revenue Configuration".to_string(),
+                        description: "Revenue sharing and distribution settings".to_string(),
+                        fields: vec!["revenue_share_percent".to_string(), "total_tokens".to_string(), "revenue_distribution_frequency".to_string(), "minimum_guarantee_usd".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Terms & Features".to_string(),
+                        description: "IP terms and optional features".to_string(),
+                        fields: vec!["expiry_date".to_string(), "sublicensing_allowed".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "IP Verification".to_string(), description: "Verify IP registration and ownership".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Revenue Audit".to_string(), description: "Validate revenue history and projections".to_string(), estimated_time_seconds: 180, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy IP revenue token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Revenue Feed Setup".to_string(), description: "Configure revenue reporting oracle".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_200_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0042".to_string(),
+                    usd_equivalent: Some("$4.20".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Patent Royalty Stream".to_string(),
+                description: "Tokenize royalty income from a granted patent".to_string(),
+                parameters: [
+                    ("ip_name".to_string(), serde_json::json!("Quantum Encryption Patent")),
+                    ("ip_symbol".to_string(), serde_json::json!("QPAT")),
+                    ("ip_type".to_string(), serde_json::json!("patent")),
+                    ("jurisdiction".to_string(), serde_json::json!("United States")),
+                    ("registration_number".to_string(), serde_json::json!("US-PAT-12345678")),
+                    ("revenue_share_percent".to_string(), serde_json::json!("80")),
+                    ("total_tokens".to_string(), serde_json::json!("1000000")),
+                    ("licensor".to_string(), serde_json::json!("Quantum Labs Inc.")),
+                ].into_iter().collect(),
+                use_case: "Fractional ownership of patent licensing revenue".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "IP Revenue Tokens enable fractional ownership of intellectual property revenue streams from patents, copyrights, trademarks, and licensing agreements".to_string(),
+                usage_guide: "1. Register IP details and ownership proof\n2. Configure revenue sharing terms\n3. Set distribution schedule\n4. Deploy and connect revenue oracle\n5. Automated revenue distribution".to_string(),
+                security_considerations: "Revenue oracle verification, minimum guarantee enforcement, IP expiry date handling, sublicensing controls, and dispute resolution mechanisms".to_string(),
+                api_reference: "ERC20 with extensions: distributeRevenue(), updateRevenueReport(), verifyRegistration(), getLicenseTerms(), getRevenueHistory()".to_string(),
+                faq: vec![
+                    FAQ { question: "How is revenue verified?".to_string(), answer: "Revenue reports are submitted by the licensor and verified through an oracle. Token holders can dispute inaccurate reports through the governance mechanism.".to_string() },
+                    FAQ { question: "What happens when the IP expires?".to_string(), answer: "At expiry, any remaining revenue is distributed and the token enters a wind-down state. No new revenue distributions occur after expiry.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::IPRevenueToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ip_name": { "type": "string", "title": "IP Name" },
+                    "ip_symbol": { "type": "string", "title": "Token Symbol" },
+                    "ip_type": { "type": "string", "title": "IP Type", "enum": ["patent", "copyright", "trademark", "trade_secret", "royalty_stream", "licensing_agreement"] },
+                    "jurisdiction": { "type": "string", "title": "Jurisdiction" },
+                    "registration_number": { "type": "string", "title": "Registration Number" },
+                    "revenue_share_percent": { "type": "string", "title": "Revenue Share (%)" },
+                    "expiry_date": { "type": "string", "title": "Expiry Date" },
+                    "total_tokens": { "type": "string", "title": "Total Tokens" },
+                    "licensor": { "type": "string", "title": "Licensor" },
+                    "revenue_distribution_frequency": { "type": "string", "title": "Distribution Frequency", "enum": ["monthly", "quarterly", "annual"] },
+                    "minimum_guarantee_usd": { "type": "string", "title": "Minimum Guarantee (USD)" },
+                    "sublicensing_allowed": { "type": "boolean", "title": "Sublicensing Allowed" }
+                },
+                "required": ["ip_name", "ip_symbol", "ip_type", "jurisdiction", "registration_number", "revenue_share_percent", "expiry_date", "total_tokens", "licensor"]
+            }),
+            validation_schema: serde_json::json!({
+                "ip_name": { "minLength": 3, "maxLength": 100 },
+                "ip_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "total_tokens": { "minimum": 100 }
+            }),
+            ui_schema: serde_json::json!({
+                "ip_type": { "ui:widget": "select" },
+                "revenue_distribution_frequency": { "ui:widget": "select" },
+                "expiry_date": { "ui:widget": "date" },
+                "sublicensing_allowed": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
+    }
+
+    /// Load Physical Goods Token template
+    async fn load_physical_goods_template(&self) -> Result<()> {
+        let template = SmartContractTemplate {
+            contract_type: ContractType::PhysicalGoodsToken,
+            name: "Physical Goods Token".to_string(),
+            description: "Tokenize physical goods with redemption capabilities, supply chain verification, inventory tracking, and shipping integration".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("physical_goods_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("PhysicalGoodsToken.sol"),
+            abi: self.create_physical_goods_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "product_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the physical product".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Luxury Watch Collection")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Product name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter product name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "product_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("LXWCH")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Product token symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "product_category".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Category of physical goods".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("luxury_goods")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "luxury_goods".to_string(), label: "Luxury Goods".to_string(), description: Some("Watches, jewelry, designer items".to_string()) },
+                            DropdownOption { value: "electronics".to_string(), label: "Electronics".to_string(), description: Some("Computers, phones, components".to_string()) },
+                            DropdownOption { value: "vehicles".to_string(), label: "Vehicles".to_string(), description: Some("Cars, boats, aircraft".to_string()) },
+                            DropdownOption { value: "machinery".to_string(), label: "Machinery".to_string(), description: Some("Industrial and manufacturing equipment".to_string()) },
+                            DropdownOption { value: "inventory".to_string(), label: "Inventory".to_string(), description: Some("Wholesale or retail inventory".to_string()) },
+                            DropdownOption { value: "raw_materials".to_string(), label: "Raw Materials".to_string(), description: Some("Unprocessed materials and supplies".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "manufacturer".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Product manufacturer or brand".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Swiss Watch Corp")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Manufacturer name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "serial_number_tracking".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable individual serial number tracking per unit".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "quantity_per_token".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Number of physical units per token".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(1000000.0) },
+                },
+                DeploymentParameter {
+                    name: "total_tokens".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total number of tokens".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("1000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Must create at least 1 token".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(100000000.0) },
+                },
+                DeploymentParameter {
+                    name: "warehouse_location".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Warehouse or storage facility location".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Zurich Free Port, Switzerland")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Warehouse location".to_string() },
+                },
+                DeploymentParameter {
+                    name: "supply_chain_verified".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable supply chain verification tracking".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "redemption_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Allow token holders to redeem for physical goods".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "shipping_included".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Include shipping costs in token price".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(false)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "insurance_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable insurance coverage on stored goods".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_300_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("redeemPhysical".to_string(), 200_000),
+                    ("updateInventory".to_string(), 75_000),
+                    ("verifySupplyChain".to_string(), 95_000),
+                    ("getTrackingInfo".to_string(), 25_000),
+                    ("requestShipping".to_string(), 150_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("serial_number_tracking".to_string(), 300_000),
+                    ("supply_chain_verified".to_string(), 250_000),
+                    ("redemption_enabled".to_string(), 350_000),
+                    ("shipping_included".to_string(), 200_000),
+                    ("insurance_enabled".to_string(), 200_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Physical Goods Token".to_string(),
+                description: "Tokenize physical goods with redemption and supply chain verification".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Product Details".to_string(),
+                        description: "Physical product information".to_string(),
+                        fields: vec!["product_name".to_string(), "product_symbol".to_string(), "product_category".to_string(), "manufacturer".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Supply & Storage".to_string(),
+                        description: "Inventory and warehouse settings".to_string(),
+                        fields: vec!["quantity_per_token".to_string(), "total_tokens".to_string(), "warehouse_location".to_string(), "serial_number_tracking".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Redemption & Features".to_string(),
+                        description: "Redemption, shipping, and insurance".to_string(),
+                        fields: vec!["supply_chain_verified".to_string(), "redemption_enabled".to_string(), "shipping_included".to_string(), "insurance_enabled".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Inventory Verification".to_string(), description: "Verify physical inventory exists in warehouse".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Supply Chain Audit".to_string(), description: "Validate supply chain and authenticity".to_string(), estimated_time_seconds: 180, requires_user_action: false },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy physical goods token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Warehouse Integration".to_string(), description: "Connect to warehouse management system".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_300_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0043".to_string(),
+                    usd_equivalent: Some("$4.30".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Luxury Watch Collection".to_string(),
+                description: "Tokenize a collection of luxury watches stored in a secure vault".to_string(),
+                parameters: [
+                    ("product_name".to_string(), serde_json::json!("Patek Philippe Collection")),
+                    ("product_symbol".to_string(), serde_json::json!("PPWCH")),
+                    ("product_category".to_string(), serde_json::json!("luxury_goods")),
+                    ("manufacturer".to_string(), serde_json::json!("Patek Philippe SA")),
+                    ("quantity_per_token".to_string(), serde_json::json!("1")),
+                    ("total_tokens".to_string(), serde_json::json!("50")),
+                    ("warehouse_location".to_string(), serde_json::json!("Geneva Free Port, Switzerland")),
+                ].into_iter().collect(),
+                use_case: "Tokenized luxury goods with physical redemption option".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Physical Goods Tokens represent ownership of physical products stored in verified facilities, with supply chain tracking, authenticity verification, and redemption capabilities".to_string(),
+                usage_guide: "1. Register product details and manufacturer\n2. Verify inventory in warehouse\n3. Configure supply chain tracking\n4. Deploy and enable trading\n5. Token holders can redeem for physical delivery".to_string(),
+                security_considerations: "Inventory proof verification, supply chain authenticity checks, redemption escrow, shipping insurance, and serial number anti-counterfeiting measures".to_string(),
+                api_reference: "ERC20 with extensions: redeemPhysical(), updateInventory(), verifySupplyChain(), getTrackingInfo(), requestShipping()".to_string(),
+                faq: vec![
+                    FAQ { question: "How does physical redemption work?".to_string(), answer: "Token holders call redeemPhysical() which burns the token and initiates a shipping request. The warehouse prepares the item for delivery with tracking.".to_string() },
+                    FAQ { question: "How is authenticity verified?".to_string(), answer: "Each item has a verified serial number linked on-chain. Supply chain records from manufacturer to warehouse are cryptographically verified.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::PhysicalGoodsToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "product_name": { "type": "string", "title": "Product Name" },
+                    "product_symbol": { "type": "string", "title": "Token Symbol" },
+                    "product_category": { "type": "string", "title": "Category", "enum": ["luxury_goods", "electronics", "vehicles", "machinery", "inventory", "raw_materials"] },
+                    "manufacturer": { "type": "string", "title": "Manufacturer" },
+                    "serial_number_tracking": { "type": "boolean", "title": "Serial Number Tracking" },
+                    "quantity_per_token": { "type": "string", "title": "Quantity per Token" },
+                    "total_tokens": { "type": "string", "title": "Total Tokens" },
+                    "warehouse_location": { "type": "string", "title": "Warehouse Location" },
+                    "supply_chain_verified": { "type": "boolean", "title": "Supply Chain Verified" },
+                    "redemption_enabled": { "type": "boolean", "title": "Redemption Enabled" },
+                    "shipping_included": { "type": "boolean", "title": "Shipping Included" },
+                    "insurance_enabled": { "type": "boolean", "title": "Insurance Enabled" }
+                },
+                "required": ["product_name", "product_symbol", "product_category", "manufacturer", "quantity_per_token", "total_tokens", "warehouse_location"]
+            }),
+            validation_schema: serde_json::json!({
+                "product_name": { "minLength": 3, "maxLength": 100 },
+                "product_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "total_tokens": { "minimum": 1 }
+            }),
+            ui_schema: serde_json::json!({
+                "product_category": { "ui:widget": "select" },
+                "serial_number_tracking": { "ui:widget": "checkbox" },
+                "supply_chain_verified": { "ui:widget": "checkbox" },
+                "redemption_enabled": { "ui:widget": "checkbox" },
+                "shipping_included": { "ui:widget": "checkbox" },
+                "insurance_enabled": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
+    }
+
+    /// Load Art & Collectible Token template
+    async fn load_art_collectible_template(&self) -> Result<()> {
+        let template = SmartContractTemplate {
+            contract_type: ContractType::ArtCollectibleToken,
+            name: "Art & Collectible Token".to_string(),
+            description: "Tokenize fine art and collectibles with fractional ownership, provenance tracking, appraisal management, and physical custody verification".to_string(),
+            version: "1.0.0".to_string(),
+            wasm_bytecode: Self::load_wasm_bytecode("art_collectible_token.wasm").unwrap_or_default(),
+            solidity_source: Self::load_solidity_source("ArtCollectibleToken.sol"),
+            abi: self.create_art_collectible_abi(),
+            deployment_parameters: vec![
+                DeploymentParameter {
+                    name: "item_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Name of the art piece or collectible".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Starry Night Study")),
+                    validation_rules: vec![ValidationRule { rule_type: "minLength".to_string(), value: serde_json::json!(3), error_message: "Item name must be at least 3 characters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Enter item name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "item_symbol".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Trading symbol".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("STARS")),
+                    validation_rules: vec![ValidationRule { rule_type: "pattern".to_string(), value: serde_json::json!("^[A-Z]{2,10}$"), error_message: "Symbol must be 2-10 uppercase letters".to_string() }],
+                    ui_component: UIComponent::TextInput { placeholder: "Item token symbol".to_string() },
+                },
+                DeploymentParameter {
+                    name: "item_type".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Type of art or collectible".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("fine_art")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "fine_art".to_string(), label: "Fine Art".to_string(), description: Some("Paintings, drawings, prints".to_string()) },
+                            DropdownOption { value: "sculpture".to_string(), label: "Sculpture".to_string(), description: Some("Three-dimensional art works".to_string()) },
+                            DropdownOption { value: "photography".to_string(), label: "Photography".to_string(), description: Some("Art photography prints".to_string()) },
+                            DropdownOption { value: "digital_art".to_string(), label: "Digital Art".to_string(), description: Some("Digital artworks and NFTs".to_string()) },
+                            DropdownOption { value: "wine".to_string(), label: "Wine".to_string(), description: Some("Fine wines and vintages".to_string()) },
+                            DropdownOption { value: "watches".to_string(), label: "Watches".to_string(), description: Some("Luxury and vintage watches".to_string()) },
+                            DropdownOption { value: "sports_memorabilia".to_string(), label: "Sports Memorabilia".to_string(), description: Some("Sports cards, jerseys, equipment".to_string()) },
+                            DropdownOption { value: "rare_coins".to_string(), label: "Rare Coins".to_string(), description: Some("Numismatic collectibles".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "artist_creator".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Artist or creator name".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("Contemporary Master")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::TextInput { placeholder: "Artist or creator name".to_string() },
+                },
+                DeploymentParameter {
+                    name: "creation_year".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Year the item was created".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("2020")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(2030.0) },
+                },
+                DeploymentParameter {
+                    name: "appraisal_value_usd".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Current appraised value in USD".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("500000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(100), error_message: "Minimum appraisal value is $100".to_string() }],
+                    ui_component: UIComponent::TokenAmountInput,
+                },
+                DeploymentParameter {
+                    name: "total_fractions".to_string(),
+                    param_type: "uint256".to_string(),
+                    description: "Total number of fractional ownership tokens".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("100000")),
+                    validation_rules: vec![ValidationRule { rule_type: "min".to_string(), value: serde_json::json!(1), error_message: "Must have at least 1 fraction".to_string() }],
+                    ui_component: UIComponent::NumberInput { min: Some(1.0), max: Some(100000000.0) },
+                },
+                DeploymentParameter {
+                    name: "provenance_verified".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Has provenance been independently verified".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "insurance_enabled".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Enable insurance coverage".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+                DeploymentParameter {
+                    name: "physical_custody".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Where the physical item is stored".to_string(),
+                    required: true,
+                    default_value: Some(serde_json::json!("vault")),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Dropdown {
+                        options: vec![
+                            DropdownOption { value: "owner".to_string(), label: "Owner".to_string(), description: Some("Held by the token issuer".to_string()) },
+                            DropdownOption { value: "vault".to_string(), label: "Vault".to_string(), description: Some("Stored in a secure vault".to_string()) },
+                            DropdownOption { value: "museum".to_string(), label: "Museum".to_string(), description: Some("On display at a museum".to_string()) },
+                            DropdownOption { value: "gallery".to_string(), label: "Gallery".to_string(), description: Some("Displayed in a gallery".to_string()) },
+                        ],
+                    },
+                },
+                DeploymentParameter {
+                    name: "kyc_required".to_string(),
+                    param_type: "bool".to_string(),
+                    description: "Require KYC verification for holders".to_string(),
+                    required: false,
+                    default_value: Some(serde_json::json!(true)),
+                    validation_rules: vec![],
+                    ui_component: UIComponent::Checkbox,
+                },
+            ],
+            gas_estimates: GasEstimates {
+                deployment: 4_100_000,
+                function_calls: [
+                    ("transfer".to_string(), 85_000),
+                    ("updateAppraisal".to_string(), 80_000),
+                    ("addProvenance".to_string(), 120_000),
+                    ("verifyAuthenticity".to_string(), 95_000),
+                    ("requestPhysicalTransfer".to_string(), 180_000),
+                    ("getFractionValue".to_string(), 25_000),
+                ].into_iter().collect(),
+                feature_costs: [
+                    ("provenance_verified".to_string(), 300_000),
+                    ("insurance_enabled".to_string(), 200_000),
+                    ("kyc_required".to_string(), 300_000),
+                ].into_iter().collect(),
+            },
+            security_features: SecurityFeatures {
+                reentrancy_protection: true,
+                overflow_protection: true,
+                access_control: true,
+                pausable: true,
+                upgradeable: true,
+                multisig_required: true,
+                timelock_enabled: true,
+                audit_status: AuditStatus::CertifiedSecure,
+            },
+            form_config: FormConfiguration {
+                title: "Deploy Art & Collectible Token".to_string(),
+                description: "Tokenize fine art and collectibles with fractional ownership and provenance tracking".to_string(),
+                sections: vec![
+                    FormSection {
+                        title: "Item Details".to_string(),
+                        description: "Art or collectible information".to_string(),
+                        fields: vec!["item_name".to_string(), "item_symbol".to_string(), "item_type".to_string(), "artist_creator".to_string(), "creation_year".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Valuation & Fractions".to_string(),
+                        description: "Appraisal and ownership structure".to_string(),
+                        fields: vec!["appraisal_value_usd".to_string(), "total_fractions".to_string()],
+                        conditional_logic: None,
+                    },
+                    FormSection {
+                        title: "Custody & Compliance".to_string(),
+                        description: "Physical custody and compliance settings".to_string(),
+                        fields: vec!["physical_custody".to_string(), "provenance_verified".to_string(), "insurance_enabled".to_string(), "kyc_required".to_string()],
+                        conditional_logic: None,
+                    },
+                ],
+                deployment_flow: vec![
+                    DeploymentStep { step_name: "Authentication".to_string(), description: "Verify artwork authenticity and provenance".to_string(), estimated_time_seconds: 600, requires_user_action: true },
+                    DeploymentStep { step_name: "Appraisal".to_string(), description: "Independent appraisal verification".to_string(), estimated_time_seconds: 300, requires_user_action: true },
+                    DeploymentStep { step_name: "Contract Deployment".to_string(), description: "Deploy art collectible token contract".to_string(), estimated_time_seconds: 60, requires_user_action: true },
+                    DeploymentStep { step_name: "Provenance Registration".to_string(), description: "Register provenance on-chain".to_string(), estimated_time_seconds: 45, requires_user_action: false },
+                ],
+                cost_estimate: CostEstimate {
+                    gas_cost: 4_100_000,
+                    gas_price_gwei: 1,
+                    total_cost_orb: "0.0041".to_string(),
+                    usd_equivalent: Some("$4.10".to_string()),
+                },
+            },
+            examples: vec![ContractExample {
+                title: "Contemporary Art Piece".to_string(),
+                description: "Fractional ownership of a contemporary painting".to_string(),
+                parameters: [
+                    ("item_name".to_string(), serde_json::json!("Ocean Depths #7")),
+                    ("item_symbol".to_string(), serde_json::json!("OCDP7")),
+                    ("item_type".to_string(), serde_json::json!("fine_art")),
+                    ("artist_creator".to_string(), serde_json::json!("Marina Abrams")),
+                    ("creation_year".to_string(), serde_json::json!("2023")),
+                    ("appraisal_value_usd".to_string(), serde_json::json!("2000000")),
+                    ("total_fractions".to_string(), serde_json::json!("200000")),
+                    ("physical_custody".to_string(), serde_json::json!("vault")),
+                ].into_iter().collect(),
+                use_case: "Fractional investment in high-value contemporary art".to_string(),
+            }],
+            documentation: ContractDocumentation {
+                overview: "Art & Collectible Tokens enable fractional ownership of high-value art and collectibles with on-chain provenance, independent appraisal tracking, and secure physical custody verification".to_string(),
+                usage_guide: "1. Authenticate artwork and verify provenance\n2. Obtain independent appraisal\n3. Configure custody arrangement\n4. Deploy fractional ownership tokens\n5. Enable secondary trading".to_string(),
+                security_considerations: "Provenance immutability, appraisal oracle verification, physical custody proof, insurance coverage, and anti-fraud authentication measures".to_string(),
+                api_reference: "ERC20 with extensions: updateAppraisal(), addProvenance(), verifyAuthenticity(), requestPhysicalTransfer(), getFractionValue()".to_string(),
+                faq: vec![
+                    FAQ { question: "How is provenance tracked?".to_string(), answer: "Each ownership transfer and exhibition is recorded on-chain via addProvenance(). Historical records are immutable and publicly verifiable.".to_string() },
+                    FAQ { question: "Can the physical item be moved?".to_string(), answer: "Physical transfers require multisig approval. requestPhysicalTransfer() initiates the process with insurance and custody verification.".to_string() },
+                ],
+            },
+        };
+
+        let form_definition = FormDefinition {
+            contract_type: ContractType::ArtCollectibleToken,
+            form_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "item_name": { "type": "string", "title": "Item Name" },
+                    "item_symbol": { "type": "string", "title": "Token Symbol" },
+                    "item_type": { "type": "string", "title": "Item Type", "enum": ["fine_art", "sculpture", "photography", "digital_art", "wine", "watches", "sports_memorabilia", "rare_coins"] },
+                    "artist_creator": { "type": "string", "title": "Artist / Creator" },
+                    "creation_year": { "type": "string", "title": "Creation Year" },
+                    "appraisal_value_usd": { "type": "string", "title": "Appraisal Value (USD)" },
+                    "total_fractions": { "type": "string", "title": "Total Fractions" },
+                    "provenance_verified": { "type": "boolean", "title": "Provenance Verified" },
+                    "insurance_enabled": { "type": "boolean", "title": "Insurance Enabled" },
+                    "physical_custody": { "type": "string", "title": "Physical Custody", "enum": ["owner", "vault", "museum", "gallery"] },
+                    "kyc_required": { "type": "boolean", "title": "KYC Required" }
+                },
+                "required": ["item_name", "item_symbol", "item_type", "artist_creator", "creation_year", "appraisal_value_usd", "total_fractions", "physical_custody"]
+            }),
+            validation_schema: serde_json::json!({
+                "item_name": { "minLength": 3, "maxLength": 100 },
+                "item_symbol": { "pattern": "^[A-Z]{2,10}$" },
+                "appraisal_value_usd": { "minimum": 100 },
+                "total_fractions": { "minimum": 1 }
+            }),
+            ui_schema: serde_json::json!({
+                "item_type": { "ui:widget": "select" },
+                "physical_custody": { "ui:widget": "select" },
+                "provenance_verified": { "ui:widget": "checkbox" },
+                "insurance_enabled": { "ui:widget": "checkbox" },
+                "kyc_required": { "ui:widget": "checkbox" }
+            }),
+            examples: vec![],
+        };
+
+        self.store_template_and_form(template, form_definition).await
+    }
+
+    // ======================================================================
+    // ABI Creation Methods for RWA Templates
+    // ======================================================================
+
+    fn create_real_estate_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "distributeDividend".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(160_000) },
+                ABIFunction { name: "updateValuation".to_string(), inputs: vec![ABIParameter { name: "newValuation".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(75_000) },
+                ABIFunction { name: "updateOccupancy".to_string(), inputs: vec![ABIParameter { name: "newRate".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(55_000) },
+                ABIFunction { name: "verifyKYC".to_string(), inputs: vec![ABIParameter { name: "user".to_string(), param_type: "address".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(65_000) },
+                ABIFunction { name: "freezeAccount".to_string(), inputs: vec![ABIParameter { name: "account".to_string(), param_type: "address".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(45_000) },
+                ABIFunction { name: "getPropertyDetails".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "name".to_string(), param_type: "string".to_string(), indexed: false }, ABIParameter { name: "location".to_string(), param_type: "string".to_string(), indexed: false }, ABIParameter { name: "valuation".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "occupancy".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "DividendDistributed".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "ValuationUpdated".to_string(), inputs: vec![ABIParameter { name: "oldValuation".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "newValuation".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "OccupancyUpdated".to_string(), inputs: vec![ABIParameter { name: "newRate".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_commodity_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "requestDelivery".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "deliveryAddress".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "requestId".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(180_000) },
+                ABIFunction { name: "updateSpotPrice".to_string(), inputs: vec![ABIParameter { name: "newPrice".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(65_000) },
+                ABIFunction { name: "verifyStorage".to_string(), inputs: vec![ABIParameter { name: "proof".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "valid".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "getStorageProof".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "proof".to_string(), param_type: "bytes".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(30_000) },
+                ABIFunction { name: "redeemPhysical".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(200_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "DeliveryRequested".to_string(), inputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "SpotPriceUpdated".to_string(), inputs: vec![ABIParameter { name: "newPrice".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "StorageVerified".to_string(), inputs: vec![ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "valid".to_string(), param_type: "bool".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_carbon_credit_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(75_000) },
+                ABIFunction { name: "retireCredits".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "reason".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "certificateId".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(120_000) },
+                ABIFunction { name: "verifyProject".to_string(), inputs: vec![ABIParameter { name: "verificationData".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "valid".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "getRetirementCertificate".to_string(), inputs: vec![ABIParameter { name: "certificateId".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(30_000) },
+                ABIFunction { name: "updateVerification".to_string(), inputs: vec![ABIParameter { name: "newData".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(80_000) },
+                ABIFunction { name: "getProjectImpact".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "totalRetired".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "totalCirculating".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "CreditsRetired".to_string(), inputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "certificateId".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "ProjectVerified".to_string(), inputs: vec![ABIParameter { name: "verifier".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_equity_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(90_000) },
+                ABIFunction { name: "vote".to_string(), inputs: vec![ABIParameter { name: "proposalId".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "support".to_string(), param_type: "bool".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(80_000) },
+                ABIFunction { name: "distributeDividend".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(160_000) },
+                ABIFunction { name: "vest".to_string(), inputs: vec![ABIParameter { name: "beneficiary".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "cliffMonths".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "lockShares".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "durationDays".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(65_000) },
+                ABIFunction { name: "unlockShares".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(65_000) },
+                ABIFunction { name: "getShareholderInfo".to_string(), inputs: vec![ABIParameter { name: "shareholder".to_string(), param_type: "address".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "shares".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "locked".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "vesting".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "VoteCast".to_string(), inputs: vec![ABIParameter { name: "voter".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "proposalId".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "support".to_string(), param_type: "bool".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "DividendDistributed".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "SharesVested".to_string(), inputs: vec![ABIParameter { name: "beneficiary".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_fixed_income_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "payCoupon".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "totalPaid".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(140_000) },
+                ABIFunction { name: "redeem".to_string(), inputs: vec![ABIParameter { name: "units".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "faceValue".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(120_000) },
+                ABIFunction { name: "call".to_string(), inputs: vec![], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(100_000) },
+                ABIFunction { name: "convert".to_string(), inputs: vec![ABIParameter { name: "units".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "equityTokens".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(150_000) },
+                ABIFunction { name: "getCouponSchedule".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "nextPaymentDate".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "couponAmount".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+                ABIFunction { name: "getYieldToMaturity".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "yieldBps".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(30_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "CouponPaid".to_string(), inputs: vec![ABIParameter { name: "totalPaid".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "paymentDate".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "BondRedeemed".to_string(), inputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "units".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "faceValue".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "BondCalled".to_string(), inputs: vec![ABIParameter { name: "callDate".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "BondConverted".to_string(), inputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "units".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "equityTokens".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_ip_revenue_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "distributeRevenue".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(160_000) },
+                ABIFunction { name: "updateRevenueReport".to_string(), inputs: vec![ABIParameter { name: "periodStart".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "periodEnd".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "revenue".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(80_000) },
+                ABIFunction { name: "verifyRegistration".to_string(), inputs: vec![ABIParameter { name: "proof".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "valid".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "getLicenseTerms".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "revenueSharePercent".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "expiryDate".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "minimumGuarantee".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+                ABIFunction { name: "getRevenueHistory".to_string(), inputs: vec![ABIParameter { name: "periods".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "amounts".to_string(), param_type: "uint256[]".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(30_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "RevenueDistributed".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "period".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "RevenueReportUpdated".to_string(), inputs: vec![ABIParameter { name: "periodStart".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "revenue".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "RegistrationVerified".to_string(), inputs: vec![ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_physical_goods_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "redeemPhysical".to_string(), inputs: vec![ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "shippingAddress".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "redemptionId".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(200_000) },
+                ABIFunction { name: "updateInventory".to_string(), inputs: vec![ABIParameter { name: "newCount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "proof".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(75_000) },
+                ABIFunction { name: "verifySupplyChain".to_string(), inputs: vec![ABIParameter { name: "chainData".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "valid".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "getTrackingInfo".to_string(), inputs: vec![ABIParameter { name: "redemptionId".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "status".to_string(), param_type: "string".to_string(), indexed: false }, ABIParameter { name: "trackingNumber".to_string(), param_type: "string".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+                ABIFunction { name: "requestShipping".to_string(), inputs: vec![ABIParameter { name: "redemptionId".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "shippingMethod".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(150_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "PhysicalRedeemed".to_string(), inputs: vec![ABIParameter { name: "holder".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "redemptionId".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "InventoryUpdated".to_string(), inputs: vec![ABIParameter { name: "newCount".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "ShippingRequested".to_string(), inputs: vec![ABIParameter { name: "redemptionId".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "method".to_string(), param_type: "string".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
+    }
+
+    fn create_art_collectible_abi(&self) -> ContractABI {
+        ContractABI {
+            functions: vec![
+                ABIFunction { name: "transfer".to_string(), inputs: vec![ABIParameter { name: "to".to_string(), param_type: "address".to_string(), indexed: false }, ABIParameter { name: "amount".to_string(), param_type: "uint256".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "success".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(85_000) },
+                ABIFunction { name: "updateAppraisal".to_string(), inputs: vec![ABIParameter { name: "newValue".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "appraiser".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(80_000) },
+                ABIFunction { name: "addProvenance".to_string(), inputs: vec![ABIParameter { name: "description".to_string(), param_type: "string".to_string(), indexed: false }, ABIParameter { name: "evidence".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![], state_mutability: StateMutability::NonPayable, gas_estimate: Some(120_000) },
+                ABIFunction { name: "verifyAuthenticity".to_string(), inputs: vec![ABIParameter { name: "proof".to_string(), param_type: "bytes".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "authentic".to_string(), param_type: "bool".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(95_000) },
+                ABIFunction { name: "requestPhysicalTransfer".to_string(), inputs: vec![ABIParameter { name: "destination".to_string(), param_type: "string".to_string(), indexed: false }], outputs: vec![ABIParameter { name: "requestId".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::NonPayable, gas_estimate: Some(180_000) },
+                ABIFunction { name: "getFractionValue".to_string(), inputs: vec![], outputs: vec![ABIParameter { name: "valuePerFraction".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "totalAppraisal".to_string(), param_type: "uint256".to_string(), indexed: false }], state_mutability: StateMutability::View, gas_estimate: Some(25_000) },
+            ],
+            events: vec![
+                ABIEvent { name: "AppraisalUpdated".to_string(), inputs: vec![ABIParameter { name: "oldValue".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "newValue".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "appraiser".to_string(), param_type: "string".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "ProvenanceAdded".to_string(), inputs: vec![ABIParameter { name: "description".to_string(), param_type: "string".to_string(), indexed: false }, ABIParameter { name: "timestamp".to_string(), param_type: "uint256".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "AuthenticityVerified".to_string(), inputs: vec![ABIParameter { name: "verifier".to_string(), param_type: "address".to_string(), indexed: true }, ABIParameter { name: "authentic".to_string(), param_type: "bool".to_string(), indexed: false }], anonymous: false },
+                ABIEvent { name: "PhysicalTransferRequested".to_string(), inputs: vec![ABIParameter { name: "requestId".to_string(), param_type: "uint256".to_string(), indexed: false }, ABIParameter { name: "destination".to_string(), param_type: "string".to_string(), indexed: false }], anonymous: false },
+            ],
+            constructor: Some(ABIConstructor { inputs: vec![] }),
+            errors: vec![],
+        }
     }
 }
 
@@ -2582,6 +4847,14 @@ impl GasEstimator {
                 (ContractType::TimelockVault, 2_200_000),
                 (ContractType::OrbusdStablecoin, 6_500_000),
                 (ContractType::OracleFeed, 3_200_000),
+                (ContractType::RealEstateToken, 4_500_000),
+                (ContractType::CommodityToken, 4_500_000),
+                (ContractType::CarbonCreditToken, 3_800_000),
+                (ContractType::ArtCollectibleToken, 4_100_000),
+                (ContractType::EquityToken, 4_500_000),
+                (ContractType::FixedIncomeToken, 4_000_000),
+                (ContractType::IPRevenueToken, 4_200_000),
+                (ContractType::PhysicalGoodsToken, 4_300_000),
             ]
             .into_iter()
             .collect(),

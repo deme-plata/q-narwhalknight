@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use chrono::{DateTime, Utc};
 use core_affinity::CoreId;
+#[cfg(target_arch = "x86_64")]
 use raw_cpuid::CpuId;
 use serde_json::Value;
 
@@ -108,6 +109,39 @@ struct ApiResponse<T> {
 /// Helper function to normalize server URL (remove trailing slash)
 fn normalize_server_url(url: &str) -> String {
     url.trim_end_matches('/').to_string()
+}
+
+/// Default fallback bootstrap server
+const FALLBACK_BOOTSTRAP_URL: &str = "https://bootstrap1.quillon.xyz";
+
+/// Try an HTTP GET request against the primary server, falling back to bootstrap1.quillon.xyz
+/// Returns (response_body, actual_url_used) on success.
+async fn fetch_with_fallback(
+    client: &reqwest::Client,
+    primary_base: &str,
+    path: &str,
+) -> Result<(String, String)> {
+    let primary_url = format!("{}{}", normalize_server_url(primary_base), path);
+    match client.get(&primary_url).timeout(std::time::Duration::from_secs(10)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            Ok((body, primary_base.to_string()))
+        }
+        Ok(resp) => {
+            warn!("⚠️  Primary server returned HTTP {} - trying fallback {}", resp.status(), FALLBACK_BOOTSTRAP_URL);
+            let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
+            let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
+            let body = resp.text().await.unwrap_or_default();
+            Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
+        }
+        Err(e) => {
+            warn!("⚠️  Primary server {} unreachable: {} - trying fallback {}", primary_base, e, FALLBACK_BOOTSTRAP_URL);
+            let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
+            let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
+            let body = resp.text().await.unwrap_or_default();
+            Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
+        }
+    }
 }
 
 #[tokio::main]
@@ -228,7 +262,8 @@ async fn main() -> Result<()> {
             // Solo mining mode - connect directly to API server
             info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
             info!("💰 Mining to wallet: {}", wallet);
-            info!("🌐 Connecting to server: {}", args.server);
+            info!("🌐 Primary server: {}", args.server);
+            info!("🔄 Fallback server: {}", FALLBACK_BOOTSTRAP_URL);
             if let Some(ref name) = args.miner_name {
                 info!("🏷️  Miner name: {}", name);
             }
@@ -247,29 +282,32 @@ async fn detect_hardware() -> Result<HardwareInfo> {
     let cuda_devices = if cfg!(feature = "cuda-mining") { 1 } else { 0 };
     let opencl_devices = if cfg!(feature = "opencl-mining") { 1 } else { 0 };
 
-    // Detect CPU features using raw-cpuid for server CPU optimizations
-    let cpuid = CpuId::new();
-    let cpu_vendor = cpuid.get_vendor_info()
-        .map(|v| v.as_str().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
+    // Detect CPU features (architecture-specific)
+    #[cfg(target_arch = "x86_64")]
+    let (cpu_vendor, has_avx2, has_avx512, cache_line_size) = {
+        let cpuid = CpuId::new();
+        let vendor = cpuid.get_vendor_info()
+            .map(|v| v.as_str().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let extended_features = cpuid.get_extended_feature_info();
+        let avx2 = extended_features.as_ref().map(|ef| ef.has_avx2()).unwrap_or(false);
+        let avx512 = extended_features.as_ref().map(|ef| ef.has_avx512f()).unwrap_or(false);
+        let cache = cpuid.get_cache_parameters()
+            .and_then(|mut params| params.next())
+            .map(|info| info.coherency_line_size() as usize)
+            .unwrap_or(64);
+        (vendor, avx2, avx512, cache)
+    };
 
-    let extended_features = cpuid.get_extended_feature_info();
-
-    let has_avx2 = extended_features
-        .as_ref()
-        .map(|ef| ef.has_avx2())
-        .unwrap_or(false);
-
-    let has_avx512 = extended_features
-        .as_ref()
-        .map(|ef| ef.has_avx512f())
-        .unwrap_or(false);
-
-    // Get cache line size (typically 64 bytes for modern CPUs, critical for multi-socket systems)
-    let cache_line_size = cpuid.get_cache_parameters()
-        .and_then(|mut params| params.next())
-        .map(|info| info.coherency_line_size() as usize)
-        .unwrap_or(64);
+    #[cfg(not(target_arch = "x86_64"))]
+    let (cpu_vendor, has_avx2, has_avx512, cache_line_size) = {
+        let vendor = if cfg!(target_arch = "aarch64") {
+            "ARM".to_string()
+        } else {
+            "Unknown".to_string()
+        };
+        (vendor, false, false, 64usize)
+    };
 
     Ok(HardwareInfo {
         cpu_cores,
@@ -1123,30 +1161,59 @@ async fn mining_thread(
 
                 // CRITICAL: Submit solution in background to avoid blocking mining thread
                 // The mining thread must continue immediately to maintain hash rate
+                // v4.5.0: Falls back to bootstrap1.quillon.xyz if primary server fails
                 let normalized_url = normalize_server_url(api_url);
                 let submit_url = format!("{}/api/v1/mining/submit", normalized_url);
+                let fallback_submit_url = format!("{}/api/v1/mining/submit", FALLBACK_BOOTSTRAP_URL);
                 let client_clone = client.clone();
                 tokio::spawn(async move {
-                    match client_clone.post(&submit_url)
-                        .json(&solution)
-                        .send()
-                        .await
-                    {
+                    let try_submit = |url: String, sol: serde_json::Value, cl: reqwest::Client| async move {
+                        cl.post(&url)
+                            .json(&sol)
+                            .timeout(std::time::Duration::from_secs(10))
+                            .send()
+                            .await
+                    };
+
+                    match try_submit(submit_url, solution.clone(), client_clone.clone()).await {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(result) = resp.json::<serde_json::Value>().await {
+                                if let Some(data) = result.get("data") {
+                                    if let Some(reward) = data.get("reward_qnk") {
+                                        info!("✅ Solution accepted! Earned {} QNK", reward);
+                                    }
+                                }
+                            }
+                        }
                         Ok(resp) => {
-                            if resp.status().is_success() {
-                                if let Ok(result) = resp.json::<serde_json::Value>().await {
-                                    if let Some(data) = result.get("data") {
-                                        if let Some(reward) = data.get("reward_qnk") {
-                                            info!("✅ Solution accepted! Earned {} QNK", reward);
+                            warn!("❌ Solution rejected by primary (HTTP {}) - trying fallback...", resp.status());
+                            match try_submit(fallback_submit_url, solution, client_clone).await {
+                                Ok(resp2) if resp2.status().is_success() => {
+                                    if let Ok(result) = resp2.json::<serde_json::Value>().await {
+                                        if let Some(data) = result.get("data") {
+                                            if let Some(reward) = data.get("reward_qnk") {
+                                                info!("✅ Solution accepted via fallback! Earned {} QNK", reward);
+                                            }
                                         }
                                     }
                                 }
-                            } else {
-                                warn!("❌ Solution rejected: HTTP {}", resp.status());
+                                _ => { warn!("❌ Solution rejected by fallback too"); }
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to submit solution: {}", e);
+                            warn!("⚠️  Primary submit failed: {} - trying fallback...", e);
+                            match try_submit(fallback_submit_url, solution, client_clone).await {
+                                Ok(resp2) if resp2.status().is_success() => {
+                                    if let Ok(result) = resp2.json::<serde_json::Value>().await {
+                                        if let Some(data) = result.get("data") {
+                                            if let Some(reward) = data.get("reward_qnk") {
+                                                info!("✅ Solution accepted via fallback! Earned {} QNK", reward);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => { warn!("❌ Failed to submit solution to both servers"); }
+                            }
                         }
                     }
                 });
@@ -1215,17 +1282,30 @@ async fn start_sse_listener(
     let normalized_url = normalize_server_url(&server_url);
 
     // Include wallet_address parameter for filtered SSE events
-    let url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
+    let primary_url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}", FALLBACK_BOOTSTRAP_URL, wallet);
+    let mut use_fallback = false;
+    let mut primary_fail_count = 0u32;
 
     loop {
         if !is_running.load(Ordering::SeqCst) {
             break;
         }
 
-        let client = match eventsource::ClientBuilder::for_url(&url) {
+        let url = if use_fallback { &fallback_url } else { &primary_url };
+
+        let client = match eventsource::ClientBuilder::for_url(url) {
             Ok(builder) => builder.build(),
             Err(e) => {
-                warn!("Failed to create SSE client: {}", e);
+                warn!("Failed to create SSE client for {}: {}", url, e);
+                if !use_fallback {
+                    primary_fail_count += 1;
+                    if primary_fail_count >= 3 {
+                        info!("🔄 Switching SSE to fallback server {}", FALLBACK_BOOTSTRAP_URL);
+                        use_fallback = true;
+                        primary_fail_count = 0;
+                    }
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 continue;
             }
@@ -1329,6 +1409,22 @@ async fn start_sse_listener(
 
         // Reconnect after delay if still running
         if is_running.load(Ordering::SeqCst) {
+            if !use_fallback {
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    info!("🔄 Primary SSE failed {} times, switching to fallback {}", primary_fail_count, FALLBACK_BOOTSTRAP_URL);
+                    use_fallback = true;
+                    primary_fail_count = 0;
+                }
+            } else {
+                // If fallback also fails, try primary again
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    info!("🔄 Fallback SSE failed, retrying primary server...");
+                    use_fallback = false;
+                    primary_fail_count = 0;
+                }
+            }
             warn!("Reconnecting to SSE stream in 5 seconds...");
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
@@ -1338,13 +1434,15 @@ async fn start_sse_listener(
 }
 
 /// Check if server is currently syncing (returns is_syncing, blocks_behind)
+/// Falls back to bootstrap1.quillon.xyz if primary server is unreachable.
 async fn check_server_sync_status(api_url: &str) -> Result<(bool, u64)> {
     let client = reqwest::Client::new();
-    let normalized_url = normalize_server_url(api_url);
-    let url = format!("{}/api/v1/status", normalized_url);
+    let path = "/api/v1/status";
 
-    let response = client.get(&url).send().await?;
-    let api_response: ApiResponse<serde_json::Value> = response.json().await?;
+    let (body, _used_url) = fetch_with_fallback(&client, api_url, path).await?;
+
+    let api_response: ApiResponse<serde_json::Value> = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse status response: {}", e))?;
 
     if !api_response.success {
         return Err(anyhow::anyhow!("API error: {:?}", api_response.error));
@@ -1363,22 +1461,15 @@ async fn check_server_sync_status(api_url: &str) -> Result<(bool, u64)> {
     Ok((is_syncing, blocks_behind))
 }
 
-/// Fetch current mining challenge from API server
+/// Fetch current mining challenge from API server (with fallback to bootstrap1.quillon.xyz)
 async fn fetch_mining_challenge(api_url: &str) -> Result<MiningChallenge> {
     let client = reqwest::Client::new();
-    // Normalize URL to prevent double slashes
-    let normalized_url = normalize_server_url(api_url);
-    let url = format!("{}/api/v1/mining/challenge", normalized_url);
+    let path = "/api/v1/mining/challenge";
 
-    let response = client.get(&url)
-        .send()
-        .await?;
+    let (body, _used_url) = fetch_with_fallback(&client, api_url, path).await?;
 
-    if !response.status().is_success() {
-        anyhow::bail!("Failed to fetch mining challenge: HTTP {}", response.status());
-    }
-
-    let api_response: ApiResponse<MiningChallenge> = response.json().await?;
+    let api_response: ApiResponse<MiningChallenge> = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse mining challenge response: {}", e))?;
 
     if !api_response.success {
         let error_msg = api_response.error.unwrap_or_else(|| "Unknown error".to_string());

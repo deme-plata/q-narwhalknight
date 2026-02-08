@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Coins, Send, ChevronDown, ChevronUp, Loader2, AlertCircle, TrendingUp, DollarSign, PieChart, Lock, Unlock, Gift, Timer, Award, Search, ArrowUpDown, ArrowUp, ArrowDown, SlidersHorizontal } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import VaultModal from './VaultModal';
 
 // v3.7.1: Sort options for the token list
 type SortField = 'symbol' | 'balance' | 'valueUsd' | 'change24h' | 'volume24h' | 'liquidity';
@@ -67,6 +68,9 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [filterText, setFilterText] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+
+  // v4.2.0: VAULT RWA modal state
+  const [showVaultModal, setShowVaultModal] = useState(false);
 
   // Staking modal state
   const [stakingToken, setStakingToken] = useState<CustomToken | null>(null);
@@ -312,9 +316,43 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
 
     window.addEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
 
+    // v4.0.1: Listen for token price updates via SSE for INSTANT value display on dashboard
+    // Previously prices only updated every 15s poll, causing tokens to show $0 after a swap.
+    const handleTokenPriceUpdate = (event: CustomEvent) => {
+      const { token_symbol, token_address, price, change_24h, volume_24h } = event.detail;
+      if (!token_symbol && !token_address) return;
+      const priceNum = parseFloat(price) || 0;
+      if (priceNum <= 0) return;
+
+      setCustomTokens(prev => {
+        let updated = false;
+        const result = prev.map(token => {
+          const matchSymbol = token_symbol && token.symbol?.toUpperCase() === token_symbol.toUpperCase();
+          const matchAddr = token_address && token.contractAddress &&
+            (token.contractAddress.toLowerCase() === token_address.toLowerCase() ||
+             token.contractAddress.toLowerCase().includes(token_address.toLowerCase().replace('qnk', '')));
+          if (matchSymbol || matchAddr) {
+            const newValueUsd = token.balance * priceNum;
+            if (token.priceUsd !== priceNum) {
+              updated = true;
+              return { ...token, priceUsd: priceNum, valueUsd: newValueUsd, change24h: change_24h || token.change24h, volume24h: volume_24h || token.volume24h };
+            }
+          }
+          return token;
+        });
+        if (updated) {
+          console.log(`💰 [CustomTokens v4.0.1] Instant price update: ${token_symbol} = $${priceNum.toFixed(6)}`);
+        }
+        return updated ? result : prev;
+      });
+    };
+
+    window.addEventListener('token-price-updated', handleTokenPriceUpdate as EventListener);
+
     return () => {
       clearInterval(interval);
       window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
+      window.removeEventListener('token-price-updated', handleTokenPriceUpdate as EventListener);
     };
   }, []);
 
@@ -399,20 +437,12 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
             continue;
           }
 
-          // v3.6.14: Handle both balance formats from API:
-          // - balance_base_units: raw u128 value (needs conversion)
-          // - balance: already formatted string
-          let apiBalance = 0;
-          const tokenDecimals = token.decimals || 8;
-
-          if (token.balance_base_units && token.balance_base_units > 0) {
-            // Convert from base units using token's decimals
-            const divisor = Math.pow(10, tokenDecimals);
-            apiBalance = token.balance_base_units / divisor;
-            console.log(`💰 [CustomTokens v3.6.14] ${upperSymbol}: balance_base_units=${token.balance_base_units}, decimals=${tokenDecimals}, converted=${apiBalance}`);
-          } else {
-            apiBalance = parseFloat(token.balance || '0');
-          }
+          // v4.0.10: ALWAYS use the pre-formatted `balance` field from the API.
+          // The backend divides by 1e24 and returns a human-readable string like "3190649616.00579900".
+          // balance_base_units is a u128 serialized as STRING which loses precision in JS Number.
+          let apiBalance = parseFloat(token.balance || '0');
+          if (isNaN(apiBalance)) apiBalance = 0;
+          console.log(`💰 [CustomTokens v4.0.10] ${upperSymbol}: balance=${token.balance}, parsed=${apiBalance}`);
 
           // v2.9.9-beta: Check if this token has a protected balance (from recent DEX swap)
           const protectedData = protectedBalances[upperSymbol];
@@ -727,30 +757,16 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
   // v3.2.15-beta: Format large token balances - FULL NUMBER (no abbreviations)
   const formatLargeBalance = (value: number): string => {
     if (!isFinite(value) || value <= 0) return '0';
-    // v3.2.15-beta: Show full number with comma separators
-    // JavaScript's toFixed() fails for numbers >= 1e21, so we need special handling
-    try {
-      // For safe integers, use standard formatting
-      if (value <= Number.MAX_SAFE_INTEGER) {
-        return value.toLocaleString(undefined, {
-          minimumFractionDigits: 0,
-          maximumFractionDigits: 4,
-        });
-      }
-      // For very large values (> MAX_SAFE_INTEGER), use BigInt conversion
-      // This preserves significant digits even though precision may be lost
-      const exponent = Math.floor(Math.log10(value));
-      const mantissa = value / Math.pow(10, exponent);
-      // Build the full number string from mantissa and exponent
-      const mantissaStr = mantissa.toFixed(15).replace('.', '');
-      const digits = mantissaStr.slice(0, Math.min(exponent + 1, 31)); // Cap at 31 digits
-      const paddedDigits = digits.padEnd(exponent + 1, '0');
-      // Add comma separators
-      return paddedDigits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    } catch {
-      // Absolute fallback: just show the number
-      return String(value);
-    }
+    if (value >= 1e30) return `${(value / 1e30).toFixed(2)} Nonillion`;
+    if (value >= 1e27) return `${(value / 1e27).toFixed(2)} Octillion`;
+    if (value >= 1e24) return `${(value / 1e24).toFixed(2)} Septillion`;
+    if (value >= 1e21) return `${(value / 1e21).toFixed(2)} Sextillion`;
+    if (value >= 1e18) return `${(value / 1e18).toFixed(2)} Quintillion`;
+    if (value >= 1e15) return `${(value / 1e15).toFixed(2)} Quadrillion`;
+    if (value >= 1e12) return `${(value / 1e12).toFixed(2)} Trillion`;
+    if (value >= 1e9) return `${(value / 1e9).toFixed(2)} Billion`;
+    if (value >= 1e6) return `${(value / 1e6).toFixed(2)} Million`;
+    return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 4 });
   };
 
   // v3.9.5-beta: Format USD values with subscript zero notation for tiny prices
@@ -868,7 +884,7 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                 </div>
                 <div>
                   <p className="text-xs text-gray-400">Total Value</p>
-                  <p className="text-lg font-bold text-green-400">{formatUsd(totalPortfolioValue)}</p>
+                  <p className="text-lg font-bold text-green-400 transition-all duration-700">{formatUsd(totalPortfolioValue)}</p>
                 </div>
               </div>
               <div className="flex items-center gap-3">
@@ -979,54 +995,70 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                 </div>
               ) : (
                 <div className="space-y-3">
+                  <AnimatePresence mode="popLayout" initial={false}>
                   {tokensWithBalance.map((token) => (
                     <motion.div
                       key={token.contractAddress}
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className="p-4 rounded-xl border"
+                      layout
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      transition={{ duration: 0.2, layout: { duration: 0.3, type: 'spring', stiffness: 300, damping: 30 } }}
+                      className={`p-4 rounded-xl border ${token.symbol?.toUpperCase() === 'VAULT' ? 'cursor-pointer hover:border-purple-400/50' : ''}`}
                       style={{
-                        background: 'rgba(139, 92, 246, 0.05)',
-                        borderColor: 'rgba(139, 92, 246, 0.2)',
+                        background: token.symbol?.toUpperCase() === 'VAULT'
+                          ? 'linear-gradient(135deg, rgba(168, 130, 255, 0.1), rgba(108, 92, 231, 0.08))'
+                          : 'rgba(139, 92, 246, 0.05)',
+                        borderColor: token.symbol?.toUpperCase() === 'VAULT'
+                          ? 'rgba(168, 130, 255, 0.35)'
+                          : 'rgba(139, 92, 246, 0.2)',
+                      }}
+                      onClick={() => {
+                        if (token.symbol?.toUpperCase() === 'VAULT') {
+                          setShowVaultModal(true);
+                        }
                       }}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
                             <h4 className="font-semibold text-white">{token.symbol}</h4>
+                            {token.symbol?.toUpperCase() === 'VAULT' && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: 'linear-gradient(135deg, #6c5ce7, #a882ff)', color: 'white' }}>RWA</span>
+                            )}
                             <span className="text-xs text-gray-500">•</span>
                             <span className="text-xs text-gray-400">{token.name}</span>
                             {(token.change24h ?? 0) !== 0 && (
-                              <span className={`text-xs flex items-center gap-1 ${(token.change24h ?? 0) > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              <span className={`text-xs flex items-center gap-1 transition-colors duration-500 ${(token.change24h ?? 0) > 0 ? 'text-green-400' : 'text-red-400'}`}>
                                 <TrendingUp className={`w-3 h-3 ${(token.change24h ?? 0) < 0 ? 'rotate-180' : ''}`} />
                                 {Math.abs(token.change24h ?? 0).toFixed(1)}%
                               </span>
                             )}
                           </div>
                           <div className="flex items-baseline gap-3">
-                            <p className="text-2xl font-bold text-purple-300">
+                            <p className="text-2xl font-bold text-purple-300 transition-all duration-500">
                               {formatLargeBalance(token.balance)}
                             </p>
                             {(token.valueUsd ?? 0) > 0 && (
-                              <p className="text-sm text-green-400 font-medium">
+                              <p className="text-sm text-green-400 font-medium transition-all duration-500">
                                 ≈ {formatUsd(token.valueUsd ?? 0)}
                               </p>
                             )}
                           </div>
                           <div className="flex items-center gap-3 mt-1 flex-wrap">
                             {(token.priceUsd ?? 0) > 0 && (
-                              <p className="text-xs text-gray-400">
+                              <p className="text-xs text-gray-400 transition-all duration-500">
                                 @ {formatUsd(token.priceUsd ?? 0)} each
                               </p>
                             )}
                             {/* v3.6.12: Volume and Liquidity from DEX */}
                             {(token.volume24h ?? 0) > 0 && (
-                              <p className="text-xs text-blue-400">
+                              <p className="text-xs text-blue-400 transition-all duration-500">
                                 Vol: {formatUsd(token.volume24h ?? 0)}
                               </p>
                             )}
                             {(token.liquidity ?? 0) > 0 && (
-                              <p className="text-xs text-cyan-400">
+                              <p className="text-xs text-cyan-400 transition-all duration-500">
                                 Liq: {formatUsd(token.liquidity ?? 0)}
                               </p>
                             )}
@@ -1076,6 +1108,7 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                       </div>
                     </motion.div>
                   ))}
+                  </AnimatePresence>
                 </div>
               )}
             </motion.div>
@@ -1330,6 +1363,20 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* v4.2.0: VAULT RWA Token Modal */}
+      <VaultModal
+        isOpen={showVaultModal}
+        onClose={() => setShowVaultModal(false)}
+        isAdmin={(() => {
+          const walletAddr = localStorage.getItem('walletAddress') || '';
+          const cleanAddr = walletAddr.replace(/^qnk/, '').toLowerCase();
+          const bankMaster = '424e4b0000000000000000000000000000000000000000000000000000000000';
+          const operatorWallet = '4fff16bc7d825a3d2e3ae0b15c6e70e91dc18dce1c55ec22543a8e4ae9e6c7b2';
+          return cleanAddr === bankMaster || cleanAddr === operatorWallet;
+        })()}
+        vaultBalance={customTokens.find(t => t.symbol?.toUpperCase() === 'VAULT')?.balance ?? 0}
+      />
     </>
   );
 }

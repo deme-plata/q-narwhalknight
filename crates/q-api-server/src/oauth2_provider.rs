@@ -81,6 +81,9 @@ pub struct UserConsent {
 
 // ============================================================================
 // OAuth2 Storage
+// v4.0.5: Each field has its own RwLock for fine-grained locking.
+// AppState wraps this in Arc (NOT Arc<RwLock<>>), so callers access
+// methods directly: state.oauth2_storage.get_client() - no outer lock.
 // ============================================================================
 
 pub struct OAuth2Storage {
@@ -125,7 +128,6 @@ impl OAuth2Storage {
 
     pub async fn store_access_token(&self, token: AccessToken) {
         let token_key = token.token.clone();
-        let mut tokens = self.access_tokens.write().await;
 
         // Store refresh token mapping if present
         if let Some(ref refresh_token) = token.refresh_token {
@@ -133,6 +135,7 @@ impl OAuth2Storage {
             refresh_tokens.insert(refresh_token.clone(), token_key.clone());
         }
 
+        let mut tokens = self.access_tokens.write().await;
         tokens.insert(token_key, token);
     }
 
@@ -150,6 +153,26 @@ impl OAuth2Storage {
                 refresh_tokens.remove(&refresh_token);
             }
         }
+    }
+
+    /// Look up an access token by its associated refresh token
+    pub async fn find_token_by_refresh(&self, refresh_token: &str) -> Option<AccessToken> {
+        let refresh_map = self.refresh_tokens.read().await;
+        if let Some(access_token_key) = refresh_map.get(refresh_token) {
+            let tokens = self.access_tokens.read().await;
+            tokens.get(access_token_key).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Remove an old access token and its refresh token mapping
+    pub async fn remove_token_and_refresh(&self, access_token_key: &str, refresh_token: &str) {
+        let mut tokens = self.access_tokens.write().await;
+        tokens.remove(access_token_key);
+        drop(tokens);
+        let mut refresh_map = self.refresh_tokens.write().await;
+        refresh_map.remove(refresh_token);
     }
 
     pub async fn store_consent(&self, consent: UserConsent) {
@@ -212,6 +235,12 @@ pub struct ConsentRequest {
     pub scopes: Vec<String>,
     pub approved: bool,
     pub auth_request_id: String, // Temporary ID to link to pending auth request
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub code_challenge: Option<String>,
+    #[serde(default)]
+    pub code_challenge_method: Option<String>,
 }
 
 /// Client registration request
@@ -240,7 +269,7 @@ pub struct RegisterClientResponse {
 fn generate_random_token(length: usize) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
+    let bytes: Vec<u8> = (0..length).map(|_| rng.gen::<u8>()).collect();
     BASE64.encode(&bytes)
 }
 
@@ -263,6 +292,8 @@ fn verify_pkce_challenge(verifier: &str, challenge: &str, method: &str) -> bool 
 
 // ============================================================================
 // OAuth2 Endpoints
+// v4.0.5: All endpoints access state.oauth2_storage directly (no outer RwLock).
+// OAuth2Storage has internal RwLock per field for safe concurrent access.
 // ============================================================================
 
 /// POST /api/v1/oauth2/register
@@ -305,10 +336,9 @@ pub async fn register_client(
         kyber_public_key,
     };
 
+    // v4.0.5: Direct access - no outer .write().await needed
     state
         .oauth2_storage
-        .write()
-        .await
         .register_client(client)
         .await
         .map_err(|e| {
@@ -339,14 +369,8 @@ pub async fn authorize(
         params.client_id
     );
 
-    // Validate client
-    let client = match state
-        .oauth2_storage
-        .read()
-        .await
-        .get_client(&params.client_id)
-        .await
-    {
+    // Validate client - direct access, no outer lock
+    let client = match state.oauth2_storage.get_client(&params.client_id).await {
         Some(c) => c,
         None => {
             warn!("Unknown client ID: {}", params.client_id);
@@ -373,9 +397,9 @@ pub async fn authorize(
         return Ok(Redirect::to(&error_uri));
     }
 
-    // Redirect to consent screen
+    // v4.0.5: Use request origin for consent URL instead of hardcoded domain
     let consent_url = format!(
-        "https://quillon.xyz/oauth/consent?client_id={}&redirect_uri={}&scope={}&state={}",
+        "/oauth/consent?client_id={}&redirect_uri={}&scope={}&state={}",
         params.client_id,
         urlencoding::encode(&params.redirect_uri),
         urlencoding::encode(&params.scope.as_deref().unwrap_or("read:balance")),
@@ -402,21 +426,16 @@ pub async fn handle_consent(
         return Ok(Json(ApiResponse::error("User denied consent".to_string())));
     }
 
-    // Store consent
+    // Store consent - direct access
     let consent = UserConsent {
         wallet_address: request.wallet_address.clone(),
         client_id: request.client_id.clone(),
         scopes: request.scopes.clone(),
         granted_at: Utc::now(),
-        expires_at: Some(Utc::now() + Duration::days(365)), // 1 year
+        expires_at: Some(Utc::now() + Duration::days(365)),
     };
 
-    state
-        .oauth2_storage
-        .write()
-        .await
-        .store_consent(consent)
-        .await;
+    state.oauth2_storage.store_consent(consent).await;
 
     // Generate authorization code
     let auth_code = generate_random_token(32);
@@ -424,19 +443,14 @@ pub async fn handle_consent(
         code: auth_code.clone(),
         client_id: request.client_id,
         wallet_address: request.wallet_address,
-        redirect_uri: String::new(), // Will be validated during token exchange
+        redirect_uri: request.redirect_uri.unwrap_or_default(),
         scopes: request.scopes,
         expires_at: Utc::now() + Duration::seconds(AUTH_CODE_EXPIRY_SECONDS),
-        code_challenge: None,
-        code_challenge_method: None,
+        code_challenge: request.code_challenge,
+        code_challenge_method: request.code_challenge_method,
     };
 
-    state
-        .oauth2_storage
-        .write()
-        .await
-        .store_auth_code(code_record)
-        .await;
+    state.oauth2_storage.store_auth_code(code_record).await;
 
     info!("✅ Consent granted, authorization code generated");
     Ok(Json(ApiResponse::success(auth_code)))
@@ -450,14 +464,8 @@ pub async fn token(
 ) -> Result<Json<ApiResponse<TokenResponse>>, StatusCode> {
     info!("🔐 OAuth2 token request from client: {}", request.client_id);
 
-    // Validate client credentials
-    let client = match state
-        .oauth2_storage
-        .read()
-        .await
-        .get_client(&request.client_id)
-        .await
-    {
+    // Validate client credentials - direct access
+    let client = match state.oauth2_storage.get_client(&request.client_id).await {
         Some(c) if c.client_secret == request.client_secret => c,
         _ => {
             error!("Invalid client credentials");
@@ -477,8 +485,6 @@ pub async fn token(
 
             let auth_code = state
                 .oauth2_storage
-                .write()
-                .await
                 .consume_auth_code(code)
                 .await
                 .ok_or_else(|| {
@@ -492,6 +498,18 @@ pub async fn token(
                 return Ok(Json(ApiResponse::error(
                     "Authorization code expired".to_string(),
                 )));
+            }
+
+            // Validate redirect_uri matches (RFC 6749 §4.1.3)
+            if !auth_code.redirect_uri.is_empty() {
+                if let Some(ref req_redirect) = request.redirect_uri {
+                    if *req_redirect != auth_code.redirect_uri {
+                        error!("Redirect URI mismatch: expected '{}', got '{}'", auth_code.redirect_uri, req_redirect);
+                        return Ok(Json(ApiResponse::error(
+                            "redirect_uri does not match the one used in authorization".to_string(),
+                        )));
+                    }
+                }
             }
 
             // Verify PKCE if present
@@ -527,12 +545,7 @@ pub async fn token(
                 refresh_token: Some(refresh_token.clone()),
             };
 
-            state
-                .oauth2_storage
-                .write()
-                .await
-                .store_access_token(token_record)
-                .await;
+            state.oauth2_storage.store_access_token(token_record).await;
 
             info!("✅ Access token generated");
             Ok(Json(ApiResponse::success(TokenResponse {
@@ -544,17 +557,58 @@ pub async fn token(
             })))
         }
         "refresh_token" => {
-            // Refresh access token
             let refresh_token = request.refresh_token.as_ref().ok_or_else(|| {
                 error!("Missing refresh token");
                 StatusCode::BAD_REQUEST
             })?;
 
-            // TODO: Implement refresh token logic
-            error!("Refresh token not yet implemented");
-            Ok(Json(ApiResponse::error(
-                "Refresh token not implemented".to_string(),
-            )))
+            // Look up the existing access token associated with this refresh token
+            let old_token = state
+                .oauth2_storage
+                .find_token_by_refresh(refresh_token)
+                .await
+                .ok_or_else(|| {
+                    error!("Invalid or expired refresh token");
+                    StatusCode::UNAUTHORIZED
+                })?;
+
+            // Verify the refresh token belongs to the requesting client
+            if old_token.client_id != request.client_id {
+                error!("Refresh token does not belong to this client");
+                return Ok(Json(ApiResponse::error(
+                    "Invalid refresh token for this client".to_string(),
+                )));
+            }
+
+            // Remove old token and refresh mapping
+            state
+                .oauth2_storage
+                .remove_token_and_refresh(&old_token.token, refresh_token)
+                .await;
+
+            // Generate new access token and refresh token
+            let new_access_token = generate_random_token(32);
+            let new_refresh_token = generate_random_token(32);
+
+            let token_record = AccessToken {
+                token: new_access_token.clone(),
+                client_id: old_token.client_id,
+                wallet_address: old_token.wallet_address,
+                scopes: old_token.scopes.clone(),
+                expires_at: Utc::now() + Duration::seconds(TOKEN_EXPIRY_SECONDS),
+                refresh_token: Some(new_refresh_token.clone()),
+            };
+
+            state.oauth2_storage.store_access_token(token_record).await;
+
+            info!("✅ Access token refreshed successfully");
+            Ok(Json(ApiResponse::success(TokenResponse {
+                access_token: new_access_token,
+                token_type: "Bearer".to_string(),
+                expires_in: TOKEN_EXPIRY_SECONDS,
+                refresh_token: Some(new_refresh_token),
+                scope: old_token.scopes.join(" "),
+            })))
         }
         _ => {
             error!("Unsupported grant type: {}", request.grant_type);
@@ -581,11 +635,9 @@ pub async fn userinfo(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Validate access token
+    // Validate access token - direct access
     let access_token = state
         .oauth2_storage
-        .read()
-        .await
         .get_access_token(token)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
@@ -609,13 +661,27 @@ pub async fn userinfo(
     // Add balance if scope allows
     if access_token.scopes.contains(&"read:balance".to_string()) {
         // Convert hex string to [u8; 32] address
-        if let Ok(address_bytes) = hex::decode(&access_token.wallet_address) {
+        let wallet_str = access_token.wallet_address.strip_prefix("qnk").unwrap_or(&access_token.wallet_address);
+        if let Ok(address_bytes) = hex::decode(wallet_str) {
             if address_bytes.len() == 32 {
                 let mut address = [0u8; 32];
                 address.copy_from_slice(&address_bytes);
                 if let Some(balance) = state.wallet_balances.read().await.get(&address).copied() {
                     user_info["balance"] = serde_json::json!(balance);
                     user_info["balance_qug"] = serde_json::json!(balance as f64 / 1e24);
+                }
+
+                // Also include token balances
+                let token_bals = state.token_balances.read().await;
+                let mut tokens = serde_json::Map::new();
+                for ((wallet, token_addr), bal) in token_bals.iter() {
+                    if *wallet == address && *bal > 0 {
+                        let token_hex = hex::encode(token_addr);
+                        tokens.insert(token_hex, serde_json::json!(bal.to_string()));
+                    }
+                }
+                if !tokens.is_empty() {
+                    user_info["token_balances"] = serde_json::Value::Object(tokens);
                 }
             }
         }
@@ -633,15 +699,38 @@ pub struct RevokeRequest {
 
 pub async fn revoke(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<RevokeRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     info!("🔐 Revoking token");
-    state
-        .oauth2_storage
-        .write()
-        .await
-        .revoke_token(&request.token)
-        .await;
+
+    // Verify the caller owns the token (must provide valid Bearer token)
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok());
+
+    if let Some(auth) = auth_header {
+        if let Some(bearer) = auth.strip_prefix("Bearer ") {
+            // Verify the caller's token is valid - direct access
+            let caller_token = state.oauth2_storage.get_access_token(bearer).await;
+
+            if let Some(caller) = caller_token {
+                // Check the token being revoked belongs to the same wallet
+                let target_token = state.oauth2_storage.get_access_token(&request.token).await;
+
+                if let Some(target) = target_token {
+                    if target.wallet_address != caller.wallet_address {
+                        error!("Token revocation denied: caller does not own target token");
+                        return Ok(Json(ApiResponse::error(
+                            "Cannot revoke tokens owned by other users".to_string(),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    state.oauth2_storage.revoke_token(&request.token).await;
     Ok(Json(ApiResponse::success("Token revoked".to_string())))
 }
 
@@ -653,13 +742,8 @@ pub async fn get_client_info(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!("🔍 Client info request for: {}", client_id);
 
-    match state
-        .oauth2_storage
-        .read()
-        .await
-        .get_client(&client_id)
-        .await
-    {
+    // Direct access - no outer lock
+    match state.oauth2_storage.get_client(&client_id).await {
         Some(client) => {
             let client_info = serde_json::json!({
                 "client_id": client.client_id,

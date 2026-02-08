@@ -7,6 +7,7 @@
 use anyhow::Result;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{IteratorMode, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -142,6 +143,7 @@ pub struct TradingPairMetadata {
 }
 
 /// Token Registry - Central storage for all token-related data
+#[cfg(not(target_os = "windows"))]
 pub struct TokenRegistry {
     db: Arc<DB>,
 
@@ -155,6 +157,19 @@ pub struct TokenRegistry {
     address_to_pools: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
+#[cfg(target_os = "windows")]
+pub struct TokenRegistry {
+    // In-memory caches for fast access
+    token_cache: Arc<RwLock<HashMap<String, TokenMetadata>>>,
+    pool_cache: Arc<RwLock<HashMap<String, PoolMetadata>>>,
+    pair_cache: Arc<RwLock<HashMap<String, TradingPairMetadata>>>,
+
+    // Index mappings for efficient lookups
+    symbol_to_address: Arc<RwLock<HashMap<String, String>>>,
+    address_to_pools: Arc<RwLock<HashMap<String, Vec<String>>>>,
+}
+
+#[cfg(not(target_os = "windows"))]
 impl TokenRegistry {
     /// Create a new token registry with RocksDB backend
     pub fn new(db: Arc<DB>) -> Self {
@@ -555,7 +570,44 @@ impl TokenRegistry {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl TokenRegistry {
+    /// Create a new token registry (Windows stub - in-memory only)
+    pub fn new(_db: Arc<()>) -> Self {
+        Self::new_stub()
+    }
+
+    pub fn new_stub() -> Self {
+        Self {
+            token_cache: Arc::new(RwLock::new(HashMap::new())),
+            pool_cache: Arc::new(RwLock::new(HashMap::new())),
+            pair_cache: Arc::new(RwLock::new(HashMap::new())),
+            symbol_to_address: Arc::new(RwLock::new(HashMap::new())),
+            address_to_pools: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn initialize(&self) -> Result<()> { Ok(()) }
+    pub async fn register_token(&self, _token: TokenMetadata) -> Result<()> { Ok(()) }
+    pub async fn get_token_by_address(&self, _address: &str) -> Result<Option<TokenMetadata>> { Ok(None) }
+    pub async fn get_token_by_symbol(&self, _symbol: &str) -> Result<Option<TokenMetadata>> { Ok(None) }
+    pub async fn get_all_tokens(&self) -> Result<Vec<TokenMetadata>> { Ok(vec![]) }
+    pub async fn get_active_tokens(&self) -> Result<Vec<TokenMetadata>> { Ok(vec![]) }
+    pub async fn update_token_metadata(&self, _address: &str, _update_fn: impl FnOnce(&mut TokenMetadata)) -> Result<()> { Ok(()) }
+    pub async fn update_token_price(&self, _address: &str, _price_usd: BigDecimal, _volume_24h: BigDecimal) -> Result<()> { Ok(()) }
+    pub async fn register_pool(&self, _pool: PoolMetadata) -> Result<()> { Ok(()) }
+    pub async fn get_pool_by_address(&self, _address: &str) -> Result<Option<PoolMetadata>> { Ok(None) }
+    pub async fn get_pool_by_pair(&self, _pair_id: &str) -> Result<Option<PoolMetadata>> { Ok(None) }
+    pub async fn get_all_pools(&self) -> Result<Vec<PoolMetadata>> { Ok(vec![]) }
+    pub async fn get_pools_for_token(&self, _address: &str) -> Result<Vec<PoolMetadata>> { Ok(vec![]) }
+    pub async fn update_pool_reserves(&self, _pool_address: &str, _reserve_base: BigDecimal, _reserve_quote: BigDecimal) -> Result<()> { Ok(()) }
+    pub async fn update_trading_pair(&self, _pair: TradingPairMetadata) -> Result<()> { Ok(()) }
+    pub async fn get_trading_pair(&self, _pair_id: &str) -> Result<Option<TradingPairMetadata>> { Ok(None) }
+    pub async fn get_all_trading_pairs(&self) -> Result<Vec<TradingPairMetadata>> { Ok(vec![]) }
+}
+
 #[cfg(test)]
+#[cfg(not(target_os = "windows"))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

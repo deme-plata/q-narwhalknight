@@ -18,6 +18,7 @@
 
 use anyhow::{bail, Context, Result};
 use q_types::StateChange;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

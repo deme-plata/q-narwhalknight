@@ -379,8 +379,12 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
       // Clear canvas
       ctx.clearRect(0, 0, width, height);
 
+      // v4.0.5: Sort data oldest-first for correct left-to-right chronological rendering
+      // Backend returns newest-first (RocksDB inverted timestamps), but chart X-axis = time
+      const sortedData = [...priceData].sort((a, b) => a.timestamp - b.timestamp);
+
       // Calculate price range
-      const prices = priceData.map(d => d.price);
+      const prices = sortedData.map(d => d.price);
       const minPrice = Math.min(...prices);
       const maxPrice = Math.max(...prices);
       const priceRange = maxPrice - minPrice;
@@ -404,8 +408,8 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
       gradient.addColorStop(1, 'rgba(168, 85, 247, 0.0)');
 
       ctx.beginPath();
-      priceData.forEach((point, i) => {
-        const x = padding + (width - 2 * padding) * (i / (priceData.length - 1));
+      sortedData.forEach((point, i) => {
+        const x = padding + (width - 2 * padding) * (i / (sortedData.length - 1));
         const y = height - padding - ((point.price - minPrice) / priceRange) * (height - 2 * padding);
 
         if (i === 0) {
@@ -426,8 +430,8 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
       ctx.strokeStyle = 'rgba(34, 211, 238, 1)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      priceData.forEach((point, i) => {
-        const x = padding + (width - 2 * padding) * (i / (priceData.length - 1));
+      sortedData.forEach((point, i) => {
+        const x = padding + (width - 2 * padding) * (i / (sortedData.length - 1));
         const y = height - padding - ((point.price - minPrice) / priceRange) * (height - 2 * padding);
 
         if (i === 0) {
@@ -439,7 +443,7 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // Draw price labels
+      // Draw Y-axis price labels
       ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
       ctx.font = '12px monospace';
       ctx.textAlign = 'right';
@@ -447,6 +451,20 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
         const price = maxPrice - (priceRange * (i / 5));
         const y = padding + (height - 2 * padding) * (i / 5);
         ctx.fillText(`$${price.toFixed(4)}`, padding - 10, y + 4);
+      }
+
+      // v4.0.5: Draw X-axis time labels
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      const xLabelCount = Math.min(5, sortedData.length);
+      for (let i = 0; i < xLabelCount; i++) {
+        const dataIdx = Math.floor(i * (sortedData.length - 1) / (xLabelCount - 1));
+        const x = padding + (width - 2 * padding) * (dataIdx / (sortedData.length - 1));
+        const ts = sortedData[dataIdx].timestamp;
+        const d = new Date(ts);
+        const label = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        ctx.fillText(label, x, height - padding + 16);
       }
 
       // Draw hover crosshair and tooltip
@@ -501,10 +519,12 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
     const padding = 40;
     const width = canvas.width;
 
+    // v4.0.5: Use sorted data (oldest-first) to match chart rendering order
+    const sortedData = [...priceData].sort((a, b) => a.timestamp - b.timestamp);
     // Calculate which data point we're hovering over
-    const dataIndex = Math.floor(((x - padding) / (width - 2 * padding)) * priceData.length);
-    if (dataIndex >= 0 && dataIndex < priceData.length) {
-      setHoveredPoint(priceData[dataIndex]);
+    const dataIndex = Math.floor(((x - padding) / (width - 2 * padding)) * sortedData.length);
+    if (dataIndex >= 0 && dataIndex < sortedData.length) {
+      setHoveredPoint(sortedData[dataIndex]);
       setMousePosition({ x, y });
     }
   };

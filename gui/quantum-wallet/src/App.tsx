@@ -9,6 +9,7 @@ import VittuaVMScreen from './components/VittuaVMScreen';
 import DownloadNodeScreen from './components/DownloadNodeScreen';
 import AIChatScreen from './components/AIChatScreen';
 import SettingsScreen from './components/SettingsScreen';
+import RwaMarketplaceScreen from './components/RwaMarketplaceScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
@@ -47,7 +48,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -867,6 +868,8 @@ function App() {
     localStorage.removeItem('faucetTransactions');
     // v3.9.2-beta: Clear ALL balance/token caches to prevent stale data on new login
     localStorage.removeItem('cachedBalance');
+    localStorage.removeItem('cachedQugusdBalance');
+    localStorage.removeItem('walletBalanceHistory');
     localStorage.removeItem('dexLockedBalance');
     localStorage.removeItem('dexCooldownUntil');
     localStorage.removeItem('protectedTokenBalances');
@@ -959,6 +962,7 @@ function App() {
               {currentScreen === 'explorer' && <ExplorerScreen />}
               {currentScreen === 'mining' && <MiningScreen />}
               {currentScreen === 'vm' && <VittuaVMScreen />}
+              {currentScreen === 'rwamarket' && <RwaMarketplaceScreen />}
               {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
               <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
                 <AIChatScreen />

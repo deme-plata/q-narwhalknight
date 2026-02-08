@@ -51,6 +51,7 @@ use crate::crypto_enhanced_sync::{
 };
 
 // 🚀 v1.0.60-beta: Comprehensive State Sync (all state via transactions)
+#[cfg(not(target_os = "windows"))]
 use crate::block_state_processor::BlockStateProcessor;
 
 // 🛡️ v1.3.0-beta: SHA3-256 Data Integrity (Quantum-Resistant Block Verification)
@@ -66,6 +67,7 @@ use crate::nemo_executor::{NemoExecutor, NemoStats};
 
 // 🚀 v1.5.0-beta: Reddio-Style Async Storage Pipeline (70% overhead reduction)
 // Hot cache + async prefetching + pipelined workflow for maximum throughput
+#[cfg(not(target_os = "windows"))]
 use crate::async_pipeline::{AsyncStoragePipeline, AsyncPipelineConfig, AsyncPipelineStats};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -159,6 +161,7 @@ pub struct TurboSyncConfig {
     pub enable_async_pipeline: bool,
 
     /// 🚀 v1.5.0-beta: Async pipeline configuration
+    #[cfg(not(target_os = "windows"))]
     pub async_pipeline_config: AsyncPipelineConfig,
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -338,6 +341,7 @@ impl Default for TurboSyncConfig {
                 .unwrap_or(true),  // ON by default - major storage optimization
 
             // 🚀 v1.5.0-beta: Async pipeline configuration (reasonable defaults)
+            #[cfg(not(target_os = "windows"))]
             async_pipeline_config: AsyncPipelineConfig::default(),
 
             // ═══════════════════════════════════════════════════════════════════════════════
@@ -1054,6 +1058,7 @@ pub struct TurboSyncManager {
     /// 🚀 v1.0.60-beta: Block state processor (Comprehensive State Sync)
     /// Processes ALL transactions through StateProcessor/StateApplicator
     /// Optional: only used when config.enable_state_sync = true
+    #[cfg(not(target_os = "windows"))]
     state_processor: Option<Arc<BlockStateProcessor>>,
 
     /// 🤖 v1.4.0-beta: ML-driven adaptive batch size optimizer
@@ -1082,6 +1087,7 @@ pub struct TurboSyncManager {
     /// 🚀 v1.5.0-beta: Reddio-Style Async Storage Pipeline (70% overhead reduction)
     /// Hot cache + async prefetching + pipelined workflow for maximum throughput
     /// Based on Reddio paper (https://arxiv.org/abs/2503.04595)
+    #[cfg(not(target_os = "windows"))]
     async_pipeline: Option<Arc<AsyncStoragePipeline>>,
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -1205,6 +1211,7 @@ impl TurboSyncManager {
 
         // 🚀 v1.0.60-beta: Initialize block state processor (Comprehensive State Sync)
         // Only initialize if enabled via Q_STATE_SYNC=1
+        #[cfg(not(target_os = "windows"))]
         let state_processor = if config.enable_state_sync {
             // Get RocksDB handle from storage for state processor
             if let Some(db) = storage.get_rocks_db_handle() {
@@ -1300,7 +1307,9 @@ impl TurboSyncManager {
 
         // 🚀 v1.5.0-beta: Initialize Reddio-Style Async Storage Pipeline
         // Provides 70% reduction in storage overhead (MPT ops = 70% of execution time)
+        #[cfg(not(target_os = "windows"))]
         let async_pipeline_enabled = config.enable_async_pipeline;
+        #[cfg(not(target_os = "windows"))]
         let async_pipeline = if async_pipeline_enabled {
             // Get RocksDB handle from storage for async pipeline
             if let Some(db) = storage.get_rocks_db_handle() {
@@ -1437,12 +1446,14 @@ impl TurboSyncManager {
             progress_tracker,
             block_verifier,
             sha3_verifier,
+            #[cfg(not(target_os = "windows"))]
             state_processor,
             batch_predictor,
             orphan_limiter,
             emergency_sync_in_progress,
             parallel_state_applicator,
             nemo_executor,
+            #[cfg(not(target_os = "windows"))]
             async_pipeline,
             // 🚀 v2.1.0-DELTA-V: Project APOLLO Control Systems
             apollo_pid_controller,
@@ -1540,40 +1551,62 @@ impl TurboSyncManager {
 
     /// 🚀 v1.5.0-beta: Get async storage pipeline for external use
     /// Allows components to use hot cache, prefetching, and pipelined I/O
+    #[cfg(not(target_os = "windows"))]
     pub fn get_async_pipeline(&self) -> Option<Arc<AsyncStoragePipeline>> {
         self.async_pipeline.clone()
     }
 
     /// 🚀 v1.5.0-beta: Check if async pipeline is enabled
+    #[cfg(not(target_os = "windows"))]
     pub fn is_async_pipeline_enabled(&self) -> bool {
         self.async_pipeline.is_some() && self.config.enable_async_pipeline
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn is_async_pipeline_enabled(&self) -> bool {
+        false
+    }
+
     /// 🚀 v1.5.0-beta: Get async pipeline statistics
     /// Returns comprehensive stats: cache hit rate, prefetch count, pipeline throughput
+    #[cfg(not(target_os = "windows"))]
     pub fn get_async_pipeline_stats(&self) -> Option<AsyncPipelineStats> {
         self.async_pipeline.as_ref().map(|p| p.stats())
     }
 
     /// 🚀 v1.5.0-beta: Log async pipeline performance summary
+    #[cfg(not(target_os = "windows"))]
     pub fn log_async_pipeline_summary(&self) {
         if let Some(pipeline) = &self.async_pipeline {
             pipeline.log_stats();
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn log_async_pipeline_summary(&self) {}
+
     /// 🚀 v1.5.0-beta: Prefetch addresses for upcoming block processing
     /// Call this before processing a block to warm the hot cache
+    #[cfg(not(target_os = "windows"))]
     pub fn prefetch_for_block(&self, transactions: &[q_types::Transaction]) {
         if let Some(pipeline) = &self.async_pipeline {
             pipeline.prefetch_for_block(transactions);
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn prefetch_for_block(&self, _transactions: &[q_types::Transaction]) {}
+
     /// 🚀 v1.5.0-beta: Get balance from hot cache (bypasses RocksDB if cached)
     /// Returns None if async pipeline is disabled
+    #[cfg(not(target_os = "windows"))]
     pub fn get_cached_balance(&self, address: &q_types::Address) -> Option<u64> {
         self.async_pipeline.as_ref().and_then(|p| p.cache.get(address))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_cached_balance(&self, _address: &q_types::Address) -> Option<u64> {
+        None
     }
 
     /// 🚀 v1.5.0-beta: Log full v1.5.0 optimization summary
@@ -1598,13 +1631,20 @@ impl TurboSyncManager {
               nemo_greedy_ratio, nemo_greedy, nemo_total, nemo_avoided, nemo_blocks);
 
         // Async pipeline stats
-        if let Some(stats) = self.get_async_pipeline_stats() {
-            info!("🚀 REDDIO (Async Pipeline): {:.1}% cache hit rate ({}/{} reads), {} prefetches",
-                  stats.cache.hit_rate * 100.0, stats.cache.hits, stats.total_reads, stats.prefetch.total_requests);
-            info!("   Pipeline: {} tasks completed, avg {}μs latency",
-                  stats.pipeline.completed_tasks, stats.pipeline.avg_latency_us);
-        } else {
-            info!("📭 REDDIO (Async Pipeline): Disabled");
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(stats) = self.get_async_pipeline_stats() {
+                info!("🚀 REDDIO (Async Pipeline): {:.1}% cache hit rate ({}/{} reads), {} prefetches",
+                      stats.cache.hit_rate * 100.0, stats.cache.hits, stats.total_reads, stats.prefetch.total_requests);
+                info!("   Pipeline: {} tasks completed, avg {}μs latency",
+                      stats.pipeline.completed_tasks, stats.pipeline.avg_latency_us);
+            } else {
+                info!("📭 REDDIO (Async Pipeline): Disabled");
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            info!("📭 REDDIO (Async Pipeline): Disabled (Windows)");
         }
 
         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2647,6 +2687,7 @@ impl TurboSyncManager {
             warn!("   Saving {} blocks in SINGLE transaction", blocks.len());
             warn!("   Expected: 3-5x faster than per-block writes");
             warn!("   Q_BATCHED_WRITES=1 (or default true)");
+            #[cfg(not(target_os = "windows"))]
             if self.state_processor.is_some() {
                 warn!("   🔄 STATE SYNC: ENABLED (Q_STATE_SYNC=1)");
             }
@@ -2655,6 +2696,7 @@ impl TurboSyncManager {
 
             // 🚀 v1.0.60-beta: Process state changes via BlockStateProcessor (NEW!)
             // This is the comprehensive state sync that processes ALL transaction types
+            #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
                 let state_start = Instant::now();
                 for block in &blocks {
@@ -2936,6 +2978,7 @@ impl TurboSyncManager {
             warn!("   Saving {} blocks with {} individual transactions", blocks.len(), blocks.len());
             warn!("   For 3-5x speedup, set Q_BATCHED_WRITES=1");
             warn!("   (Only enable after verifying P2P stability)");
+            #[cfg(not(target_os = "windows"))]
             if self.state_processor.is_some() {
                 warn!("   🔄 STATE SYNC: ENABLED (Q_STATE_SYNC=1)");
             }
@@ -2943,6 +2986,7 @@ impl TurboSyncManager {
 
             // 🚀 v1.0.60-beta: Process state changes via BlockStateProcessor (NEW!)
             // Works in legacy mode too - process state for each block
+            #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
                 for block in &blocks {
                     match state_proc.process_block(block) {
@@ -3699,6 +3743,7 @@ impl TurboSyncManager {
             progress_tracker: Arc::clone(&self.progress_tracker),
             block_verifier: Arc::clone(&self.block_verifier),
             // v1.0.60-beta: State processor for comprehensive state sync
+            #[cfg(not(target_os = "windows"))]
             state_processor: self.state_processor.clone(),
             // 🛡️ v1.3.0-beta: SHA3-256 Data Integrity Verifier
             sha3_verifier: Arc::clone(&self.sha3_verifier),
@@ -3713,6 +3758,7 @@ impl TurboSyncManager {
             // 🚀 v1.5.0-beta: NEMO high-contention executor
             nemo_executor: Arc::clone(&self.nemo_executor),
             // 🚀 v1.5.0-beta: Reddio async storage pipeline
+            #[cfg(not(target_os = "windows"))]
             async_pipeline: self.async_pipeline.clone(),
             // 🚀 v2.1.0-DELTA-V: Project APOLLO Control Systems
             apollo_pid_controller: Arc::clone(&self.apollo_pid_controller),

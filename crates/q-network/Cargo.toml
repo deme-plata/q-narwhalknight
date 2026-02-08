@@ -12,7 +12,7 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 # ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
 q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 q-dag-knight = { path = "../q-dag-knight" }
-q-resonance = { path = "../q-resonance" }
+q-resonance = { path = "../q-resonance", optional = true }
 q-storage = { path = "../q-storage" }
 q-zk-stark = { path = "../q-zk-stark" }
 q-ai-inference = { path = "../q-ai-inference" }
@@ -59,6 +59,7 @@ sha3 = { workspace = true }
 # Cryptography - Phase 1 (Post-Quantum)
 pqcrypto-dilithium = { workspace = true }
 pqcrypto-kyber = { workspace = true }
+pqcrypto-traits = { workspace = true }
 
 # v2.5.1-beta: AEAD encryption for P2P AI message privacy
 chacha20poly1305 = { workspace = true }
@@ -125,6 +126,8 @@ proptest = { workspace = true }
 # Enable mDNS only on Linux platforms
 [features]
 default = []
+# K-Parameter resonance protocol (disabled for ARM64 cross-compilation)
+resonance = ["q-resonance"]
 # ✨ v1.0.58-beta: Enable Lattice Aggregate Signatures for 98% bandwidth reduction
 advanced-crypto = ["q-crypto-advanced"]
 

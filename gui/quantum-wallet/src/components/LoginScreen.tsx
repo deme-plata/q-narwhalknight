@@ -415,6 +415,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         localStorage.removeItem('walletEncryptedAegisKey');
         localStorage.removeItem('walletAegisPublicKey');
         localStorage.removeItem('walletPasswordHash');
+        localStorage.removeItem('cachedBalance');
+        localStorage.removeItem('cachedQugusdBalance');
+        localStorage.removeItem('walletBalanceHistory');
       } else if (!hasExistingEncryptedWallet && hasPasswordHash()) {
         console.log('🔐 No encrypted data but password hash exists - verifying password...');
         const isPasswordValid = await verifyPasswordHash(password);
@@ -433,6 +436,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         localStorage.setItem('walletAddress', response.data.address_formatted || '');
         localStorage.setItem('walletId', response.data.id);
         localStorage.removeItem('cachedBalance');
+        localStorage.removeItem('cachedQugusdBalance');
+        localStorage.removeItem('walletBalanceHistory');
         console.log('🗑️ Cleared cached balance from previous wallet');
 
         try {

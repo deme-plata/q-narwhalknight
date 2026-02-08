@@ -107,17 +107,21 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
       const priceMultiplier = totalWeightedPrice / 100; // Normalize
       const liveNAV = baseNAV * (1 + (priceMultiplier - 1) * 0.1); // Dampened effect
 
-      // Fetch user's QUGUSD balance for trading
-      const walletAddress = localStorage.getItem('walletAddress');
-      if (walletAddress) {
-        try {
-          const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, 'QUGUSD');
-          if (balanceResponse.success && balanceResponse.data) {
-            setUserQugusdBalance(balanceResponse.data.balance || 0);
+      // v4.0.3: Fetch user's QUGUSD balance using authenticated multi-token API
+      // Previously used getTokenBalance('QUGUSD') which failed because 'QUGUSD' is not a valid hex address
+      try {
+        const multiTokenResponse = await qnkAPI.getMultiTokenBalance();
+        if (multiTokenResponse.success && multiTokenResponse.data) {
+          const qugusdData = multiTokenResponse.data.tokens?.QUGUSD;
+          if (qugusdData) {
+            // Balance comes as base units (24 decimals), convert to display
+            const rawBalance = parseFloat(qugusdData.balance || '0');
+            setUserQugusdBalance(rawBalance > 1e15 ? rawBalance / 1e24 : rawBalance);
+            console.log('💰 [IndexFund] QUGUSD balance:', rawBalance > 1e15 ? rawBalance / 1e24 : rawBalance);
           }
-        } catch (err) {
-          console.warn('Failed to fetch QUGUSD balance:', err);
         }
+      } catch (err) {
+        console.warn('Failed to fetch QUGUSD balance:', err);
       }
 
       // Update index data with live values
@@ -181,29 +185,54 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
           throw new Error(`Insufficient QUGUSD balance. You have ${userQugusdBalance.toFixed(2)} QUGUSD`);
         }
 
-        // Call mint API (would need backend implementation)
-        // For now, show what would happen
+        // v4.0.3: Mint index shares by swapping QUGUSD → Index token
         const sharesToMint = amount / indexData.navPerShare;
         console.log(`Minting ${sharesToMint.toFixed(6)} ${token.symbol} shares for ${amount} QUGUSD`);
 
-        // TODO: Implement actual mint transaction
-        // await qnkAPI.mintIndexShares(walletAddress, token.id, amount);
+        const amountInBaseUnits = Math.floor(amount * 1e24);
+        const minOut = Math.floor(sharesToMint * 0.95 * 1e24); // 5% slippage
 
-        alert(`Would mint ${sharesToMint.toFixed(6)} ${token.symbol} shares for ${amount} QUGUSD\n\nNote: Index fund minting requires backend smart contract integration.`);
+        const result = await qnkAPI.executeSwap({
+          from_token: 'QUGUSD',
+          to_token: token.id,
+          amount_in: amountInBaseUnits,
+          min_amount_out: minOut,
+          wallet_address: walletAddress,
+        });
+
+        if (result.success) {
+          alert(`Successfully minted ${sharesToMint.toFixed(6)} ${token.symbol} shares for ${amount.toFixed(2)} QUGUSD`);
+          fetchLiveData(); // Refresh balances
+        } else {
+          throw new Error(result.error || 'Mint transaction failed');
+        }
       } else {
         // Check if user has enough index shares
         if (amount > token.balance) {
-          throw new Error(`Insufficient ${token.symbol} balance. You have ${token.balance.toFixed(6)} shares`);
+          throw new Error(`Insufficient ${token.symbol} balance. You have ${(Number(token.balance) || 0).toFixed(6)} shares`);
         }
 
-        // Call redeem API
+        // v4.0.3: Redeem index shares by swapping Index token → QUGUSD
         const qugusdToReceive = amount * indexData.navPerShare;
         console.log(`Redeeming ${amount} ${token.symbol} shares for ${qugusdToReceive.toFixed(2)} QUGUSD`);
 
-        // TODO: Implement actual redeem transaction
-        // await qnkAPI.redeemIndexShares(walletAddress, token.id, amount);
+        const amountInBaseUnits = Math.floor(amount * 1e24);
+        const minOut = Math.floor(qugusdToReceive * 0.95 * 1e24); // 5% slippage
 
-        alert(`Would redeem ${amount} ${token.symbol} shares for ${qugusdToReceive.toFixed(2)} QUGUSD\n\nNote: Index fund redemption requires backend smart contract integration.`);
+        const result = await qnkAPI.executeSwap({
+          from_token: token.id,
+          to_token: 'QUGUSD',
+          amount_in: amountInBaseUnits,
+          min_amount_out: minOut,
+          wallet_address: walletAddress,
+        });
+
+        if (result.success) {
+          alert(`Successfully redeemed ${amount.toFixed(6)} ${token.symbol} shares for ${qugusdToReceive.toFixed(2)} QUGUSD`);
+          fetchLiveData(); // Refresh balances
+        } else {
+          throw new Error(result.error || 'Redeem transaction failed');
+        }
       }
 
       setTradeAmount('');
@@ -337,7 +366,7 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {[
                     { label: 'Total AUM', value: formatCurrency(indexData.totalAUM), icon: BarChart3, color: 'purple' },
-                    { label: 'Your Balance', value: `${token.balance.toFixed(4)} ${token.symbol}`, icon: Wallet, color: 'blue' },
+                    { label: 'Your Balance', value: `${(Number(token.balance) || 0).toFixed(4)} ${token.symbol}`, icon: Wallet, color: 'blue' },
                     { label: 'YTD Return', value: `${indexData.ytdReturn >= 0 ? '+' : ''}${indexData.ytdReturn}%`, icon: TrendingUp, color: 'green' },
                     { label: 'All-Time Return', value: `${indexData.allTimeReturn >= 0 ? '+' : ''}${indexData.allTimeReturn}%`, icon: Target, color: 'violet' },
                   ].map((metric, idx) => (
@@ -589,7 +618,7 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
                       {tradeMode === 'mint' ? 'You Pay (QUGUSD)' : `You Redeem (${token.symbol})`}
                     </span>
                     <span className="text-sm text-amber-200/60">
-                      Balance: {tradeMode === 'mint' ? userQugusdBalance.toFixed(2) : token.balance.toFixed(4)}
+                      Balance: {tradeMode === 'mint' ? (Number(userQugusdBalance) || 0).toFixed(2) : (Number(token.balance) || 0).toFixed(4)}
                     </span>
                   </div>
                   <input

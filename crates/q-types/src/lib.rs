@@ -556,6 +556,17 @@ pub const BANK_MASTER_ACCOUNT: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// VAULT RWA token constants (v4.2.0-beta)
+/// Physical hardware wallet token - 1 token = 1 physical Quillon Vault device
+/// Whole units only (0 decimals), owned by BANK_MASTER_ACCOUNT
+pub const VAULT_DECIMALS: u8 = 0;
+pub const VAULT_TOKEN_ADDRESS: [u8; 32] = [
+    0x56, 0x41, 0x55, 0x4C, 0x54, 0x00, 0x00, 0x00, // "VAULT" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
 // ============================================================================
 // Fee System Constants (v1.4.5-beta, v3.4.0-beta: 10x reduction)
 // ============================================================================

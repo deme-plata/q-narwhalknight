@@ -2282,21 +2282,6 @@ export default function ExplorerScreen() {
                 {networkSupply.networkHashrateFormatted}
               </motion.div>
               <div className="text-sm text-gray-400 flex flex-col items-center gap-0.5">
-                <span className="flex items-center gap-1">
-                  <motion.span
-                    animate={{ opacity: [0.5, 1, 0.5] }}
-                    transition={{ duration: 1.5, repeat: Infinity }}
-                  >
-                    ⚛️
-                  </motion.span>
-                  Total Network Power
-                  <span className="text-[10px] text-quantum-purple opacity-0 group-hover:opacity-100 transition-opacity ml-1">
-                    Click for Quantum
-                  </span>
-                </span>
-                <span className="text-[9px] text-purple-400/70 opacity-0 group-hover:opacity-100 transition-opacity">
-                  VDF + Genus-2 Jacobian + Quantum
-                </span>
               </div>
             </div>
 

@@ -9,6 +9,7 @@
 //! v3.2.2: Added u128_serde for MessagePack P2P compatibility
 
 use anyhow::{anyhow, Result};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

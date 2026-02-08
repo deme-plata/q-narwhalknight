@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2 } from 'lucide-react';
+import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2, BarChart3, Activity, Layers, Users, DollarSign, Repeat, PieChart, Wallet, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import TokenDetailsModal from './TokenDetailsModal';
 import IndexFundModal from './IndexFundModal';
 import LiquidityModal from './LiquidityModal';
@@ -217,6 +217,8 @@ interface Token {
   circulatingSupply: number;
   holders: number;
   decimals?: number;  // v3.2.15-beta: Token decimals (default 8 for custom tokens, 24 for QUG)
+  createdAt?: number;  // v4.1.0: Deployment timestamp (epoch ms)
+  txCount?: number;    // v4.1.0: Total transaction/swap count
   features: {
     reflection: boolean;
     autoLiquidity: boolean;
@@ -274,7 +276,7 @@ export default function DexScreen() {
   const [swapTo, setSwapTo] = useState('QUGUSD');
   const [swapAmount, setSwapAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change1h' | 'change24h' | 'change7d' | 'volume24h' | 'liquidity' | 'marketCap' | 'holders'>('volume24h');
+  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change1h' | 'change24h' | 'change7d' | 'volume24h' | 'liquidity' | 'marketCap' | 'holders' | 'txCount' | 'createdAt'>('volume24h');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [filterBy, setFilterBy] = useState<'all' | 'gainers' | 'losers'>('all');
   const [selectedToken, setSelectedToken] = useState<Token | null>(null);
@@ -396,6 +398,10 @@ export default function DexScreen() {
 
   // 📊 v2.5.0-beta: Perpetual Futures Trading State
   const [dexMode, setDexMode] = useState<'spot' | 'perpetual'>('spot');
+  // v4.1.0: Collapsible UI sections
+  const [isSwapCollapsed, setIsSwapCollapsed] = useState(true);
+  const [isMenuCollapsed, setIsMenuCollapsed] = useState(false);
+  const [isAnalyticsCollapsed, setIsAnalyticsCollapsed] = useState(true);
   const [perpSide, setPerpSide] = useState<'long' | 'short'>('long');
   const [perpLeverage, setPerpLeverage] = useState(2);
   const [perpSize, setPerpSize] = useState('');
@@ -862,8 +868,9 @@ export default function DexScreen() {
         const eventAddr = tokenAddress?.startsWith('qnk') ? tokenAddress.substring(3) : (tokenAddress || '');
 
         if (tokenId === eventAddr) {
-          console.log(`✅ [DEX] Updated ${token.symbol} balance: ${token.balance} → ${newBalance}`);
-          return { ...token, balance: newBalance };
+          const numericBalance = typeof newBalance === 'string' ? parseFloat(newBalance) || 0 : (Number(newBalance) || 0);
+          console.log(`✅ [DEX] Updated ${token.symbol} balance: ${token.balance} → ${numericBalance}`);
+          return { ...token, balance: numericBalance };
         }
         return token;
       }));
@@ -1112,51 +1119,62 @@ export default function DexScreen() {
         let nativeQugBalance = 0;
         let qugusdBalance = 0;
         let usdBalance = 0;
+        let allTokenBalances: Record<string, any> = {}; // v4.3.0: Store all token balances for index funds
         if (walletAddress) {
           console.log('🔍 [DEX] Fetching multi-token balance for wallet:', walletAddress);
           try {
             const multiTokenResponse = await qnkAPI.getMultiTokenBalance();
             console.log('📊 [DEX] Multi-token balance API response:', multiTokenResponse);
             if (multiTokenResponse.success && multiTokenResponse.data) {
+              // v4.3.0: Save all token balances for index fund lookup
+              if (multiTokenResponse.data.tokens) {
+                allTokenBalances = multiTokenResponse.data.tokens;
+              }
               // Extract QUG balance (already in human-readable form)
               if (multiTokenResponse.data.tokens && multiTokenResponse.data.tokens.QUG) {
                 nativeQugBalance = parseFloat(multiTokenResponse.data.tokens.QUG.balance) || 0;
                 console.log('✅ [DEX] Native QUG balance fetched:', nativeQugBalance, 'QUG');
-              } else {
-                console.warn('⚠️ [DEX] QUG balance not in multi-token response');
               }
               // Extract QUGUSD balance (already in human-readable form)
               if (multiTokenResponse.data.tokens && multiTokenResponse.data.tokens.QUGUSD) {
                 qugusdBalance = parseFloat(multiTokenResponse.data.tokens.QUGUSD.balance) || 0;
                 console.log('✅ [DEX] QUGUSD balance fetched:', qugusdBalance, 'QUGUSD');
               }
-            } else {
-              console.warn('⚠️ [DEX] Multi-token balance fetch unsuccessful:', multiTokenResponse);
-              console.warn('⚠️ [DEX] API error:', multiTokenResponse.error);
+              // v4.0.9: Also check top-level qug_balance field (some API versions put it here)
+              if (nativeQugBalance === 0 && multiTokenResponse.data.qug_balance !== undefined) {
+                nativeQugBalance = parseFloat(multiTokenResponse.data.qug_balance) || 0;
+                console.log('✅ [DEX] QUG balance from top-level field:', nativeQugBalance);
+              }
+            }
 
-              // FALLBACK: Try single wallet balance API (same as Dashboard uses)
-              console.log('🔄 [DEX] Trying fallback: getWalletBalance');
+            // v4.0.9: If QUG balance is still 0 after multi-token API, try dedicated wallet balance API
+            // QUG is a native coin (wallet_balances), not a token (token_balances), so multi-token
+            // may succeed but NOT include QUG. Always fall back to getWalletBalance for QUG.
+            if (nativeQugBalance === 0) {
+              console.log('🔄 [DEX] QUG balance still 0, trying getWalletBalance fallback');
               try {
                 const fallbackResponse = await qnkAPI.getWalletBalance(walletAddress);
-                console.log('📊 [DEX] Fallback balance response:', fallbackResponse);
                 if (fallbackResponse.success && fallbackResponse.data) {
-                  nativeQugBalance = fallbackResponse.data.balance_qnk || 0;
-                  console.log('✅ [DEX] Fallback QUG balance fetched:', nativeQugBalance, 'QUG');
-                } else {
-                  // FINAL FALLBACK: Use cached balance from localStorage (what Dashboard uses)
-                  const cachedBalance = localStorage.getItem('cachedBalance');
-                  if (cachedBalance) {
-                    nativeQugBalance = parseFloat(cachedBalance);
-                    console.log('💰 [DEX] Using cached balance from localStorage:', nativeQugBalance);
+                  nativeQugBalance = fallbackResponse.data.balance_qnk || fallbackResponse.data.balance || 0;
+                  // Handle raw base units (> 1e15 means base units with 24 decimals)
+                  if (nativeQugBalance > 1e15) {
+                    nativeQugBalance = nativeQugBalance / 1e24;
                   }
+                  console.log('✅ [DEX] Fallback QUG balance:', nativeQugBalance, 'QUG');
                 }
               } catch (fallbackError) {
-                console.error('❌ [DEX] Fallback balance fetch failed:', fallbackError);
-                // FINAL FALLBACK: Use cached balance from localStorage
-                const cachedBalance = localStorage.getItem('cachedBalance');
-                if (cachedBalance) {
-                  nativeQugBalance = parseFloat(cachedBalance);
-                  console.log('💰 [DEX] Using cached balance from localStorage (error fallback):', nativeQugBalance);
+                console.warn('⚠️ [DEX] Fallback getWalletBalance failed:', fallbackError);
+              }
+            }
+
+            // v4.0.9: Final fallback - use cached balance from localStorage
+            if (nativeQugBalance === 0) {
+              const cachedBalance = localStorage.getItem('cachedBalance');
+              if (cachedBalance) {
+                const cached = parseFloat(cachedBalance);
+                if (cached > 0) {
+                  nativeQugBalance = cached > 1e15 ? cached / 1e24 : cached;
+                  console.log('💰 [DEX] Using cached QUG balance:', nativeQugBalance);
                 }
               }
             }
@@ -1232,9 +1250,8 @@ export default function DexScreen() {
                   console.log(`🔍 Resolved pool.token0 "${t0}" => "${token0Key}"`);
                 }
               }
-              // v2.6.1-beta: Backend already returns reserves in human-readable format
-              // Pool API response has reserves pre-divided by 1e8 (see dex_integration_api.rs:506-507)
-              const reserve0Display = parseFloat(pool.reserve0) || 0;
+              // v4.1.2: Pool API returns raw 24-decimal reserves - divide by 1e24 for display
+              const reserve0Display = (parseFloat(pool.reserve0) || 0) / 1e24;
               poolsByToken.set(token0Key, (poolsByToken.get(token0Key) || 0) + reserve0Display);
 
               // Resolve token1 to address key
@@ -1254,8 +1271,8 @@ export default function DexScreen() {
                   console.log(`🔍 Resolved pool.token1 "${t1}" => "${token1Key}"`);
                 }
               }
-              // v2.6.1-beta: Backend already returns reserves in human-readable format
-              const reserve1Display = parseFloat(pool.reserve1) || 0;
+              // v4.1.2: Pool API returns raw 24-decimal reserves - divide by 1e24 for display
+              const reserve1Display = (parseFloat(pool.reserve1) || 0) / 1e24;
               poolsByToken.set(token1Key, (poolsByToken.get(token1Key) || 0) + reserve1Display);
             });
 
@@ -1497,15 +1514,25 @@ export default function DexScreen() {
           const apiTokensPromises = response.data
             .filter(apiToken => apiToken.symbol !== 'QUG' && apiToken.symbol !== 'QUGUSD' && apiToken.symbol !== 'ORBUSD')
             .map(async (apiToken) => {
-              // Calculate actual supply using decimals from API
-              // ✅ FIX: Backend defaults to 8 decimals, not 18!
+              // v4.0.14: Backend now returns supply in token's own decimal base units (8-decimal)
+              // computed from actual token_balances (ground truth), not ambiguous deployment_params
               const decimals = apiToken.decimals || 8;
-              // v3.2.14-beta: Use BigInt to prevent precision loss for large supplies
               const rawSupply = apiToken.total_supply || '0';
               const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
-              const supplyBigInt = BigInt(supplyStr);
-              const divisorBigInt = BigInt(10 ** decimals);
-              const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
+              let actualSupply = 0;
+              try {
+                // Handle scientific notation strings like "1e+30" that BigInt can't parse
+                const cleanStr = supplyStr.toLowerCase().includes('e')
+                  ? BigInt(Math.round(parseFloat(supplyStr))).toString()
+                  : supplyStr;
+                const supplyBigInt = BigInt(cleanStr);
+                const divisorBigInt = BigInt(10) ** BigInt(decimals);
+                actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
+              } catch {
+                actualSupply = parseFloat(supplyStr) || 0;
+                if (actualSupply > 1e15) actualSupply = actualSupply / Math.pow(10, decimals);
+              }
+              // v4.0.15: Allow arbitrary supply sizes - formatNumber handles display up to 1e30+
 
               // Fetch balance for this token if wallet is available
               let tokenBalance = 0;
@@ -1516,12 +1543,19 @@ export default function DexScreen() {
                   console.log(`📊 [API Token] Balance response for ${apiToken.symbol}:`, balanceResponse);
 
                   if (balanceResponse.success && balanceResponse.data) {
-                    // v3.2.14-beta: Use BigInt for precision with large balances
+                    // v4.1.0: Balance stored as display × 10^(2*decimals) due to double-conversion
+                    // Divide by 10^(2*decimals) to get display value matching supply
                     const rawBalance = balanceResponse.data.balance || '0';
                     const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
-                    const balanceBigInt = BigInt(balanceStr);
-                    tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
-                    console.log(`✅ [API Token] Converted ${apiToken.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
+                    try {
+                      const balanceBigInt = BigInt(balanceStr);
+                      const balDivisor = BigInt(10) ** BigInt(2 * decimals);
+                      tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
+                    } catch {
+                      tokenBalance = parseFloat(balanceStr) || 0;
+                      if (tokenBalance > 1e15) tokenBalance = tokenBalance / Math.pow(10, 2 * decimals);
+                    }
+                    console.log(`✅ [API Token] Converted ${apiToken.symbol} balance from ${rawBalance} to ${tokenBalance} (2×${decimals}dec)`);
                   } else {
                     console.warn(`⚠️ [API Token] Balance fetch unsuccessful for ${apiToken.symbol}:`, balanceResponse.error || balanceResponse);
                   }
@@ -1566,11 +1600,8 @@ export default function DexScreen() {
               const tokenAmountInPool = poolsByToken.get(apiToken.address) || 0;
               const tokenLiquidity = tokenAmountInPool * customPrice;
 
-              // Calculate market cap if not provided by oracle
               const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
-
-              // Calculate FDV (Fully Diluted Valuation) = total supply * price
-              const fullyDilutedMC = (actualSupply || 10000000) * customPrice;
+              const fullyDilutedMC = actualSupply * customPrice;
 
               return {
                 id: apiToken.address,
@@ -1585,9 +1616,11 @@ export default function DexScreen() {
                 liquidity: tokenLiquidity,
                 marketCap: calculatedMarketCap,
                 fullyDilutedMarketCap: fullyDilutedMC,
-                totalSupply: actualSupply || 10000000,
-                circulatingSupply: actualSupply || 10000000,
+                totalSupply: actualSupply,
+                circulatingSupply: actualSupply,
                 holders: customHolders,
+                createdAt: apiToken.deployed_at ? apiToken.deployed_at * 1000 : undefined,
+                txCount: apiToken.tx_count || 0,
                 icon: '🪙',
                 logoUrl: apiToken.logo_url || localStorage.getItem(`token_logo_${apiToken.address}`) || undefined,
                 // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
@@ -1638,14 +1671,13 @@ export default function DexScreen() {
               total_supply: contract.total_supply
             });
 
-            // Calculate actual supply using decimals
-            // ✅ FIX: Backend defaults to 8 decimals, not 18!
+            // Calculate actual supply using token's own decimals
             const decimals = contract.decimals || 8;
-            // v3.2.14-beta: Use BigInt to prevent precision loss for large supplies
+            // v4.0.12: deployment_params stores supply in token's OWN decimal base units, NOT 24
             const rawSupply = contract.total_supply || '0';
             const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
             const supplyBigInt = BigInt(supplyStr);
-            const divisorBigInt = BigInt(10 ** decimals);
+            const divisorBigInt = BigInt(10) ** BigInt(decimals);
             const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
 
             // Fetch balance for this token if wallet is available
@@ -1655,12 +1687,14 @@ export default function DexScreen() {
                 const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, contract.address);
                 console.log(`📊 Balance response for ${contract.symbol}:`, balanceResponse);
                 if (balanceResponse.success && balanceResponse.data) {
-                  // v3.2.14-beta: Use BigInt for precision with large balances
+                  // v4.1.0: Balance stored as display × 10^(2*decimals) due to double-conversion
+                  // Divide by 10^(2*decimals) to get display value matching supply
                   const rawBalance = balanceResponse.data.balance || '0';
                   const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
                   const balanceBigInt = BigInt(balanceStr);
-                  tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
-                  console.log(`✅ Converted ${contract.symbol} balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
+                  const balDivisor = BigInt(10) ** BigInt(2 * decimals);
+                  tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
+                  console.log(`✅ Converted ${contract.symbol} balance from ${rawBalance} to ${tokenBalance} (2×${decimals}dec)`);
                 } else {
                   console.warn(`⚠️ Balance fetch unsuccessful for ${contract.symbol}:`, balanceResponse);
                 }
@@ -1708,7 +1742,7 @@ export default function DexScreen() {
             // Calculate market cap if not provided by oracle
             const calculatedMarketCap = customMarketCap || (actualSupply * customPrice);
             // Calculate FDV (Fully Diluted Valuation) = total supply * price
-            const fullyDilutedMC = (actualSupply || 0) * customPrice;
+            const fullyDilutedMC = actualSupply * customPrice;
 
             return {
               id: contract.address,
@@ -1723,9 +1757,11 @@ export default function DexScreen() {
               liquidity: tokenLiquidity,
               marketCap: calculatedMarketCap,
               fullyDilutedMarketCap: fullyDilutedMC,
-              totalSupply: actualSupply || 0,
-              circulatingSupply: actualSupply || 0,
+              totalSupply: actualSupply,
+              circulatingSupply: actualSupply,
               holders: customHolders,
+              createdAt: contract.deployed_at ? contract.deployed_at * 1000 : undefined,
+              txCount: contract.tx_count || 0,
               icon: '🪙',
               // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
               // Without this, custom tokens default to 24 decimals which causes U128 overflow
@@ -1774,12 +1810,17 @@ export default function DexScreen() {
         const qnk10NavPerShare = qugPrice * 3; // Projected NAV: ~3x QUG price
         const defi5NavPerShare = qugPrice * 2; // Projected NAV: ~2x QUG price
 
+        // v4.3.0: Read index fund balances from multi-token API response
+        const qnk10Balance = parseFloat(allTokenBalances?.QNK10?.balance || '0');
+        const defi5Balance = parseFloat(allTokenBalances?.DEFI5?.balance || '0');
+        console.log(`🏦 [DEX v4.3.0] Index fund balances: QNK10=${qnk10Balance}, DEFI5=${defi5Balance}`);
+
         const indexFundTokens: Token[] = [
           {
             id: 'index-fund-qnk10',
             symbol: 'QNK10',
             name: 'QNK Top 10 Index',
-            balance: 0,
+            balance: qnk10Balance,
             price: qnk10NavPerShare,
             change1h: qugChange1h,
             change24h: qugChange24h,
@@ -1832,7 +1873,7 @@ export default function DexScreen() {
             id: 'index-fund-defi5',
             symbol: 'DEFI5',
             name: 'Stable Yield Index',
-            balance: 0,
+            balance: defi5Balance,
             price: defi5NavPerShare,
             change1h: qugusdChange1h,
             change24h: qugusdChange24h,
@@ -2180,8 +2221,16 @@ export default function DexScreen() {
   };
 
   const formatNumber = (num: number, decimals: number = 2) => {
-    if (num >= 1000000000) return `$${(num / 1000000000).toFixed(decimals)}B`;
-    if (num >= 1000000) return `$${(num / 1000000).toFixed(decimals)}M`;
+    if (!isFinite(num) || isNaN(num)) return '$0.00';
+    if (num >= 1e30) return `$${(num / 1e30).toFixed(decimals)} Nonillion`;
+    if (num >= 1e27) return `$${(num / 1e27).toFixed(decimals)} Octillion`;
+    if (num >= 1e24) return `$${(num / 1e24).toFixed(decimals)} Septillion`;
+    if (num >= 1e21) return `$${(num / 1e21).toFixed(decimals)} Sextillion`;
+    if (num >= 1e18) return `$${(num / 1e18).toFixed(decimals)} Quintillion`;
+    if (num >= 1e15) return `$${(num / 1e15).toFixed(decimals)} Quadrillion`;
+    if (num >= 1e12) return `$${(num / 1e12).toFixed(decimals)} Trillion`;
+    if (num >= 1e9) return `$${(num / 1e9).toFixed(decimals)} Billion`;
+    if (num >= 1e6) return `$${(num / 1e6).toFixed(decimals)} Million`;
     if (num >= 1000) return `$${(num / 1000).toFixed(decimals)}K`;
     return `$${num.toFixed(decimals)}`;
   };
@@ -2219,20 +2268,12 @@ export default function DexScreen() {
       const token0 = tokenA === 'QUG' ? 'QUG' : tokenAData?.id || tokenA;
       const token1 = tokenB === 'QUG' ? 'QUG' : tokenBData?.id || tokenB;
 
-      // v3.2.23-beta: Use TOKEN-NATIVE decimals to prevent u128 overflow
-      // With 24 decimals, max tokens = 3.4e38 / 1e24 = 3.4e14 (~340 trillion)
-      // For tokens with larger supplies (1e28+), we must use their native decimals.
-      //
-      // Decimal rules:
-      // - QUG/QUGUSD: Always 24 decimals (native blockchain tokens)
-      // - Custom tokens: Use their configured decimals (typically 7-8)
-      //
-      // The backend normalizes all values to 24 decimals for AMM calculations,
-      // then de-normalizes the output to the target token's decimals.
-      const isNativeTokenA = tokenA === 'QUG' || tokenA === 'QUGUSD';
-      const isNativeTokenB = tokenB === 'QUG' || tokenB === 'QUGUSD';
-      const decimals0 = isNativeTokenA ? 24 : (tokenAData?.decimals ?? 8);
-      const decimals1 = isNativeTokenB ? 24 : (tokenBData?.decimals ?? 8);
+      // v4.1.2: ALL pool reserves use 24 decimals internally.
+      // Previously custom tokens used their native decimals (e.g., 8), which caused
+      // reserves to be 10^16x smaller than expected when displayed (divided by 1e24).
+      // The AMM, swap handler, and pool display ALL assume 24 decimals.
+      const decimals0 = 24;
+      const decimals1 = 24;
 
       console.log(`📊 Pool reserve decimals: ${tokenA}=${decimals0}, ${tokenB}=${decimals1}`);
 
@@ -2306,28 +2347,27 @@ export default function DexScreen() {
       let tokenBalance = 0;
 
       // Create token object with real data from blockchain
-      // Calculate actual supply using decimals
-      // ✅ FIX: Backend defaults to 8 decimals, not 18!
+      // v4.0.12: Supply uses token's own decimals, balances use 24 decimals
       const decimals = contract.decimals || 8;
-      // v3.2.14-beta: Use BigInt to prevent precision loss for large token supplies
       const rawSupply = contract.total_supply || '0';
       const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
       const supplyBigInt = BigInt(supplyStr);
-      const divisorBigInt = BigInt(10 ** decimals);
-      // Use floating-point for display calculations but preserve BigInt precision
-      const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
+      const supplyDivisor = BigInt(10) ** BigInt(decimals);
+      const actualSupply = Number(supplyBigInt / supplyDivisor) + Number(supplyBigInt % supplyDivisor) / Number(supplyDivisor);
 
       if (walletAddress) {
         // Try to fetch token balance
         const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, customTokenAddress);
         if (balanceResponse.success && balanceResponse.data) {
-          // v3.2.14-beta: Fix BigInt precision loss for large balances
+          // v4.1.2: Token balances are in 10^(2*decimals) format due to double-conversion
+          // in contracts_api.rs (frontend sends base units, backend multiplies again).
+          // For 8-decimal tokens: raw = display * 10^16, NOT 10^24.
           const rawBalance = balanceResponse.data.balance || '0';
           const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
           const balanceBigInt = BigInt(balanceStr);
-          // Integer division for whole part, float for fractional
-          tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
-          console.log(`✅ [Custom Token] Converted balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals})`);
+          const balDivisor = BigInt(10) ** BigInt(2 * decimals);
+          tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
+          console.log(`✅ [Custom Token] Converted balance from ${rawBalance} to ${tokenBalance} (decimals: ${decimals}, divisor: 10^${2*decimals})`);
         }
       }
 
@@ -3114,39 +3154,62 @@ export default function DexScreen() {
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
       >
-        <div>
-          <h1 className="text-3xl font-black bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
-            Quantum DEX
-          </h1>
-          <p className="text-gray-400 mt-1">Decentralized exchange with quantum security</p>
-        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div>
+              <h1 className="text-3xl font-black bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
+                Quantum DEX
+              </h1>
+              {!isMenuCollapsed && <p className="text-gray-400 mt-1">Decentralized exchange with quantum security</p>}
+            </div>
+            <button
+              onClick={() => setIsMenuCollapsed(!isMenuCollapsed)}
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+              title={isMenuCollapsed ? 'Show menu' : 'Hide menu'}
+            >
+              {isMenuCollapsed ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronUp className="w-4 h-4 text-gray-400" />}
+            </button>
+          </div>
 
-        {/* Mode Toggle: Spot / Perpetual */}
-        <div className="flex items-center gap-2 bg-white/5 rounded-xl p-1">
-          <button
-            onClick={() => setDexMode('spot')}
-            className={`px-4 py-2 rounded-lg font-semibold transition-all ${
-              dexMode === 'spot'
-                ? 'bg-quantum-cyan text-black'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            Spot
-          </button>
-          <button
-            onClick={() => setDexMode('perpetual')}
-            className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
-              dexMode === 'perpetual'
-                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            Perpetual
-            <span className="text-xs bg-red-500/30 px-2 py-0.5 rounded-full">10x</span>
-          </button>
+          {/* Mode Toggle: Spot / Perpetual */}
+          <AnimatePresence>
+            {!isMenuCollapsed && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2 }}
+                className="flex items-center gap-2 bg-white/5 rounded-xl p-1"
+              >
+                <button
+                  onClick={() => setDexMode('spot')}
+                  className={`px-4 py-2 rounded-lg font-semibold transition-all ${
+                    dexMode === 'spot'
+                      ? 'bg-quantum-cyan text-black'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Spot
+                </button>
+                <button
+                  onClick={() => setDexMode('perpetual')}
+                  className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
+                    dexMode === 'perpetual'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Perpetual
+                  <span className="text-xs bg-red-500/30 px-2 py-0.5 rounded-full">10x</span>
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
+        {isMenuCollapsed && (
+          <span className="text-xs text-gray-500 ml-1">{dexMode === 'spot' ? 'Spot' : 'Perpetual'} mode</span>
+        )}
       </motion.div>
 
       {loading ? (
@@ -3808,27 +3871,293 @@ export default function DexScreen() {
       ) : (
         /* ========== SPOT TRADING INTERFACE ========== */
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Swap Interface */}
+          {/* DEX Network Metrics Dashboard - Comprehensive Statistics (above swap + tokens) */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 }}
+            className="lg:col-span-4 mb-2"
+          >
+            {(() => {
+              // === Aggregate Metrics ===
+              const totalMarketCap = tokens.reduce((sum, t) => sum + (t.marketCap || 0), 0);
+              const totalVolume24h = tokens.reduce((sum, t) => sum + (t.volume24h || 0), 0);
+              const totalLiquidity = tokens.reduce((sum, t) => sum + (t.liquidity || 0), 0);
+              const totalHolders = tokens.reduce((sum, t) => sum + (t.holders || 0), 0);
+              const totalTokens = tokens.length;
+              const totalPools = liquidityPools.length;
+              const totalFDV = tokens.reduce((sum, t) => sum + ((t.totalSupply || 0) * (t.price || 0)), 0);
+
+              // === Price Movement Stats ===
+              const gainers = tokens.filter(t => t.change24h > 0).length;
+              const losers = tokens.filter(t => t.change24h < 0).length;
+              const unchanged = tokens.filter(t => t.change24h === 0).length;
+              const avgChange24h = tokens.length > 0 ? tokens.reduce((sum, t) => sum + (t.change24h || 0), 0) / tokens.length : 0;
+              const avgChange1h = tokens.length > 0 ? tokens.reduce((sum, t) => sum + (t.change1h || 0), 0) / tokens.length : 0;
+              const avgChange7d = tokens.length > 0 ? tokens.reduce((sum, t) => sum + (t.change7d || 0), 0) / tokens.length : 0;
+              const sorted24h = [...tokens].sort((a, b) => (b.change24h || 0) - (a.change24h || 0));
+              const topGainer = sorted24h[0];
+              const topLoser = sorted24h[sorted24h.length - 1];
+              const medianChange24h = sorted24h.length > 0 ? (sorted24h[Math.floor(sorted24h.length / 2)]?.change24h || 0) : 0;
+
+              // === Volume Stats ===
+              const tokensWithVolume = tokens.filter(t => (t.volume24h || 0) > 0);
+              const avgVolume = tokensWithVolume.length > 0 ? totalVolume24h / tokensWithVolume.length : 0;
+              const sortedByVolume = [...tokens].sort((a, b) => (b.volume24h || 0) - (a.volume24h || 0));
+              const topVolumeToken = sortedByVolume[0];
+              const volumeToMcapRatio = totalMarketCap > 0 ? (totalVolume24h / totalMarketCap * 100) : 0;
+
+              // === Liquidity Stats ===
+              const avgLiquidityPerPool = totalPools > 0 ? totalLiquidity / totalPools : 0;
+              const sortedByLiquidity = [...tokens].sort((a, b) => (b.liquidity || 0) - (a.liquidity || 0));
+              const deepestPool = sortedByLiquidity[0];
+              const tokensWithLiquidity = tokens.filter(t => (t.liquidity || 0) > 0).length;
+              const liquidityToMcapRatio = totalMarketCap > 0 ? (totalLiquidity / totalMarketCap * 100) : 0;
+
+              // === Token Distribution ===
+              const totalCirculating = tokens.reduce((sum, t) => sum + (t.circulatingSupply || 0), 0);
+              const totalTotalSupply = tokens.reduce((sum, t) => sum + (t.totalSupply || 0), 0);
+              const avgCirculatingPct = totalTotalSupply > 0 ? (totalCirculating / totalTotalSupply * 100) : 0;
+              const tokensWithFeatures = {
+                reflection: tokens.filter(t => t.features?.reflection).length,
+                autoLiquidity: tokens.filter(t => t.features?.autoLiquidity).length,
+                buybackAndBurn: tokens.filter(t => t.features?.buybackAndBurn).length,
+                antiWhale: tokens.filter(t => t.features?.antiWhale).length,
+                quantumSecured: tokens.filter(t => t.features?.quantumSecured).length,
+              };
+              const indexTokens = tokens.filter(t => t.isIndexToken).length;
+              const perpTokens = tokens.filter(t => t.isPerp).length;
+              const customTokens = tokens.filter(t => !['QUG', 'QUGUSD'].includes(t.symbol) && !t.isIndexToken && !t.isPerp).length;
+
+              // === Fee Stats ===
+              const avgBuyFee = tokens.length > 0 ? tokens.reduce((sum, t) => sum + (t.fees?.buy || 0), 0) / tokens.length : 0;
+              const avgSellFee = tokens.length > 0 ? tokens.reduce((sum, t) => sum + (t.fees?.sell || 0), 0) / tokens.length : 0;
+
+              // Compact number formatter without dollar sign
+              const fmtNum = (n: number): string => {
+                if (!isFinite(n) || isNaN(n)) return '0';
+                if (n >= 1e30) return `${(n / 1e30).toFixed(2)} Nonillion`;
+                if (n >= 1e27) return `${(n / 1e27).toFixed(2)} Octillion`;
+                if (n >= 1e24) return `${(n / 1e24).toFixed(2)} Septillion`;
+                if (n >= 1e21) return `${(n / 1e21).toFixed(2)} Sextillion`;
+                if (n >= 1e18) return `${(n / 1e18).toFixed(2)} Quintillion`;
+                if (n >= 1e15) return `${(n / 1e15).toFixed(2)} Quadrillion`;
+                if (n >= 1e12) return `${(n / 1e12).toFixed(2)} Trillion`;
+                if (n >= 1e9) return `${(n / 1e9).toFixed(2)} Billion`;
+                if (n >= 1e6) return `${(n / 1e6).toFixed(2)} Million`;
+                if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+                return n.toFixed(2);
+              };
+
+              // Primary headline metrics (big cards)
+              const headlineMetrics = [
+                { label: 'Total Network Value', value: formatNumber(totalMarketCap), sub: `FDV: ${formatNumber(totalFDV)}`, icon: PieChart, gradient: 'from-quantum-cyan via-blue-500 to-quantum-purple' },
+                { label: 'Total Value Locked', value: formatNumber(totalLiquidity), sub: `${totalPools} pools | ${tokensWithLiquidity} tokens`, icon: Wallet, gradient: 'from-green-400 via-emerald-500 to-teal-500' },
+                { label: '24h Trading Volume', value: formatNumber(totalVolume24h), sub: `Vol/MCap: ${volumeToMcapRatio.toFixed(2)}%`, icon: BarChart3, gradient: 'from-quantum-purple via-violet-500 to-fuchsia-500' },
+                { label: 'Active Markets', value: `${totalTokens} Tokens`, sub: `${totalPools} pairs | ${fmtNum(totalHolders)} holders`, icon: Activity, gradient: 'from-amber-400 via-orange-500 to-red-500' },
+              ];
+
+              // Secondary detailed metrics grid
+              const detailMetrics = [
+                // Market Sentiment
+                { label: 'Market Sentiment', value: gainers > losers ? 'Bullish' : gainers < losers ? 'Bearish' : 'Neutral', color: gainers > losers ? 'text-green-400' : gainers < losers ? 'text-red-400' : 'text-yellow-400' },
+                { label: 'Gainers / Losers', value: `${gainers} / ${losers}`, color: gainers > losers ? 'text-green-400' : 'text-red-400' },
+                { label: 'Bullish Ratio', value: `${((gainers / Math.max(totalTokens, 1)) * 100).toFixed(0)}%`, color: 'text-gray-300' },
+                { label: 'Avg 1h Change', value: `${avgChange1h >= 0 ? '+' : ''}${avgChange1h.toFixed(2)}%`, color: avgChange1h >= 0 ? 'text-green-400' : 'text-red-400' },
+                { label: 'Avg 24h Change', value: `${avgChange24h >= 0 ? '+' : ''}${avgChange24h.toFixed(2)}%`, color: avgChange24h >= 0 ? 'text-green-400' : 'text-red-400' },
+                { label: 'Avg 7d Change', value: `${avgChange7d >= 0 ? '+' : ''}${avgChange7d.toFixed(2)}%`, color: avgChange7d >= 0 ? 'text-green-400' : 'text-red-400' },
+                { label: 'Median 24h', value: `${medianChange24h >= 0 ? '+' : ''}${medianChange24h.toFixed(2)}%`, color: medianChange24h >= 0 ? 'text-green-400' : 'text-red-400' },
+                // Volume
+                { label: 'Top Volume', value: topVolumeToken ? `${topVolumeToken.symbol} ${formatNumber(topVolumeToken.volume24h || 0)}` : '-', color: 'text-quantum-cyan' },
+                { label: 'Avg Volume/Token', value: formatNumber(avgVolume), color: 'text-gray-300' },
+                { label: 'Tokens Trading', value: `${tokensWithVolume.length} / ${totalTokens}`, color: 'text-gray-300' },
+                // Liquidity
+                { label: 'Avg Liquidity/Pool', value: formatNumber(avgLiquidityPerPool), color: 'text-gray-300' },
+                { label: 'Deepest Pool', value: deepestPool ? `${deepestPool.symbol} ${formatNumber(deepestPool.liquidity || 0)}` : '-', color: 'text-quantum-cyan' },
+                { label: 'Liq/MCap Ratio', value: `${liquidityToMcapRatio.toFixed(2)}%`, color: 'text-gray-300' },
+                // Top Movers
+                { label: 'Top Gainer', value: topGainer ? `${topGainer.symbol} +${(topGainer.change24h || 0).toFixed(1)}%` : '-', color: 'text-green-400' },
+                { label: 'Top Loser', value: topLoser ? `${topLoser.symbol} ${(topLoser.change24h || 0).toFixed(1)}%` : '-', color: 'text-red-400' },
+                // Token Composition
+                { label: 'Custom Tokens', value: `${customTokens}`, color: 'text-gray-300' },
+                { label: 'Index Funds', value: `${indexTokens}`, color: 'text-purple-400' },
+                { label: 'Perpetuals', value: `${perpTokens}`, color: 'text-orange-400' },
+                // Fees
+                { label: 'Avg Buy Fee', value: `${avgBuyFee.toFixed(2)}%`, color: 'text-gray-300' },
+                { label: 'Avg Sell Fee', value: `${avgSellFee.toFixed(2)}%`, color: 'text-gray-300' },
+                // Supply
+                { label: 'Avg Circ. Supply', value: `${avgCirculatingPct.toFixed(0)}%`, color: 'text-gray-300' },
+                // Features
+                { label: 'Quantum Secured', value: `${tokensWithFeatures.quantumSecured}`, color: 'text-quantum-cyan' },
+                { label: 'Auto-Liquidity', value: `${tokensWithFeatures.autoLiquidity}`, color: 'text-gray-300' },
+                { label: 'Buyback & Burn', value: `${tokensWithFeatures.buybackAndBurn}`, color: 'text-amber-400' },
+              ];
+
+              return (
+                <div className="relative group">
+                  <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink rounded-2xl blur-lg opacity-20 group-hover:opacity-40 transition-opacity" />
+                  <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-quantum-cyan/20 overflow-hidden">
+                    {/* Header */}
+                    <div className="flex items-center justify-between px-6 pt-5 pb-4 cursor-pointer" onClick={() => setIsAnalyticsCollapsed(!isAnalyticsCollapsed)}>
+                      <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                        <Layers className="w-5 h-5 text-quantum-cyan" />
+                        Quillon DEX Analytics
+                      </h2>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] text-gray-500 font-mono">{new Date().toLocaleTimeString()}</span>
+                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-green-500/10 border border-green-500/20">
+                          <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          <span className="text-[10px] text-green-400 font-medium">LIVE</span>
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setIsAnalyticsCollapsed(!isAnalyticsCollapsed); }}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                          title={isAnalyticsCollapsed ? 'Expand analytics' : 'Collapse analytics'}
+                        >
+                          {isAnalyticsCollapsed ? <ChevronRight className="w-4 h-4 text-gray-400" /> : <ChevronLeft className="w-4 h-4 text-gray-400" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Headline Metrics - Large Cards */}
+                    <AnimatePresence>
+                    {!isAnalyticsCollapsed && (
+                    <motion.div
+                      initial={{ opacity: 0, width: 0 }}
+                      animate={{ opacity: 1, width: '100%' }}
+                      exit={{ opacity: 0, height: 0, overflow: 'hidden' }}
+                      transition={{ duration: 0.3 }}
+                    >
+                    <div className="px-6 pb-4">
+                      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                        {headlineMetrics.map((m, idx) => {
+                          const Icon = m.icon;
+                          return (
+                            <motion.div
+                              key={m.label}
+                              initial={{ opacity: 0, scale: 0.95 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ delay: 0.04 * idx }}
+                              className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover:bg-white/[0.04] transition-all"
+                            >
+                              <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${m.gradient}`} />
+                              <div className="flex items-center gap-2 mb-3">
+                                <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${m.gradient} flex items-center justify-center shadow-lg`}>
+                                  <Icon className="w-4 h-4 text-white" />
+                                </div>
+                                <span className="text-[11px] text-gray-400 font-medium">{m.label}</span>
+                              </div>
+                              <p className="text-xl font-bold text-white mb-1">{m.value}</p>
+                              <p className="text-[11px] text-gray-500">{m.sub}</p>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Detailed Statistics Grid */}
+                    <div className="border-t border-white/[0.04] px-6 py-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <BarChart3 className="w-4 h-4 text-gray-500" />
+                        <span className="text-xs text-gray-400 font-medium uppercase tracking-wider">Detailed Statistics</span>
+                      </div>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-x-4 gap-y-2">
+                        {detailMetrics.map((m, idx) => (
+                          <div key={m.label} className="py-1.5">
+                            <p className="text-[10px] text-gray-500 truncate">{m.label}</p>
+                            <p className={`text-xs font-semibold truncate ${m.color}`}>{m.value}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Market Sentiment Bar */}
+                    <div className="border-t border-white/[0.04] px-6 py-3">
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] text-gray-500 font-medium whitespace-nowrap">24h Sentiment</span>
+                        <div className="flex-1 h-2 rounded-full overflow-hidden bg-white/[0.03] flex">
+                          {gainers > 0 && (
+                            <div
+                              className="h-full bg-gradient-to-r from-green-500 to-emerald-400 transition-all duration-700"
+                              style={{ width: `${(gainers / Math.max(totalTokens, 1)) * 100}%` }}
+                            />
+                          )}
+                          {unchanged > 0 && (
+                            <div
+                              className="h-full bg-gray-600 transition-all duration-700"
+                              style={{ width: `${(unchanged / Math.max(totalTokens, 1)) * 100}%` }}
+                            />
+                          )}
+                          {losers > 0 && (
+                            <div
+                              className="h-full bg-gradient-to-r from-red-400 to-rose-500 transition-all duration-700"
+                              style={{ width: `${(losers / Math.max(totalTokens, 1)) * 100}%` }}
+                            />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 text-[10px]">
+                          <span className="text-green-400 flex items-center gap-1">
+                            <TrendingUp className="w-3 h-3" /> {gainers}
+                          </span>
+                          <span className="text-red-400 flex items-center gap-1">
+                            <TrendingDown className="w-3 h-3" /> {losers}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    </motion.div>
+                    )}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              );
+            })()}
+          </motion.div>
+
+          {/* Swap + Token Table Row */}
+          <div className="lg:col-span-4 flex gap-4">
+          {/* Swap Interface - Collapses horizontally */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
-            className="lg:col-span-1"
+            className={isSwapCollapsed ? "flex-shrink-0" : "w-full lg:w-1/2 flex-shrink-0"}
           >
+              {isSwapCollapsed ? (
+                /* Collapsed: narrow vertical sidebar */
+                <div
+                  className="bg-black/60 backdrop-blur-xl rounded-xl border border-quantum-cyan/20 px-0.5 py-2 flex flex-col items-center gap-2 cursor-pointer hover:border-quantum-cyan/40 transition-colors min-h-[140px] w-7"
+                  onClick={() => setIsSwapCollapsed(false)}
+                >
+                  <ChevronRight className="w-3 h-3 text-quantum-cyan flex-shrink-0" />
+                  <div className="flex-1 flex items-center">
+                    <span className="text-white/80 font-bold text-[10px] [writing-mode:vertical-lr] rotate-180 tracking-[0.2em] uppercase">Swap</span>
+                  </div>
+                </div>
+              ) : (
             <div className="relative group">
               {/* Glow effect */}
               <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
-
               <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-quantum-cyan/20 p-6 space-y-4">
-                <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center justify-between mb-2">
                   <h2 className="text-xl font-bold text-white">Swap Tokens</h2>
-                  <button
-                    onClick={() => setIsSettingsModalOpen(true)}
-                    className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
-                  >
-                    <Settings className="w-5 h-5 text-gray-400" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setIsSettingsModalOpen(true)}
+                      className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                    >
+                      <Settings className="w-5 h-5 text-gray-400" />
+                    </button>
+                    <button
+                      onClick={() => setIsSwapCollapsed(true)}
+                      className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                      title="Collapse swap panel"
+                    >
+                      <ChevronLeft className="w-5 h-5 text-gray-400" />
+                    </button>
+                  </div>
                 </div>
 
+              <div className="space-y-4">
               {/* From Token */}
               <div className="space-y-2">
                 <label className="text-sm text-gray-400">From</label>
@@ -3889,7 +4218,7 @@ export default function DexScreen() {
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-gray-500">
-                    Balance: {findToken(swapFrom)?.balance.toFixed(4) || '0.0000'}
+                    Balance: {(Number(findToken(swapFrom)?.balance) || 0).toFixed(4)}
                   </span>
                   <button
                     onClick={() => {
@@ -4175,13 +4504,53 @@ export default function DexScreen() {
                   </span>
                 </div>
                 <div className="flex justify-between text-gray-400">
-                  <span>Slippage</span>
-                  <span className="text-white">0.5%</span>
+                  <span>Slippage Tolerance</span>
+                  <span className="text-white">{dexSettings.slippageTolerance}%</span>
                 </div>
                 <div className="flex justify-between text-gray-400">
                   <span>Fee</span>
                   <span className="text-white">0.3%</span>
                 </div>
+                {/* v4.0.1: Show price impact to user */}
+                {(() => {
+                  if (!swapAmount || parseFloat(swapAmount) <= 0) return null;
+                  const fromToken = findToken(swapFrom);
+                  const toToken = findToken(swapTo);
+                  if (!fromToken || !toToken) return null;
+                  const formatTokenForBackend = (tokenId: string): string => {
+                    if (tokenId === 'native-qug') return 'QUG';
+                    if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                    return tokenId;
+                  };
+                  const fromFormatted = formatTokenForBackend(fromToken.id);
+                  const toFormatted = formatTokenForBackend(toToken.id);
+                  // v4.0.2: Also match by symbol for custom tokens (pool may use address or symbol)
+                  const matchingPool = liquidityPools.find(pool => {
+                    const p0 = pool.token0.toUpperCase();
+                    const p1 = pool.token1.toUpperCase();
+                    const f = fromFormatted.toUpperCase();
+                    const t = toFormatted.toUpperCase();
+                    const fSym = fromToken.symbol.toUpperCase();
+                    const tSym = toToken.symbol.toUpperCase();
+                    return (p0 === f && p1 === t) || (p0 === t && p1 === f) ||
+                           (p0 === fSym && p1 === tSym) || (p0 === tSym && p1 === fSym);
+                  });
+                  if (!matchingPool) return null;
+                  const isForward = matchingPool.token0.toUpperCase() === fromFormatted.toUpperCase() ||
+                                    matchingPool.token0.toUpperCase() === fromToken.symbol.toUpperCase();
+                  // v4.0.10: ALL pool reserves use 24 decimals internally
+                  const reserveIn = (isForward ? parseU128(matchingPool.reserve0) : parseU128(matchingPool.reserve1)) / 1e24;
+                  if (reserveIn <= 0) return null;
+                  const amountIn = parseFloat(swapAmount);
+                  const impact = (amountIn / (reserveIn + amountIn)) * 100;
+                  const impactColor = impact > 10 ? 'text-red-400' : impact > 3 ? 'text-yellow-400' : 'text-green-400';
+                  return (
+                    <div className="flex justify-between text-gray-400">
+                      <span>Price Impact</span>
+                      <span className={impactColor}>{impact < 0.01 ? '<0.01' : impact.toFixed(2)}%</span>
+                    </div>
+                  );
+                })()}
                 {/* v2.4.0: Price discrepancy warning when AMM rate differs from oracle */}
                 {(() => {
                   const fromToken = findToken(swapFrom);
@@ -4400,14 +4769,14 @@ export default function DexScreen() {
                         console.log('🔒 [DEX] PRE-SWAP (USD→QUG): Set PRELIMINARY locked balance:', preliminaryQugBalance);
                       }
 
-                      // v3.4.19-beta: Use correct decimal scaling for each token
-                      const fromDec = 24; // QUGUSD always has 24 decimals
-                      const toDec = toToken.decimals ?? 24; // Use toToken's decimals for output
+                      // v4.0.13: Send amounts as strings to preserve u128 precision
+                      const qugusdAmountBigInt = parseAmountToBigInt(qugusdAmount.toString(), 24);
+                      const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), 24);
                       const swapResponse = await qnkAPI.executeSwap({
                         from_token: 'QUGUSD',
                         to_token: toTokenFormatted,
-                        amount_in: Math.floor(qugusdAmount * Math.pow(10, fromDec)),
-                        min_amount_out: Math.floor(minOutput * Math.pow(10, toDec)), // v3.4.19: Use toToken decimals
+                        amount_in: qugusdAmountBigInt.toString(),
+                        min_amount_out: minOutputBigInt.toString(),
                         wallet_address: walletAddress
                       });
 
@@ -4477,7 +4846,7 @@ export default function DexScreen() {
                   }
 
                   if (fromToken.balance < parseFloat(swapAmount)) {
-                    alert(`Insufficient ${swapFrom} balance. You have ${fromToken.balance.toFixed(4)}`);
+                    alert(`Insufficient ${swapFrom} balance. You have ${(Number(fromToken.balance) || 0).toFixed(4)}`);
                     return;
                   }
 
@@ -4500,7 +4869,20 @@ export default function DexScreen() {
                     const fromTokenFormatted = formatTokenForBackend(fromToken.id);
                     const toTokenFormatted = formatTokenForBackend(toToken.id);
 
-                    const matchingPool = liquidityPools.find(pool => {
+                    // v4.5.0: Re-fetch pools right before swap to get fresh reserves
+                    // Stale reserves cause slippage errors on low-liquidity pools
+                    let freshPools = liquidityPools;
+                    try {
+                      const freshPoolsResp = await qnkAPI.getLiquidityPools();
+                      if (freshPoolsResp.success && freshPoolsResp.data) {
+                        freshPools = freshPoolsResp.data;
+                        console.log('🔄 [DEX v4.5.0] Re-fetched fresh pool reserves before swap');
+                      }
+                    } catch (e) {
+                      console.warn('⚠️ Could not refresh pools, using cached reserves');
+                    }
+
+                    const matchingPool = freshPools.find((pool: any) => {
                       const pool0Upper = pool.token0.toUpperCase();
                       const pool1Upper = pool.token1.toUpperCase();
                       const fromUpper = fromTokenFormatted.toUpperCase();
@@ -4523,22 +4905,20 @@ export default function DexScreen() {
                       // Determine if we're swapping forward or reverse in the pool
                       const isForward = matchingPool.token0.toUpperCase() === fromTokenFormatted.toUpperCase();
 
-                      // v3.6.10-beta: CRITICAL FIX - Use correct decimals for each token!
-                      // Previously both reserves were divided by 1e24, causing massive errors when swapping
-                      // between tokens with different decimals (e.g., QUG 24 decimals vs custom token 8 decimals)
-                      const fromDec = fromToken.decimals ?? 24;
-                      const toDec = toToken.decimals ?? 24;
-                      const fromDivisor = Math.pow(10, fromDec);
-                      const toDivisor = Math.pow(10, toDec);
+                      // v4.0.10: CRITICAL FIX - ALL pool reserves are stored in 24-decimal format internally.
+                      // The AMM stores reserves * 1e24 regardless of the token's official decimals.
+                      // Using token-specific decimals here caused 10^16x errors for 8-decimal custom tokens.
+                      const POOL_DECIMALS = 24; // ALL reserves use 24 decimals
+                      const poolDivisor = Math.pow(10, POOL_DECIMALS);
 
                       const reserveIn = isForward
-                        ? parseU128(matchingPool.reserve0) / fromDivisor
-                        : parseU128(matchingPool.reserve1) / fromDivisor;
+                        ? parseU128(matchingPool.reserve0) / poolDivisor
+                        : parseU128(matchingPool.reserve1) / poolDivisor;
                       const reserveOut = isForward
-                        ? parseU128(matchingPool.reserve1) / toDivisor
-                        : parseU128(matchingPool.reserve0) / toDivisor;
+                        ? parseU128(matchingPool.reserve1) / poolDivisor
+                        : parseU128(matchingPool.reserve0) / poolDivisor;
 
-                      console.log(`🔢 [DEX v3.6.10] Reserve decimals: from=${fromDec}, to=${toDec}, reserveIn=${reserveIn}, reserveOut=${reserveOut}`);
+                      console.log(`🔢 [DEX v4.0.10] Pool reserves (24 decimals): reserveIn=${reserveIn}, reserveOut=${reserveOut}`);
 
                       // v2.4.0: Add NaN protection for zero reserves
                       if (reserveIn <= 0 || reserveOut <= 0) {
@@ -4552,7 +4932,7 @@ export default function DexScreen() {
                         alert('Invalid swap calculation - please try a different amount');
                         return;
                       }
-                      minOutput = expectedOutput * 0.995; // 0.5% slippage tolerance
+                      minOutput = expectedOutput * (1 - dexSettings.slippageTolerance / 100); // Use user's slippage setting
 
                       console.log('💱 Swap calculation using pool reserves:', {
                         pool: matchingPool.pool_id,
@@ -4582,7 +4962,7 @@ export default function DexScreen() {
                         alert('❌ Invalid price calculation. Please refresh prices and try again.');
                         return;
                       }
-                      minOutput = expectedOutput * 0.95; // More lenient slippage for oracle-based swaps
+                      minOutput = expectedOutput * (1 - Math.max(dexSettings.slippageTolerance, 5) / 100); // Oracle needs at least 5% tolerance
 
                       console.log('💱 No pool found - using oracle pricing (backend will handle):', {
                         expectedOutput,
@@ -4630,14 +5010,12 @@ export default function DexScreen() {
                       console.log('🔒 [DEX] PRE-SWAP: Set PRELIMINARY locked balance (QUG will be added):', preliminaryToBalance);
                     }
 
-                    // v3.2.22-beta: Use BigInt for precision-safe amount calculation
-                    // Determine decimals based on token type (QUG/QUGUSD use 24, custom tokens use their decimals)
-                    const fromDecimals = fromToken.decimals ?? 24; // Default to 24 for native tokens
-                    const toDecimals = toToken.decimals ?? 24; // v3.4.19-beta: Fix - output uses toToken's decimals
-                    const amountInBigInt = parseAmountToBigInt(swapAmount, fromDecimals);
-                    // v3.4.19-beta: CRITICAL FIX - minOutput must use toToken's decimals, not fromToken's!
-                    // This was causing slippage errors when swapping between tokens with different decimals
-                    const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), toDecimals);
+                    // v4.0.11: ALL amounts sent to backend use 24 decimals
+                    // Pool reserves are stored in 24-decimal format internally,
+                    // so amount_in and min_amount_out must also be in 24-decimal.
+                    const INTERNAL_DECIMALS = 24;
+                    const amountInBigInt = parseAmountToBigInt(swapAmount, INTERNAL_DECIMALS);
+                    const minOutputBigInt = parseAmountToBigInt(minOutput.toString(), INTERNAL_DECIMALS);
 
                     // Validate amount doesn't exceed u128 max
                     if (amountInBigInt > U128_MAX) {
@@ -4645,38 +5023,35 @@ export default function DexScreen() {
                       return;
                     }
 
-                    // Convert BigInt to Number for API (safe for amounts < 2^53)
-                    // For very large amounts, the API will need to support string format in the future
-                    const amountInNum = Number(amountInBigInt);
-                    const minOutputNum = Number(minOutputBigInt);
+                    // v4.0.13: CRITICAL FIX - Send amounts as STRINGS to preserve precision.
+                    // Number(BigInt) loses precision for 24-decimal amounts (> 2^53).
+                    // Backend deserialize_u128_from_any accepts both numbers and strings.
+                    const amountInStr = amountInBigInt.toString();
+                    const minOutputStr = minOutputBigInt.toString();
 
-                    console.log(`🔢 [DEX v3.6.9] Swap amounts:`, {
+                    console.log(`🔢 [DEX v4.0.13] Swap amounts (all 24-dec, string format):`, {
                       swapAmount,
-                      fromDecimals,
-                      toDecimals,
-                      amountInBigInt: amountInBigInt.toString(),
-                      amountInNum,
+                      internalDecimals: INTERNAL_DECIMALS,
+                      amountIn: amountInStr,
                       expectedOutput,
                       minOutput,
-                      minOutputBigInt: minOutputBigInt.toString(),
-                      minOutputNum
+                      minAmountOut: minOutputStr
                     });
 
                     const response = await qnkAPI.executeSwap({
                       from_token: fromTokenFormatted,
                       to_token: toTokenFormatted,
-                      amount_in: amountInNum, // Uses proper decimal scaling via BigInt
-                      min_amount_out: minOutputNum, // Uses proper decimal scaling via BigInt
-                      wallet_address: walletAddress
+                      amount_in: amountInStr, // String to preserve u128 precision
+                      min_amount_out: minOutputStr, // String to preserve u128 precision
+                      wallet_address: walletAddress,
                     });
 
                     if (response.success && response.data) {
                       // v2.4.0: NaN protection for amount_out
-                      // v3.7.2-beta: CRITICAL FIX - Use toToken's actual decimals instead of hardcoded 1e24
-                      // Previously: rawAmountOut / 1e24 caused astronomical prices for custom tokens (8 decimals)
-                      const rawAmountOut = response.data.amount_out;
-                      const divisor = Math.pow(10, toDecimals);
-                      const amountOut = (rawAmountOut && isFinite(rawAmountOut)) ? rawAmountOut / divisor : expectedOutput;
+                      // v4.0.10: Read estimated_amount_out (the actual field name from backend)
+                      // ALL amounts from the backend AMM are in 24-decimal format
+                      const rawAmountOut = parseFloat(response.data.estimated_amount_out || response.data.amount_out || '0');
+                      const amountOut = (rawAmountOut && isFinite(rawAmountOut)) ? rawAmountOut / 1e24 : expectedOutput;
                       const amountIn = parseFloat(swapAmount) || 0;
 
                       console.log('📊 [DEX] Swap response:', { rawAmountOut, amountOut, amountIn, expectedOutput });
@@ -4988,11 +5363,233 @@ export default function DexScreen() {
                   )}
                 </div>
               )}
+              </div>
+            </div>
+            </div>
+              )}
+        </motion.div>
+
+          {/* Token Table - Right side, next to swap */}
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="flex-1 min-w-0"
+          >
+          <div className="relative group">
+            {/* Glow effect */}
+            <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
+
+            <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-quantum-purple/20 p-6">
+              <h2 className="text-xl font-bold text-white mb-6">Available Tokens</h2>
+
+              {/* Search and Filters */}
+              <div className="flex flex-col sm:flex-row gap-4 mb-6">
+                {/* Search */}
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search by name, symbol, or address..."
+                    className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-quantum-cyan/50 transition-colors"
+                  />
+                </div>
+
+                {/* Filter Buttons */}
+                <div className="flex gap-2">
+                  {(['all', 'gainers', 'losers'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setFilterBy(filter)}
+                      className={`px-4 py-3 rounded-xl font-medium transition-all ${
+                        filterBy === filter
+                          ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
+                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                      }`}
+                    >
+                      {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="overflow-x-auto max-h-[700px] overflow-y-auto">
+                <table className="w-full">
+                  <thead className="sticky top-0 bg-black/90 backdrop-blur-sm z-10">
+                    <tr className="border-b border-white/10">
+                      <th className="text-left py-3 px-2 text-gray-400 font-medium text-xs">Token</th>
+                      <th onClick={() => handleSort('price')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        Price {sortBy === 'price' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('change1h')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        1h {sortBy === 'change1h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('change24h')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        24h {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('change7d')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        7d {sortBy === 'change7d' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('volume24h')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        Vol {sortBy === 'volume24h' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('marketCap')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        MCap {sortBy === 'marketCap' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th className="text-right py-3 px-2 text-gray-400 font-medium text-xs whitespace-nowrap" title="Fully Diluted Valuation">
+                        FDV
+                      </th>
+                      <th onClick={() => handleSort('liquidity')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        Liq {sortBy === 'liquidity' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('holders')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        Holders {sortBy === 'holders' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('createdAt')} className="text-right py-3 px-2 text-gray-400 font-medium text-xs cursor-pointer hover:text-white transition-colors whitespace-nowrap">
+                        Age {sortBy === 'createdAt' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th className="text-right py-3 px-2 text-gray-400 font-medium text-xs">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredTokens.map((token, index) => (
+                      <motion.tr
+                        key={token.id}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ delay: index * 0.05 }}
+                        className={`border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer ${
+                          nitroBoostTokens.has(token.id) ? 'nitro-boost-active' : ''
+                        }`}
+                        onClick={() => setSelectedToken(token)}
+                      >
+                        <td className="py-3 px-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0">
+                              {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
+                                <div className="relative w-5 h-5">
+                                  <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)', padding: '1px' }}>
+                                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
+                                      <img src="/quillon-logo.png" alt="Quillon" className="w-full h-full object-contain" style={{ filter: 'invert(1)' }} />
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : token.logoUrl ? (
+                                <img src={token.logoUrl} alt={token.symbol} className="w-6 h-6 rounded-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                              ) : token.icon}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1">
+                                <span className="font-bold text-white text-sm">{token.symbol}</span>
+                                {token.isIndexToken && <span className="px-1 rounded bg-purple-600/50 text-[10px] font-bold text-purple-200">IDX</span>}
+                                {token.isPerp && <span className="px-1 rounded bg-pink-600/50 text-[10px] font-bold text-pink-200">PERP</span>}
+                                {boostedTokens.has(token.id) && <span className="px-1 rounded bg-orange-500/50 text-[10px] font-bold text-orange-200">NITRO</span>}
+                              </div>
+                              <div className="text-xs text-gray-500 truncate">{token.name}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3 px-2 text-right text-white font-medium whitespace-nowrap text-xs">${formatPrice(token.price)}</td>
+                        <td className="py-3 px-2 text-right">
+                          <span className={`font-medium text-xs ${token.change1h > 0 ? 'text-quantum-green' : token.change1h < 0 ? 'text-red-500' : 'text-gray-500'}`}>
+                            {token.change1h > 0 ? '+' : ''}{token.change1h.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="py-3 px-2 text-right">
+                          <span className={`font-medium text-xs ${token.change24h > 0 ? 'text-quantum-green' : token.change24h < 0 ? 'text-red-500' : 'text-gray-500'}`}>
+                            {token.change24h > 0 ? '+' : ''}{token.change24h.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="py-3 px-2 text-right">
+                          <span className={`font-medium text-xs ${token.change7d > 0 ? 'text-quantum-green' : token.change7d < 0 ? 'text-red-500' : 'text-gray-500'}`}>
+                            {token.change7d > 0 ? '+' : ''}{token.change7d.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="py-3 px-2 text-right text-white text-xs whitespace-nowrap">{formatNumber(token.volume24h)}</td>
+                        <td className="py-3 px-2 text-right text-white text-xs whitespace-nowrap">${formatNumber(token.marketCap)}</td>
+                        <td className="py-3 px-2 text-right text-gray-400 text-xs whitespace-nowrap" title="Fully Diluted Valuation">${formatNumber(token.totalSupply * token.price)}</td>
+                        <td className="py-3 px-2 text-right text-gray-400 text-xs whitespace-nowrap">${formatNumber(token.liquidity)}</td>
+                        <td className="py-3 px-2 text-right text-gray-500 text-xs whitespace-nowrap">{token.holders?.toLocaleString() || '0'}</td>
+                        <td className="py-3 px-2 text-right text-gray-500 text-xs whitespace-nowrap">
+                          {token.createdAt ? (() => {
+                            const diff = Date.now() - token.createdAt;
+                            const mins = Math.floor(diff / 60000);
+                            const hrs = Math.floor(diff / 3600000);
+                            const days = Math.floor(diff / 86400000);
+                            if (days > 0) return `${days}d`;
+                            if (hrs > 0) return `${hrs}h`;
+                            return `${mins}m`;
+                          })() : '-'}
+                        </td>
+                        <td className="py-3 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1">
+                            <motion.button
+                              onClick={() => { setSwapFrom(token.symbol); setIsSwapCollapsed(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+                              className="px-2 py-1 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-lg text-white text-xs font-medium hover:shadow-lg transition-all"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                            >
+                              Trade
+                            </motion.button>
+                            <motion.button
+                              onClick={() => setLiquidityToken(token)}
+                              className="px-2 py-1 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-lg text-white text-xs font-medium hover:shadow-lg transition-all"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                            >
+                              LP
+                            </motion.button>
+                            <motion.button
+                              onClick={() => handleNitroBoost(token)}
+                              className={`px-2 py-1 rounded-lg text-xs font-medium hover:shadow-lg transition-all ${
+                                boostedTokens.has(token.id)
+                                  ? 'bg-orange-500/80 text-white'
+                                  : 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/40'
+                              }`}
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              title={boostedTokens.has(token.id) ? `Boosted: ${boostedTokens.get(token.id)} pts` : 'Nitro Boost'}
+                            >
+                              🚀
+                            </motion.button>
+                            <motion.button
+                              onClick={() => handleAIAnalyze(token)}
+                              className="px-2 py-1 bg-blue-500/20 text-blue-400 hover:bg-blue-500/40 rounded-lg text-xs font-medium hover:shadow-lg transition-all"
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              title="AI Analysis"
+                            >
+                              🤖
+                            </motion.button>
+                          </div>
+                        </td>
+                      </motion.tr>
+                    ))}
+                  </tbody>
+                </table>
+                {filteredTokens.length === 0 && (
+                  <div className="text-center py-12">
+                    <Info className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+                    <p className="text-gray-400">No tokens found matching your criteria</p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
+          </motion.div>
+          </div>{/* end Swap + Token Table flex row */}
+
+          {/* Liquidity Sections - Full width below */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="lg:col-span-4"
+          >
 
           {/* Custom Token Liquidity Section */}
-          <div className="relative group mt-6">
+          <div className="relative group">
             {/* Glow effect */}
             <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
 
@@ -5162,24 +5759,24 @@ export default function DexScreen() {
                                   if (contractInfo.success && contractInfo.data) {
                                     const contract = contractInfo.data;
                                     const walletAddress = localStorage.getItem('walletAddress') || '';
-                                    // ✅ FIX: Backend defaults to 8 decimals, not 18!
+                                    // v4.0.12: Supply uses token's own decimals, balances use 24 decimals internally
                                     const decimals = contract.decimals || 8;
-                                    // v3.2.14-beta: Use BigInt to prevent precision loss
                                     const rawSupply = contract.total_supply || '0';
                                     const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
                                     const supplyBigInt = BigInt(supplyStr);
-                                    const divisorBigInt = BigInt(10 ** decimals);
-                                    const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
+                                    const supplyDivisor = BigInt(10) ** BigInt(decimals);
+                                    const actualSupply = Number(supplyBigInt / supplyDivisor) + Number(supplyBigInt % supplyDivisor) / Number(supplyDivisor);
                                     let tokenBalance = 0;
 
                                     if (walletAddress) {
                                       const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, pool.token0);
                                       if (balanceResponse.success && balanceResponse.data) {
-                                        // v3.2.14-beta: Use BigInt for precision with large balances
+                                        // Balances use 24 decimals internally
                                         const rawBalance = balanceResponse.data.balance || '0';
                                         const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
                                         const balanceBigInt = BigInt(balanceStr);
-                                        tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
+                                        const balDivisor = BigInt(10) ** BigInt(24);
+                                        tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
                                       }
                                     }
 
@@ -5244,24 +5841,24 @@ export default function DexScreen() {
                                       if (contractInfo.success && contractInfo.data) {
                                         const contract = contractInfo.data;
                                         const walletAddress = localStorage.getItem('walletAddress') || '';
-                                        // ✅ FIX: Backend defaults to 8 decimals, not 18!
+                                        // v4.0.12: Supply uses token's own decimals, balances use 24 decimals
                                         const decimals = contract.decimals || 8;
-                                        // v3.2.14-beta: Use BigInt to prevent precision loss
                                         const rawSupply = contract.total_supply || '0';
                                         const supplyStr = typeof rawSupply === 'string' ? rawSupply : String(rawSupply);
                                         const supplyBigInt = BigInt(supplyStr);
-                                        const divisorBigInt = BigInt(10 ** decimals);
-                                        const actualSupply = Number(supplyBigInt / divisorBigInt) + Number(supplyBigInt % divisorBigInt) / Number(divisorBigInt);
+                                        const supplyDivisor = BigInt(10) ** BigInt(decimals);
+                                        const actualSupply = Number(supplyBigInt / supplyDivisor) + Number(supplyBigInt % supplyDivisor) / Number(supplyDivisor);
                                         let tokenBalance = 0;
 
                                         if (walletAddress) {
                                           const balanceResponse = await qnkAPI.getTokenBalance(walletAddress, foundToken.address);
                                           if (balanceResponse.success && balanceResponse.data) {
-                                            // v3.2.14-beta: Use BigInt for precision with large balances
+                                            // Balances use 24 decimals internally
                                             const rawBalance = balanceResponse.data.balance || '0';
                                             const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
                                             const balanceBigInt = BigInt(balanceStr);
-                                            tokenBalance = Number(balanceBigInt / divisorBigInt) + Number(balanceBigInt % divisorBigInt) / Number(divisorBigInt);
+                                            const balDivisor = BigInt(10) ** BigInt(24);
+                                            tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
                                           }
                                         }
 
@@ -5366,369 +5963,6 @@ export default function DexScreen() {
               </div>
             </div>
           );})()}
-        </motion.div>
-
-        {/* Token Table */}
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="lg:col-span-3"
-        >
-          <div className="relative group">
-            {/* Glow effect */}
-            <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-2xl blur-lg opacity-30 group-hover:opacity-50 transition-opacity" />
-
-            <div className="relative bg-black/60 backdrop-blur-xl rounded-2xl border border-quantum-purple/20 p-6">
-              <h2 className="text-xl font-bold text-white mb-6">Available Tokens</h2>
-
-              {/* Search and Filters */}
-              <div className="flex flex-col sm:flex-row gap-4 mb-6">
-                {/* Search */}
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search by name, symbol, or address (qnk...)..."
-                    className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-quantum-cyan/50 transition-colors"
-                  />
-                </div>
-
-                {/* Filter Buttons */}
-                <div className="flex gap-2">
-                  {(['all', 'gainers', 'losers'] as const).map((filter) => (
-                    <button
-                      key={filter}
-                      onClick={() => setFilterBy(filter)}
-                      className={`px-4 py-3 rounded-xl font-medium transition-all ${
-                        filterBy === filter
-                          ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-white'
-                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
-                      }`}
-                    >
-                      {filter.charAt(0).toUpperCase() + filter.slice(1)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Table */}
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-white/10">
-                      <th className="text-left py-3 px-4 text-gray-400 font-medium text-sm">Token</th>
-                      <th
-                        onClick={() => handleSort('price')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        Price {sortBy === 'price' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        onClick={() => handleSort('change1h')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        1h % {sortBy === 'change1h' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        onClick={() => handleSort('change24h')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        24h % {sortBy === 'change24h' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        onClick={() => handleSort('change7d')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        7d % {sortBy === 'change7d' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        onClick={() => handleSort('volume24h')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        Volume {sortBy === 'volume24h' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        onClick={() => handleSort('marketCap')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        Market Cap {sortBy === 'marketCap' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                        title="Fully Diluted Valuation (Total Supply × Price)"
-                      >
-                        FDV
-                      </th>
-                      <th
-                        onClick={() => handleSort('liquidity')}
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                      >
-                        Liquidity {sortBy === 'liquidity' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th
-                        className="text-right py-3 px-4 text-gray-400 font-medium text-sm cursor-pointer hover:text-white transition-colors"
-                        onClick={() => handleSort('holders')}
-                      >
-                        Holders {sortBy === 'holders' && (sortDirection === 'asc' ? '↑' : '↓')}
-                      </th>
-                      <th className="text-right py-3 px-4 text-gray-400 font-medium text-sm">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredTokens.map((token, index) => (
-                      <motion.tr
-                        key={token.id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: index * 0.1 }}
-                        className={`border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer relative ${
-                          nitroBoostTokens.has(token.id) ? 'nitro-boost-active' : ''
-                        }`}
-                        onClick={() => setSelectedToken(token)}
-                      >
-                        {/* Nitro boost effects */}
-                        {nitroBoostTokens.has(token.id) && (
-                          <>
-                            <div className="hyperspeed-lines" />
-                            <motion.div
-                              className="absolute inset-0 pointer-events-none"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: [0, 1, 0] }}
-                              transition={{ duration: 2, ease: "easeInOut" }}
-                            >
-                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-500/30 to-transparent" />
-                            </motion.div>
-                          </>
-                        )}
-                        {/* Token Info */}
-                        <td className="py-4 px-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-xl overflow-hidden">
-                              {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
-                                <div className="relative w-7 h-7">
-                                  <div className="absolute inset-0 rounded-full" style={{
-                                    background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                                    padding: '1px'
-                                  }}>
-                                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
-                                      <img
-                                        src="/quillon-logo.png"
-                                        alt="Quillon"
-                                        className="w-full h-full object-contain"
-                                        style={{ filter: 'invert(1)' }}
-                                      />
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : token.isIndexToken ? (
-                                <div className="relative w-7 h-7">
-                                  <div className="absolute inset-0 rounded-full" style={{
-                                    background: 'linear-gradient(135deg, #8B5CF6 0%, #A855F7 50%, #D946EF 100%)',
-                                    padding: '1px'
-                                  }}>
-                                    <div className="w-full h-full bg-gradient-to-b from-purple-950 via-violet-900 to-purple-950 rounded-full flex items-center justify-center">
-                                      <svg className="w-4 h-4 text-purple-300" fill="currentColor" viewBox="0 0 24 24">
-                                        <path d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/>
-                                        <path d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/>
-                                      </svg>
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : token.logoUrl ? (
-                                <img
-                                  src={token.logoUrl}
-                                  alt={token.symbol}
-                                  className="w-8 h-8 rounded-full object-cover"
-                                  onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling && ((e.currentTarget.nextElementSibling as HTMLElement).style.display = 'block'); }}
-                                />
-                              ) : (
-                                token.icon
-                              )}
-                            </div>
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2">
-                                <div className="font-bold text-white">{token.symbol}</div>
-                                {token.isIndexToken && (
-                                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-purple-600 to-violet-600 text-xs font-bold text-white">
-                                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
-                                      <path d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/>
-                                      <path d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/>
-                                    </svg>
-                                    INDEX
-                                  </div>
-                                )}
-                                {token.isPerp && (
-                                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-pink-600 to-purple-600 text-xs font-bold text-white">
-                                    <TrendingUp className="w-3 h-3" />
-                                    PERP
-                                  </div>
-                                )}
-                                {boostedTokens.has(token.id) && (
-                                  <motion.div
-                                    initial={{ scale: 0 }}
-                                    animate={{ scale: 1 }}
-                                    className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-orange-500 to-yellow-500 text-xs font-bold text-white"
-                                  >
-                                    <Zap className="w-3 h-3" />
-                                    NITRO {boostedTokens.get(token.id)}
-                                  </motion.div>
-                                )}
-                              </div>
-                              <div className="text-sm text-gray-400">{token.name}</div>
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* Price - v2.9.27-beta: Fixed small number formatting */}
-                        <td className="py-4 px-4 text-right text-white font-medium">
-                          ${formatPrice(token.price)}
-                        </td>
-
-                        {/* 1h Change - REAL DATA */}
-                        <td className="py-4 px-4 text-right">
-                          <div className={`flex items-center justify-end gap-1 ${
-                            token.change1h > 0 ? 'text-quantum-green' : 'text-red-500'
-                          }`}>
-                            <span className="font-medium">
-                              {token.change1h > 0 ? '+' : ''}{token.change1h.toFixed(2)}%
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* 24h Change */}
-                        <td className="py-4 px-4 text-right">
-                          <div className={`flex items-center justify-end gap-1 ${
-                            token.change24h > 0 ? 'text-quantum-green' : 'text-red-500'
-                          }`}>
-                            {token.change24h > 0 ? (
-                              <TrendingUp className="w-4 h-4" />
-                            ) : (
-                              <TrendingDown className="w-4 h-4" />
-                            )}
-                            <span className="font-medium">
-                              {token.change24h > 0 ? '+' : ''}{token.change24h.toFixed(2)}%
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* 7d Change - REAL DATA */}
-                        <td className="py-4 px-4 text-right">
-                          <div className={`flex items-center justify-end gap-1 ${
-                            token.change7d > 0 ? 'text-quantum-green' : 'text-red-500'
-                          }`}>
-                            <span className="font-medium">
-                              {token.change7d > 0 ? '+' : ''}{token.change7d.toFixed(2)}%
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* Volume */}
-                        <td className="py-4 px-4 text-right text-white font-medium">
-                          {formatNumber(token.volume24h)}
-                        </td>
-
-                        {/* Market Cap */}
-                        <td className="py-4 px-4 text-right text-white font-medium">
-                          ${formatNumber(token.marketCap)}
-                        </td>
-
-                        {/* FDV (Fully Diluted Valuation) - v3.7.1 */}
-                        <td className="py-4 px-4 text-right text-gray-400 font-medium" title="Total Supply × Price">
-                          ${formatNumber(token.totalSupply * token.price)}
-                        </td>
-
-                        {/* Liquidity */}
-                        <td className="py-4 px-4 text-right text-white font-medium">
-                          ${formatNumber(token.liquidity)}
-                        </td>
-
-                        {/* Holders */}
-                        <td className="py-4 px-4 text-right text-gray-400 font-medium">
-                          {token.holders?.toLocaleString() || '0'}
-                        </td>
-
-                        {/* Actions */}
-                        <td className="py-4 px-4 text-right" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-end gap-2">
-                            {/* Special Mint button for QUGUSD - deposits QUG as collateral to mint QUGUSD */}
-                            {token.symbol === 'QUGUSD' && (
-                              <motion.button
-                                onClick={() => setIsMintQUGUSDModalOpen(true)}
-                                className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg text-white font-medium hover:shadow-lg hover:shadow-green-500/50 transition-all flex items-center gap-2"
-                                whileHover={{ scale: 1.05 }}
-                                whileTap={{ scale: 0.95 }}
-                              >
-                                <span className="text-lg">💵</span>
-                                Mint USD
-                              </motion.button>
-                            )}
-                            <motion.button
-                              onClick={() => {
-                                setSwapFrom(token.symbol);
-                                window.scrollTo({ top: 0, behavior: 'smooth' });
-                              }}
-                              className="px-4 py-2 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-lg text-white font-medium hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                            >
-                              Trade
-                            </motion.button>
-                            <motion.button
-                              onClick={() => setLiquidityToken(token)}
-                              className="px-4 py-2 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-lg text-white font-medium hover:shadow-lg hover:shadow-quantum-purple/50 transition-all flex items-center gap-2"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                            >
-                              <Droplet className="w-4 h-4" />
-                              Liquidity
-                            </motion.button>
-                            <motion.button
-                              onClick={() => handleNitroBoost(token)}
-                              className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 rounded-lg text-white font-medium hover:shadow-lg hover:shadow-orange-500/50 transition-all flex items-center gap-2 turbo-button relative overflow-hidden"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                              disabled={nitroBoostTokens.has(token.id)}
-                            >
-                              <Zap className="w-4 h-4" />
-                              Nitro
-                              {nitroBoostTokens.has(token.id) && (
-                                <motion.div
-                                  className="absolute inset-0 bg-gradient-to-r from-yellow-400 to-orange-600"
-                                  initial={{ x: '-100%' }}
-                                  animate={{ x: '200%' }}
-                                  transition={{ duration: 0.6, repeat: 3 }}
-                                />
-                              )}
-                            </motion.button>
-                            {/* AI Token Analyzer Button */}
-                            <motion.button
-                              onClick={() => handleAIAnalyze(token)}
-                              className="px-4 py-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 rounded-lg text-white font-medium hover:shadow-lg hover:shadow-violet-500/50 transition-all flex items-center gap-2"
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                              title="AI Token Analysis"
-                            >
-                              <Brain className="w-4 h-4" />
-                              AI
-                            </motion.button>
-                          </div>
-                        </td>
-                      </motion.tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {filteredTokens.length === 0 && (
-                  <div className="text-center py-12">
-                    <Info className="w-12 h-12 text-gray-600 mx-auto mb-4" />
-                    <p className="text-gray-400">No tokens found matching your criteria</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
         </motion.div>
 
         {/* AI Market Analyzer Panel - Full Width Below Token Table */}
@@ -6322,14 +6556,17 @@ export default function DexScreen() {
 
                       setLoadingDca(true);
                       try {
+                        // v4.0.11: ALL amounts use 24 decimals (internal pool format)
+                        const fromTokenData = findToken(swapFrom);
+                        const dcaAmountBigInt = parseAmountToBigInt(dcaAmount, 24);
                         const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/dca/orders`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
                             wallet_address: walletAddress,
-                            from_token: swapFrom === 'QUG' ? 'QUG' : findToken(swapFrom)?.id || swapFrom,
+                            from_token: swapFrom === 'QUG' ? 'QUG' : fromTokenData?.id || swapFrom,
                             to_token: swapTo === 'QUG' ? 'QUG' : findToken(swapTo)?.id || swapTo,
-                            amount_per_execution: Math.floor(parseFloat(dcaAmount) * 1e24),
+                            amount_per_execution: dcaAmountBigInt.toString(),
                             interval: dcaInterval,
                             max_slippage: 0.03,
                             max_executions: dcaMaxExecutions ? parseInt(dcaMaxExecutions) : null,

@@ -390,12 +390,28 @@ pub async fn get_supported_tokens(
         // Check if this contract has token metadata (symbol indicates it's a token)
         if let Some(symbol) = &contract.metadata.symbol {
             // Get token details from deployment params
-            let total_supply = contract
+            // v4.0.15: Pass through raw supply - frontend handles arbitrary sizes
+            let total_supply_str = contract
                 .deployment_params
                 .get("initialSupply")
                 .or_else(|| contract.deployment_params.get("initial_supply"))
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
-                .unwrap_or(0);
+                .map(|v| {
+                    if let Some(n) = v.as_u64() {
+                        n.to_string()
+                    } else if let Some(s) = v.as_str() {
+                        // Try parsing as u128 first (exact), fall back to f64 for scientific notation
+                        if let Ok(n) = s.parse::<u128>() {
+                            n.to_string()
+                        } else if let Ok(f) = s.parse::<f64>() {
+                            format!("{:.0}", f)
+                        } else {
+                            "0".to_string()
+                        }
+                    } else {
+                        v.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "0".to_string());
 
             let name = if contract.metadata.name.is_empty() {
                 symbol.clone()
@@ -409,7 +425,7 @@ pub async fn get_supported_tokens(
                 name,
                 symbol: symbol.clone(),
                 decimals,
-                total_supply: total_supply.to_string(),
+                total_supply: total_supply_str.clone(),
                 contract_type: "Custom".to_string(),
                 verified: false, // Custom tokens are not verified by default
                 audit_report: None,
@@ -419,7 +435,7 @@ pub async fn get_supported_tokens(
                 "✅ Added custom token to DEX listing: {} ({}) - Supply: {}",
                 symbol,
                 hex::encode(&contract.address.0[..8]),
-                total_supply
+                total_supply_str
             );
         }
     }
@@ -1105,15 +1121,15 @@ pub async fn get_token_price(
     let qugusd_address = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS);
     let token_upper = token.to_uppercase();
 
-    // Get current QUG price from CollateralVault (with fallback to correct price)
-    // v1.0.50-beta: CRITICAL FIX - Ensure QUG price is correct even if vault has stale data
-    const CORRECT_QUG_PRICE_USD: f64 = 42.50;
-    let vault_price = state.collateral_vault.read().await.qug_price_usd;
-    let qug_price_usd = if (vault_price - CORRECT_QUG_PRICE_USD).abs() > 0.01 {
-        tracing::warn!("⚠️ [DEX] Vault QUG price ${:.2} differs from expected ${:.2}, using correct price", vault_price, CORRECT_QUG_PRICE_USD);
-        CORRECT_QUG_PRICE_USD
-    } else {
-        vault_price
+    // v4.0.4: Get QUG price from vault (which is updated from AMM after each swap)
+    // Previously forced to hardcoded $42.50 which prevented price discovery
+    let qug_price_usd = {
+        let vault_price = state.collateral_vault.read().await.qug_price_usd;
+        if vault_price > 0.0 {
+            vault_price
+        } else {
+            42.50 // Only use default if vault has no price at all
+        }
     };
 
     let price = if token == qug_address || token_upper == "QUG" {

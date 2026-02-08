@@ -1,13 +1,15 @@
 use libp2p::{
     gossipsub::{self, MessageAuthenticity, IdentTopic, Event as GossipsubEvent},
     identify,
-    mdns,
     noise,
     swarm::{Swarm, SwarmEvent, NetworkBehaviour},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
+#[cfg(target_os = "linux")]
+use libp2p::mdns;
 use libp2p_websocket as websocket;
 use libp2p::identity::Keypair as Libp2pKeypair;
+#[cfg(target_os = "linux")]
 use libp2p::mdns::Event as MdnsEvent;
 use futures::StreamExt;
 use anyhow::{Error as AnyhowError, Result};
@@ -43,7 +45,8 @@ pub enum BridgeEvent {
     },
 }
 
-/// Custom libp2p behaviour combining gossip, mDNS, and identification
+/// Custom libp2p behaviour combining gossip, mDNS (Linux), and identification
+#[cfg(target_os = "linux")]
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "QnkBehaviourEvent")]
 struct QnkBehaviour {
@@ -52,9 +55,18 @@ struct QnkBehaviour {
     identify: identify::Behaviour,
 }
 
+#[cfg(not(target_os = "linux"))]
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "QnkBehaviourEvent")]
+struct QnkBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    identify: identify::Behaviour,
+}
+
 #[derive(Debug)]
 enum QnkBehaviourEvent {
     Gossipsub(gossipsub::Event),
+    #[cfg(target_os = "linux")]
     Mdns(MdnsEvent),
     Identify(identify::Event),
 }
@@ -65,6 +77,7 @@ impl From<gossipsub::Event> for QnkBehaviourEvent {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl From<MdnsEvent> for QnkBehaviourEvent {
     fn from(event: MdnsEvent) -> Self {
         QnkBehaviourEvent::Mdns(event)
@@ -137,16 +150,25 @@ impl Libp2pBridge {
         ).map_err(|e| anyhow::anyhow!("Failed to create gossipsub behaviour: {}", e))?;
 
         // Behaviour configuration
+        let identify = identify::Behaviour::new(identify::Config::new(
+            "/qnarwhal/1.0.0".to_string(),  // v1.0.2-beta: Standardized protocol ID for P2P compatibility
+            local_key.public(),
+        ));
+
+        #[cfg(target_os = "linux")]
         let behaviour = QnkBehaviour {
             gossipsub,
             mdns: mdns::Behaviour::new(
                 mdns::Config::default(),
                 peer_id,
             )?,
-            identify: identify::Behaviour::new(identify::Config::new(
-                "/qnarwhal/1.0.0".to_string(),  // v1.0.2-beta: Standardized protocol ID for P2P compatibility
-                local_key.public(),
-            )),
+            identify,
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let behaviour = QnkBehaviour {
+            gossipsub,
+            identify,
         };
 
         let mut swarm = Swarm::new(transport, behaviour, peer_id, libp2p::swarm::Config::with_tokio_executor());
@@ -290,6 +312,7 @@ impl Libp2pBridge {
     /// Process libp2p swarm events
     async fn handle_swarm_event(&mut self, event: SwarmEvent<QnkBehaviourEvent>) -> Result<()> {
         match event {
+            #[cfg(target_os = "linux")]
             SwarmEvent::Behaviour(QnkBehaviourEvent::Mdns(mdns_event)) => {
                 match mdns_event {
                     mdns::Event::Discovered(peers) => {

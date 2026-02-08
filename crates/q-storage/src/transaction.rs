@@ -27,7 +27,11 @@ use tracing::{debug, error, info, warn};
 use rocksdb::{WriteBatch, WriteOptions};
 
 use crate::balance_consensus::BalanceUpdate;
-use crate::kv::{KVStore, RocksDBKV};
+use crate::kv::KVStore;
+#[cfg(not(target_os = "windows"))]
+use crate::kv::RocksDBKV;
+#[cfg(target_os = "windows")]
+use crate::kv_sled::RocksDBKV;
 
 // For block serialization and hashing
 use sha2::{Sha256, Digest};
@@ -472,35 +476,246 @@ impl Drop for QTransaction {
     }
 }
 
-// Windows stub (uses sled which doesn't have WriteBatch)
+// Windows implementation using sled::Batch for atomic writes
 #[cfg(target_os = "windows")]
 pub struct QTransaction {
+    /// Buffered operations per sled tree (column family equivalent)
+    /// Each entry: (tree_name, key, value) for puts, or (tree_name, key, empty) for deletes
+    ops: Arc<Mutex<Vec<(String, Vec<u8>, Option<Vec<u8>>)>>>,
+
+    /// Reference to hot database
+    hot_db: Arc<RocksDBKV>,
+
+    /// Transaction state
+    state: Arc<Mutex<TransactionState>>,
+
+    /// Balance updates tracked for logging
+    balance_updates: Arc<Mutex<Vec<BalanceUpdate>>>,
+
+    /// Transaction ID
     tx_id: u64,
+
+    /// Track max block height saved in this transaction
+    max_saved_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(target_os = "windows")]
 impl QTransaction {
-    pub fn new(_hot_db: Arc<crate::kv_sled::RocksDBKV>, tx_id: u64) -> Self {
-        Self { tx_id }
+    pub fn new(hot_db: Arc<RocksDBKV>, tx_id: u64) -> Self {
+        debug!("🔄 Transaction {} created (sled)", tx_id);
+        Self {
+            ops: Arc::new(Mutex::new(Vec::new())),
+            hot_db,
+            state: Arc::new(Mutex::new(TransactionState::Active)),
+            balance_updates: Arc::new(Mutex::new(Vec::new())),
+            tx_id,
+            max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
-    pub async fn put(&self, _cf: &str, _key: &[u8], _value: &[u8]) -> Result<()> {
-        Err(anyhow!("Transactions not supported on Windows"))
-    }
+    pub async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        let state = self.state.lock().await;
+        if *state != TransactionState::Active {
+            return Err(anyhow!("Transaction {} is not active (state: {:?})", self.tx_id, *state));
+        }
+        drop(state);
 
-    pub async fn delete(&self, _cf: &str, _key: &[u8]) -> Result<()> {
-        Err(anyhow!("Transactions not supported on Windows"))
-    }
-
-    pub async fn track_balance_update(&self, _update: BalanceUpdate) -> Result<()> {
+        let mut ops = self.ops.lock().await;
+        ops.push((cf.to_string(), key.to_vec(), Some(value.to_vec())));
+        debug!("🔄 Transaction {}: PUT {} bytes to CF {}", self.tx_id, value.len(), cf);
         Ok(())
     }
 
+    pub async fn delete(&self, cf: &str, key: &[u8]) -> Result<()> {
+        let state = self.state.lock().await;
+        if *state != TransactionState::Active {
+            return Err(anyhow!("Transaction {} is not active (state: {:?})", self.tx_id, *state));
+        }
+        drop(state);
+
+        let mut ops = self.ops.lock().await;
+        ops.push((cf.to_string(), key.to_vec(), None));
+        debug!("🔄 Transaction {}: DELETE from CF {}", self.tx_id, cf);
+        Ok(())
+    }
+
+    pub async fn save_qblock(&self, block: &q_types::QBlock) -> Result<()> {
+        let block_bytes = bincode::serialize(block)
+            .context("Failed to serialize block with bincode")?;
+
+        let height_key = format!("qblock:height:{}", block.header.height);
+        self.put("blocks", height_key.as_bytes(), &block_bytes).await?;
+
+        // Store block hash -> height mapping
+        let block_hash = self.calculate_block_hash_for_storage(block);
+        let height_bytes = block.header.height.to_be_bytes();
+        self.put("block_hash_to_height", &block_hash, &height_bytes).await?;
+
+        // Track max height for pointer update on commit
+        use std::sync::atomic::Ordering;
+        let current_max = self.max_saved_height.load(Ordering::SeqCst);
+        if block.header.height > current_max {
+            self.max_saved_height.store(block.header.height, Ordering::SeqCst);
+        }
+
+        // Update pointer if contiguous extension
+        let current_pointer = self.get_current_height_from_pointer().await?;
+        if block.header.height == 0 || block.header.height == current_pointer + 1 {
+            if block.header.height < current_pointer && current_pointer > 1000 {
+                error!("🚨 [TRANSACTION] BLOCKED HEIGHT REGRESSION: {} → {} (keeping {})",
+                       current_pointer, block.header.height, current_pointer);
+            } else {
+                self.put("blocks", b"qblock:latest", &height_bytes).await?;
+                info!("📊 [STATE-TRANSITION] POINTER ADVANCED: {} → {} | block_hash={}",
+                      current_pointer, block.header.height, hex::encode(&block_hash[..8]));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_current_height_from_pointer(&self) -> Result<u64> {
+        match self.get("blocks", b"qblock:latest").await? {
+            Some(bytes) if bytes.len() == 8 => {
+                Ok(u64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ]))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    fn calculate_block_hash_for_storage(&self, block: &q_types::QBlock) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(&block.header.height.to_be_bytes());
+        hasher.update(&block.header.timestamp.to_be_bytes());
+        hasher.update(&block.header.prev_block_hash);
+        hasher.update(&block.header.solutions_root);
+
+        for solution in &block.mining_solutions {
+            hasher.update(&solution.miner_address);
+            hasher.update(&solution.nonce.to_be_bytes());
+            hasher.update(&solution.difficulty_target);
+            hasher.update(&solution.timestamp.to_be_bytes());
+            hasher.update(&solution.hash);
+        }
+
+        for tx in &block.transactions {
+            if let Ok(tx_bytes) = postcard::to_allocvec(tx) {
+                hasher.update(&tx_bytes);
+            }
+        }
+
+        let hash = hasher.finalize();
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        result
+    }
+
+    pub async fn track_balance_update(&self, update: BalanceUpdate) -> Result<()> {
+        let mut updates = self.balance_updates.lock().await;
+        updates.push(update);
+        Ok(())
+    }
+
+    pub fn hot_db(&self) -> &Arc<RocksDBKV> {
+        &self.hot_db
+    }
+
+    pub async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        use crate::kv::KVStore;
+        self.hot_db.get(cf, key).await
+    }
+
     pub async fn commit(self) -> Result<()> {
-        Err(anyhow!("Transactions not supported on Windows"))
+        let mut state = self.state.lock().await;
+        if *state != TransactionState::Active {
+            return Err(anyhow!("Transaction {} already completed (state: {:?})", self.tx_id, *state));
+        }
+
+        debug!("💾 Committing transaction {} (sled)...", self.tx_id);
+        let start = std::time::Instant::now();
+
+        let ops = self.ops.lock().await;
+
+        // Add qblock:latest pointer update if we saved blocks
+        use std::sync::atomic::Ordering;
+        let max_height = self.max_saved_height.load(Ordering::SeqCst);
+        let mut extra_puts: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+        if max_height > 0 {
+            use crate::kv::KVStore;
+            let current_pointer = match self.hot_db.get("blocks", b"qblock:latest").await {
+                Ok(Some(bytes)) if bytes.len() == 8 => {
+                    u64::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                                        bytes[4], bytes[5], bytes[6], bytes[7]])
+                }
+                _ => 0,
+            };
+
+            if max_height > current_pointer {
+                let height_bytes = max_height.to_be_bytes();
+                extra_puts.push(("blocks".to_string(), b"qblock:latest".to_vec(), height_bytes.to_vec()));
+                info!("✅ Transaction {}: Batch sync pointer update {} -> {} (advancing by {} blocks)",
+                      self.tx_id, current_pointer, max_height, max_height - current_pointer);
+            }
+        }
+
+        // Collect puts and deletes
+        use crate::kv::KVStore;
+        let mut puts: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+        for (cf, key, value) in ops.iter() {
+            if let Some(v) = value {
+                puts.push((cf.as_str(), key.clone(), v.clone()));
+            } else {
+                // Apply deletes directly (sled batch only supports inserts+removes per tree)
+                self.hot_db.delete(cf, key).await?;
+            }
+        }
+
+        // Add the extra pointer update puts
+        for (cf, key, value) in &extra_puts {
+            puts.push((cf.as_str(), key.clone(), value.clone()));
+        }
+
+        // Apply all puts as a batch (uses sled::Batch per tree internally)
+        if !puts.is_empty() {
+            self.hot_db.write_batch(puts).await
+                .context("sled batch commit failed")?;
+        }
+
+        // Flush to ensure durability (equivalent to RocksDB's set_sync(true))
+        self.hot_db.flush().await
+            .context("sled flush after commit failed")?;
+
+        let elapsed = start.elapsed();
+        *state = TransactionState::Committed;
+        drop(state);
+
+        let updates = self.balance_updates.lock().await;
+        info!("✅ Transaction {} committed successfully ({} balance updates, {:?}, sled)",
+              self.tx_id, updates.len(), elapsed);
+
+        if elapsed.as_millis() > 10 {
+            warn!("⚠️  Transaction {} commit took {:?} (target: <10ms)", self.tx_id, elapsed);
+        }
+
+        Ok(())
     }
 
     pub async fn rollback(self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        if *state == TransactionState::Committed {
+            return Err(anyhow!("Cannot rollback transaction {} - already committed", self.tx_id));
+        }
+        if *state == TransactionState::Aborted {
+            return Ok(());
+        }
+        *state = TransactionState::Aborted;
+        drop(state);
+
+        let updates = self.balance_updates.lock().await;
+        warn!("⏮️  Transaction {} rolled back ({} balance updates discarded)", self.tx_id, updates.len());
         Ok(())
     }
 
@@ -509,7 +724,20 @@ impl QTransaction {
     }
 
     pub async fn is_active(&self) -> bool {
-        false
+        let state = self.state.lock().await;
+        *state == TransactionState::Active
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for QTransaction {
+    fn drop(&mut self) {
+        if let Ok(state) = self.state.try_lock() {
+            if *state == TransactionState::Active {
+                error!("🚨 Transaction {} dropped without commit or rollback!", self.tx_id);
+                error!("   This will cause automatic rollback - no data written");
+            }
+        }
     }
 }
 

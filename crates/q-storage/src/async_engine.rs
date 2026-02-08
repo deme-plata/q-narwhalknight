@@ -17,6 +17,7 @@
 //                                           └─ Zero async runtime contention
 
 use anyhow::{Context, Result};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{DB, WriteBatch, WriteOptions};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

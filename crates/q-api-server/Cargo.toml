@@ -21,6 +21,9 @@ name = "quillon-bank-cli"
 path = "src/bin/quillon-bank-cli.rs"
 
 [dependencies]
+# Vendored OpenSSL for cross-compilation (ARM64, etc.)
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
 q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
 # 🔐 v1.3.12-beta: Required for SQIsign post-quantum consensus signatures
@@ -109,7 +112,7 @@ q-sharding = { path = "../q-sharding" }
 # q-cache = { path = "../q-cache" } # Temporarily disabled due to compilation errors
 q-dag-knight = { path = "../q-dag-knight", features = ["advanced-crypto"] }  # v1.0.60-beta: Genus-2 VDF enabled by default
 q-narwhal-core = { path = "../q-narwhal-core" }
-q-resonance = { path = "../q-resonance" } # ✅ ENABLED - K-Parameter quantum phase analysis!
+q-resonance = { path = "../q-resonance", optional = true } # K-Parameter quantum phase analysis
 q-vdf = { path = "../q-vdf" }
 q-quantum-crypto = { path = "../q-quantum-crypto" }
 q-dex = { path = "../q-dex" } # ✅ ENABLED - BigDecimal issues fixed!
@@ -211,8 +214,10 @@ q-benchmarks = { path = "../q-benchmarks" }
 # v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
 # 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus
 # ✨ v2.2.1-beta: Mining pool ALWAYS enabled - Stratum + PPLNS
-default = ["tui"]
+default = ["tui", "resonance"]
 tui = ["q-tui"]
+vendored-openssl = ["openssl"]
+resonance = ["q-resonance", "q-network/resonance"]
 # ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
 # Note: q-crypto-advanced is now always included for SQIsign consensus
 advanced-crypto = []  # Feature flag kept for backwards compat, but dep is always included

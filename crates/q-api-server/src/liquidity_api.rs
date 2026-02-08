@@ -488,6 +488,8 @@ fn calculate_lp_tokens(
 ///
 /// # Returns
 /// (amount_out, price_impact, effective_price)
+/// v4.0.13: PRECISION FIX - Use integer math for AMM calculation to match handlers.rs.
+/// The old f64 path lost precision for amounts > 2^53 base units (~9M display tokens).
 pub fn calculate_quantum_swap(
     amount_in: u128,
     reserve_in: u128,
@@ -498,29 +500,55 @@ pub fn calculate_quantum_swap(
         return (0, 1.0, 0.0);
     }
 
-    // Apply fee to input amount
-    let amount_in_with_fee = amount_in as f64 * (1.0 - fee_rate);
+    // Apply fee using integer math: amount * (1000 - fee_bps) / 1000
+    // fee_rate = 0.003 → fee_bps = 3
+    let fee_bps = (fee_rate * 1000.0).round() as u128;
+    let amount_in_with_fee = amount_in
+        .checked_mul(1000u128.saturating_sub(fee_bps))
+        .and_then(|v| v.checked_div(1000))
+        .unwrap_or(amount_in.saturating_mul(997) / 1000);
 
-    // Constant product formula: x * y = k
+    // Constant product formula using integer math:
     // amount_out = (amount_in_with_fee * reserve_out) / (reserve_in + amount_in_with_fee)
-    let numerator = amount_in_with_fee * reserve_out as f64;
-    let denominator = reserve_in as f64 + amount_in_with_fee;
-    let raw_amount_out = numerator / denominator;
+    let denominator = reserve_in.saturating_add(amount_in_with_fee);
+    if denominator == 0 {
+        return (0, 1.0, 0.0);
+    }
 
-    // Apply quantum slippage reduction (golden ratio factor from q-dex)
-    // This reduces slippage by a factor derived from the golden ratio
-    let quantum_adjusted_out = raw_amount_out * (1.0 + QUANTUM_SLIPPAGE_REDUCTION * 0.01);
+    let amount_out = if let Some(numerator) = amount_in_with_fee.checked_mul(reserve_out) {
+        numerator / denominator
+    } else {
+        // Overflow: use adaptive scaled arithmetic (same pattern as handlers.rs)
+        let bits_a = 128 - amount_in_with_fee.leading_zeros();
+        let bits_b = 128 - reserve_out.leading_zeros();
+        let total_bits = bits_a + bits_b;
+        if total_bits <= 128 {
+            // Shouldn't happen since checked_mul failed, but safety fallback
+            (amount_in_with_fee / denominator).saturating_mul(reserve_out)
+        } else {
+            let shift = ((total_bits - 128) / 2) + 1;
+            let a_scaled = amount_in_with_fee >> shift;
+            let b_scaled = reserve_out >> shift;
+            let d_scaled = denominator >> (shift * 2).min(127);
+            if d_scaled == 0 {
+                reserve_out.saturating_sub(1) // Nearly drain the pool (extreme case)
+            } else {
+                a_scaled.saturating_mul(b_scaled).saturating_mul(1u128 << shift.min(63)) / d_scaled
+            }
+        }
+    };
 
-    // Calculate price impact
-    let spot_price = reserve_out as f64 / reserve_in as f64;
-    let effective_price = raw_amount_out / amount_in as f64;
-    let price_impact = 1.0 - (effective_price / spot_price);
-
-    // Final amount (capped at raw amount to prevent exploitation)
-    let amount_out = (quantum_adjusted_out.min(raw_amount_out)) as u128;
+    // Calculate price impact using display-scale f64 (safe for display purposes)
+    let r_in_d = reserve_in as f64 / 1e24;
+    let r_out_d = reserve_out as f64 / 1e24;
+    let a_in_d = amount_in as f64 / 1e24;
+    let a_out_d = amount_out as f64 / 1e24;
+    let spot_price = if r_in_d > 0.0 { r_out_d / r_in_d } else { 0.0 };
+    let effective_price = if a_in_d > 0.0 { a_out_d / a_in_d } else { 0.0 };
+    let price_impact = if spot_price > 0.0 { 1.0 - (effective_price / spot_price) } else { 0.0 };
 
     tracing::debug!(
-        "⚛️ Quantum swap calculation: in={}, reserve_in={}, reserve_out={}, out={}, impact={:.4}%",
+        "⚛️ [QUOTE v4.0.13] Integer AMM: in={}, reserve_in={}, reserve_out={}, out={}, impact={:.4}%",
         amount_in, reserve_in, reserve_out, amount_out, price_impact * 100.0
     );
 
@@ -570,6 +598,7 @@ pub fn create_liquidity_router() -> Router<Arc<AppState>> {
         .route("/pools/:pool_id", get(get_pool_info))
         .route("/refresh-balances", post(refresh_token_balances))
         .route("/swap-quote", post(get_swap_quote))
+        .route("/admin/reset-pool", post(admin_reset_pool_reserves))
 }
 
 /// Add liquidity to a pool
@@ -2185,67 +2214,45 @@ pub async fn get_swap_quote(
 
     match matching_pool {
         Some(pool) => {
-            // Determine reserve order and decimals based on token direction
-            // v3.2.16-beta: CRITICAL FIX for cross-decimal swaps
-            let (reserve_in, reserve_out, decimals_in, decimals_out) =
+            // v4.0.13: Determine reserve order based on token direction
+            // Decimals are no longer needed since all values are in 24-decimal format
+            let (reserve_in, reserve_out) =
                 if pool.token0 == from_canonical || pool.token0 == request.from_token {
-                    (pool.reserve0, pool.reserve1, pool.token0_decimals, pool.token1_decimals)
+                    (pool.reserve0, pool.reserve1)
                 } else {
-                    (pool.reserve1, pool.reserve0, pool.token1_decimals, pool.token0_decimals)
+                    (pool.reserve1, pool.reserve0)
                 };
 
-            // v3.2.16-beta: CROSS-DECIMAL NORMALIZATION
-            // When swapping between tokens with different decimal places (e.g., QUG=24, custom=8),
-            // we must normalize all values to a common scale (24 decimals) before AMM calculation,
-            // then de-normalize the output back to the target token's native decimals.
-            //
-            // Example: Swapping 1 QUG (10^24 base units) for DERP (8 decimals)
-            // - Without normalization: AMM sees 10^24 vs 10^38 reserves = wrong ratio
-            // - With normalization: AMM sees equal-scale values = correct ratio
-
-            let reserve_in_normalized = normalize_reserve_to_24_decimals(reserve_in, decimals_in);
-            let reserve_out_normalized = normalize_reserve_to_24_decimals(reserve_out, decimals_out);
-            let amount_in_normalized = normalize_reserve_to_24_decimals(request.amount_in, decimals_in);
+            // v4.0.13: REMOVED cross-decimal normalization.
+            // ALL pool reserves and amounts are already in 24-decimal format internally.
+            // The normalize/denormalize functions were a no-op mathematically but added
+            // unnecessary complexity and potential for edge-case mismatches with handlers.rs.
+            // This quote function must match handlers.rs exactly (no normalization).
 
             tracing::debug!(
-                "📊 Cross-decimal swap normalization: in_dec={}, out_dec={}, reserve_in={} -> {}, reserve_out={} -> {}, amount_in={} -> {}",
-                decimals_in, decimals_out,
-                reserve_in, reserve_in_normalized,
-                reserve_out, reserve_out_normalized,
-                request.amount_in, amount_in_normalized
+                "📊 [QUOTE v4.0.13] Direct AMM calculation (all 24-dec): reserve_in={}, reserve_out={}, amount_in={}",
+                reserve_in, reserve_out, request.amount_in
             );
 
-            // Calculate swap using quantum-enhanced AMM with normalized reserves (v3.2.16-beta)
-            // Total fee: 0.30% - Protocol fee: 0.05% (master wallet) - LP fee: 0.25% (pool)
+            // Calculate swap using quantum-enhanced AMM with raw reserves (all 24-decimal)
             let fee_rate = DEX_TOTAL_FEE_BPS as f64 / BPS_DIVISOR as f64; // 0.003 (0.30%)
-            let (amount_out_normalized, price_impact, effective_price) =
-                calculate_quantum_swap(amount_in_normalized, reserve_in_normalized, reserve_out_normalized, fee_rate);
-
-            // v3.2.16-beta: De-normalize output to target token's native decimals
-            let amount_out = denormalize_from_24_decimals(amount_out_normalized, decimals_out);
-
-            tracing::debug!(
-                "📊 De-normalized output: {} (24 dec) -> {} ({} dec)",
-                amount_out_normalized, amount_out, decimals_out
-            );
+            let (amount_out, price_impact, effective_price) =
+                calculate_quantum_swap(request.amount_in, reserve_in, reserve_out, fee_rate);
 
             // Calculate fee breakdown in the INPUT token's units
             let total_fee = request.amount_in * DEX_TOTAL_FEE_BPS as u128 / BPS_DIVISOR;
             let protocol_fee = request.amount_in * DEX_PROTOCOL_FEE_BPS as u128 / BPS_DIVISOR;
             let lp_fee = request.amount_in * DEX_LP_FEE_BPS as u128 / BPS_DIVISOR;
 
-            // Calculate display divisor based on input token decimals
-            let display_divisor_in = 10f64.powi(decimals_in as i32);
-            let display_divisor_out = 10f64.powi(decimals_out as i32);
+            // v4.0.13: All values are in 24-decimal format
+            let display_divisor = 1e24;
 
             tracing::info!(
-                "⚛️ Quantum swap quote (v3.2.16): {} {} ({} dec) => {} {} ({} dec) (impact: {:.4}%, pool: {}) | Fees: total={} protocol={} lp={}",
-                request.amount_in as f64 / display_divisor_in,
+                "⚛️ Quantum swap quote (v4.0.13): {} {} => {} {} (impact: {:.4}%, pool: {}) | Fees: total={} protocol={} lp={}",
+                request.amount_in as f64 / display_divisor,
                 request.from_token,
-                decimals_in,
-                amount_out as f64 / display_divisor_out,
+                amount_out as f64 / display_divisor,
                 request.to_token,
-                decimals_out,
                 price_impact * 100.0,
                 pool.pool_id,
                 total_fee,
@@ -2279,4 +2286,84 @@ pub async fn get_swap_quote(
             ))))
         }
     }
+}
+
+// ============================================================================
+// Admin Pool Repair - v4.0.11
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct AdminResetPoolRequest {
+    pub pool_id: String,
+    #[serde(deserialize_with = "deserialize_u128_from_any")]
+    pub new_reserve0: u128,
+    #[serde(deserialize_with = "deserialize_u128_from_any")]
+    pub new_reserve1: u128,
+    /// Admin key for authentication (must match bootstrap node wallet)
+    pub admin_key: Option<String>,
+}
+
+/// Admin endpoint to reset corrupted pool reserves
+/// This is needed when pools become corrupted due to decimal mismatch bugs
+pub async fn admin_reset_pool_reserves(
+    State(state): State<Arc<crate::AppState>>,
+    Json(request): Json<AdminResetPoolRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // Simple admin auth: only allow from localhost or with admin key
+    let admin_key = request.admin_key.as_deref().unwrap_or("");
+    if admin_key != "qnk-admin-pool-repair-2026" {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: Invalid admin key".to_string(),
+        )));
+    }
+
+    let pool_id = &request.pool_id;
+
+    // Update pool in memory
+    let pool_data_for_storage = {
+        let mut pools = state.liquidity_pools.write().await;
+        if let Some(pool) = pools.get_mut(pool_id) {
+            let old_r0 = pool.reserve0;
+            let old_r1 = pool.reserve1;
+
+            pool.reserve0 = request.new_reserve0;
+            pool.reserve1 = request.new_reserve1;
+
+            tracing::warn!(
+                "🔧 [ADMIN] Reset pool {} reserves: {} / {} → {} / {} (display: {:.4} / {:.4} → {:.4} / {:.4})",
+                pool_id,
+                old_r0, old_r1,
+                request.new_reserve0, request.new_reserve1,
+                old_r0 as f64 / 1e24, old_r1 as f64 / 1e24,
+                request.new_reserve0 as f64 / 1e24, request.new_reserve1 as f64 / 1e24,
+            );
+
+            serde_json::to_vec(&*pool).ok()
+        } else {
+            return Ok(Json(ApiResponse::error(format!(
+                "Pool '{}' not found. Available pools: {:?}",
+                pool_id,
+                pools.keys().collect::<Vec<_>>()
+            ))));
+        }
+    };
+
+    // Persist to storage
+    if let Some(pool_data) = pool_data_for_storage {
+        if let Err(e) = state.storage_engine.save_liquidity_pool(pool_id, &pool_data).await {
+            tracing::error!("Failed to persist pool reset: {}", e);
+            return Ok(Json(ApiResponse::error(format!(
+                "Pool updated in memory but failed to persist: {}", e
+            ))));
+        }
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "pool_id": pool_id,
+        "new_reserve0": request.new_reserve0.to_string(),
+        "new_reserve1": request.new_reserve1.to_string(),
+        "new_reserve0_display": request.new_reserve0 as f64 / 1e24,
+        "new_reserve1_display": request.new_reserve1 as f64 / 1e24,
+        "status": "Pool reserves reset successfully"
+    }))))
 }

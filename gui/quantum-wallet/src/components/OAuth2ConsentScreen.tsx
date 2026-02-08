@@ -113,7 +113,10 @@ export default function OAuth2ConsentScreen({ clientId, redirectUri, scope, stat
           client_id: client.client_id,
           scopes: scopes,
           approved: true,
-          auth_request_id: urlParams.get('state') || ''
+          auth_request_id: urlParams.get('state') || '',
+          redirect_uri: redirectUri || urlParams.get('redirect_uri') || undefined,
+          code_challenge: urlParams.get('code_challenge') || undefined,
+          code_challenge_method: urlParams.get('code_challenge_method') || undefined,
         })
       });
 

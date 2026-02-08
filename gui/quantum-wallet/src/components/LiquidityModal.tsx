@@ -29,6 +29,22 @@ const toNum = (val: number | string | undefined | null): number => {
   return isNaN(num) ? 0 : num;
 };
 
+// v4.0.15: Format large balances compactly (e.g., 1e29 → "100.00Sx")
+const formatLargeBalance = (val: number): string => {
+  if (!isFinite(val) || isNaN(val)) return '0';
+  if (val >= 1e30) return `${(val / 1e30).toFixed(2)} Nonillion`;
+  if (val >= 1e27) return `${(val / 1e27).toFixed(2)} Octillion`;
+  if (val >= 1e24) return `${(val / 1e24).toFixed(2)} Septillion`;
+  if (val >= 1e21) return `${(val / 1e21).toFixed(2)} Sextillion`;
+  if (val >= 1e18) return `${(val / 1e18).toFixed(2)} Quintillion`;
+  if (val >= 1e15) return `${(val / 1e15).toFixed(2)} Quadrillion`;
+  if (val >= 1e12) return `${(val / 1e12).toFixed(2)} Trillion`;
+  if (val >= 1e9) return `${(val / 1e9).toFixed(2)} Billion`;
+  if (val >= 1e6) return `${(val / 1e6).toFixed(2)} Million`;
+  if (val >= 10000) return `${(val / 1000).toFixed(1)}K`;
+  return val.toFixed(4);
+};
+
 // v3.2.22-beta: Helper to format very small prices (e.g., 1e-28)
 // toFixed(8) can't display prices smaller than 0.00000001
 const formatSmallPrice = (price: number): string => {
@@ -285,15 +301,16 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           </div>
                           <div className="text-right">
                             <div className="text-xs text-gray-400">Balance</div>
-                            <div className="text-sm text-white font-medium">{toNum(token.balance).toFixed(4)}</div>
+                            <div className="text-sm text-white font-medium" title={toNum(token.balance).toLocaleString()}>{formatLargeBalance(toNum(token.balance))}</div>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <input
-                            type="number"
+                            type="text"
                             value={amount1}
-                            onChange={(e) => handleAmount1Change(e.target.value)}
+                            onChange={(e) => { if (/^[0-9]*\.?[0-9]*$/.test(e.target.value) || e.target.value === '') handleAmount1Change(e.target.value); }}
                             placeholder="0.0"
+                            inputMode="decimal"
                             className={`flex-1 bg-transparent text-2xl font-bold focus:outline-none ${
                               parseFloat(amount1 || '0') > toNum(token.balance) ? 'text-red-500' : 'text-white'
                             }`}
@@ -346,15 +363,16 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                           </select>
                           <div className="text-right">
                             <div className="text-xs text-gray-400">Balance</div>
-                            <div className="text-sm text-white font-medium">{toNum(pairToken?.balance).toFixed(4)}</div>
+                            <div className="text-sm text-white font-medium" title={toNum(pairToken?.balance).toLocaleString()}>{formatLargeBalance(toNum(pairToken?.balance))}</div>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <input
-                            type="number"
+                            type="text"
                             value={amount2}
-                            onChange={(e) => handleAmount2Change(e.target.value)}
+                            onChange={(e) => { if (/^[0-9]*\.?[0-9]*$/.test(e.target.value) || e.target.value === '') handleAmount2Change(e.target.value); }}
                             placeholder="0.0"
+                            inputMode="decimal"
                             className={`flex-1 bg-transparent text-2xl font-bold focus:outline-none ${
                               pairToken && parseFloat(amount2 || '0') > toNum(pairToken.balance) ? 'text-red-500' : 'text-white'
                             }`}

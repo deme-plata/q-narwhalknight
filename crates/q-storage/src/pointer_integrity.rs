@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::DB;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

@@ -190,6 +190,37 @@ button,
   transform: scale(0.98);
 }
 
+/* v4.0.1: CRITICAL FIX - Button text must be readable in performance mode.
+   The from-amber/from-purple/from-yellow gradient text override (lines 116-123)
+   breaks button text by applying background-clip:text to action buttons.
+   Buttons must keep their solid background and white/colored text. */
+.performance-mode button[class*="from-"],
+.performance-mode button[class*="bg-gradient"],
+.performance-mode a[class*="from-"],
+.performance-mode a[class*="bg-gradient"] {
+  -webkit-text-fill-color: inherit !important;
+  background-clip: border-box !important;
+  -webkit-background-clip: border-box !important;
+}
+
+/* Ensure all RWA control section buttons have readable text */
+.performance-mode button[class*="text-orange"],
+.performance-mode button[class*="text-emerald"],
+.performance-mode button[class*="text-pink"],
+.performance-mode button[class*="text-violet"],
+.performance-mode button[class*="text-cyan"],
+.performance-mode button[class*="text-blue"],
+.performance-mode button[class*="text-green"],
+.performance-mode button[class*="text-amber"],
+.performance-mode button[class*="text-purple"],
+.performance-mode button[class*="text-indigo"],
+.performance-mode button[class*="text-gray"],
+.performance-mode button[class*="text-white"] {
+  -webkit-text-fill-color: currentColor !important;
+  background-clip: border-box !important;
+  -webkit-background-clip: border-box !important;
+}
+
 /* Static background gradient for performance mode - replaces animated particles */
 .performance-mode .min-h-full {
   background:

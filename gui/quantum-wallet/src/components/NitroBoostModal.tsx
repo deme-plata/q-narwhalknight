@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Zap, CreditCard, Coins, TrendingUp, Award, Star } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
+import { qnkAPI } from '../services/api';
 
 interface Token {
   id: string;
@@ -60,12 +61,42 @@ export default function NitroBoostModal({ isOpen, onClose, token, onPurchase }: 
   const handlePurchase = async () => {
     setProcessing(true);
 
-    // Simulate purchase processing
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    try {
+      const walletAddress = localStorage.getItem('walletAddress');
+      if (!walletAddress) {
+        alert('Please connect your wallet first');
+        setProcessing(false);
+        return;
+      }
 
-    onPurchase(selectedPackage.points, paymentMethod);
-    setProcessing(false);
-    onClose();
+      // Calculate cost based on payment method
+      const cost = paymentMethod === 'QUG' ? selectedPackage.priceQUG : selectedPackage.priceQUGUSD;
+
+      // Send transaction to burn address to pay for NITRO points
+      const burnAddress = 'qnk0000000000000000000000000000000000000000000000000000000000000000';
+      const txResponse = await qnkAPI.sendTransaction(
+        walletAddress,
+        burnAddress,
+        cost,
+        `Nitro Points Purchase: ${selectedPackage.points} points (${selectedPackage.name})`,
+        paymentMethod
+      );
+
+      if (!txResponse.success) {
+        alert(`Payment failed: ${txResponse.error || 'Unknown error'}\n\nYour ${paymentMethod} was not deducted.`);
+        setProcessing(false);
+        return;
+      }
+
+      // Payment successful - grant points
+      onPurchase(selectedPackage.points, paymentMethod);
+    } catch (error) {
+      console.error('Nitro purchase failed:', error);
+      alert(`Purchase failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setProcessing(false);
+      onClose();
+    }
   };
 
   const price = paymentMethod === 'QUG' ? selectedPackage.priceQUG : selectedPackage.priceQUGUSD;

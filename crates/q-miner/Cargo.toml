@@ -12,7 +12,7 @@ repository = "https://github.com/deme-plata/q-narwhalknight"
 q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
 q-network = { path = "../q-network", optional = true }
-q-storage = { path = "../q-storage" }
+q-storage = { path = "../q-storage", optional = true }
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
 q-quantum-rng = { path = "../q-quantum-rng" }
 
@@ -63,6 +63,7 @@ jemallocator = { version = "0.5", optional = true }
 # Networking for pool mining
 # Override reqwest to use native-tls for cross-compilation compatibility
 reqwest = { version = "0.12", features = ["json", "socks", "stream", "native-tls"], default-features = false }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 url = "2.5"
 # rustls = { workspace = true } # Not needed for miner, using native-tls
 tokio-socks = "0.5"
@@ -121,6 +122,7 @@ tokio-test = "0.4"
 
 [features]
 default = ["cpu-mining", "network", "cli", "jemalloc"]
+vendored-openssl = ["openssl"]
 
 # Mining backends
 cpu-mining = []

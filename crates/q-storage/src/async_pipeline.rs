@@ -28,6 +28,7 @@
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};

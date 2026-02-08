@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles } from 'lucide-react';
+import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
 
 interface MiningStats {
@@ -51,6 +51,10 @@ export default function MiningDashboard() {
   // This prevents jumps caused by mixing local accumulation with backend absolute values
   const [sessionRewardsTotal, setSessionRewardsTotal] = useState(0);
   const initialBalanceRef = useRef<number | null>(null);
+
+  // Daily earnings calculation
+  const [qugPriceUsd, setQugPriceUsd] = useState(0);
+  const [blockReward, setBlockReward] = useState(0);
 
   // v3.4.21-beta: Fetch authoritative balance from API
   const fetchBalance = async () => {
@@ -140,6 +144,28 @@ export default function MiningDashboard() {
     fetchNetworkHashrate();
     const networkHashrateInterval = setInterval(fetchNetworkHashrate, 30000); // Every 30s
 
+    // Fetch QUG price and block reward for daily earnings calculation
+    const fetchEarningsData = async () => {
+      try {
+        const [priceRes, challengeRes] = await Promise.all([
+          fetch('/api/v1/oracle/price/QUG').catch(() => null),
+          fetch('/api/v1/mining/challenge').catch(() => null),
+        ]);
+        if (priceRes?.ok) {
+          const json = await priceRes.json();
+          const price = json.data?.price_usd || json.data?.price || 0;
+          if (price > 0 && price < 1_000_000) setQugPriceUsd(price);
+        }
+        if (challengeRes?.ok) {
+          const json = await challengeRes.json();
+          const reward = json.data?.block_reward || 0;
+          if (reward > 0) setBlockReward(reward);
+        }
+      } catch { /* endpoints may not be available */ }
+    };
+    fetchEarningsData();
+    const priceInterval = setInterval(fetchEarningsData, 60000);
+
     // Subscribe to mining rewards via SSE
     const eventSource = qnkAPI.subscribeToMiningRewards(
       walletAddress,
@@ -164,6 +190,7 @@ export default function MiningDashboard() {
       clearInterval(networkHashrateInterval);
       clearInterval(balanceRefreshInterval);
       clearInterval(miningStatsInterval);
+      clearInterval(priceInterval);
     };
   }, [walletAddress]);
 
@@ -566,7 +593,45 @@ export default function MiningDashboard() {
       </div>
 
       {/* Network Stats Row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Daily Earnings Card */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.35 }}
+          className="bg-gradient-to-br from-quantum-indigo/40 to-emerald-500/20 backdrop-blur-xl border border-emerald-500/40 rounded-xl p-6"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <DollarSign className="w-6 h-6 text-emerald-400" />
+            <span className="text-sm text-gray-400">Est. Daily Earnings</span>
+          </div>
+          {(() => {
+            // v4.3.0: Use daily emission target directly instead of blocksPerDay * blockReward.
+            // blockReward is per-solution (0.001288 QUG), NOT per-block. A miner submits
+            // many solutions per block, so blocksPerDay * blockReward massively underestimates.
+            // Correct formula: yourShare * dailyTarget * (1 - devFee)
+            const ERA_0_DAILY_QUG = 224.7465; // Austrian economics: Era 0 daily emission target
+            const DEV_FEE = 0.01; // 1% dev fee
+            const yourShare = stats.networkHashRate > 0 ? displayHashRate / stats.networkHashRate : 0;
+            const dailyQug = yourShare * ERA_0_DAILY_QUG * (1 - DEV_FEE);
+            const dailyUsd = dailyQug * qugPriceUsd;
+            return (
+              <>
+                <div className="text-3xl font-bold text-white mb-1">
+                  {dailyUsd > 0 ? `$${dailyUsd.toFixed(2)}` : '$0.00'}
+                </div>
+                <div className="text-sm text-emerald-400">{dailyQug.toFixed(4)} QUG/day</div>
+                {qugPriceUsd > 0 && (
+                  <div className="text-xs text-gray-500 mt-1">@ ${qugPriceUsd.toFixed(2)}/QUG</div>
+                )}
+                {yourShare > 0 && (
+                  <div className="text-xs text-gray-500">Network share: {(yourShare * 100).toFixed(2)}%</div>
+                )}
+              </>
+            );
+          })()}
+        </motion.div>
+
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

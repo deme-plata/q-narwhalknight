@@ -1,9 +1,22 @@
 // Q-NarwhalKnight API Service
 // Handles all communication with the quantum consensus node
 // v1.0.53: Added automatic port discovery when default port is unavailable
+// v4.2.0: Added multi-server failover — if primary API fails, tries secondary servers
 
 import { generateAuthHeader, walletSession, loadWallet, keypairFromMnemonic, recoverMnemonic } from './walletAuth';
 import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDiscovery';
+
+// v4.2.0: Known API server endpoints (primary + fallback)
+// Order matters: first is primary, rest are fallbacks
+const API_SERVERS = [
+  'https://quillon.xyz',       // Server Beta — Primary (185.182.185.227)
+  'http://109.205.176.60:8080', // Server Gamma — Secondary
+];
+
+// Track which server is currently active (index into API_SERVERS)
+let activeServerIndex = 0;
+let lastFailoverTime = 0;
+const FAILOVER_COOLDOWN_MS = 30000; // Don't failover more than once per 30s
 
 // Get API base URL from localStorage (set by network selector or auto-discovery) or use default
 const getApiBaseUrl = () => {
@@ -15,6 +28,46 @@ const getApiBaseUrl = () => {
 };
 
 let API_BASE_URL = getApiBaseUrl();
+
+// v4.2.0: Try to failover to the next available server
+const tryFailover = async (): Promise<string | null> => {
+  const now = Date.now();
+  if (now - lastFailoverTime < FAILOVER_COOLDOWN_MS) {
+    return null; // Too soon since last failover
+  }
+
+  // Try each server in order (skip current)
+  for (let i = 0; i < API_SERVERS.length; i++) {
+    if (i === activeServerIndex) continue;
+
+    const serverUrl = API_SERVERS[i];
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const response = await fetch(`${serverUrl}/api/v1/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        console.log(`🔄 [FAILOVER] Switching to backup server: ${serverUrl}`);
+        activeServerIndex = i;
+        lastFailoverTime = now;
+        API_BASE_URL = `${serverUrl}/api`;
+        localStorage.setItem('apiBaseURL', serverUrl);
+        localStorage.setItem('failoverServer', serverUrl);
+        window.dispatchEvent(new CustomEvent('api-failover', { detail: { server: serverUrl, index: i } }));
+        return API_BASE_URL;
+      }
+    } catch {
+      // This server is also down, try next
+      continue;
+    }
+  }
+
+  console.error('❌ [FAILOVER] All API servers are unreachable');
+  return null;
+};
 
 // v1.0.53: Initialize node discovery on module load
 // This runs once when the API module is first imported
@@ -491,6 +544,36 @@ class QNarwhalKnightAPI {
           }
 
           if (attempt === retries) {
+            // v4.2.0: All retries exhausted on current server — try failover
+            const isNetworkError = error instanceof TypeError &&
+              (error.message.includes('Failed to fetch') || error.message.includes('NetworkError') || error.message.includes('Load failed'));
+
+            if (isNetworkError) {
+              console.warn(`🔄 [FAILOVER] Primary server unreachable, attempting failover...`);
+              const newBaseUrl = await tryFailover();
+              if (newBaseUrl) {
+                // Retry the request once on the failover server
+                try {
+                  const failoverUrl = `${newBaseUrl}${endpoint}`;
+                  console.log(`🔄 [FAILOVER] Retrying on backup: ${failoverUrl}`);
+                  const failoverResponse = await fetch(failoverUrl, {
+                    ...options,
+                    headers: {
+                      'Content-Type': 'application/json',
+                      ...options?.headers,
+                    },
+                  });
+                  if (failoverResponse.ok) {
+                    const result = await failoverResponse.json();
+                    console.log(`✅ [FAILOVER] Request succeeded on backup server`);
+                    return result;
+                  }
+                } catch (failoverError) {
+                  console.error(`❌ [FAILOVER] Backup server also failed:`, failoverError);
+                }
+              }
+            }
+
             console.error(`❌ [API FAILED] ${options?.method || 'GET'} ${endpoint} after ${retries + 1} attempts:`, error);
             return {
               success: false,
@@ -1629,11 +1712,12 @@ class QNarwhalKnightAPI {
   }
 
   // Execute token swap through liquidity pools (AUTHENTICATED)
+  // v4.0.13: amount_in and min_amount_out accept string|number to preserve u128 precision
   async executeSwap(request: {
     from_token: string;
     to_token: string;
-    amount_in: number;
-    min_amount_out: number;
+    amount_in: number | string;
+    min_amount_out: number | string;
     wallet_address: string;
   }): Promise<ApiResponse<any>> {
     console.log('💱 Executing swap (authenticated):', request);
@@ -1722,31 +1806,17 @@ class QNarwhalKnightAPI {
   }): Promise<ApiResponse<any>> {
     console.log('💵 Minting QUGUSD with collateral:', request);
 
-    // Backend expects amount as u64 in base units (smallest denomination)
-    // Convert from human-readable decimal to base units by multiplying by 100,000,000
-    const amountBaseUnits = Math.floor(request.amount * 100000000);
+    // Backend expects qug_amount as string (human-readable QUG amount)
+    // The collateral_amount IS the QUG amount the user wants to lock
+    const qugAmount = request.collateral_amount.toString();
 
-    console.log(`💵 Converting amount: ${request.amount} QUGUSD → ${amountBaseUnits} base units`);
+    console.log(`💵 Locking ${qugAmount} QUG as collateral`);
 
-    // ✅ CRITICAL FIX: Get wallet address from localStorage and send it to backend
-    const walletAddress = localStorage.getItem('walletAddress');
-    if (!walletAddress) {
-      return {
-        success: false,
-        data: null,
-        error: 'No wallet address found. Please create or import a wallet first.',
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    console.log('👤 Minting QUGUSD for wallet:', walletAddress);
-
-    return this.request<any>('/v1/quillon-bank/stablecoin/mint', {
+    // v4.0.5: Use authenticatedRequest - backend uses AuthenticatedWallet extractor
+    return this.authenticatedRequest<any>('/v1/stablecoin/mint', {
       method: 'POST',
       body: JSON.stringify({
-        ...request,
-        amount: amountBaseUnits,  // Send as integer in base units
-        wallet_address: walletAddress,  // ✅ Send wallet address to backend
+        qug_amount: qugAmount,
       }),
     });
   }
@@ -1758,22 +1828,25 @@ class QNarwhalKnightAPI {
     collateral_type: string;
   }): Promise<ApiResponse<any>> {
     console.log('🔥 Burning QUGUSD to release collateral:', request);
-    return this.request<any>('/v1/quillon-bank/stablecoin/burn', {
+    // v4.0.5: Use authenticatedRequest and correct body format
+    return this.authenticatedRequest<any>('/v1/stablecoin/redeem', {
       method: 'POST',
-      body: JSON.stringify(request),
+      body: JSON.stringify({
+        qugusd_amount: request.amount.toString(),
+      }),
     });
   }
 
   // Get stablecoin status
   async getStablecoinStatus(): Promise<ApiResponse<any>> {
     console.log('📊 Fetching stablecoin status');
-    return this.request<any>('/v1/quillon-bank/stablecoin/status');
+    return this.request<any>('/v1/stablecoin/vault/stats');
   }
 
   // Get collateral status
   async getCollateralStatus(): Promise<ApiResponse<any>> {
     console.log('📊 Fetching collateral status');
-    return this.request<any>('/v1/quillon-bank/stablecoin/collateral');
+    return this.request<any>('/v1/stablecoin/vault/stats');
   }
 
   /**
@@ -2119,6 +2192,54 @@ class QNarwhalKnightAPI {
    */
   async getResolutionConfig(): Promise<ApiResponse<ResolutionConfig>> {
     return this.request<ResolutionConfig>('/v1/qno/resolution-config');
+  }
+
+  // ============================================================================
+  // v4.2.0: VAULT RWA Token — Physical Device Redemption API
+  // ============================================================================
+
+  /** Get VAULT token supply stats (public, no auth needed) */
+  async getVaultTokenStats(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/contracts/vault/stats');
+  }
+
+  /** Get redemption orders (authenticated — admin sees all, users see their own) */
+  async getVaultRedemptions(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/vault/redemptions');
+  }
+
+  /** Redeem a VAULT token — burn 1 token and create physical device order */
+  async redeemVault(shippingInfo: {
+    shipping_name: string;
+    shipping_address: string;
+    city: string;
+    state_province: string;
+    zip: string;
+    country: string;
+    phone: string;
+    email: string;
+    color_variant: string;
+    quantity?: number;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/vault/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(shippingInfo),
+    });
+  }
+
+  /** Admin: update redemption status/tracking/serial */
+  async fulfillVaultRedemption(data: {
+    redemption_id: string;
+    tracking_number?: string;
+    serial_number?: string;
+    status: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/vault/fulfill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
   }
 }
 

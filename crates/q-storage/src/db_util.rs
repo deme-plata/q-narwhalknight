@@ -9,6 +9,7 @@
 /// - Batch operations when possible to reduce I/O overhead
 
 use std::sync::Arc;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{DB, WriteBatch, WriteOptions};
 use anyhow::Result;
 

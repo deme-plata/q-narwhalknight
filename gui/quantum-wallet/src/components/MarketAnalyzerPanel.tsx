@@ -132,25 +132,89 @@ export default function MarketAnalyzerPanel({
   const [technicalData, setTechnicalData] = useState<TimeframeData | null>(null);
   const [loadingTechnical, setLoadingTechnical] = useState(false);
 
-  // Fetch real token data from DEX
+  // Fetch real token data from DEX, enriched with prices from pool reserves
   const fetchTokens = async (): Promise<Token[]> => {
     try {
-      const response = await fetch('/api/v1/dex/tokens');
-      if (response.ok) {
-        const result = await response.json();
-        // API returns { success: true, data: [...] } - data IS the array
-        const tokens = result.data || result.tokens || [];
-        if (Array.isArray(tokens)) {
-          return tokens.map((t: any) => ({
-            symbol: t.symbol || t.metadata?.symbol || 'UNKNOWN',
-            name: t.name || t.metadata?.name || t.symbol || 'Unknown Token',
-            price: t.price || 0,
+      // Fetch both tokens and pools in parallel
+      const [tokenRes, poolRes] = await Promise.all([
+        fetch('/api/v1/dex/tokens'),
+        fetch('/api/v1/liquidity/pools'),
+      ]);
+
+      let rawTokens: any[] = [];
+      let rawPools: any[] = [];
+
+      if (tokenRes.ok) {
+        const result = await tokenRes.json();
+        rawTokens = result.data || result.tokens || [];
+      }
+      if (poolRes.ok) {
+        const result = await poolRes.json();
+        rawPools = result.data || result.pools || [];
+      }
+
+      // Get QUG/USD price from QUG/QUGUSD pool
+      let qugPriceUsd = 42.50; // Default
+      const qugQugusdPool = rawPools.find((p: any) =>
+        (p.token0 === 'QUG' && p.token1 === 'QUGUSD') ||
+        (p.token0 === 'QUGUSD' && p.token1 === 'QUG')
+      );
+      if (qugQugusdPool) {
+        const r0 = parseFloat(qugQugusdPool.reserve0) || 0;
+        const r1 = parseFloat(qugQugusdPool.reserve1) || 0;
+        if (qugQugusdPool.token0 === 'QUG' && r0 > 0) {
+          qugPriceUsd = r1 / r0;
+        } else if (qugQugusdPool.token1 === 'QUG' && r1 > 0) {
+          qugPriceUsd = r0 / r1;
+        }
+      }
+
+      // Build price map: for each token paired with QUG, compute price
+      const tokenPriceMap: Record<string, { price: number; liquidity: number; poolReserveQug: number }> = {};
+      tokenPriceMap['QUG'] = { price: qugPriceUsd, liquidity: 0, poolReserveQug: 0 };
+      tokenPriceMap['QUGUSD'] = { price: 1.0, liquidity: 0, poolReserveQug: 0 };
+
+      for (const pool of rawPools) {
+        const r0 = parseFloat(pool.reserve0) || 0;
+        const r1 = parseFloat(pool.reserve1) || 0;
+        if (r0 <= 0 || r1 <= 0) continue;
+
+        const isToken0Qug = pool.token0 === 'QUG';
+        const isToken1Qug = pool.token1 === 'QUG';
+
+        if (isToken0Qug || isToken1Qug) {
+          const tokenSymbol = isToken0Qug ? pool.token1 : pool.token0;
+          const tokenReserve = isToken0Qug ? r1 : r0;
+          const qugReserve = isToken0Qug ? r0 : r1;
+
+          if (tokenReserve > 0) {
+            const priceInQug = qugReserve / tokenReserve;
+            const priceInUsd = priceInQug * qugPriceUsd;
+            const liquidityUsd = qugReserve * qugPriceUsd * 2;
+
+            // Use pool with highest liquidity for this token
+            if (!tokenPriceMap[tokenSymbol] || liquidityUsd > tokenPriceMap[tokenSymbol].liquidity) {
+              tokenPriceMap[tokenSymbol] = { price: priceInUsd, liquidity: liquidityUsd, poolReserveQug: qugReserve };
+            }
+          }
+        }
+      }
+
+      // Enrich tokens with computed prices
+      if (Array.isArray(rawTokens)) {
+        return rawTokens.map((t: any) => {
+          const sym = t.symbol || t.metadata?.symbol || 'UNKNOWN';
+          const priceData = tokenPriceMap[sym];
+          return {
+            symbol: sym,
+            name: t.name || t.metadata?.name || sym,
+            price: priceData?.price || 0,
             change24h: t.change24h || t.change_24h || 0,
             volume24h: t.volume24h || t.volume_24h || 0,
-            liquidity: t.liquidity || 0,
+            liquidity: priceData?.liquidity || 0,
             marketCap: t.marketCap || t.market_cap || 0,
-          }));
-        }
+          };
+        }).filter((t: Token) => t.price > 0); // Only show tokens with real prices
       }
       return [];
     } catch (err) {
@@ -165,7 +229,6 @@ export default function MarketAnalyzerPanel({
       const response = await fetch('/api/v1/liquidity/pools');
       if (response.ok) {
         const result = await response.json();
-        // API returns { success: true, data: [...] } - data IS the array
         const pools = result.data || result.pools || [];
         if (Array.isArray(pools)) {
           return pools;
@@ -402,11 +465,97 @@ Based on the technical indicators (Bollinger Bands, MACD, RSI, Stochastic, Fibon
 
       setLastUpdated(new Date());
     } catch (err) {
-      console.error('AI analysis failed:', err);
-      setError(err instanceof Error ? err.message : 'AI analysis failed');
+      console.error('AI analysis failed, generating local analysis:', err);
+      // v4.5.0: Generate meaningful local analysis from real pool/token data
+      // instead of showing an error when AI is unavailable
+      generateLocalAnalysis(tokenData, poolData, techData);
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  // v4.5.0: Generate analysis locally from real on-chain data when AI is unavailable
+  const generateLocalAnalysis = (tokenData: Token[], poolData: Pool[], techData?: TimeframeData | null) => {
+    const totalLiquidity = tokenData.reduce((sum, t) => sum + t.liquidity, 0);
+    const totalVolume = tokenData.reduce((sum, t) => sum + t.volume24h, 0);
+    const avgChange = tokenData.length > 0
+      ? tokenData.reduce((sum, t) => sum + t.change24h, 0) / tokenData.length
+      : 0;
+
+    // Find top gainers and losers
+    const sorted = [...tokenData].sort((a, b) => b.change24h - a.change24h);
+    const topGainer = sorted[0];
+    const topLoser = sorted[sorted.length - 1];
+
+    // Find highest liquidity tokens
+    const byLiquidity = [...tokenData].sort((a, b) => b.liquidity - a.liquidity);
+    const topLiquid = byLiquidity.slice(0, 3);
+
+    // Determine sentiment
+    const bullishCount = tokenData.filter(t => t.change24h > 0).length;
+    const bearishCount = tokenData.filter(t => t.change24h < 0).length;
+    const sentiment = bullishCount > bearishCount * 1.5 ? 'bullish' :
+                      bearishCount > bullishCount * 1.5 ? 'bearish' : 'neutral';
+
+    const confidence = Math.min(85, 40 + poolData.length * 3 + tokenData.length * 2);
+
+    // Build opportunities
+    const opportunities: string[] = [];
+    if (topGainer && topGainer.change24h > 5) {
+      opportunities.push(`${topGainer.symbol} up ${topGainer.change24h.toFixed(1)}% - momentum play if volume supports`);
+    }
+    if (topLiquid.length > 0) {
+      opportunities.push(`Deepest liquidity: ${topLiquid.map(t => `${t.symbol} ($${(t.liquidity/1000).toFixed(0)}K)`).join(', ')}`);
+    }
+    if (poolData.length > 5) {
+      opportunities.push(`${poolData.length} active pools - healthy market depth for arbitrage`);
+    }
+
+    // Build risks
+    const risks: string[] = [];
+    if (topLoser && topLoser.change24h < -5) {
+      risks.push(`${topLoser.symbol} down ${Math.abs(topLoser.change24h).toFixed(1)}% - check liquidity before entering`);
+    }
+    const lowLiqTokens = tokenData.filter(t => t.liquidity < 1000 && t.liquidity > 0);
+    if (lowLiqTokens.length > 0) {
+      risks.push(`${lowLiqTokens.length} tokens with <$1K liquidity - high slippage risk`);
+    }
+    if (totalLiquidity < 50000) {
+      risks.push('Overall DEX liquidity still growing - larger trades may have significant price impact');
+    }
+
+    // Technical summary
+    let technicalSummary = '';
+    if (techData) {
+      const ind = techData.indicators;
+      const signals: string[] = [];
+      if (ind.rsi > 70) signals.push('RSI overbought');
+      else if (ind.rsi < 30) signals.push('RSI oversold');
+      else signals.push('RSI neutral');
+      signals.push(`MACD ${ind.macd.trend}`);
+      signals.push(`Bollinger ${ind.bollinger.signal}`);
+      technicalSummary = `Technical signals: ${signals.join(', ')}`;
+    }
+
+    const summary = `Market overview: ${tokenData.length} tokens with real pricing from ${poolData.length} liquidity pools. ` +
+      `Total liquidity: $${(totalLiquidity/1000).toFixed(0)}K. ` +
+      `${bullishCount} tokens positive, ${bearishCount} negative. ` +
+      (technicalSummary ? technicalSummary : '');
+
+    setAiAnalysis({
+      sentiment,
+      confidence,
+      summary,
+      technicalSummary,
+      opportunities: opportunities.length > 0 ? opportunities : ['Market data loading - check back shortly'],
+      risks: risks.length > 0 ? risks : ['Always DYOR - on-chain data only, not financial advice'],
+      recommendation: sentiment === 'bullish'
+        ? `Market trending positive. Focus on high-liquidity pairs like ${topLiquid[0]?.symbol || 'QUG'} for lower slippage.`
+        : sentiment === 'bearish'
+        ? `Market showing weakness. Consider reducing exposure or waiting for support levels.`
+        : `Mixed signals - focus on highest-liquidity pools for best execution.`,
+    });
+    setLastUpdated(new Date());
   };
 
   // Load real data and analyze

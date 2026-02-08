@@ -17,6 +17,8 @@ use libp2p::{
 // mDNS is only available on non-Windows platforms due to libudev dependency
 #[cfg(not(target_os = "windows"))]
 use libp2p::mdns::{self, Event as MdnsEvent};
+#[cfg(not(target_os = "windows"))]
+use libp2p::swarm::behaviour::toggle::Toggle;
 use futures::StreamExt;
 
 use serde::{Deserialize, Serialize};
@@ -27,12 +29,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-/// 🚀 v3.4.13-beta: Mining solution rate limiter to prevent gossipsub queue overflow
-/// Minimum milliseconds between mining solution broadcasts (100ms = 10/sec max)
-static LAST_MINING_SOLUTION_BROADCAST_MS: AtomicU64 = AtomicU64::new(0);
-const MIN_MINING_BROADCAST_INTERVAL_MS: u64 = 100; // 100ms = max 10 broadcasts/sec
+// v4.3.0-beta: Mining solution rate limiting now handled by gossipsub_queue (MessagePriority::Low)
+// Removed: LAST_MINING_SOLUTION_BROADCAST_MS, MIN_MINING_BROADCAST_INTERVAL_MS
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
+
+// v4.3.0-beta: Global peer latency tracker and bootstrap health cache
+lazy_static::lazy_static! {
+    /// Peer latency tracker fed by libp2p ping RTT measurements
+    pub static ref PEER_LATENCY_TRACKER: crate::peer_latency::PeerLatencyTracker =
+        crate::peer_latency::PeerLatencyTracker::new();
+    /// Bootstrap endpoint health cache for latency-based ordering
+    pub static ref BOOTSTRAP_HEALTH_CACHE: crate::peer_latency::BootstrapHealthCache =
+        crate::peer_latency::BootstrapHealthCache::new();
+}
 
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
 use crate::handshake::ServerRole;
@@ -65,15 +75,23 @@ use q_types::QBlock;
 ///   }
 /// }
 
-/// 🔧 v3.3.2-beta: MULTIPLE HARDCODED BOOTSTRAP PEERS - Mainnet safety
+/// 🔧 v4.2.0-beta: MULTIPLE HARDCODED BOOTSTRAP PEERS - Mainnet safety
 /// This ensures nodes can connect even when one bootstrap node is down
-/// Server Beta (185.182.185.227) = Primary production
-/// Server Alpha (161.35.219.10) = Secondary production
+/// Server Beta (185.182.185.227) = Primary production bootstrap
+/// Server Gamma (109.205.176.60) = Secondary production bootstrap
 pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
-    // Server Beta - Primary production bootstrap
+    // Server Beta - Primary production bootstrap (quillon.xyz)
     "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx",
-    // Server Alpha - Secondary bootstrap (configure Q_BOOTSTRAP_PEER_ALPHA to override peer ID)
-    // Note: Actual peer ID will be determined when Server Alpha P2P is configured
+    // Server Gamma - Secondary production bootstrap
+    // Peer ID discovered dynamically via HTTP at startup (fetch_peer_id_from_http)
+    "/ip4/109.205.176.60/tcp/9001",
+];
+
+/// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
+/// Used when hardcoded peer IDs are stale or missing (e.g., new server first boot)
+pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
+    "http://185.182.185.227:8080",
+    "http://109.205.176.60:8080",
 ];
 
 /// Legacy single bootstrap peer constant (for backwards compatibility)
@@ -138,8 +156,9 @@ fn get_bootstrap_peers() -> Vec<String> {
 #[behaviour(to_swarm = "QNarwhalEvent")]
 pub struct QNarwhalBehaviour {
     /// mDNS for local network discovery (zero-config) - only available on non-Windows platforms
+    /// Wrapped in Toggle so mDNS failure (e.g. Permission denied on ARM) doesn't crash the node
     #[cfg(not(target_os = "windows"))]
-    mdns: mdns::tokio::Behaviour,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     /// Kademlia DHT for global internet discovery (clearnet)
     kademlia: Kademlia<MemoryStore>,
     /// Identify protocol for peer exchange
@@ -525,6 +544,7 @@ fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<(Keyp
 /// * `Err` if HTTP request failed or invalid response
 async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<String> {
     let url = format!("http://{}:{}/api/v1/peer-id", ip, http_port);
+    let endpoint_key = format!("http://{}:{}", ip, http_port);
 
     info!("🔍 Fetching dynamic peer ID from {} (with retry)", url);
 
@@ -545,11 +565,15 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
             Err(e) => {
                 error!("❌ Failed to build reqwest client: {:?}", e);
                 if attempt == 3 {
+                    BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
                     return Err(anyhow::anyhow!("Client build error: {}", e));
                 }
                 continue;
             }
         };
+
+        // v4.3.0-beta: Track request timing for bootstrap health ordering
+        let request_start = std::time::Instant::now();
 
         match client.get(&url).send().await {
             Ok(response) => {
@@ -559,6 +583,7 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
                 if !status.is_success() {
                     warn!("⚠️ Non-success HTTP status: {}", status);
                     if attempt == 3 {
+                        BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
                         return Err(anyhow::anyhow!("HTTP error status: {}", status));
                     }
                     continue;
@@ -568,7 +593,11 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
                     Ok(peer_response) => {
                         if peer_response.success {
                             if let Some(data) = peer_response.data {
-                                info!("✅ Successfully fetched peer ID on attempt {}/3: {}", attempt, data.peer_id);
+                                let rtt = request_start.elapsed();
+                                info!("✅ Successfully fetched peer ID on attempt {}/3: {} ({}ms)",
+                                      attempt, data.peer_id, rtt.as_millis());
+                                // v4.3.0-beta: Record successful fetch for health ordering
+                                BOOTSTRAP_HEALTH_CACHE.record_success(&endpoint_key, rtt, &data.peer_id);
                                 return Ok(data.peer_id);
                             } else {
                                 warn!("⚠️ API returned success=true but no data field");
@@ -577,12 +606,14 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
                             warn!("⚠️ API returned success=false");
                         }
                         if attempt == 3 {
+                            BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
                             return Err(anyhow::anyhow!("API returned invalid response"));
                         }
                     }
                     Err(e) => {
                         error!("❌ Failed to parse JSON response: {:?}", e);
                         if attempt == 3 {
+                            BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
                             return Err(anyhow::anyhow!("JSON parse error: {}", e));
                         }
                     }
@@ -596,12 +627,14 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
                     error!("   Failed URL: {}", url_err);
                 }
                 if attempt == 3 {
+                    BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
                     return Err(anyhow::anyhow!("HTTP request error after 3 attempts: {}", e));
                 }
             }
         }
     }
 
+    BOOTSTRAP_HEALTH_CACHE.record_failure(&endpoint_key);
     Err(anyhow::anyhow!("Failed to fetch peer ID from HTTP endpoint after 3 attempts"))
 }
 
@@ -1097,10 +1130,20 @@ impl UnifiedNetworkManager {
             .with_behaviour(move |keypair_inner, relay_client| {
                 let local_peer_id_inner = keypair_inner.public().to_peer_id();
 
-                // mDNS for local discovery
+                // mDNS for local discovery (optional - may fail on restricted systems like ARM without root)
                 #[cfg(not(target_os = "windows"))]
-                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id_inner)
-                    .expect("Failed to initialize behaviour");
+                let mdns: Toggle<mdns::tokio::Behaviour> = match mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id_inner) {
+                    Ok(m) => {
+                        info!("✅ mDNS initialized - local peer discovery enabled");
+                        Toggle::from(Some(m))
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️ mDNS init failed: {}. Continuing without local peer discovery. \
+                            This is normal on ARM/embedded or when running without root. \
+                            Internet-based peer discovery (Kademlia DHT) will still work.", e);
+                        Toggle::from(None)
+                    }
+                };
 
                 // Kademlia DHT
                 let mut kad_config = KademliaConfig::default();
@@ -1855,6 +1898,12 @@ impl UnifiedNetworkManager {
         // vs previous ~3.3 blocks/second (30x improvement)
         let mut health_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
 
+        // v4.3.0-beta: Queue drain interval - flush priority gossipsub queue to swarm
+        let mut queue_drain_interval = tokio::time::interval(tokio::time::Duration::from_millis(1));
+
+        // v4.3.0-beta: Peer scoring interval - update gossipsub scores from latency data
+        let mut peer_scoring_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+
         // 🚨 v1.0.20-beta: Event loop heartbeat to diagnose silent failures
         let mut last_heartbeat = std::time::Instant::now();
         let heartbeat_interval = tokio::time::Duration::from_secs(5);
@@ -1893,6 +1942,35 @@ impl UnifiedNetworkManager {
                     } else {
                         warn!("⚠️ [BLOCK-PACK ASYNC] No pending channel for request {} (may have timed out)", async_req_id);
                     }
+                }
+
+                // v4.3.0-beta: Drain priority gossipsub queue → publish to swarm
+                _ = queue_drain_interval.tick() => {
+                    // Drain up to 10 messages per 1ms tick (= 10,000/sec max throughput)
+                    let batch = crate::gossipsub_queue::gossipsub_queue().drain_batch(10);
+                    for msg in batch {
+                        let ident_topic = IdentTopic::new(&msg.topic);
+                        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(ident_topic, msg.data) {
+                            debug!("[QUEUE DRAIN] Failed to publish {}: {}", msg.topic, e);
+                        }
+                    }
+                }
+
+                // v4.3.0-beta: Update gossipsub peer scores from latency data
+                _ = peer_scoring_interval.tick() => {
+                    let scores = PEER_LATENCY_TRACKER.get_all_scores();
+                    let mut updated = 0usize;
+                    for (peer_id, score) in &scores {
+                        // set_application_score returns bool: true if PeerScoreParams configured, false otherwise
+                        if self.swarm.behaviour_mut().gossipsub.set_application_score(peer_id, *score) {
+                            updated += 1;
+                        }
+                    }
+                    if !scores.is_empty() {
+                        debug!("[MESH SCORING] Updated {}/{} peer scores from latency data", updated, scores.len());
+                    }
+                    // Also log queue stats
+                    crate::gossipsub_queue::log_queue_stats();
                 }
 
                 // 🩺 Periodic P2P health check (every 10 seconds)
@@ -1969,12 +2047,25 @@ impl UnifiedNetworkManager {
                             }
                         }
 
-                        // 3. 🔧 v2.4.8: Dynamic bootstrap discovery via Q_BOOTSTRAP_URL (for stale peer IDs)
-                        // This is crucial when bootstrap peer regenerates its identity key
+                        // 3. 🔧 v4.2.0: Dynamic bootstrap discovery from ALL known HTTP endpoints
+                        // Tries Q_BOOTSTRAP_URL first, then all BOOTSTRAP_HTTP_ENDPOINTS
                         if !reconnect_attempted {
+                            // Build list of URLs to try
+                            let mut discovery_urls: Vec<String> = Vec::new();
                             if let Ok(bootstrap_url) = std::env::var("Q_BOOTSTRAP_URL") {
-                                info!("🔄 [AUTO-RECONNECT] Fetching fresh bootstrap peer from Q_BOOTSTRAP_URL...");
-                                let url = format!("{}/api/v1/status", bootstrap_url.trim_end_matches('/'));
+                                discovery_urls.push(bootstrap_url.trim_end_matches('/').to_string());
+                            }
+                            for endpoint in BOOTSTRAP_HTTP_ENDPOINTS {
+                                let ep = endpoint.trim_end_matches('/').to_string();
+                                if !discovery_urls.contains(&ep) {
+                                    discovery_urls.push(ep);
+                                }
+                            }
+
+                          for bootstrap_url in &discovery_urls {
+                            if reconnect_attempted { break; }
+                            info!("🔄 [AUTO-RECONNECT] Trying bootstrap endpoint: {}", bootstrap_url);
+                                let url = format!("{}/api/v1/status", bootstrap_url);
                                 match reqwest::Client::new()
                                     .get(&url)
                                     .timeout(std::time::Duration::from_secs(5))
@@ -2045,10 +2136,10 @@ impl UnifiedNetworkManager {
                                         warn!("⚠️ [AUTO-RECONNECT] Bootstrap URL returned status: {}", response.status());
                                     }
                                     Err(e) => {
-                                        warn!("⚠️ [AUTO-RECONNECT] Failed to reach Q_BOOTSTRAP_URL: {}", e);
+                                        warn!("⚠️ [AUTO-RECONNECT] Failed to reach {}: {}", bootstrap_url, e);
                                     }
                                 }
-                            }
+                          } // end for bootstrap_url in discovery_urls
                         }
 
                         if !reconnect_attempted {
@@ -2447,7 +2538,16 @@ impl UnifiedNetworkManager {
                 debug!("🔍 Identify event: {:?}", event);
             }
             QNarwhalEvent::Ping(event) => {
-                debug!("🏓 Ping event: {:?}", event);
+                // v4.3.0-beta: Extract RTT and feed into peer latency tracker
+                match event.result {
+                    Ok(rtt) => {
+                        debug!("🏓 Ping RTT to {}: {}ms", event.peer, rtt.as_millis());
+                        PEER_LATENCY_TRACKER.update_rtt(&event.peer, rtt);
+                    }
+                    Err(ref e) => {
+                        debug!("🏓 Ping failure to {}: {:?}", event.peer, e);
+                    }
+                }
             }
             QNarwhalEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source,
@@ -4084,90 +4184,71 @@ impl UnifiedNetworkManager {
                     warn!("   → Check bootstrap peer connectivity and port forwarding (Docker: -p 9001:9001)");
                 }
 
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, block_bytes) {
-                    Ok(message_id) => {
-                        info!("✅ Successfully published block {} to P2P network (msg_id: {:?})", block_height, message_id);
-                        // 🧅 v3.4.20-beta: Tor encryption layer activity logging
-                        info!("🔐 [TOR] Block {} encrypted via Noise+Onion routing before broadcast", block_height);
-                        debug!("🧅 [CIRCUIT] 3-hop Tor circuit used for gossipsub message propagation");
+                // v4.3.0-beta: Route through priority gossipsub queue instead of direct publish
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), block_bytes) {
+                    Ok(()) => {
+                        info!("✅ [QUEUE] Enqueued block {} for P2P broadcast (topic={})", block_height, topic);
                     }
-                    Err(e) => {
-                        // 🔍 v1.0.71-beta: More detailed error logging
-                        let error_msg = format!("{:?}", e);
-                        if error_msg.contains("InsufficientPeers") {
-                            warn!("❌ [P2P BROADCAST] Block {} failed: No peers subscribed to topic '{}'", block_height, topic);
-                            warn!("   → Block is stored locally and can be synced via turbo-sync");
-                            warn!("   → For Docker nodes, ensure: --network host OR -p 9001:9001");
-                            // v1.3.5-beta: Dynamic bootstrap discovery - no hardcoded peer IDs
-                            warn!("   → Set Q_BOOTSTRAP_URL=http://185.182.185.227:8080 for auto-discovery");
-                            warn!("   → Or fetch peer ID: curl -s http://185.182.185.227:8080/api/v1/status | jq '.data.multiaddrs[0]'");
-                        } else {
-                            warn!("❌ Failed to publish block {} to topic {}: {}", block_height, topic, e);
-                        }
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Block {} dropped: {} (topic={})", block_height, reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishBlockRequest { topic, request_bytes } => {
                 info!("📤 Publishing block request ({} bytes) to gossipsub topic: {}", request_bytes.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
-                    Ok(_) => {
-                        info!("✅ Successfully published block request to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued block request (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ Failed to publish block request to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Block request dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishBlockResponse { topic, response_bytes, block_height } => {
                 info!("📤 Publishing block response for block {} ({} bytes) to gossipsub topic: {}", block_height, response_bytes.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, response_bytes) {
-                    Ok(_) => {
-                        info!("✅ Successfully published block response for block {} to P2P network", block_height);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), response_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued block response for block {} (topic={})", block_height, topic);
                     }
-                    Err(e) => {
-                        warn!("❌ Failed to publish block response to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Block response for block {} dropped: {} (topic={})", block_height, reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishBlockPack { topic, pack_bytes } => {
                 info!("🚀 [TURBO SYNC] Publishing block pack ({:.1} KB compressed) to gossipsub topic: {}",
                       pack_bytes.len() as f64 / 1024.0, topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, pack_bytes) {
-                    Ok(_) => {
-                        info!("✅ [TURBO SYNC] Successfully published block pack to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), pack_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued block pack (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [TURBO SYNC] Failed to publish block pack to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Block pack dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
             NetworkCommand::RequestBlockPack { topic, request_bytes, start_height, end_height } => {
                 info!("🚀 [TURBO SYNC] Requesting block pack {}-{} ({} bytes) from P2P network",
                       start_height, end_height, request_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
-                    Ok(_) => {
-                        info!("✅ [TURBO SYNC] Successfully published block pack request to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued block pack request {}-{} (topic={})", start_height, end_height, topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [TURBO SYNC] Failed to publish block pack request to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Block pack request {}-{} dropped: {} (topic={})", start_height, end_height, reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishPeerHeight { topic, announcement_bytes, height } => {
                 debug!("📡 [TURBO SYNC] Publishing peer height announcement {} ({} bytes) to topic: {}",
                       height, announcement_bytes.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes) {
-                    Ok(_) => {
-                        debug!("✅ [TURBO SYNC] Successfully announced height {} to P2P network", height);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), announcement_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued peer height {} (topic={})", height, topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [TURBO SYNC] Failed to publish peer height to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Peer height {} dropped: {} (topic={})", height, reason, topic);
                     }
                 }
             }
@@ -4276,23 +4357,15 @@ impl UnifiedNetworkManager {
                             info!("   📝 JSON Preview: {}...", preview);
                         }
 
-                        let ident_topic = IdentTopic::new(topic.as_str());
-
-                        // Check mesh peers before publishing
-                        let mesh_peers = self.swarm.behaviour().gossipsub.mesh_peers(&ident_topic.hash()).count();
-                        let all_peers = self.swarm.behaviour().gossipsub.all_peers().count();
-                        info!("   👥 Mesh Peers for topic: {}, Total Gossipsub Peers: {}", mesh_peers, all_peers);
-
-                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes.clone()) {
-                            Ok(msg_id) => {
-                                info!("   ✅ PUBLISHED SUCCESSFULLY!");
-                                info!("   📨 Gossipsub Message ID: {:?}", msg_id);
+                        // v4.3.0-beta: Route through priority gossipsub queue
+                        match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), message_bytes) {
+                            Ok(()) => {
+                                info!("   ✅ [QUEUE] AI message enqueued for broadcast");
                                 info!("═══════════════════════════════════════════════════════════════");
                             }
-                            Err(e) => {
-                                error!("   ❌ PUBLISH FAILED: {}", e);
-                                error!("   💡 Hint: Check if topic is subscribed and has mesh peers");
-                                error!("═══════════════════════════════════════════════════════════════");
+                            Err(reason) => {
+                                warn!("   ⚠️ [QUEUE] AI message dropped: {}", reason);
+                                info!("═══════════════════════════════════════════════════════════════");
                             }
                         }
                     }
@@ -4304,26 +4377,24 @@ impl UnifiedNetworkManager {
             }
             NetworkCommand::PublishPoolAnnouncement { topic, announcement_bytes } => {
                 info!("💱 [LIQUIDITY POOLS] Publishing pool announcement to topic: {} ({} bytes)", topic, announcement_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes.clone()) {
-                    Ok(_) => {
-                        info!("✅ [LIQUIDITY POOLS] Successfully published pool announcement to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), announcement_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued pool announcement (topic={})", topic);
                     }
-                    Err(e) => {
-                        error!("❌ [LIQUIDITY POOLS] Failed to publish pool announcement to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Pool announcement dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishTokenAnnouncement { topic, announcement_bytes } => {
                 // v2.3.7-beta: Publish token deployment for cross-node discovery
                 info!("🪙 [TOKEN ANNOUNCEMENT] Publishing token deployment to topic: {} ({} bytes)", topic, announcement_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, announcement_bytes.clone()) {
-                    Ok(_) => {
-                        info!("✅ [TOKEN ANNOUNCEMENT] Successfully broadcast token deployment to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), announcement_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued token announcement (topic={})", topic);
                     }
-                    Err(e) => {
-                        error!("❌ [TOKEN ANNOUNCEMENT] Failed to publish token to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Token announcement dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4331,14 +4402,12 @@ impl UnifiedNetworkManager {
                 // v1.0.88-beta: Publish miner stats for P2P hashrate aggregation
                 debug!("⛏️ [MINER STATS] Publishing stats for {} to topic: {} ({} bytes)",
                        &miner_address[..16.min(miner_address.len())], topic, stats_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, stats_bytes.clone()) {
-                    Ok(_) => {
-                        debug!("✅ [MINER STATS] Successfully published miner stats to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), stats_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued miner stats (topic={})", topic);
                     }
-                    Err(e) => {
-                        // Only log at warn level since miner stats are non-critical
-                        warn!("⚠️ [MINER STATS] Failed to publish miner stats to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Miner stats dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4346,52 +4415,27 @@ impl UnifiedNetworkManager {
                 // v1.1.26-beta: Balance update log reduced to debug to avoid spam
                 debug!("💰 [BALANCE UPDATE] Publishing update for {} (+{} units) to topic: {} ({} bytes)",
                        &wallet_address[..16.min(wallet_address.len())], amount, topic, update_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, update_bytes.clone()) {
-                    Ok(_) => {
-                        // Success log reduced to trace to avoid spam
-                        trace!("✅ [BALANCE UPDATE] Successfully broadcast balance update to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), update_bytes) {
+                    Ok(()) => {
+                        trace!("📤 [QUEUE] Enqueued balance update (topic={})", topic);
                     }
-                    Err(e) => {
-                        // v1.1.26-beta: Reduced to debug - common when no peers subscribed
-                        debug!("❌ [BALANCE UPDATE] Failed to publish balance update to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        debug!("⚠️ [QUEUE] Balance update dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
             NetworkCommand::PublishMiningSolution { topic, solution_bytes, miner_address, block_height, nonce } => {
                 // v2.2.1-beta: P2P mining solution broadcasting
                 // Enables decentralized mining - any node can include the solution in a block
-
-                // 🚀 v3.4.13-beta: Rate limit mining solution broadcasts to prevent gossipsub queue overflow
-                // When miners are actively mining, they can submit solutions 10+ times/sec which fills
-                // the gossipsub send queue and causes connection drops for syncing peers
-                let now_ms = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_millis() as u64;
-                let last_broadcast_ms = LAST_MINING_SOLUTION_BROADCAST_MS.load(Ordering::Relaxed);
-                let elapsed_ms = now_ms.saturating_sub(last_broadcast_ms);
-
-                if elapsed_ms < MIN_MINING_BROADCAST_INTERVAL_MS {
-                    // Rate limited - skip this broadcast
-                    debug!(
-                        "⏳ [P2P MINING] Rate limited: {}ms since last broadcast (min: {}ms), skipping solution from {}",
-                        elapsed_ms, MIN_MINING_BROADCAST_INTERVAL_MS, &miner_address[..16.min(miner_address.len())]
-                    );
-                } else {
-                    // Update last broadcast time
-                    LAST_MINING_SOLUTION_BROADCAST_MS.store(now_ms, Ordering::Relaxed);
-
-                    info!("⛏️ [P2P MINING] Broadcasting solution from {} for block #{} (nonce: {}) to topic: {} ({} bytes)",
-                           &miner_address[..16.min(miner_address.len())], block_height, nonce, topic, solution_bytes.len());
-                    let ident_topic = IdentTopic::new(topic.as_str());
-                    match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, solution_bytes) {
-                        Ok(_) => {
-                            info!("✅ [P2P MINING] Successfully broadcast mining solution to P2P network");
-                        }
-                        Err(e) => {
-                            warn!("⚠️ [P2P MINING] Failed to broadcast mining solution to topic {}: {}", topic, e);
-                        }
+                // v4.3.0-beta: Rate limiting now handled by gossipsub queue (MessagePriority::Low = 100ms interval)
+                info!("⛏️ [P2P MINING] Broadcasting solution from {} for block #{} (nonce: {}) to topic: {} ({} bytes)",
+                       &miner_address[..16.min(miner_address.len())], block_height, nonce, topic, solution_bytes.len());
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), solution_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued mining solution for block #{} (topic={})", block_height, topic);
+                    }
+                    Err(reason) => {
+                        debug!("⚠️ [QUEUE] Mining solution for block #{} dropped: {} (topic={})", block_height, reason, topic);
                     }
                 }
             }
@@ -4400,14 +4444,12 @@ impl UnifiedNetworkManager {
                 // Broadcast transaction to all peers for real-time mempool synchronization
                 debug!("📤 [P2P MEMPOOL] Broadcasting tx {} ({} bytes) to topic: {}",
                        &tx_hash[..16.min(tx_hash.len())], tx_bytes.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, tx_bytes) {
-                    Ok(_) => {
-                        debug!("✅ [P2P MEMPOOL] Successfully broadcast tx {} to P2P network", &tx_hash[..16.min(tx_hash.len())]);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), tx_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued tx {} (topic={})", &tx_hash[..16.min(tx_hash.len())], topic);
                     }
-                    Err(e) => {
-                        // Debug level - common when no peers subscribed to this topic
-                        debug!("⚠️ [P2P MEMPOOL] Failed to broadcast tx {}: {}", &tx_hash[..16.min(tx_hash.len())], e);
+                    Err(reason) => {
+                        debug!("⚠️ [QUEUE] Tx {} dropped: {} (topic={})", &tx_hash[..16.min(tx_hash.len())], reason, topic);
                     }
                 }
             }
@@ -4416,13 +4458,12 @@ impl UnifiedNetworkManager {
                 debug!("🔮 [QNO P2P] Publishing {:?} operation to topic: {}", message.message_type, topic);
                 match message.to_bytes() {
                     Ok(msg_bytes) => {
-                        let ident_topic = IdentTopic::new(topic.as_str());
-                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, msg_bytes) {
-                            Ok(_) => {
-                                debug!("✅ [QNO P2P] Successfully broadcast QNO operation to P2P network");
+                        match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), msg_bytes) {
+                            Ok(()) => {
+                                debug!("📤 [QUEUE] Enqueued QNO operation (topic={})", topic);
                             }
-                            Err(e) => {
-                                warn!("⚠️ [QNO P2P] Failed to publish QNO operation to topic {}: {}", topic, e);
+                            Err(reason) => {
+                                warn!("⚠️ [QUEUE] QNO operation dropped: {} (topic={})", reason, topic);
                             }
                         }
                     }
@@ -4435,13 +4476,12 @@ impl UnifiedNetworkManager {
                 // v2.4.8-beta: Publish token social profile for cross-node sync
                 info!("📱 [TOKEN SOCIAL] Publishing social profile for {} to topic: {} ({} bytes)",
                       contract_address, topic, profile_bytes.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, profile_bytes.clone()) {
-                    Ok(_) => {
-                        info!("✅ [TOKEN SOCIAL] Successfully broadcast social profile to P2P network");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), profile_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued token social profile (topic={})", topic);
                     }
-                    Err(e) => {
-                        error!("❌ [TOKEN SOCIAL] Failed to publish social profile to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Token social profile dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4449,13 +4489,12 @@ impl UnifiedNetworkManager {
                 // v2.9.2-beta: Publish DEX event (trade, liquidity, price) to all peers
                 // This enables TRUE DEX decentralization by broadcasting state changes
                 info!("💱 [DEX P2P] Publishing DEX event to topic: {} ({} bytes)", topic, message.len());
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message.clone()) {
-                    Ok(msg_id) => {
-                        info!("✅ [DEX P2P] Successfully broadcast DEX event to P2P network (msg_id: {:?})", msg_id);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), message) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued DEX event (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("⚠️ [DEX P2P] Failed to publish DEX event to topic {}: {}", topic, e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] DEX event dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4602,14 +4641,13 @@ impl UnifiedNetworkManager {
                 };
 
                 let request_bytes = serde_json::to_vec(&request).unwrap_or_default();
-                let ident_topic = IdentTopic::new(topic.as_str());
 
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, request_bytes) {
-                    Ok(_) => {
-                        info!("✅ [CONSENSUS P2P] Signature request broadcast successfully");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued consensus signature request (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [CONSENSUS P2P] Failed to broadcast signature request: {}", e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Consensus signature request dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4639,14 +4677,13 @@ impl UnifiedNetworkManager {
                 };
 
                 let sig_bytes = serde_json::to_vec(&sig_msg).unwrap_or_default();
-                let ident_topic = IdentTopic::new(topic.as_str());
 
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, sig_bytes) {
-                    Ok(_) => {
-                        debug!("✅ [CONSENSUS P2P] Signature published successfully");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), sig_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued consensus signature (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [CONSENSUS P2P] Failed to publish signature: {}", e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Consensus signature dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4681,14 +4718,13 @@ impl UnifiedNetworkManager {
                 };
 
                 let cert_bytes = serde_json::to_vec(&cert_msg).unwrap_or_default();
-                let ident_topic = IdentTopic::new(topic.as_str());
 
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, cert_bytes) {
-                    Ok(_) => {
-                        info!("✅ [CONSENSUS P2P] Certificate broadcast successfully");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), cert_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued consensus certificate (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [CONSENSUS P2P] Failed to broadcast certificate: {}", e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] Consensus certificate dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
@@ -4721,43 +4757,43 @@ impl UnifiedNetworkManager {
                 };
 
                 let report_bytes = serde_json::to_vec(&report).unwrap_or_default();
-                let ident_topic = IdentTopic::new(topic.as_str());
 
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, report_bytes) {
-                    Ok(_) => {
-                        error!("📢 [CONSENSUS P2P] Equivocation proof broadcast - validator {} will be slashed",
+                // v4.3.0-beta: Route through priority queue (Critical priority for consensus)
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), report_bytes) {
+                    Ok(()) => {
+                        error!("📢 [CONSENSUS P2P] Equivocation proof enqueued - validator {} will be slashed",
                                hex::encode(&validator_id[..8]));
                     }
-                    Err(e) => {
-                        error!("❌ [CONSENSUS P2P] Failed to broadcast equivocation proof: {}", e);
+                    Err(reason) => {
+                        error!("❌ [CONSENSUS P2P] Failed to enqueue equivocation proof: {}", reason);
                     }
                 }
             }
 
             // ⚡ v2.6.0: Handle all-reduce messages for tensor parallelism
+            // v4.3.0-beta: Route through priority queue
             NetworkCommand::PublishAllReduce { topic, data } => {
                 debug!("⚡ [ALL-REDUCE] Publishing {} bytes to topic: {}", data.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
-                    Ok(_) => {
-                        debug!("✅ [ALL-REDUCE] Message published successfully");
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), data) {
+                    Ok(()) => {
+                        debug!("✅ [QUEUE] Enqueued all-reduce message (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [ALL-REDUCE] Failed to publish: {}", e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] All-reduce message dropped: {} (topic={})", reason, topic);
                     }
                 }
             }
 
             // 🔐 v2.4.6-beta: BFT consensus message publishing
+            // v4.3.0-beta: Route through priority queue
             NetworkCommand::PublishConsensusMessage { topic, message_bytes } => {
                 debug!("🔐 [BFT] Publishing {} bytes to consensus topic: {}", message_bytes.len(), topic);
-                let ident_topic = IdentTopic::new(topic.as_str());
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, message_bytes) {
-                    Ok(_) => {
-                        info!("✅ [BFT] Consensus message published to {}", topic);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), message_bytes) {
+                    Ok(()) => {
+                        debug!("✅ [QUEUE] Enqueued BFT consensus message (topic={})", topic);
                     }
-                    Err(e) => {
-                        warn!("❌ [BFT] Failed to publish consensus message: {}", e);
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] BFT consensus message dropped: {} (topic={})", reason, topic);
                     }
                 }
             }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{WriteBatch, WriteOptions, DB};
 use anyhow::{Result, Context, bail};
 use tracing::{info, warn, error, debug};

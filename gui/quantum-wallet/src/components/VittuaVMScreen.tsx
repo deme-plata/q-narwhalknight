@@ -1,8 +1,22 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send, History, BarChart3, TrendingUp, Activity, Clock, ArrowUpRight, ArrowDownRight, Gift, Percent, PieChart } from 'lucide-react';
+import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send, History, BarChart3, TrendingUp, Activity, Clock, ArrowUpRight, ArrowDownRight, Gift, Percent, PieChart, Landmark, Gem, Leaf, Palette, FileText, Package, Shield, DollarSign, Search, ArrowUpDown, Filter, X, Wallet, HelpCircle } from 'lucide-react';
+import RwaPortfolioTab from './RwaPortfolioTab';
+import {
+  contractTemplates,
+  rwaFieldsByTemplate,
+  contractTypeMap,
+  feeMultipliers,
+  categories,
+  calculateDynamicGas,
+  TARGET_FEE_USD,
+  type ContractCategory,
+  type ContractTemplate,
+  type RwaField,
+} from './rwaTemplateData';
 
-type ContractCategory = 'tokens' | 'defi' | 'rwa' | 'governance';
+// ContractCategory is now imported from rwaTemplateData
+type _ContractCategoryAlias = ContractCategory; // Keep for backward compatibility
 type DeploymentStep = 'select' | 'basics' | 'features' | 'review' | 'deploying' | 'success';
 type ContractTab = 'control' | 'events' | 'stats' | 'social';
 
@@ -78,6 +92,22 @@ interface DeployedContract {
     pausable?: boolean;
     upgradeable?: boolean;
     airdrop?: boolean;
+    // RWA-specific features
+    kyc_required?: boolean;
+    accredited_only?: boolean;
+    dividend_enabled?: boolean;
+    transfer_restrictions?: boolean;
+    voting_rights?: boolean;
+    callable?: boolean;
+    convertible?: boolean;
+    delivery_option?: boolean;
+    insurance_enabled?: boolean;
+    retirement_enabled?: boolean;
+    offset_tracking?: boolean;
+    provenance_verified?: boolean;
+    redemption_enabled?: boolean;
+    sublicensing_allowed?: boolean;
+    [key: string]: boolean | undefined; // Allow dynamic RWA feature keys
   };
   isPaused?: boolean;
   logoUrl?: string; // libp2p IPFS CID for logo
@@ -87,87 +117,45 @@ interface DeployedContract {
   decimals?: number; // v1.4.9: Token decimals for balance conversion
   owner?: string; // v2.4.8: Contract owner/creator address
   socialMedia?: SocialMediaProfile; // v2.4.8: Social links
+  deploymentParams?: Record<string, string | boolean>; // RWA deployment parameters
 }
 
-interface ContractTemplate {
-  id: string;
-  name: string;
-  description: string;
-  icon: typeof Coins;
-  category: ContractCategory;
-  features: string[];
-  gasEstimate: string;
+// ContractTemplate, ContractCategory, RwaField interfaces and constants
+// are all imported from ./rwaTemplateData (contractTemplates, rwaFieldsByTemplate,
+// contractTypeMap, feeMultipliers, categories, calculateDynamicGas, TARGET_FEE_USD)
+
+// ─── Tooltip helpers for RWA controls ───────────────
+function RwaTooltip({ text, children, position = 'top' }: { text: string; children: React.ReactNode; position?: 'top' | 'bottom' | 'left' | 'right' }) {
+  const [show, setShow] = useState(false);
+  const pos: Record<string, string> = {
+    top: 'bottom-full left-1/2 -translate-x-1/2 mb-2',
+    bottom: 'top-full left-1/2 -translate-x-1/2 mt-2',
+    right: 'left-full top-1/2 -translate-y-1/2 ml-2',
+  };
+  return (
+    <span className="relative inline-flex items-center" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <span className={`absolute z-[100] ${pos[position] || pos.top} pointer-events-none`}>
+          <span className="block bg-gray-800 text-gray-200 text-[11px] leading-[1.4] px-3 py-2 rounded-lg shadow-xl shadow-black/40 border border-gray-700/50 max-w-[260px] min-w-[140px] whitespace-normal font-normal">
+            {text}
+          </span>
+        </span>
+      )}
+    </span>
+  );
 }
 
-// Dynamic gas pricing: Target $0.10 USD equivalent in QUG
-// As QUG price increases, gas cost in QUG decreases proportionally
-// This ensures fees stay affordable even if 1 QUG = $1M in the future
-const TARGET_FEE_USD = 0.10; // Target $0.10 USD per contract deployment
-
-// Calculate dynamic gas based on USD target and oracle price
-const calculateDynamicGas = (baseUsdCost: number, qugPriceUsd: number): number => {
-  // If QUG = $1M, then 0.0000001 QUG = $0.10
-  // If QUG = $0.01, then 10 QUG = $0.10
-  const qugAmount = baseUsdCost / qugPriceUsd;
-  return Math.max(0.0000001, qugAmount); // Minimum 0.0000001 QUG (100 nanoQUG)
-};
-
-const contractTemplates: ContractTemplate[] = [
-  {
-    id: 'secure-token',
-    name: 'Secure Token',
-    description: 'Basic quantum-safe token with transfer and balance tracking',
-    icon: Coins,
-    category: 'tokens',
-    features: ['Transfer', 'Balance Tracking', 'Quantum-Safe'],
-    gasEstimate: '~$0.10 USD' // Will be calculated dynamically from oracle
-  },
-  {
-    id: 'advanced-token',
-    name: 'Advanced Token',
-    description: 'Feature-rich token with minting, burning, staking, and governance',
-    icon: Sparkles,
-    category: 'tokens',
-    features: ['Mintable', 'Burnable', 'Staking', 'Governance', 'Reflection', 'Pausable'],
-    gasEstimate: '~$0.20 USD' // Will be calculated dynamically from oracle
-  },
-  {
-    id: 'rwa-token',
-    name: 'RWA Token',
-    description: 'Real-world asset tokenization with compliance features',
-    icon: Building,
-    category: 'rwa',
-    features: ['Asset Backing', 'Compliance', 'KYC Integration', 'Transfer Restrictions'],
-    gasEstimate: '~$0.30 USD' // Will be calculated dynamically from oracle
-  },
-  {
-    id: 'governance',
-    name: 'Governance DAO',
-    description: 'Decentralized governance with proposal and voting mechanisms',
-    icon: Vote,
-    category: 'governance',
-    features: ['Proposals', 'Voting', 'Timelock', 'Delegation'],
-    gasEstimate: '~$0.40 USD' // Will be calculated dynamically from oracle
-  },
-  {
-    id: 'private-dex',
-    name: 'Private DEX',
-    description: 'Privacy-preserving decentralized exchange with ZK-SNARKs',
-    icon: Lock,
-    category: 'defi',
-    features: ['Private Swaps', 'ZK-SNARKs', 'Liquidity Pools', 'AMM'],
-    gasEstimate: '~$0.50 USD' // Will be calculated dynamically from oracle
-  }
-];
-
-const categories = [
-  { id: 'tokens' as ContractCategory, name: 'Tokens', icon: Coins },
-  { id: 'defi' as ContractCategory, name: 'DeFi', icon: Lock },
-  { id: 'rwa' as ContractCategory, name: 'RWA', icon: Building },
-  { id: 'governance' as ContractCategory, name: 'Governance', icon: Vote }
-];
+function RwaInfoTip({ text, position }: { text: string; position?: 'top' | 'bottom' | 'right' }) {
+  return (
+    <RwaTooltip text={text} position={position || 'top'}>
+      <HelpCircle className="w-3.5 h-3.5 text-gray-500 hover:text-gray-300 transition-colors cursor-help ml-1 inline" />
+    </RwaTooltip>
+  );
+}
 
 export default function VittuaVMScreen() {
+  const [vmView, setVmView] = useState<'deploy' | 'contracts' | 'portfolio'>('deploy');
   const [step, setStep] = useState<DeploymentStep>('select');
   const [selectedCategory, setSelectedCategory] = useState<ContractCategory>('tokens');
   const [selectedTemplate, setSelectedTemplate] = useState<ContractTemplate | null>(null);
@@ -198,6 +186,7 @@ export default function VittuaVMScreen() {
 
   // Contract basics
   const [contractName, setContractName] = useState('');
+  const [contractDescription, setContractDescription] = useState(''); // v4.0.1: Description for contract/token
   const [tokenSymbol, setTokenSymbol] = useState('');
   const [initialSupply, setInitialSupply] = useState('1000000');
   const [tokenDecimals, setTokenDecimals] = useState(8); // v3.2.18-beta: User-configurable decimals
@@ -216,6 +205,17 @@ export default function VittuaVMScreen() {
     upgradeable: false,
     airdrop: true
   });
+
+  // RWA-specific parameters (dynamic per template)
+  const [rwaParams, setRwaParams] = useState<Record<string, string | boolean>>({});
+
+  const updateRwaParam = (key: string, value: string | boolean) => {
+    setRwaParams(prev => ({ ...prev, [key]: value }));
+  };
+
+  // Check if selected template is an RWA type
+  const isRwaTemplate = selectedTemplate?.category === 'rwa' && selectedTemplate?.id !== 'rwa-token';
+  const currentRwaFields = selectedTemplate ? rwaFieldsByTemplate[selectedTemplate.id] || [] : [];
 
   // Deployed contracts - fetched from blockchain backend API
   const [deployedContracts, setDeployedContracts] = useState<DeployedContract[]>([]);
@@ -648,6 +648,7 @@ export default function VittuaVMScreen() {
               isPaused: false,
               totalSupply: formattedSupply, // v3.2.14-beta: Fixed - now in display units
               decimals: decimals,
+              deploymentParams: c.deployment_params || {}, // v4.0.3: RWA config params
             };
           });
 
@@ -728,12 +729,80 @@ export default function VittuaVMScreen() {
     return () => clearInterval(interval);
   }, [step]); // Re-fetch when returning to 'select' step
 
+  // Deployed contracts search, sort, and filter state
+  const [contractSearch, setContractSearch] = useState('');
+  const [contractSort, setContractSort] = useState<'name' | 'date' | 'type' | 'symbol'>('date');
+  const [contractSortDir, setContractSortDir] = useState<'asc' | 'desc'>('desc');
+  const [contractTypeFilter, setContractTypeFilter] = useState<string>('all');
+
+  const filteredDeployedContracts = React.useMemo(() => {
+    let filtered = [...deployedContracts];
+
+    // Search filter
+    if (contractSearch.trim()) {
+      const q = contractSearch.toLowerCase();
+      filtered = filtered.filter(c =>
+        c.name.toLowerCase().includes(q) ||
+        c.symbol.toLowerCase().includes(q) ||
+        c.type.toLowerCase().includes(q) ||
+        c.address.toLowerCase().includes(q)
+      );
+    }
+
+    // Type filter
+    if (contractTypeFilter !== 'all') {
+      filtered = filtered.filter(c => {
+        const ct = c.type.toLowerCase();
+        if (contractTypeFilter === 'rwa') return ['realestate', 'equity', 'fixedincome', 'commodity', 'carbon', 'art', 'collectible', 'ip', 'royalt', 'physical', 'rwa'].some(t => ct.includes(t));
+        if (contractTypeFilter === 'token') return ct.includes('token') && !['realestate', 'equity', 'fixedincome', 'commodity', 'carbon', 'art', 'collectible', 'ip', 'royalt', 'physical', 'rwa'].some(t => ct.includes(t));
+        if (contractTypeFilter === 'governance') return ct.includes('governance') || ct.includes('dao');
+        if (contractTypeFilter === 'defi') return ct.includes('dex') || ct.includes('defi');
+        return true;
+      });
+    }
+
+    // Sort
+    filtered.sort((a, b) => {
+      let cmp = 0;
+      switch (contractSort) {
+        case 'name': cmp = a.name.localeCompare(b.name); break;
+        case 'symbol': cmp = a.symbol.localeCompare(b.symbol); break;
+        case 'type': cmp = a.type.localeCompare(b.type); break;
+        case 'date': cmp = (a.deployedAt?.getTime() || 0) - (b.deployedAt?.getTime() || 0); break;
+      }
+      return contractSortDir === 'desc' ? -cmp : cmp;
+    });
+
+    return filtered;
+  }, [deployedContracts, contractSearch, contractSort, contractSortDir, contractTypeFilter]);
+
   // Contract control states
   const [mintAmount, setMintAmount] = useState('');
   const [burnAmount, setBurnAmount] = useState('');
   const [reflectionRate, setReflectionRate] = useState('2');
   const [airdropAddresses, setAirdropAddresses] = useState('');
   const [airdropAmount, setAirdropAmount] = useState('');
+
+  // v4.0.3: RWA action state - inline feedback instead of browser alerts
+  const [rwaActionStatus, setRwaActionStatus] = useState<Record<string, { loading: boolean; message: string; success: boolean }>>({});
+  const [rwaInputs, setRwaInputs] = useState<Record<string, string>>({});
+
+  const getRwaInput = (key: string) => rwaInputs[key] || '';
+  const setRwaInput = (key: string, value: string) => setRwaInputs(prev => ({ ...prev, [key]: value }));
+  const getRwaStatus = (contractAddr: string, action: string) => rwaActionStatus[`${contractAddr}:${action}`];
+  const setRwaStatus = (contractAddr: string, action: string, status: { loading: boolean; message: string; success: boolean }) => {
+    setRwaActionStatus(prev => ({ ...prev, [`${contractAddr}:${action}`]: status }));
+    // Auto-clear success/error messages after 5 seconds
+    if (!status.loading) {
+      setTimeout(() => {
+        setRwaActionStatus(prev => {
+          const next = { ...prev };
+          delete next[`${contractAddr}:${action}`];
+          return next;
+        });
+      }, 5000);
+    }
+  };
 
   const toggleFeature = (feature: keyof typeof features) => {
     setFeatures(prev => ({ ...prev, [feature]: !prev[feature] }));
@@ -743,12 +812,9 @@ export default function VittuaVMScreen() {
 
   const handleSelectTemplate = (template: ContractTemplate) => {
     setSelectedTemplate(template);
-    // Advanced Token goes to features step, others go to basics
-    if (template.id === 'advanced-token') {
-      setStep('basics');
-    } else {
-      setStep('basics');
-    }
+    setRwaParams({}); // Reset RWA params when switching templates
+    setContractDescription(''); // Reset description when switching templates
+    setStep('basics');
   };
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -854,6 +920,14 @@ export default function VittuaVMScreen() {
         selectedTemplate?.id === 'secure-token' ? 1 :
         selectedTemplate?.id === 'advanced-token' ? 2 :
         selectedTemplate?.id === 'rwa-token' ? 3 :
+        selectedTemplate?.id === 'real-estate-token' ? 4 :
+        selectedTemplate?.id === 'equity-token' ? 4 :
+        selectedTemplate?.id === 'fixed-income-token' ? 3.5 :
+        selectedTemplate?.id === 'commodity-token' ? 3.5 :
+        selectedTemplate?.id === 'carbon-credit-token' ? 3 :
+        selectedTemplate?.id === 'art-collectible-token' ? 3.5 :
+        selectedTemplate?.id === 'ip-revenue-token' ? 3.5 :
+        selectedTemplate?.id === 'physical-goods-token' ? 3.5 :
         selectedTemplate?.id === 'governance' ? 4 :
         selectedTemplate?.id === 'private-dex' ? 5 : 1;
 
@@ -886,6 +960,7 @@ export default function VittuaVMScreen() {
         template: selectedTemplate?.name,
         initialSupply,
         features: selectedTemplate?.id === 'advanced-token' ? features : {},
+        rwaParameters: isRwaTemplate ? rwaParams : undefined,
         logoIpfsCid: logoIpfsCid || undefined,
         deployedAt: new Date().toISOString(),
       };
@@ -914,6 +989,14 @@ export default function VittuaVMScreen() {
         'secure-token': 'secure_token',
         'advanced-token': 'advanced_token',
         'rwa-token': 'rwa_token',
+        'real-estate-token': 'real_estate_token',
+        'equity-token': 'equity_token',
+        'fixed-income-token': 'fixed_income_token',
+        'commodity-token': 'commodity_token',
+        'carbon-credit-token': 'carbon_credit_token',
+        'art-collectible-token': 'art_collectible_token',
+        'ip-revenue-token': 'ip_revenue_token',
+        'physical-goods-token': 'physical_goods_token',
         'governance': 'governance',
         'private-dex': 'private_dex',
       };
@@ -951,10 +1034,12 @@ export default function VittuaVMScreen() {
         parameters: {
           name: contractName,
           symbol: tokenSymbol,
+          description: contractDescription || undefined, // v4.0.1: Include description
           initialSupply: initialSupplyBaseUnits, // v3.2.18-beta: Send BASE units
           decimals: tokenDecimals, // v3.2.18-beta: User-selected decimals
           logoIpfsCid: logoIpfsCid || undefined,
           ...features, // Include all feature flags
+          ...(isRwaTemplate ? rwaParams : {}), // Include RWA-specific parameters
         },
         deployment_options: {
           test_deployment: false,
@@ -1013,6 +1098,7 @@ export default function VittuaVMScreen() {
         logoDataUrl: logoPreview || undefined,
         decimals: tokenDecimals, // v3.2.18-beta: Store user-selected decimals
         totalSupply: initialSupply, // v3.2.18-beta: Store initial supply in display units
+        deploymentParams: isRwaTemplate ? rwaParams : undefined, // RWA deployment parameters
       };
 
       const updatedContracts = [...deployedContracts, newContract];
@@ -1022,6 +1108,27 @@ export default function VittuaVMScreen() {
       const cacheKey = `deployedContracts_${walletAddress}`;
       localStorage.setItem(cacheKey, JSON.stringify(updatedContracts));
       console.log('💾 Updated cache with newly deployed contract');
+
+      // v4.0.1: Auto-save description to social profile if provided
+      if (contractDescription.trim()) {
+        try {
+          await fetch(`/api/v1/contracts/${contractAddress}/social`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              description: contractDescription.trim(),
+              owner_address: walletAddress,
+            }),
+          });
+          setSocialProfiles(prev => ({
+            ...prev,
+            [contractAddress]: { description: contractDescription.trim() },
+          }));
+          console.log('📝 Auto-saved description to social profile');
+        } catch (err) {
+          console.warn('Failed to auto-save description:', err);
+        }
+      }
 
       setStep('success');
 
@@ -1295,6 +1402,53 @@ export default function VittuaVMScreen() {
     }
   };
 
+  // v4.0.3: Generic RWA contract action handler with inline feedback
+  const handleContractAction = async (contract: DeployedContract, action: string, extraData?: Record<string, string>) => {
+    setRwaStatus(contract.address, action, { loading: true, message: 'Processing...', success: false });
+    try {
+      console.log(`🏗️ RWA action "${action}" on contract ${contract.address}`, extraData);
+      const response = await fetch(`/api/v1/contracts/${contract.address}/interact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...extraData }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || `Action "${action}" failed`);
+      }
+      const result = await response.json();
+      console.log(`✅ RWA action "${action}" succeeded:`, result);
+
+      // Add event to contract history
+      const newEvent: ContractEvent = {
+        id: `${action}-${Date.now()}`,
+        type: 'transfer',
+        amount: extraData?.amount || '0',
+        timestamp: new Date(),
+        txHash: result.data?.transaction_hash || `0x${Date.now().toString(16)}`
+      };
+      setContractEvents(prev => ({
+        ...prev,
+        [contract.address]: [newEvent, ...(prev[contract.address] || [])]
+      }));
+
+      const readableAction = action.replace(/_/g, ' ');
+      setRwaStatus(contract.address, action, { loading: false, message: `${readableAction} completed`, success: true });
+
+      // Refresh contract data to show updated params (e.g. new appraisal value, verification status)
+      if (result.data?.updated_params) {
+        setDeployedContracts(prev => prev.map(c =>
+          c.address === contract.address
+            ? { ...c, deploymentParams: { ...c.deploymentParams, ...result.data.updated_params } }
+            : c
+        ));
+      }
+    } catch (error: any) {
+      console.error(`❌ RWA action "${action}" failed:`, error);
+      setRwaStatus(contract.address, action, { loading: false, message: error.message, success: false });
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -1312,9 +1466,51 @@ export default function VittuaVMScreen() {
         </div>
       </div>
 
+      {/* ═══ Top-Level Navigation Tabs ═══ */}
+      <div className="flex gap-2 border-b border-quantum-purple/10 pb-3">
+        {[
+          { id: 'deploy' as const, label: 'Deploy & Templates', icon: Cpu },
+          { id: 'contracts' as const, label: 'My Contracts', icon: FileCode, count: deployedContracts.length },
+          { id: 'portfolio' as const, label: 'RWA Portfolio', icon: Wallet },
+        ].map(tab => (
+          <motion.button
+            key={tab.id}
+            onClick={() => { setVmView(tab.id); if (tab.id === 'deploy') setStep('select'); }}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-sm transition-all ${
+              vmView === tab.id
+                ? 'bg-gradient-to-r from-quantum-purple/80 to-quantum-cyan/80 text-white shadow-lg'
+                : 'bg-quantum-dark/40 text-gray-400 hover:text-white hover:bg-quantum-dark/60'
+            }`}
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <tab.icon className="w-4 h-4" />
+            {tab.label}
+            {tab.count !== undefined && tab.count > 0 && (
+              <span className="bg-quantum-purple/30 text-xs px-1.5 py-0.5 rounded-full">{tab.count}</span>
+            )}
+          </motion.button>
+        ))}
+      </div>
+
+      {/* ═══ RWA Portfolio View ═══ */}
+      {vmView === 'portfolio' && (
+        <RwaPortfolioTab
+          contracts={deployedContracts}
+          walletAddress={localStorage.getItem('walletAddress') || ''}
+        />
+      )}
+
+      {/* ═══ My Contracts View (standalone) ═══ */}
+      {vmView === 'contracts' && (loadingContracts || deployedContracts.length > 0) && (() => {
+        // This renders the deployed contracts section directly
+        // We reuse the same section that's currently inside step === 'select'
+        return null; // Will be rendered below alongside select step
+      })()}
+
       <AnimatePresence mode="wait">
         {/* Step 1: Contract Selection */}
-        {step === 'select' && (
+        {(vmView === 'deploy' || vmView === 'contracts') && step === 'select' && (
           <motion.div
             key="select"
             initial={{ opacity: 0, y: 20 }}
@@ -1322,7 +1518,8 @@ export default function VittuaVMScreen() {
             exit={{ opacity: 0, y: -20 }}
             className="space-y-6"
           >
-            {/* Category Tabs */}
+            {/* Category Tabs + Template Grid - only show in deploy view */}
+            {vmView === 'deploy' && (<>
             <div className="flex gap-2 overflow-x-auto pb-2">
               {categories.map((category) => (
                 <motion.button
@@ -1375,6 +1572,7 @@ export default function VittuaVMScreen() {
                 </motion.div>
               ))}
             </div>
+            </>)}
           </motion.div>
         )}
 
@@ -1405,6 +1603,25 @@ export default function VittuaVMScreen() {
                     placeholder="My Token"
                     className="w-full bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none"
                   />
+                </div>
+
+                {/* v4.0.1: Description field for all contracts */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Description <span className="text-gray-500 text-xs">(Optional — visible on social profile)</span>
+                  </label>
+                  <textarea
+                    value={contractDescription}
+                    onChange={(e) => setContractDescription(e.target.value)}
+                    placeholder={isRwaTemplate
+                      ? "Describe your real-world asset token — what it represents, investment thesis, target market..."
+                      : "Describe your token project — purpose, use case, community..."
+                    }
+                    rows={3}
+                    maxLength={500}
+                    className="w-full bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none resize-none text-sm"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">{contractDescription.length}/500 characters. Can be edited later in the Social tab.</p>
                 </div>
 
                 {selectedTemplate.id.includes('token') && (
@@ -1640,7 +1857,7 @@ export default function VittuaVMScreen() {
                   Back
                 </motion.button>
                 <motion.button
-                  onClick={() => selectedTemplate.id === 'advanced-token' ? setStep('features') : setStep('review')}
+                  onClick={() => (selectedTemplate.id === 'advanced-token' || isRwaTemplate) ? setStep('features') : setStep('review')}
                   disabled={!contractName || (selectedTemplate.id.includes('token') && (!tokenSymbol || !initialSupply))}
                   className="flex-1 bg-gradient-to-r from-quantum-purple to-quantum-cyan hover:from-quantum-purple/80 hover:to-quantum-cyan/80 text-white py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   whileHover={{ scale: 1.02 }}
@@ -1664,6 +1881,85 @@ export default function VittuaVMScreen() {
             className="space-y-6"
           >
             <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-purple/30 rounded-xl p-6">
+              {isRwaTemplate ? (
+                <>
+                  <div className="flex items-center gap-3 mb-2">
+                    {selectedTemplate && <selectedTemplate.icon className="w-6 h-6 text-quantum-cyan" />}
+                    <h2 className="text-2xl font-bold text-white">Configure {selectedTemplate?.name}</h2>
+                  </div>
+                  <p className="text-gray-400 mb-6">Set the specific parameters for your RWA contract</p>
+
+                  <div className="space-y-6 max-h-[60vh] overflow-y-auto pr-2">
+                    {/* Group fields by section */}
+                    {(() => {
+                      const sections = new Map<string, RwaField[]>();
+                      currentRwaFields.forEach(field => {
+                        const sec = field.section || 'General';
+                        if (!sections.has(sec)) sections.set(sec, []);
+                        sections.get(sec)!.push(field);
+                      });
+                      return Array.from(sections.entries()).map(([sectionName, fields]) => (
+                        <div key={sectionName}>
+                          <h3 className="text-lg font-bold text-quantum-cyan mb-3">{sectionName}</h3>
+                          <div className="space-y-3">
+                            {fields.map(field => {
+                              if (field.type === 'checkbox') {
+                                return (
+                                  <label key={field.key} className="flex items-center gap-3 p-4 bg-quantum-dark/50 rounded-lg cursor-pointer hover:bg-quantum-dark/70 transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      checked={!!rwaParams[field.key]}
+                                      onChange={() => updateRwaParam(field.key, !rwaParams[field.key])}
+                                      className="w-5 h-5 rounded border-quantum-cyan/30 text-quantum-cyan focus:ring-quantum-cyan"
+                                    />
+                                    <div>
+                                      <div className="font-medium text-white">{field.label}</div>
+                                      {field.description && <div className="text-sm text-gray-400">{field.description}</div>}
+                                    </div>
+                                  </label>
+                                );
+                              } else if (field.type === 'select') {
+                                return (
+                                  <div key={field.key}>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{field.label}</label>
+                                    <select
+                                      value={(rwaParams[field.key] as string) || ''}
+                                      onChange={(e) => updateRwaParam(field.key, e.target.value)}
+                                      className="w-full bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white focus:border-quantum-cyan/50 focus:outline-none appearance-none"
+                                    >
+                                      <option value="" className="bg-gray-900">Select {field.label}...</option>
+                                      {field.options?.map(opt => (
+                                        <option key={opt.value} value={opt.value} className="bg-gray-900">{opt.label}</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                );
+                              } else {
+                                return (
+                                  <div key={field.key}>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{field.label}</label>
+                                    <input
+                                      type={field.type === 'number' ? 'text' : 'text'}
+                                      value={(rwaParams[field.key] as string) || ''}
+                                      onChange={(e) => {
+                                        const val = field.type === 'number' ? e.target.value.replace(/[^0-9.]/g, '') : e.target.value;
+                                        updateRwaParam(field.key, val);
+                                      }}
+                                      placeholder={field.placeholder}
+                                      className="w-full bg-quantum-dark/50 border border-quantum-cyan/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none"
+                                    />
+                                  </div>
+                                );
+                              }
+                            })}
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </>
+              ) : (
+                <>
               <h2 className="text-2xl font-bold text-white mb-2">Select Features</h2>
               <p className="text-gray-400 mb-6">Choose the capabilities you want for your token</p>
 
@@ -1790,6 +2086,8 @@ export default function VittuaVMScreen() {
                   </div>
                 </div>
               </div>
+                </>
+              )}
 
               <div className="flex gap-3 mt-6">
                 <motion.button
@@ -1877,6 +2175,36 @@ export default function VittuaVMScreen() {
                   </div>
                 )}
 
+                {/* Description in review */}
+                {contractDescription && (
+                  <div className="bg-quantum-dark/50 rounded-lg p-4">
+                    <div className="text-sm text-gray-400 mb-2">Description</div>
+                    <p className="text-white text-sm">{contractDescription}</p>
+                  </div>
+                )}
+
+                {/* RWA Parameters Summary */}
+                {isRwaTemplate && Object.keys(rwaParams).length > 0 && (
+                  <div className="bg-quantum-dark/50 rounded-lg p-4">
+                    <div className="text-sm text-gray-400 mb-2">RWA Configuration</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(rwaParams)
+                        .filter(([_, val]) => val !== '' && val !== false)
+                        .map(([key, val]) => {
+                          const field = currentRwaFields.find(f => f.key === key);
+                          const displayVal = typeof val === 'boolean' ? 'Yes' :
+                            field?.options?.find(o => o.value === val)?.label || String(val);
+                          return (
+                            <div key={key} className="text-sm">
+                              <span className="text-gray-500">{field?.label || key}: </span>
+                              <span className="text-quantum-cyan">{displayVal}</span>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="bg-gradient-to-r from-quantum-yellow/10 to-quantum-orange/10 border border-quantum-yellow/30 rounded-lg p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-sm text-gray-300">Estimated Gas Cost</div>
@@ -1887,7 +2215,7 @@ export default function VittuaVMScreen() {
 
               <div className="flex gap-3">
                 <motion.button
-                  onClick={() => setStep(selectedTemplate.id === 'advanced-token' ? 'features' : 'basics')}
+                  onClick={() => setStep((selectedTemplate.id === 'advanced-token' || isRwaTemplate) ? 'features' : 'basics')}
                   className="flex-1 bg-quantum-dark/50 hover:bg-quantum-dark/70 text-white py-3 px-4 rounded-xl transition-colors"
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
@@ -2005,8 +2333,8 @@ export default function VittuaVMScreen() {
         )}
       </AnimatePresence>
 
-      {/* My Deployed Contracts Section */}
-      {step === 'select' && (loadingContracts || deployedContracts.length > 0) && (
+      {/* My Deployed Contracts Section - visible in deploy (select step) and contracts views */}
+      {(vmView === 'contracts' || (vmView === 'deploy' && step === 'select')) && (loadingContracts || deployedContracts.length > 0) && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2015,14 +2343,93 @@ export default function VittuaVMScreen() {
         >
           <h2 className="text-2xl font-bold text-white">My Deployed Contracts</h2>
 
+          {/* Search, Sort & Filter Toolbar */}
+          {deployedContracts.length > 0 && (
+            <div className="bg-quantum-indigo/20 backdrop-blur-xl border border-quantum-purple/20 rounded-xl p-4 space-y-3">
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                <input
+                  type="text"
+                  value={contractSearch}
+                  onChange={(e) => setContractSearch(e.target.value)}
+                  placeholder="Search contracts by name, symbol, type, or address..."
+                  className="w-full bg-quantum-dark/60 border border-quantum-purple/20 rounded-lg pl-10 pr-10 py-2.5 text-white text-sm placeholder-gray-500 focus:border-quantum-cyan/50 focus:outline-none transition-colors"
+                />
+                {contractSearch && (
+                  <button onClick={() => setContractSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors">
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Filter & Sort Row */}
+              <div className="flex flex-wrap gap-2 items-center">
+                {/* Type Filter */}
+                <div className="flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-gray-500" />
+                  <select
+                    value={contractTypeFilter}
+                    onChange={(e) => setContractTypeFilter(e.target.value)}
+                    className="bg-quantum-dark/60 border border-quantum-purple/20 rounded-lg px-3 py-1.5 text-white text-xs focus:border-quantum-cyan/50 focus:outline-none appearance-none cursor-pointer"
+                  >
+                    <option value="all">All Types</option>
+                    <option value="token">Tokens</option>
+                    <option value="rwa">RWA</option>
+                    <option value="governance">Governance</option>
+                    <option value="defi">DeFi</option>
+                  </select>
+                </div>
+
+                {/* Sort */}
+                <div className="flex items-center gap-1.5">
+                  <ArrowUpDown className="w-3.5 h-3.5 text-gray-500" />
+                  <select
+                    value={contractSort}
+                    onChange={(e) => setContractSort(e.target.value as 'name' | 'date' | 'type' | 'symbol')}
+                    className="bg-quantum-dark/60 border border-quantum-purple/20 rounded-lg px-3 py-1.5 text-white text-xs focus:border-quantum-cyan/50 focus:outline-none appearance-none cursor-pointer"
+                  >
+                    <option value="date">Sort by Date</option>
+                    <option value="name">Sort by Name</option>
+                    <option value="symbol">Sort by Symbol</option>
+                    <option value="type">Sort by Type</option>
+                  </select>
+                  <button
+                    onClick={() => setContractSortDir(d => d === 'asc' ? 'desc' : 'asc')}
+                    className="bg-quantum-dark/60 border border-quantum-purple/20 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white text-xs transition-colors"
+                    title={contractSortDir === 'asc' ? 'Ascending' : 'Descending'}
+                  >
+                    {contractSortDir === 'asc' ? '↑' : '↓'}
+                  </button>
+                </div>
+
+                {/* Results count */}
+                <span className="text-xs text-gray-500 ml-auto">
+                  {filteredDeployedContracts.length} of {deployedContracts.length} contracts
+                </span>
+              </div>
+            </div>
+          )}
+
           {loadingContracts && (
             <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-purple/30 rounded-xl p-6 text-center">
               <p className="text-gray-400">Loading deployed contracts from blockchain...</p>
             </div>
           )}
 
+          {/* No results message */}
+          {!loadingContracts && deployedContracts.length > 0 && filteredDeployedContracts.length === 0 && (
+            <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-purple/30 rounded-xl p-6 text-center">
+              <Search className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+              <p className="text-gray-400 text-sm">No contracts match your search</p>
+              <button onClick={() => { setContractSearch(''); setContractTypeFilter('all'); }} className="text-quantum-cyan text-xs mt-2 hover:underline">
+                Clear filters
+              </button>
+            </div>
+          )}
+
           <div className="space-y-4">
-            {deployedContracts.map((contract) => (
+            {filteredDeployedContracts.map((contract) => (
               <motion.div
                 key={contract.address}
                 initial={{ opacity: 0, y: 10 }}
@@ -2120,7 +2527,7 @@ export default function VittuaVMScreen() {
                 {/* Tab Content */}
                 <AnimatePresence mode="wait">
                   {/* Control Tab */}
-                  {getActiveTab(contract.address) === 'control' && Object.keys(contract.features).length > 0 && (
+                  {getActiveTab(contract.address) === 'control' && (
                     <motion.div
                       key="control"
                       initial={{ opacity: 0, y: 10 }}
@@ -2384,6 +2791,767 @@ export default function VittuaVMScreen() {
                         </div>
                       )}
                     </div>
+
+                    {/* ═══ RWA-Specific Controls ═══ */}
+                    {(() => {
+                      const ct = contract.type.toLowerCase();
+                      const isRwa = ['realestate', 'equity', 'fixedincome', 'commodity', 'carboncredit',
+                        'artcollectible', 'iprevenue', 'physicalgoods', 'rwatoken', 'real_estate',
+                        'fixed_income', 'carbon_credit', 'art_collectible', 'ip_revenue', 'physical_goods'
+                      ].some(t => ct.includes(t));
+                      const isRealEstate = ct.includes('realestate') || ct.includes('real_estate');
+                      const isEquity = ct.includes('equity');
+                      const isFixedIncome = ct.includes('fixedincome') || ct.includes('fixed_income');
+                      const isCommodity = ct.includes('commodity');
+                      const isCarbonCredit = ct.includes('carboncredit') || ct.includes('carbon_credit');
+                      const isArt = ct.includes('artcollectible') || ct.includes('art_collectible');
+                      const isIP = ct.includes('iprevenue') || ct.includes('ip_revenue');
+                      const isPhysical = ct.includes('physicalgoods') || ct.includes('physical_goods');
+                      if (!isRwa) return null;
+                      return (
+                      <div className="mt-4 space-y-4">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Building className="w-4 h-4 text-amber-400" />
+                          <h4 className="font-bold text-amber-400 tracking-wide text-sm uppercase">RWA Asset Management</h4>
+                        </div>
+
+                        {/* v4.0.1: Description display + quick edit */}
+                        {(() => {
+                          const desc = socialProfiles[contract.address]?.description;
+                          return (
+                            <div className="bg-gradient-to-r from-amber-900/5 to-quantum-dark/30 rounded-lg p-4 border border-amber-500/10">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs text-amber-400/70 font-medium uppercase tracking-wider">Description</span>
+                                <motion.button
+                                  onClick={() => {
+                                    setActiveTab(contract.address, 'social');
+                                    setEditingSocial(contract.address);
+                                    setSocialFormData(socialProfiles[contract.address] || {});
+                                  }}
+                                  className="text-xs text-quantum-cyan hover:text-white transition-colors flex items-center gap-1"
+                                  whileHover={{ scale: 1.05 }}
+                                >
+                                  <FileCode className="w-3 h-3" />
+                                  {desc ? 'Edit' : 'Add Description'}
+                                </motion.button>
+                              </div>
+                              {desc ? (
+                                <p className="text-sm text-gray-300 leading-relaxed">{desc}</p>
+                              ) : (
+                                <p className="text-sm text-gray-500 italic">No description set. Click "Add Description" or go to the Social tab to add one.</p>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        <div className="grid md:grid-cols-2 gap-4">
+                          {/* KYC/Compliance Management - show for all RWA types */}
+                          {(isRwa) && (
+                            <div className="bg-gradient-to-b from-amber-900/10 to-quantum-dark/50 rounded-lg p-4 border border-amber-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Shield className="w-4 h-4 text-amber-400" />
+                                <span className="font-medium text-white">Compliance Controls</span>
+                                <RwaInfoTip text="Manage regulatory compliance for this RWA token. KYC, accreditation, and transfer restrictions are enforced on-chain during DEX swaps." />
+                              </div>
+                              <div className="space-y-2">
+                                {contract.features.kyc_required && (
+                                  <div className="flex items-center justify-between bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-sm text-gray-300">KYC Required<RwaInfoTip text="Know Your Customer verification requires all token holders to verify their identity. When enabled, the DEX blocks purchases from unverified wallets." /></span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs text-amber-400">Active</span>
+                                      <motion.button
+                                        onClick={() => handleContractAction(contract, 'toggle_kyc')}
+                                        className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 px-2 py-1 rounded text-xs"
+                                        whileTap={{ scale: 0.95 }}
+                                      >
+                                        Configure
+                                      </motion.button>
+                                    </div>
+                                  </div>
+                                )}
+                                {contract.features.accredited_only && (
+                                  <div className="flex items-center justify-between bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-sm text-gray-300">Accredited Only<RwaInfoTip text="Restricts token ownership to accredited investors meeting SEC income ($200K+/yr) or net worth ($1M+) requirements." /></span>
+                                    <span className="text-xs text-amber-400">Enforced</span>
+                                  </div>
+                                )}
+                                {contract.features.transfer_restrictions && (
+                                  <div className="flex items-center justify-between bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-sm text-gray-300">Transfer Restrictions<RwaInfoTip text="Limits transfers to whitelisted wallet addresses only. The token issuer manages the whitelist of approved holders." /></span>
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'manage_whitelist')}
+                                      className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 px-2 py-1 rounded text-xs"
+                                      whileTap={{ scale: 0.95 }}
+                                    >
+                                      Manage Whitelist
+                                    </motion.button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Dividend / Revenue Distribution */}
+                          {(contract.features.dividend_enabled || isRealEstate || isEquity || isIP) && (
+                            <div className="bg-gradient-to-b from-green-900/10 to-quantum-dark/50 rounded-lg p-4 border border-green-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <DollarSign className="w-4 h-4 text-green-400" />
+                                <span className="font-medium text-white">Revenue Distribution</span>
+                                <RwaInfoTip text="Distribute revenue (rent, dividends, coupons, royalties) proportionally to all token holders. Amount is split based on ownership percentage." />
+                              </div>
+                              <div className="space-y-2">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Next Distribution:</span>
+                                  <span className="text-green-400 font-medium">Pending</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Total Distributed:</span>
+                                  <span className="text-white font-medium">$0.00</span>
+                                </div>
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Distribution Amount (USD)<RwaInfoTip text="Total USD amount to distribute. Each holder receives a share proportional to their token ownership (e.g., owning 10% of tokens = 10% of distribution)." /></label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:dividend_amount`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:dividend_amount`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="1000"
+                                      className="flex-1 bg-quantum-dark/70 border border-green-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-green-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'distribute_dividend', { amount: getRwaInput(`${contract.address}:dividend_amount`) })}
+                                      disabled={!getRwaInput(`${contract.address}:dividend_amount`) || getRwaStatus(contract.address, 'distribute_dividend')?.loading}
+                                      className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'distribute_dividend')?.loading ? '...' : 'Distribute'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'distribute_dividend') && !getRwaStatus(contract.address, 'distribute_dividend')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'distribute_dividend')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'distribute_dividend')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-500">Distribute dividends/revenue to all token holders proportionally</p>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Voting / Governance (Equity specific) */}
+                          {(contract.features.voting_rights || isEquity) && (
+                            <div className="bg-gradient-to-b from-purple-900/10 to-quantum-dark/50 rounded-lg p-4 border border-purple-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Vote className="w-4 h-4 text-purple-400" />
+                                <span className="font-medium text-white">Shareholder Voting</span>
+                                <RwaInfoTip text="Create and manage governance proposals for equity token holders. Voting power is proportional to token ownership. Proposals require quorum to pass." />
+                              </div>
+                              <div className="space-y-2">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Active Proposals:<RwaInfoTip text="Number of currently open proposals. Token holders can vote on active proposals until the voting period ends." /></span>
+                                  <span className="text-white font-medium">0</span>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={getRwaInput(`${contract.address}:proposal_title`)}
+                                  onChange={(e) => setRwaInput(`${contract.address}:proposal_title`, e.target.value)}
+                                  placeholder="Proposal title"
+                                  className="w-full bg-quantum-dark/70 border border-purple-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-purple-500/50 focus:outline-none"
+                                />
+                                <textarea
+                                  value={getRwaInput(`${contract.address}:proposal_desc`)}
+                                  onChange={(e) => setRwaInput(`${contract.address}:proposal_desc`, e.target.value)}
+                                  placeholder="Proposal description..."
+                                  rows={2}
+                                  className="w-full bg-quantum-dark/70 border border-purple-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-purple-500/50 focus:outline-none resize-none"
+                                />
+                                <motion.button
+                                  onClick={() => handleContractAction(contract, 'create_proposal', {
+                                    title: getRwaInput(`${contract.address}:proposal_title`),
+                                    description: getRwaInput(`${contract.address}:proposal_desc`)
+                                  })}
+                                  disabled={!getRwaInput(`${contract.address}:proposal_title`) || getRwaStatus(contract.address, 'create_proposal')?.loading}
+                                  className="w-full bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.98 }}
+                                >
+                                  {getRwaStatus(contract.address, 'create_proposal')?.loading ? 'Creating...' : 'Create Shareholder Proposal'}
+                                </motion.button>
+                                {getRwaStatus(contract.address, 'create_proposal') && !getRwaStatus(contract.address, 'create_proposal')?.loading && (
+                                  <p className={`text-xs ${getRwaStatus(contract.address, 'create_proposal')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                    {getRwaStatus(contract.address, 'create_proposal')?.message}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Bond/Fixed Income Controls */}
+                          {(contract.features.callable || contract.features.convertible || isFixedIncome) && (
+                            <div className="bg-gradient-to-b from-blue-900/10 to-quantum-dark/50 rounded-lg p-4 border border-blue-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Landmark className="w-4 h-4 text-blue-400" />
+                                <span className="font-medium text-white">Bond Controls</span>
+                                <RwaInfoTip text="Manage fixed-income bond features: pay coupons to holders, call bonds early, or convert to equity if convertible." />
+                              </div>
+                              <div className="space-y-2">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Credit Rating:<RwaInfoTip text="The bond's credit quality rating (AAA to D). Higher ratings indicate lower default risk and typically offer lower yields." /></span>
+                                  <span className="text-blue-400 font-medium">{contract.deploymentParams?.credit_rating || 'N/A'}</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Coupon Rate:<RwaInfoTip text="Annual interest rate paid to bondholders, expressed as percentage of face value. Paid on schedule via coupon payments." /></span>
+                                  <span className="text-white font-medium">{contract.deploymentParams?.coupon_rate_percent || '0'}%</span>
+                                </div>
+                                {/* Coupon Payment */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Coupon Amount (USD)</label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:coupon_amount`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:coupon_amount`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="1000"
+                                      className="flex-1 bg-quantum-dark/70 border border-blue-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-blue-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'pay_coupon', { amount: getRwaInput(`${contract.address}:coupon_amount`) })}
+                                      disabled={!getRwaInput(`${contract.address}:coupon_amount`) || getRwaStatus(contract.address, 'pay_coupon')?.loading}
+                                      className="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'pay_coupon')?.loading ? '...' : 'Pay Coupon'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'pay_coupon') && !getRwaStatus(contract.address, 'pay_coupon')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'pay_coupon')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'pay_coupon')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {contract.features.callable && (
+                                  <div>
+                                    <label className="text-xs text-gray-400 mb-1 block">Call Price (USD)</label>
+                                    <div className="flex gap-2">
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={getRwaInput(`${contract.address}:call_price`)}
+                                        onChange={(e) => setRwaInput(`${contract.address}:call_price`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                        placeholder="Face value"
+                                        className="flex-1 bg-quantum-dark/70 border border-blue-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-blue-500/50 focus:outline-none"
+                                      />
+                                      <motion.button
+                                        onClick={() => handleContractAction(contract, 'call_bond', { call_price: getRwaInput(`${contract.address}:call_price`) })}
+                                        disabled={getRwaStatus(contract.address, 'call_bond')?.loading}
+                                        className="bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+                                        whileTap={{ scale: 0.98 }}
+                                      >
+                                        {getRwaStatus(contract.address, 'call_bond')?.loading ? '...' : 'Call Bond'}
+                                      </motion.button>
+                                    </div>
+                                  </div>
+                                )}
+                                {contract.features.convertible && (
+                                  <motion.button
+                                    onClick={() => handleContractAction(contract, 'convert_bond')}
+                                    disabled={getRwaStatus(contract.address, 'convert_bond')?.loading}
+                                    className="w-full bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                  >
+                                    {getRwaStatus(contract.address, 'convert_bond')?.loading ? 'Converting...' : 'Convert to Equity'}
+                                  </motion.button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Physical Delivery / Redemption */}
+                          {(contract.features.delivery_option || contract.features.redemption_enabled || isCommodity || isPhysical) && (
+                            <div className="bg-gradient-to-b from-orange-900/10 to-quantum-dark/50 rounded-lg p-4 border border-orange-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Package className="w-4 h-4 text-orange-400" />
+                                <span className="font-medium text-white">Delivery & Redemption</span>
+                                <RwaInfoTip text="Manage physical delivery of commodity/goods tokens. Token holders can redeem tokens for physical delivery or update storage proofs." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Storage:<RwaInfoTip text="Current physical storage facility where the underlying asset is held. Storage conditions are audited and verified on-chain." /></span>
+                                  <span className="text-white font-medium">{contract.deploymentParams?.storage_facility || 'N/A'}</span>
+                                </div>
+                                {/* Process Redemption */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Redemption Quantity</label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:redeem_qty`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:redeem_qty`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="Units to redeem"
+                                      className="flex-1 bg-quantum-dark/70 border border-orange-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-orange-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'process_redemption', { quantity: getRwaInput(`${contract.address}:redeem_qty`), request_id: `redeem_${Date.now()}` })}
+                                      disabled={!getRwaInput(`${contract.address}:redeem_qty`) || getRwaStatus(contract.address, 'process_redemption')?.loading}
+                                      className="bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'process_redemption')?.loading ? '...' : 'Redeem'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'process_redemption') && !getRwaStatus(contract.address, 'process_redemption')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'process_redemption')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'process_redemption')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {/* Update Inventory */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Storage Proof / Inventory Update</label>
+                                  <input
+                                    type="text"
+                                    value={getRwaInput(`${contract.address}:storage_proof`)}
+                                    onChange={(e) => setRwaInput(`${contract.address}:storage_proof`, e.target.value)}
+                                    placeholder="Proof hash or audit reference"
+                                    className="w-full bg-quantum-dark/70 border border-orange-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-orange-500/50 focus:outline-none mb-2"
+                                  />
+                                  <motion.button
+                                    onClick={() => handleContractAction(contract, 'update_inventory', { proof_hash: getRwaInput(`${contract.address}:storage_proof`) })}
+                                    disabled={getRwaStatus(contract.address, 'update_inventory')?.loading}
+                                    className="w-full bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                  >
+                                    {getRwaStatus(contract.address, 'update_inventory')?.loading ? 'Updating...' : 'Update Inventory / Storage Proof'}
+                                  </motion.button>
+                                  {getRwaStatus(contract.address, 'update_inventory') && !getRwaStatus(contract.address, 'update_inventory')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_inventory')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_inventory')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Carbon Credit Controls */}
+                          {(contract.features.retirement_enabled || contract.features.offset_tracking || isCarbonCredit) && (
+                            <div className="bg-gradient-to-b from-emerald-900/10 to-quantum-dark/50 rounded-lg p-4 border border-emerald-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Leaf className="w-4 h-4 text-emerald-400" />
+                                <span className="font-medium text-white">Carbon Credit Management</span>
+                                <RwaInfoTip text="Manage carbon offset credits. Retire credits to generate permanent carbon offset certificates. Credits follow Verra VCS or Gold Standard protocols." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Verification:<RwaInfoTip text="Carbon credit verification standard used (e.g., Verra VCS, Gold Standard). Determines the quality and market acceptance of the credits." /></span>
+                                  <span className="text-emerald-400 font-medium">{contract.deploymentParams?.verification_standard || 'Verra VCS'}</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Vintage Year:<RwaInfoTip text="The year the carbon reduction or removal actually occurred. More recent vintages typically command higher prices." /></span>
+                                  <span className="text-white font-medium">{contract.deploymentParams?.vintage_year || 'N/A'}</span>
+                                </div>
+                                {/* Update Verification */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Verifier Name</label>
+                                  <input
+                                    type="text"
+                                    value={getRwaInput(`${contract.address}:verifier`)}
+                                    onChange={(e) => setRwaInput(`${contract.address}:verifier`, e.target.value)}
+                                    placeholder="e.g., Verra, Gold Standard"
+                                    className="w-full bg-quantum-dark/70 border border-emerald-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-emerald-500/50 focus:outline-none mb-2"
+                                  />
+                                  <motion.button
+                                    onClick={() => handleContractAction(contract, 'update_verification', { verifier: getRwaInput(`${contract.address}:verifier`) })}
+                                    disabled={getRwaStatus(contract.address, 'update_verification')?.loading}
+                                    className="w-full bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                  >
+                                    {getRwaStatus(contract.address, 'update_verification')?.loading ? 'Updating...' : 'Update Verification Status'}
+                                  </motion.button>
+                                  {getRwaStatus(contract.address, 'update_verification') && !getRwaStatus(contract.address, 'update_verification')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_verification')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_verification')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {/* Retire Credits / Issue Certificate */}
+                                {contract.features.retirement_enabled && (
+                                  <div>
+                                    <label className="text-xs text-gray-400 mb-1 block">Tonnes CO2 to Retire</label>
+                                    <div className="flex gap-2">
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={getRwaInput(`${contract.address}:retire_tonnes`)}
+                                        onChange={(e) => setRwaInput(`${contract.address}:retire_tonnes`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                        placeholder="100"
+                                        className="flex-1 bg-quantum-dark/70 border border-emerald-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-emerald-500/50 focus:outline-none"
+                                      />
+                                      <motion.button
+                                        onClick={() => handleContractAction(contract, 'retire_credits', { tonnes_co2: getRwaInput(`${contract.address}:retire_tonnes`), beneficiary: getRwaInput(`${contract.address}:beneficiary`) })}
+                                        disabled={!getRwaInput(`${contract.address}:retire_tonnes`) || getRwaStatus(contract.address, 'retire_credits')?.loading}
+                                        className="bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50"
+                                        whileHover={{ scale: 1.02 }}
+                                        whileTap={{ scale: 0.98 }}
+                                      >
+                                        {getRwaStatus(contract.address, 'retire_credits')?.loading ? '...' : 'Retire & Issue Certificate'}
+                                      </motion.button>
+                                    </div>
+                                    <input
+                                      type="text"
+                                      value={getRwaInput(`${contract.address}:beneficiary`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:beneficiary`, e.target.value)}
+                                      placeholder="Beneficiary name (optional)"
+                                      className="w-full mt-2 bg-quantum-dark/70 border border-emerald-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-emerald-500/50 focus:outline-none"
+                                    />
+                                    {getRwaStatus(contract.address, 'retire_credits') && !getRwaStatus(contract.address, 'retire_credits')?.loading && (
+                                      <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'retire_credits')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                        {getRwaStatus(contract.address, 'retire_credits')?.message}
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Art & Collectibles Controls */}
+                          {(contract.features.provenance_verified || isArt) && (
+                            <div className="bg-gradient-to-b from-pink-900/10 to-quantum-dark/50 rounded-lg p-4 border border-pink-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Palette className="w-4 h-4 text-pink-400" />
+                                <span className="font-medium text-white">Provenance & Authentication</span>
+                                <RwaInfoTip text="Track artwork provenance (ownership history), appraisal values, and custody location. All records are immutably stored on-chain." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between bg-quantum-dark/40 rounded p-2">
+                                  <span className="text-sm text-gray-300">Provenance Verified</span>
+                                  <span className={`text-xs font-medium ${contract.features.provenance_verified ? 'text-emerald-400' : 'text-yellow-400'}`}>
+                                    {contract.features.provenance_verified ? 'Verified' : 'Pending'}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Current Appraisal:<RwaInfoTip text="Most recent professional appraisal value in USD. Regular appraisals help maintain accurate token pricing and insurance coverage." /></span>
+                                  <span className="text-pink-400 font-medium">${Number(contract.deploymentParams?.appraisal_value_usd || 0).toLocaleString()}</span>
+                                </div>
+                                {/* Update Appraisal */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">New Appraisal Value (USD)</label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:appraisal`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:appraisal`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="500000"
+                                      className="flex-1 bg-quantum-dark/70 border border-pink-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-pink-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'update_appraisal', { appraisal_value_usd: getRwaInput(`${contract.address}:appraisal`) })}
+                                      disabled={!getRwaInput(`${contract.address}:appraisal`) || getRwaStatus(contract.address, 'update_appraisal')?.loading}
+                                      className="bg-pink-500/20 hover:bg-pink-500/30 text-pink-300 px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50"
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'update_appraisal')?.loading ? '...' : 'Update'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'update_appraisal') && !getRwaStatus(contract.address, 'update_appraisal')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_appraisal')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_appraisal')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {/* Update Custody */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Custody Location</label>
+                                  <input
+                                    type="text"
+                                    value={getRwaInput(`${contract.address}:custody_location`)}
+                                    onChange={(e) => setRwaInput(`${contract.address}:custody_location`, e.target.value)}
+                                    placeholder="e.g., Geneva Freeport Vault C-12"
+                                    className="w-full bg-quantum-dark/70 border border-pink-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-pink-500/50 focus:outline-none mb-2"
+                                  />
+                                  <motion.button
+                                    onClick={() => handleContractAction(contract, 'update_custody', { custody_location: getRwaInput(`${contract.address}:custody_location`) })}
+                                    disabled={getRwaStatus(contract.address, 'update_custody')?.loading}
+                                    className="w-full bg-quantum-dark/50 hover:bg-quantum-dark/70 text-gray-200 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                  >
+                                    {getRwaStatus(contract.address, 'update_custody')?.loading ? 'Updating...' : 'Update Custody Location'}
+                                  </motion.button>
+                                  {getRwaStatus(contract.address, 'update_custody') && !getRwaStatus(contract.address, 'update_custody')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_custody')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_custody')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* IP & Royalties Controls */}
+                          {(contract.features.sublicensing_allowed || isIP) && (
+                            <div className="bg-gradient-to-b from-violet-900/10 to-quantum-dark/50 rounded-lg p-4 border border-violet-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <FileText className="w-4 h-4 text-violet-400" />
+                                <span className="font-medium text-white">IP & License Management</span>
+                                <RwaInfoTip text="Manage intellectual property licensing, royalty distributions, and sublicensing for IP-backed tokens." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">License Type:<RwaInfoTip text="The licensing arrangement type (exclusive, non-exclusive, etc.). Determines sublicensing rights and territory restrictions." /></span>
+                                  <span className="text-white font-medium">{contract.deploymentParams?.license_type || 'Exclusive'}</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Royalty Rate:<RwaInfoTip text="Percentage of revenue from IP usage that is distributed to token holders as royalty payments." /></span>
+                                  <span className="text-violet-400 font-medium">{contract.deploymentParams?.royalty_rate_percent || '0'}%</span>
+                                </div>
+                                {/* Distribute Royalties */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Royalty Amount (USD)</label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:royalty_amount`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:royalty_amount`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="5000"
+                                      className="flex-1 bg-quantum-dark/70 border border-violet-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-violet-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'distribute_royalties', { amount: getRwaInput(`${contract.address}:royalty_amount`) })}
+                                      disabled={!getRwaInput(`${contract.address}:royalty_amount`) || getRwaStatus(contract.address, 'distribute_royalties')?.loading}
+                                      className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'distribute_royalties')?.loading ? '...' : 'Distribute'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'distribute_royalties') && !getRwaStatus(contract.address, 'distribute_royalties')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'distribute_royalties')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'distribute_royalties')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {/* Manage Sublicenses */}
+                                {contract.features.sublicensing_allowed && (
+                                  <div>
+                                    <label className="text-xs text-gray-400 mb-1 block">Sublicense Details</label>
+                                    <input
+                                      type="text"
+                                      value={getRwaInput(`${contract.address}:licensee`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:licensee`, e.target.value)}
+                                      placeholder="Licensee name or address"
+                                      className="w-full bg-quantum-dark/70 border border-violet-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-violet-500/50 focus:outline-none mb-2"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={getRwaInput(`${contract.address}:license_terms`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:license_terms`, e.target.value)}
+                                      placeholder="Terms (e.g., non-exclusive, 2 years)"
+                                      className="w-full bg-quantum-dark/70 border border-violet-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-violet-500/50 focus:outline-none mb-2"
+                                    />
+                                    <motion.button
+                                      onClick={() => handleContractAction(contract, 'manage_sublicenses', {
+                                        licensee: getRwaInput(`${contract.address}:licensee`),
+                                        terms: getRwaInput(`${contract.address}:license_terms`)
+                                      })}
+                                      disabled={!getRwaInput(`${contract.address}:licensee`) || getRwaStatus(contract.address, 'manage_sublicenses')?.loading}
+                                      className="w-full bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                      whileHover={{ scale: 1.02 }}
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'manage_sublicenses')?.loading ? 'Processing...' : 'Grant Sublicense'}
+                                    </motion.button>
+                                    {getRwaStatus(contract.address, 'manage_sublicenses') && !getRwaStatus(contract.address, 'manage_sublicenses')?.loading && (
+                                      <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'manage_sublicenses')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                        {getRwaStatus(contract.address, 'manage_sublicenses')?.message}
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Real Estate Specific */}
+                          {isRealEstate && (
+                            <div className="bg-gradient-to-b from-amber-900/10 to-quantum-dark/50 rounded-lg p-4 border border-amber-500/10 md:col-span-2">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Building className="w-4 h-4 text-amber-400" />
+                                <span className="font-medium text-white">Property Management</span>
+                                <RwaInfoTip text="Manage real estate property details including valuation, occupancy rates, and rental yield. Updates affect token price and yield calculations." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-xs text-gray-500">Location</span>
+                                    <div className="text-sm text-white">{contract.deploymentParams?.location || '—'}</div>
+                                  </div>
+                                  <div className="bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-xs text-gray-500">Property Type</span>
+                                    <div className="text-sm text-white capitalize">{String(contract.deploymentParams?.property_type || '—').replace(/_/g, ' ')}</div>
+                                  </div>
+                                  <div className="bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-xs text-gray-500">Occupancy Rate<RwaInfoTip text="Percentage of rentable units currently occupied. Higher occupancy = more rental income = higher yield for token holders." position="bottom" /></span>
+                                    <div className="text-sm text-amber-400 font-medium">{contract.deploymentParams?.occupancy_rate || '—'}%</div>
+                                  </div>
+                                  <div className="bg-quantum-dark/40 rounded p-2">
+                                    <span className="text-xs text-gray-500">Rental Yield<RwaInfoTip text="Annual rental income as a percentage of property value. This directly determines the dividend rate for token holders." position="bottom" /></span>
+                                    <div className="text-sm text-green-400 font-medium">{contract.deploymentParams?.rental_yield_percent || '—'}%</div>
+                                  </div>
+                                </div>
+                                {/* Update Valuation */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">New Valuation (USD)</label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      value={getRwaInput(`${contract.address}:valuation`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:valuation`, e.target.value.replace(/[^0-9]/g, ''))}
+                                      placeholder="e.g., 1500000"
+                                      className="flex-1 bg-quantum-dark/70 border border-amber-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-amber-500/50 focus:outline-none"
+                                    />
+                                    <motion.button
+                                      onClick={() => {
+                                        const val = getRwaInput(`${contract.address}:valuation`);
+                                        if (val) handleContractAction(contract, 'update_property_valuation', { valuation_usd: val });
+                                      }}
+                                      disabled={!getRwaInput(`${contract.address}:valuation`) || getRwaStatus(contract.address, 'update_property_valuation')?.loading}
+                                      className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+                                      whileTap={{ scale: 0.98 }}
+                                    >
+                                      {getRwaStatus(contract.address, 'update_property_valuation')?.loading ? '...' : 'Update'}
+                                    </motion.button>
+                                  </div>
+                                  {getRwaStatus(contract.address, 'update_property_valuation') && !getRwaStatus(contract.address, 'update_property_valuation')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_property_valuation')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_property_valuation')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                                {/* Update Occupancy & Yield */}
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-xs text-gray-400 mb-1 block">Occupancy (%)</label>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:occupancy`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:occupancy`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="95"
+                                      className="w-full bg-quantum-dark/70 border border-amber-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-amber-500/50 focus:outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-xs text-gray-400 mb-1 block">Rental Yield (%)</label>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getRwaInput(`${contract.address}:yield`)}
+                                      onChange={(e) => setRwaInput(`${contract.address}:yield`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                      placeholder="5.5"
+                                      className="w-full bg-quantum-dark/70 border border-amber-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-amber-500/50 focus:outline-none"
+                                    />
+                                  </div>
+                                </div>
+                                <motion.button
+                                  onClick={() => {
+                                    const occ = getRwaInput(`${contract.address}:occupancy`);
+                                    const yld = getRwaInput(`${contract.address}:yield`);
+                                    handleContractAction(contract, 'update_occupancy', { occupancy_rate: occ || '', rental_yield_percent: yld || '' });
+                                  }}
+                                  disabled={getRwaStatus(contract.address, 'update_occupancy')?.loading}
+                                  className="w-full bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 text-white px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.98 }}
+                                >
+                                  {getRwaStatus(contract.address, 'update_occupancy')?.loading ? 'Updating...' : 'Update Occupancy & Yield'}
+                                </motion.button>
+                                {getRwaStatus(contract.address, 'update_occupancy') && !getRwaStatus(contract.address, 'update_occupancy')?.loading && (
+                                  <p className={`text-xs ${getRwaStatus(contract.address, 'update_occupancy')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                    {getRwaStatus(contract.address, 'update_occupancy')?.message}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Insurance Status (shared across multiple RWA types) */}
+                          {(contract.features.insurance_enabled || isCommodity || isArt || isPhysical) && (
+                            <div className="bg-gradient-to-b from-cyan-900/10 to-quantum-dark/50 rounded-lg p-4 border border-cyan-500/10">
+                              <div className="flex items-center gap-2 mb-3">
+                                <Shield className="w-4 h-4 text-cyan-400" />
+                                <span className="font-medium text-white">Insurance</span>
+                                <RwaInfoTip text="Configure insurance coverage for the underlying asset. Insurance protects token holders against damage, theft, or loss of the physical asset." />
+                              </div>
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between bg-quantum-dark/40 rounded p-2">
+                                  <span className="text-sm text-gray-300">Coverage Status<RwaInfoTip text="Whether insurance coverage is currently active. Inactive coverage means the asset is uninsured and token holders bear full loss risk." /></span>
+                                  <span className={`text-xs font-medium ${contract.features.insurance_enabled ? 'text-emerald-400' : 'text-yellow-400'}`}>
+                                    {contract.features.insurance_enabled ? 'Active' : 'Inactive'}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-400">Provider:</span>
+                                  <span className="text-white font-medium">{contract.deploymentParams?.insurance_provider || 'None'}</span>
+                                </div>
+                                {/* Update Insurance */}
+                                <div>
+                                  <label className="text-xs text-gray-400 mb-1 block">Insurance Provider</label>
+                                  <input
+                                    type="text"
+                                    value={getRwaInput(`${contract.address}:ins_provider`)}
+                                    onChange={(e) => setRwaInput(`${contract.address}:ins_provider`, e.target.value)}
+                                    placeholder="e.g., Lloyd's of London"
+                                    className="w-full bg-quantum-dark/70 border border-cyan-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-cyan-500/50 focus:outline-none mb-2"
+                                  />
+                                  <label className="text-xs text-gray-400 mb-1 block">Coverage Amount (USD)</label>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={getRwaInput(`${contract.address}:ins_coverage`)}
+                                    onChange={(e) => setRwaInput(`${contract.address}:ins_coverage`, e.target.value.replace(/[^0-9.]/g, ''))}
+                                    placeholder="1000000"
+                                    className="w-full bg-quantum-dark/70 border border-cyan-500/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-cyan-500/50 focus:outline-none mb-2"
+                                  />
+                                  <motion.button
+                                    onClick={() => handleContractAction(contract, 'update_insurance', {
+                                      provider: getRwaInput(`${contract.address}:ins_provider`),
+                                      coverage_usd: getRwaInput(`${contract.address}:ins_coverage`)
+                                    })}
+                                    disabled={getRwaStatus(contract.address, 'update_insurance')?.loading}
+                                    className="w-full bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 px-3 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                  >
+                                    {getRwaStatus(contract.address, 'update_insurance')?.loading ? 'Updating...' : 'Update Insurance Policy'}
+                                  </motion.button>
+                                  {getRwaStatus(contract.address, 'update_insurance') && !getRwaStatus(contract.address, 'update_insurance')?.loading && (
+                                    <p className={`text-xs mt-1 ${getRwaStatus(contract.address, 'update_insurance')?.success ? 'text-green-400' : 'text-red-400'}`}>
+                                      {getRwaStatus(contract.address, 'update_insurance')?.message}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      );
+                    })()}
 
                     {/* View in Explorer */}
                     <motion.button
@@ -2692,6 +3860,16 @@ export default function VittuaVMScreen() {
                             />
                           </div>
                           <div className="bg-quantum-dark/50 rounded-lg p-4">
+                            <label className="text-xs text-gray-400 mb-1 block">Medium / Blog</label>
+                            <input
+                              type="text"
+                              value={socialFormData.medium || ''}
+                              onChange={(e) => setSocialFormData(prev => ({ ...prev, medium: e.target.value }))}
+                              placeholder="https://medium.com/..."
+                              className="w-full bg-quantum-dark/70 border border-quantum-purple/20 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:border-quantum-orange/50 focus:outline-none"
+                            />
+                          </div>
+                          <div className="bg-quantum-dark/50 rounded-lg p-4">
                             <label className="text-xs text-gray-400 mb-1 block">Description</label>
                             <textarea
                               value={socialFormData.description || ''}
@@ -2786,6 +3964,17 @@ export default function VittuaVMScreen() {
                                   >
                                     <span className="text-lg">⚙️</span>
                                     <span className="text-sm">GitHub</span>
+                                  </a>
+                                )}
+                                {socialProfiles[contract.address]?.medium && (
+                                  <a
+                                    href={socialProfiles[contract.address].medium}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-quantum-dark/50 hover:bg-quantum-orange/30 rounded-lg p-3 flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
+                                  >
+                                    <span className="text-lg">📝</span>
+                                    <span className="text-sm">Medium</span>
                                   </a>
                                 )}
                               </div>

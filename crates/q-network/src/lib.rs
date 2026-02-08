@@ -34,6 +34,7 @@ pub mod libp2p_bridge;
 pub mod dag_sync_adapter; // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync network adapter
 
 // Resonance consensus protocol (Phase 3: String-theoretic consensus)
+#[cfg(feature = "resonance")]
 pub mod resonance_protocol;
 
 // Transaction Tunneling - Ultra-low-latency fast path
@@ -61,6 +62,7 @@ pub use unified_network_manager::{UnifiedNetworkManager, NetworkCommand};
 pub use libp2p_bridge::{Libp2pBridge, BridgeEvent, DhtEvent};
 
 // Export resonance consensus protocol components
+#[cfg(feature = "resonance")]
 pub use resonance_protocol::{
     resonance_topic, ResonanceGossipManager, ResonanceProtocolHandler,
 };
@@ -118,6 +120,9 @@ pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verif
 pub mod circuit_breaker; // v1.0.3-beta: Circuit breaker for attack protection (Week 2, Day 3-4)
 pub mod address_filter; // v1.2.2-beta: Docker/container address filtering for P2P sync optimization
 pub mod gossipsub_queue; // v3.4.13-beta: Priority queue with rate limiting for gossipsub
+pub mod peer_latency;        // v4.3.0-beta: Peer latency tracking for gossipsub mesh scoring
+pub mod pq_handshake;        // v4.3.0-beta: Post-quantum hybrid Noise handshake (Kyber1024)
+pub mod set_reconciliation;  // v4.3.0-beta: Set-reconciliation sync for bandwidth reduction
 
 // ========== v1.9.0-SLINGSHOT: Project APOLLO Phase 4 - Continuous Streaming ==========
 pub mod continuous_sync; // Continuous stream protocol (SCRAMJET FLOW) - 30-50% RTT savings
@@ -183,6 +188,14 @@ pub use all_reduce::{
     AllReduceCoordinator, AllReduceConfig, AllReduceMessage, AllReduceStats,
     TOPIC_ALL_REDUCE,
 };
+
+// v4.3.0-beta: Peer latency, PQ handshake, and set reconciliation exports
+pub use peer_latency::{PeerLatencyTracker, PeerLatencyInfo, BootstrapHealthCache, BootstrapHealth};
+pub use pq_handshake::{
+    PQHandshakeConfig, PQHandshakeResult, PQSessionManager, PQHandshakeCodec,
+    PQ_HANDSHAKE_PROTOCOL,
+};
+pub use set_reconciliation::{SetReconciliationManager, BlockInventorySketch, ReconciliationResult};
 
 // Simplified network structure for compilation
 pub struct QuantumNetwork {

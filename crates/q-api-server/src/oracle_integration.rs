@@ -15,7 +15,34 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+#[cfg(not(target_os = "windows"))]
 use q_storage::qno_storage::{OutcomeType, PredictionOutcome};
+
+// Windows stubs for qno_storage types (RocksDB not available)
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum OutcomeType {
+    GasFee,
+    BlockTime,
+    NetworkLoad,
+    ValidatorUptime,
+    CrossChain,
+    DefiTvl,
+    Custom(String),
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PredictionOutcome {
+    pub id: String,
+    pub domain: String,
+    pub outcome_type: OutcomeType,
+    pub predicted_value: f64,
+    pub actual_value: f64,
+    pub timestamp: u64,
+    pub confidence_threshold: f64,
+    pub oracle_signature: Vec<u8>,
+}
 
 // ============================================================================
 // Oracle Provider Trait

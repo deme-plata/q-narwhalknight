@@ -32,6 +32,7 @@ use q_zk_stark::StarkSystem;
 use q_dag_knight::{DAGKnightConsensus, QuantumAnchorElection};
 use q_narwhal_core::production_mempool::ProductionMempool;
 use q_narwhal_core::{NarwhalCore, ReliableBroadcast};
+#[cfg(feature = "resonance")]
 use q_resonance::{KParameterAnalyzer, KParameterMetrics, PhaseTransition, ResonanceCoordinator};
 use q_vdf::{QuantumVDF, VDFProof};
 
@@ -816,32 +817,21 @@ impl MiningStatistics {
             stats.solution_timestamps.drain(0..100);
         }
 
-        // Calculate hashrate from recent solutions
-        // Each solution represents approximately 2^20 hashes (difficulty baseline)
-        // Hashrate (H/s) = solutions * difficulty_factor / time_window
-        let solutions_in_window = stats.solution_timestamps.len() as f64;
-        let time_window_secs = 60.0; // Use 60 second window
-
-        // Difficulty factor: each valid solution represents ~1M hashes on average at base difficulty
-        // Adjust this based on actual network difficulty
-        let difficulty_factor = 1_000_000.0; // 1M hashes per solution at base difficulty
-
-        // v3.5.6-beta FIX: Calculate hashrate in H/s (frontend formatHashRate expects H/s)
-        // Frontend auto-converts: >= 1M H/s → MH/s, >= 1K H/s → KH/s
-        let calculated_hashrate = (solutions_in_window * difficulty_factor) / time_window_secs;
-
-        // v3.5.6-beta FIX: Convert miner-reported KH/s to H/s before comparison
-        // Miners send hashrate in KH/s (e.g., 1000 KH/s = 1 MH/s)
-        // Calculated hashrate is in H/s (e.g., 1000000 H/s = 1 MH/s)
+        // v4.1.2: Use miner-reported hashrate directly (miner counts every hash attempt accurately)
+        // Miner sends hashrate in KH/s, convert to H/s for display
         let hash_rate_hs = hash_rate * 1000.0; // Convert KH/s to H/s
 
-        // Use client-reported hashrate if provided and higher, otherwise use calculated
-        // This allows miners that report accurate hashrate to show it, while fixing miners that don't
-        stats.last_hashrate = if hash_rate_hs > calculated_hashrate {
-            hash_rate_hs
+        // Use client-reported hashrate if provided, otherwise estimate from solutions
+        // The miner's own hash counter is the most accurate source
+        if hash_rate_hs > 0.0 {
+            stats.last_hashrate = hash_rate_hs;
         } else {
-            calculated_hashrate
-        };
+            // Fallback: estimate from solution rate (for miners that don't report hashrate)
+            let solutions_in_window = stats.solution_timestamps.len() as f64;
+            let time_window_secs = 60.0;
+            let difficulty_factor = 65_536.0;
+            stats.last_hashrate = (solutions_in_window * difficulty_factor) / time_window_secs;
+        }
 
         stats.last_update = now;
         stats.total_solutions += 1;
@@ -1116,6 +1106,11 @@ pub struct AppState {
     // ✅ v1.0.2-beta Layer 3 FIX: Changed to bounded channel with 10,000 capacity
     pub mining_submission_tx: Option<tokio::sync::mpsc::Sender<MiningSubmission>>,
 
+    // 🔒 v4.1.3: Mining nonce deduplication — prevents double-reward attacks
+    // Tracks (challenge_hash_prefix, nonce) pairs. Entries auto-expire when challenge rotates.
+    // Uses DashMap for lock-free concurrent access from multiple mining submissions.
+    pub mining_nonce_dedup: Arc<dashmap::DashMap<(u64, u64), u64>>, // (challenge_height, nonce) -> timestamp
+
     // BREAKTHROUGH: DNS-Phantom → Connection Integration
     pub connection_manager: Option<Arc<q_network::connection_manager::ConnectionManager>>,
 
@@ -1169,9 +1164,20 @@ pub struct AppState {
     pub consensus: Arc<RwLock<DAGKnightConsensus>>,
 
     // Quillon Resonance Consensus - K-Parameter Phase Analysis
+    #[cfg(feature = "resonance")]
     pub k_parameter_analyzer: Option<Arc<KParameterAnalyzer>>,
+    #[cfg(not(feature = "resonance"))]
+    pub k_parameter_analyzer: Option<()>,
+
+    #[cfg(feature = "resonance")]
     pub resonance_coordinator: Option<Arc<ResonanceCoordinator>>,
+    #[cfg(not(feature = "resonance"))]
+    pub resonance_coordinator: Option<()>,
+
+    #[cfg(feature = "resonance")]
     pub shadow_coordinator: Option<Arc<tokio::sync::Mutex<q_resonance::ShadowModeCoordinator>>>,
+    #[cfg(not(feature = "resonance"))]
+    pub shadow_coordinator: Option<()>,
 
     // Quantum Cryptography
     pub quantum_crypto: Option<Arc<QuantumCryptoEngine>>,
@@ -1285,7 +1291,7 @@ pub struct AppState {
     pub distributed_protocol: Option<Arc<q_network::DistributedProtocolManager>>,
 
     // OAuth2 Provider for third-party integrations
-    pub oauth2_storage: Arc<RwLock<oauth2_provider::OAuth2Storage>>,
+    pub oauth2_storage: Arc<oauth2_provider::OAuth2Storage>,
 
     // AI Inference Engine - Privacy-first distributed inference with KV-cache (OLD - slow)
     pub inference_engine: Option<
@@ -1326,12 +1332,14 @@ pub struct AppState {
     // Feature-flagged with --experimental-fast-sync
     pub fast_sync_enabled: bool,
     pub fast_sync_tx: Option<tokio::sync::mpsc::Sender<q_types::block::QBlock>>,
+    #[cfg(not(target_os = "windows"))]
     pub fast_sync_metrics: Option<Arc<tokio::sync::Mutex<q_storage::BatchMetrics>>>,
 
     // ✅ v1.0.7-beta: AsyncStorageEngine - Permanent mining stall fix
     // Dedicated worker thread with micro-batching (512 blocks OR 2ms)
     // Eliminates RwLock contention and amortizes RocksDB compaction overhead
     // AI Consensus (5/5 experts): Root cause = blocking RocksDB I/O under async RwLock
+    #[cfg(not(target_os = "windows"))]
     pub async_storage: Option<Arc<q_storage::AsyncStorageEngine>>,
 
     // ✨ v1.0.16-beta: PQC Validator Keypair - Post-Quantum Block Signing
@@ -1366,6 +1374,7 @@ pub struct AppState {
 
     // 🔮 v1.4.2-beta: QNO (Quantum Neural Oracle) Prediction Staking
     // Persistent storage for prediction staking with P2P sync for decentralized validation
+    #[cfg(not(target_os = "windows"))]
     pub qno_storage: Arc<RwLock<Option<Arc<q_storage::qno_storage::QnoStorage>>>>,
 
     // ⛏️ v2.2.1-beta: Stratum Mining Pool with PPLNS Rewards
@@ -1430,6 +1439,9 @@ pub struct AppState {
     // Enables account inheritance and estate planning on the blockchain
     pub user_identities: Arc<RwLock<Vec<quillon_bank_api::UserIdentity>>>,
     pub death_certificates: Arc<RwLock<Vec<quillon_bank_api::DeathCertificate>>>,
+
+    // 🔐 v4.2.0-beta: VAULT RWA Token - Physical hardware wallet redemption tracking
+    pub vault_redemptions: Arc<RwLock<Vec<contracts_api::VaultRedemption>>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1540,6 +1552,8 @@ impl AppState {
         // 3. Total data loss scenarios
         //
         // Performance: O(log N) - ~10 disk reads for 1M blocks, ~2 seconds for 10K blocks
+        #[cfg(not(target_os = "windows"))]
+        {
         tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         tracing::info!("🔍 v0.9.97-beta: COMPREHENSIVE DATABASE INTEGRITY CHECK");
         tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1616,6 +1630,7 @@ impl AppState {
         }
 
         tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        } // end #[cfg(not(target_os = "windows"))] integrity check block
 
         // ✅ HEIGHT RECOVERY FIX (v0.8.5-beta): Repair height pointer before loading height
         // NOTE: v0.9.97-beta comprehensive check above supersedes this, but kept for compatibility
@@ -1927,16 +1942,19 @@ impl AppState {
                             persisted_vault.total_qugusd_minted,
                             persisted_vault.qug_price_usd
                         );
-                        // v1.0.50-beta: CRITICAL FIX - Update persisted vault's QUG price to correct oracle price
-                        // Old vaults may have incorrect default of $10.00 instead of $42.50
-                        const CORRECT_QUG_PRICE_USD: f64 = 42.50;
-                        if (persisted_vault.qug_price_usd - CORRECT_QUG_PRICE_USD).abs() > 0.01 {
-                            tracing::info!(
-                                "💱 Correcting vault QUG price from ${:.2} to ${:.2}",
-                                persisted_vault.qug_price_usd,
-                                CORRECT_QUG_PRICE_USD
+                        // v4.0.4: Keep persisted vault price as-is (was updated from AMM during trading).
+                        // Previously forced to $42.50 on restart, which destroyed price discovery.
+                        if persisted_vault.qug_price_usd <= 0.0 {
+                            tracing::warn!(
+                                "💱 Vault QUG price was invalid (${:.6}), resetting to default $42.50",
+                                persisted_vault.qug_price_usd
                             );
-                            persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
+                            persisted_vault.qug_price_usd = 42.50;
+                        } else {
+                            tracing::info!(
+                                "💱 Loaded vault QUG price: ${:.4} (preserved from last session)",
+                                persisted_vault.qug_price_usd
+                            );
                         }
 
                         // v2.4.0: CRITICAL FIX - Detect and fix u64 underflow corruption
@@ -1994,6 +2012,79 @@ impl AppState {
                 Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
             }
         };
+        // v4.0.7: Initialize vault QUG price from pool reserves on startup
+        // Ensures price reflects actual market state even if vault persistence was missed
+        {
+            let mut vault_w = collateral_vault.write().await;
+            let current_price = vault_w.qug_price_usd;
+            let mut pool_price: f64 = 0.0;
+            for p in liquidity_pools_map.values() {
+                let t0 = p.token0.to_uppercase();
+                let t1 = p.token1.to_uppercase();
+                let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG"
+                    || t0 == hex::encode([0u8; 32]).to_uppercase();
+                let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG"
+                    || t1 == hex::encode([0u8; 32]).to_uppercase();
+                let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS).to_uppercase();
+                let t0_is_qugusd = t0 == "QUGUSD" || t0 == qugusd_hex
+                    || t0 == format!("QNK{}", qugusd_hex);
+                let t1_is_qugusd = t1 == "QUGUSD" || t1 == qugusd_hex
+                    || t1 == format!("QNK{}", qugusd_hex);
+                if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                    let (qug_r, usd_r) = if t0_is_qug {
+                        (p.reserve0 as f64, p.reserve1 as f64)
+                    } else {
+                        (p.reserve1 as f64, p.reserve0 as f64)
+                    };
+                    if qug_r > 0.0 {
+                        pool_price = usd_r / qug_r;
+                    }
+                    break;
+                }
+            }
+            if pool_price > 0.0 && pool_price < 1_000_000.0 {
+                vault_w.qug_price_usd = pool_price;
+                vault_w.last_price_update = chrono::Utc::now().timestamp();
+                tracing::info!(
+                    "💱 [STARTUP v4.0.7] Set vault QUG price from pool reserves: ${:.4} (was ${:.4})",
+                    pool_price, current_price
+                );
+            } else {
+                tracing::info!(
+                    "💱 [STARTUP v4.0.7] No QUG/QUGUSD pool found, keeping vault price at ${:.4}",
+                    current_price
+                );
+
+                // v4.0.7: Auto-create QUG/QUGUSD pool so AMM price discovery works
+                // Without this pool, all QUG<->QUGUSD swaps use oracle (static price)
+                let vault_price = current_price;
+                let bootstrap_qug: u128 = 10_000 * 1_000_000_000_000_000_000_000_000u128; // 10k QUG in 24-decimal
+                let bootstrap_qugusd: u128 = (10_000.0 * vault_price * 1e24) as u128;
+                let pool_id = "pool-qug-qugusd-bootstrap".to_string();
+                let pool = LiquidityPool {
+                    pool_id: pool_id.clone(),
+                    token0: "QUG".to_string(),
+                    token1: "QUGUSD".to_string(),
+                    reserve0: bootstrap_qug,
+                    reserve1: bootstrap_qugusd,
+                    provider: [0u8; 32],
+                    created_at: chrono::Utc::now(),
+                    lp_token_supply: ((bootstrap_qug as f64 * bootstrap_qugusd as f64).sqrt()) as u128,
+                    token0_decimals: 24,
+                    token1_decimals: 24,
+                };
+                liquidity_pools_map.insert(pool_id.clone(), pool.clone());
+                if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
+                    if let Err(e) = storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await {
+                        tracing::warn!("⚠️ Failed to persist bootstrap QUG/QUGUSD pool: {}", e);
+                    }
+                }
+                tracing::info!(
+                    "🏊 [STARTUP v4.0.7] Created bootstrap QUG/QUGUSD pool: 10,000 QUG / {:.0} QUGUSD @ ${:.2}/QUG",
+                    bootstrap_qugusd as f64 / 1e24, vault_price
+                );
+            }
+        }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         // Load existing loan applications from persistent storage
@@ -2167,6 +2258,7 @@ impl AppState {
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             mining_submission_tx: None, // Disabled in test mode
+            mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
             connection_manager: None,
             dag_sync_manager: None, // Will be initialized with PeerRegistry
 
@@ -2378,7 +2470,7 @@ impl AppState {
             distributed_protocol: None, // Initialized separately
 
             // OAuth2 Provider - Initialize with empty storage
-            oauth2_storage: Arc::new(RwLock::new(oauth2_provider::OAuth2Storage::new())),
+            oauth2_storage: Arc::new(oauth2_provider::OAuth2Storage::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -2437,9 +2529,11 @@ impl AppState {
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
             fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,       // Will be initialized in main.rs if enabled
+            #[cfg(not(target_os = "windows"))]
             fast_sync_metrics: None,  // Will be initialized in main.rs if enabled
 
             // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
+            #[cfg(not(target_os = "windows"))]
             async_storage: None, // Will be initialized in main.rs with DB handle
 
             // ✨ v1.0.16-beta: PQC Validator Keypair - Initialized in main.rs if --validator-key provided
@@ -2462,6 +2556,7 @@ impl AppState {
             )),
 
             // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
+            #[cfg(not(target_os = "windows"))]
             qno_storage: Arc::new(RwLock::new(None)),
 
             // ⛏️ v2.3.0-beta: Stratum Mining Pool (initialized in main.rs)
@@ -2503,6 +2598,8 @@ impl AppState {
             bank_messages: Arc::new(RwLock::new(Vec::new())),
             user_identities: Arc::new(RwLock::new(Vec::new())),
             death_certificates: Arc::new(RwLock::new(Vec::new())),
+            // 🔐 v4.2.0: VAULT RWA redemptions
+            vault_redemptions: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -2883,16 +2980,19 @@ impl AppState {
                             persisted_vault.total_qugusd_minted,
                             persisted_vault.qug_price_usd
                         );
-                        // v1.0.50-beta: CRITICAL FIX - Update persisted vault's QUG price to correct oracle price
-                        // Old vaults may have incorrect default of $10.00 instead of $42.50
-                        const CORRECT_QUG_PRICE_USD: f64 = 42.50;
-                        if (persisted_vault.qug_price_usd - CORRECT_QUG_PRICE_USD).abs() > 0.01 {
-                            tracing::info!(
-                                "💱 Correcting vault QUG price from ${:.2} to ${:.2}",
-                                persisted_vault.qug_price_usd,
-                                CORRECT_QUG_PRICE_USD
+                        // v4.0.4: Keep persisted vault price as-is (was updated from AMM during trading).
+                        // Previously forced to $42.50 on restart, which destroyed price discovery.
+                        if persisted_vault.qug_price_usd <= 0.0 {
+                            tracing::warn!(
+                                "💱 Vault QUG price was invalid (${:.6}), resetting to default $42.50",
+                                persisted_vault.qug_price_usd
                             );
-                            persisted_vault.qug_price_usd = CORRECT_QUG_PRICE_USD;
+                            persisted_vault.qug_price_usd = 42.50;
+                        } else {
+                            tracing::info!(
+                                "💱 Loaded vault QUG price: ${:.4} (preserved from last session)",
+                                persisted_vault.qug_price_usd
+                            );
                         }
 
                         // v2.4.0: CRITICAL FIX - Detect and fix u64 underflow corruption
@@ -2950,6 +3050,79 @@ impl AppState {
                 Arc::new(RwLock::new(q_vm::contracts::CollateralVault::new()))
             }
         };
+        // v4.0.7: Initialize vault QUG price from pool reserves on startup
+        // Ensures price reflects actual market state even if vault persistence was missed
+        {
+            let mut vault_w = collateral_vault.write().await;
+            let current_price = vault_w.qug_price_usd;
+            let mut pool_price: f64 = 0.0;
+            for p in liquidity_pools_map.values() {
+                let t0 = p.token0.to_uppercase();
+                let t1 = p.token1.to_uppercase();
+                let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG"
+                    || t0 == hex::encode([0u8; 32]).to_uppercase();
+                let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG"
+                    || t1 == hex::encode([0u8; 32]).to_uppercase();
+                let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS).to_uppercase();
+                let t0_is_qugusd = t0 == "QUGUSD" || t0 == qugusd_hex
+                    || t0 == format!("QNK{}", qugusd_hex);
+                let t1_is_qugusd = t1 == "QUGUSD" || t1 == qugusd_hex
+                    || t1 == format!("QNK{}", qugusd_hex);
+                if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                    let (qug_r, usd_r) = if t0_is_qug {
+                        (p.reserve0 as f64, p.reserve1 as f64)
+                    } else {
+                        (p.reserve1 as f64, p.reserve0 as f64)
+                    };
+                    if qug_r > 0.0 {
+                        pool_price = usd_r / qug_r;
+                    }
+                    break;
+                }
+            }
+            if pool_price > 0.0 && pool_price < 1_000_000.0 {
+                vault_w.qug_price_usd = pool_price;
+                vault_w.last_price_update = chrono::Utc::now().timestamp();
+                tracing::info!(
+                    "💱 [STARTUP v4.0.7] Set vault QUG price from pool reserves: ${:.4} (was ${:.4})",
+                    pool_price, current_price
+                );
+            } else {
+                tracing::info!(
+                    "💱 [STARTUP v4.0.7] No QUG/QUGUSD pool found, keeping vault price at ${:.4}",
+                    current_price
+                );
+
+                // v4.0.7: Auto-create QUG/QUGUSD pool so AMM price discovery works
+                // Without this pool, all QUG<->QUGUSD swaps use oracle (static price)
+                let vault_price = current_price;
+                let bootstrap_qug: u128 = 10_000 * 1_000_000_000_000_000_000_000_000u128; // 10k QUG in 24-decimal
+                let bootstrap_qugusd: u128 = (10_000.0 * vault_price * 1e24) as u128;
+                let pool_id = "pool-qug-qugusd-bootstrap".to_string();
+                let pool = LiquidityPool {
+                    pool_id: pool_id.clone(),
+                    token0: "QUG".to_string(),
+                    token1: "QUGUSD".to_string(),
+                    reserve0: bootstrap_qug,
+                    reserve1: bootstrap_qugusd,
+                    provider: [0u8; 32],
+                    created_at: chrono::Utc::now(),
+                    lp_token_supply: ((bootstrap_qug as f64 * bootstrap_qugusd as f64).sqrt()) as u128,
+                    token0_decimals: 24,
+                    token1_decimals: 24,
+                };
+                liquidity_pools_map.insert(pool_id.clone(), pool.clone());
+                if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
+                    if let Err(e) = storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await {
+                        tracing::warn!("⚠️ Failed to persist bootstrap QUG/QUGUSD pool: {}", e);
+                    }
+                }
+                tracing::info!(
+                    "🏊 [STARTUP v4.0.7] Created bootstrap QUG/QUGUSD pool: 10,000 QUG / {:.0} QUGUSD @ ${:.2}/QUG",
+                    bootstrap_qugusd as f64 / 1e24, vault_price
+                );
+            }
+        }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
         // Load existing loan applications from persistent storage
@@ -3082,6 +3255,7 @@ impl AppState {
 
             // Mining submission async queue
             mining_submission_tx: None, // Will be initialized in main.rs
+            mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
 
             // BREAKTHROUGH: DNS-Phantom → Connection Integration
             connection_manager: {
@@ -3389,7 +3563,7 @@ impl AppState {
             distributed_protocol: None, // Initialized separately
 
             // OAuth2 Provider - Initialize with empty storage
-            oauth2_storage: Arc::new(RwLock::new(oauth2_provider::OAuth2Storage::new())),
+            oauth2_storage: Arc::new(oauth2_provider::OAuth2Storage::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -3448,9 +3622,11 @@ impl AppState {
             // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC - Initialized in main.rs
             fast_sync_enabled: false, // Will be set in main.rs based on CLI flag
             fast_sync_tx: None,       // Will be initialized in main.rs if enabled
+            #[cfg(not(target_os = "windows"))]
             fast_sync_metrics: None,  // Will be initialized in main.rs if enabled
 
             // ✅ v1.0.7-beta: AsyncStorageEngine - Initialized in main.rs after DB setup
+            #[cfg(not(target_os = "windows"))]
             async_storage: None, // Will be initialized in main.rs with DB handle
 
             // ✨ v1.0.16-beta: PQC Validator Keypair - Initialized in main.rs if --validator-key provided
@@ -3473,6 +3649,7 @@ impl AppState {
             )),
 
             // 🔮 v1.4.2-beta: QNO Prediction Staking - Will be initialized after DB is ready
+            #[cfg(not(target_os = "windows"))]
             qno_storage: Arc::new(RwLock::new(None)),
 
             // ⛏️ v2.3.0-beta: Stratum Mining Pool (initialized in main.rs)
@@ -3514,6 +3691,8 @@ impl AppState {
             bank_messages: Arc::new(RwLock::new(Vec::new())),
             user_identities: Arc::new(RwLock::new(Vec::new())),
             death_certificates: Arc::new(RwLock::new(Vec::new())),
+            // 🔐 v4.2.0: VAULT RWA redemptions
+            vault_redemptions: Arc::new(RwLock::new(Vec::new())),
         })
     }
 

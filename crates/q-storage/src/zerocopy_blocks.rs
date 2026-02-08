@@ -283,7 +283,10 @@ pub struct ZeroCopyBlockStore {
     index: HashMap<u64, (u64, u64)>,
 
     /// Memory-mapped region (optional, for read-heavy workloads)
+    #[cfg(not(target_os = "windows"))]
     mmap: Option<memmap2::Mmap>,
+    #[cfg(target_os = "windows")]
+    mmap: Option<()>,
 
     /// File handle
     file: File,
@@ -336,6 +339,7 @@ impl ZeroCopyBlockStore {
     }
 
     /// Enable memory-mapping for read access
+    #[cfg(not(target_os = "windows"))]
     pub fn enable_mmap(&mut self) -> Result<()> {
         if self.file_size == 0 {
             warn!("[ZEROCOPY] Cannot mmap empty file");
@@ -350,6 +354,13 @@ impl ZeroCopyBlockStore {
             self.file_size
         );
 
+        Ok(())
+    }
+
+    /// Enable memory-mapping for read access (Windows stub - mmap not available)
+    #[cfg(target_os = "windows")]
+    pub fn enable_mmap(&mut self) -> Result<()> {
+        warn!("[ZEROCOPY] Memory-mapping not available on Windows");
         Ok(())
     }
 
@@ -416,6 +427,7 @@ impl ZeroCopyBlockStore {
             .context("Block not found in index")?;
 
         // Use mmap if available
+        #[cfg(not(target_os = "windows"))]
         if let Some(ref mmap) = self.mmap {
             let start = *offset as usize;
             let end = start + ZeroCopyHeader::SIZE;
@@ -447,6 +459,7 @@ impl ZeroCopyBlockStore {
             .context("Block not found in index")?;
 
         // Use mmap if available
+        #[cfg(not(target_os = "windows"))]
         if let Some(ref mmap) = self.mmap {
             let start = offset as usize;
             let end = start + size as usize;
@@ -471,6 +484,7 @@ impl ZeroCopyBlockStore {
     }
 
     /// Get block as zero-copy view (requires mmap)
+    #[cfg(not(target_os = "windows"))]
     pub fn get_view(&self, height: u64) -> Result<ZeroCopyBlockView<'_>> {
         let (offset, size) = self
             .index
@@ -491,6 +505,12 @@ impl ZeroCopyBlockStore {
         }
 
         ZeroCopyBlockView::from_bytes(&mmap[start..end])
+    }
+
+    /// Get block as zero-copy view (not supported on Windows - no mmap)
+    #[cfg(target_os = "windows")]
+    pub fn get_view(&self, _height: u64) -> Result<ZeroCopyBlockView<'_>> {
+        bail!("Zero-copy block views not supported on Windows")
     }
 
     /// Get statistics

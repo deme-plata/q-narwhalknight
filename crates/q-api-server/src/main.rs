@@ -18,10 +18,12 @@ use q_storage::{
 // v0.9.37-beta PHASE 3: Cross-fork blockchain synchronization
 use q_storage::{detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats};
 // ✅ v1.0.7-beta: AsyncStorageEngine for permanent mining stall fix
+#[cfg(not(target_os = "windows"))]
 use q_storage::AsyncStorageEngine;
 // ✅ v2.3.9-beta: Warp Sync v1.0 - Batch signature verification (25-50x faster)
 use q_storage::warp_sync::{WarpSyncConfig, WarpSyncValidator};
 // ✅ v1.4.2-beta: QNO Storage for persistent prediction staking
+#[cfg(not(target_os = "windows"))]
 use q_storage::qno_storage::QnoStorage;
 mod cdp_simple;
 // v2.4.8-beta: Use library's contracts_api module instead of redeclaring (fixes crate:: imports)
@@ -33,6 +35,7 @@ use q_api_server::quillon_bank_api;
 // ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System
 mod stablecoin_api;
 // ✅ v3.0 - Quantum Neural Oracle Prediction Staking API
+#[cfg(not(target_os = "windows"))]
 mod qno_api;
 // ✅ v0.9.36-beta - AI Transaction Assistant with Address Book Integration
 mod ai_transaction_assistant;
@@ -1005,13 +1008,110 @@ async fn main() -> anyhow::Result<()> {
 
     // Parse command line arguments
     let matches = Command::new("q-api-server")
-        .version("0.1.0")
-        .about("Q-NarwhalKnight API Server - Server Alpha Node")
+        .version("4.5.0-beta")
+        .about("Q-NarwhalKnight Quantum Consensus Node")
+        .long_about(
+"Q-NarwhalKnight Quantum Consensus Node v4.5.0-beta
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Full-featured blockchain node with DAG-Knight consensus, integrated DEX,
+post-quantum cryptography, and decentralized AI inference.
+
+QUICK START:
+  ./q-api-server --port 8080                         # Start node on port 8080
+  ./q-api-server --port 8080 --mine --mining-wallet qnk<addr>  # Start with mining
+  ./q-api-server --port 8080 --tui                   # Start with terminal UI
+
+API ENDPOINTS (http://localhost:<port>):
+  GET  /api/v1/status                  Node status, peer info, block height
+  GET  /api/v1/node/status             Detailed node dashboard data
+  GET  /api/v1/network/supply          Max supply, mined coins, hashrate
+  GET  /api/v1/peer-id                 This node's libp2p peer ID
+  GET  /api/v1/events                  SSE event stream (blocks, balances, prices)
+  GET  /api/v1/mining/challenge        Current mining challenge
+  POST /api/v1/mining/submit           Submit mining solution
+  GET  /api/v1/mining/stats/:wallet    Wallet mining statistics
+  POST /api/v1/transactions            Submit a transaction
+  POST /api/v1/transactions/send       Send QUG to an address
+  GET  /api/v1/wallets                 List wallets
+  POST /api/v1/wallets/create          Create new wallet
+  GET  /api/v1/mnemonic                Generate mnemonic seed phrase
+  POST /api/v1/faucet                  Request testnet tokens
+  GET  /api/v1/validators              List registered validators
+  POST /api/v1/defi/swap               Execute a DEX swap
+  GET  /api/v1/defi/pools              List liquidity pools
+  GET  /api/v1/defi/oracle/price/:id   Token price oracle
+  POST /api/v1/contracts/deploy        Deploy a smart contract / token
+  GET  /api/v1/contracts/:addr/balance/:wallet  Token balance query
+
+ENVIRONMENT VARIABLES:
+  Q_NETWORK_ID=testnet-phase19         Network ID (overrides --network)
+  Q_API_PORT=8080                      API port (overrides --port)
+  Q_DB_PATH=./data                     Database directory
+  Q_WORKER_THREADS=4                   Tokio worker threads
+  Q_DISABLE_AI=1                       Disable AI inference engine
+  Q_DISABLE_DEX=1                      Disable DEX/swap functionality
+  Q_ENABLE_ORACLE=1                    Enable price oracle
+  Q_ENABLE_TOR=1                       Enable Tor anonymity layer
+  Q_TOR_DISABLED=1                     Explicitly disable Tor
+  Q_ENABLE_MINING_POOL=1               Enable mining pool server
+  Q_POOL_WALLET=qnk<addr>             Pool payout wallet
+  Q_STRATUM_PORT=3333                  Stratum protocol port
+  Q_POOL_NAME=\"My Pool\"                Pool display name
+  Q_ENABLE_DISTRIBUTED_POOL=1          Enable P2P decentralized pool
+  Q_ENABLE_DAG_SYNC=true               Enable DAG-aware sync (default: true)
+  Q_ENABLE_RECURSIVE_PROOFS=1          Enable ZK recursive proofs
+  Q_ENABLE_PROVER=1                    Enable STARK prover
+  Q_AI_MODEL=bitnet                    AI model: bitnet or mistral
+  Q_MODELS_DIR=./models                AI model files directory
+  Q_DEBUG_MODE=1                       Enable debug logging
+
+S3 STORAGE (archival / overflow):
+  Q_STORAGE_S3_BUCKET=my-bucket        S3 bucket name (enables S3)
+  Q_STORAGE_S3_REGION=eu-west-1        S3 region
+  Q_STORAGE_S3_PREFIX=q-narwhalknight  S3 key prefix
+  Q_STORAGE_OVERFLOW_PATHS=/mnt/d2,/mnt/d3   Extra local disk paths
+  Q_STORAGE_PRIMARY_MIN_FREE_GB=10     Min free GB before overflow
+  Q_STORAGE_ARCHIVE_AFTER_BLOCKS=100000  Archive old blocks to S3
+
+  S3 Setup Example (AWS):
+    export AWS_ACCESS_KEY_ID=AKIA...
+    export AWS_SECRET_ACCESS_KEY=...
+    export Q_STORAGE_S3_BUCKET=my-qnk-backups
+    export Q_STORAGE_S3_REGION=us-east-1
+    ./q-api-server --port 8080
+
+  S3 Setup Example (MinIO / self-hosted):
+    export AWS_ACCESS_KEY_ID=minioadmin
+    export AWS_SECRET_ACCESS_KEY=minioadmin
+    export AWS_ENDPOINT_URL=http://localhost:9000
+    export Q_STORAGE_S3_BUCKET=qnk-data
+    ./q-api-server --port 8080
+
+  Note: S3 is used for cold/archival blocks and backups only.
+  Hot data (recent blocks, balances, state) stays on local NVMe/SSD.
+
+TUNING (advanced):
+  Q_TURBO_PARALLEL_STREAMS=16          Parallel sync streams
+  Q_TURBO_CHUNK_SIZE=2500              Blocks per sync chunk
+  Q_TURBO_COMPRESSION_LEVEL=1          Compression level (1-9)
+  Q_TURBO_CHUNK_TIMEOUT_SECS=30        Sync chunk timeout
+  Q_BATCHED_WRITES=1                   Enable batched DB writes
+
+P2P NETWORK:
+  Bootstrap:  /ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhd...
+  Fallback:   bootstrap1.quillon.xyz
+  Default P2P port: 9001 (auto-configured)
+  Gossipsub topics: blocks, peer-heights, turbo-sync-*
+
+HOMEPAGE: https://quillon.xyz
+DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v4.5.0-beta"
+        )
         .arg(
             Arg::new("node-id")
                 .long("node-id")
                 .value_name("ID")
-                .help("Node identifier for this Alpha instance")
+                .help("Node identifier for this instance")
                 .required(false),
         )
         .arg(
@@ -1030,26 +1130,26 @@ async fn main() -> anyhow::Result<()> {
             Arg::new("port")
                 .long("port")
                 .value_name("PORT")
-                .help("API server port")
+                .help("HTTP API server port [env: Q_API_PORT]")
                 .default_value("8080"),
         )
         .arg(
             Arg::new("tui")
                 .long("tui")
-                .help("Enable beautiful terminal UI mode for node monitoring")
+                .help("Enable terminal UI mode with live metrics dashboard")
                 .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("network")
                 .long("network")
                 .value_name("NETWORK")
-                .help("Network to connect to (testnet or mainnet)")
+                .help("Network to join: testnet or mainnet [env: Q_NETWORK_ID]")
                 .default_value("testnet"),
         )
         .arg(
             Arg::new("experimental-fast-sync")
                 .long("experimental-fast-sync")
-                .help("Enable experimental batched sync (150-250 BPS, ≤16 block max loss on crash)")
+                .help("Enable batched sync (150-250 BPS, max 16 block loss on crash)")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -1059,7 +1159,6 @@ async fn main() -> anyhow::Result<()> {
                 .help("Path to validator keypair file (enables PQC block signing)")
                 .required(false),
         )
-        // 🔨 v2.3.0-beta: Integrated Mining - Single unified node with mining capability
         .arg(
             Arg::new("mine")
                 .long("mine")
@@ -1070,14 +1169,14 @@ async fn main() -> anyhow::Result<()> {
             Arg::new("mining-threads")
                 .long("mining-threads")
                 .value_name("THREADS")
-                .help("Number of CPU threads for mining (0 = auto-detect)")
+                .help("CPU threads for mining (0 = auto-detect all cores)")
                 .default_value("0"),
         )
         .arg(
             Arg::new("mining-wallet")
                 .long("mining-wallet")
                 .value_name("WALLET")
-                .help("Wallet address for mining rewards (required if --mine is set)")
+                .help("Wallet address for mining rewards (required with --mine)")
                 .required(false),
         )
         .get_matches();
@@ -2752,7 +2851,9 @@ async fn main() -> anyhow::Result<()> {
     // ========================================
     // 🚀 v1.0.2-beta PHASE 1A: SAFE BATCHED SYNC
     // Initialize SafeBatchedWriter for 150-250 BPS performance (16-27x improvement)
+    // (Windows: SafeBatchedWriter not available - RocksDB-dependent)
     // ========================================
+    #[cfg(not(target_os = "windows"))]
     if use_fast_sync {
         info!("🚀 ════════════════════════════════════════════════════════");
         info!("🚀 Initializing SafeBatchedWriter (Phase 1A)...");
@@ -2827,12 +2928,20 @@ async fn main() -> anyhow::Result<()> {
         info!("🔒 Using default durable sync (9.3 BPS, zero loss)");
         info!("   To enable fast sync: --experimental-fast-sync");
     }
+    #[cfg(target_os = "windows")]
+    {
+        info!("🔒 SafeBatchedWriter not available on Windows");
+        info!("   Using default durable sync");
+    }
 
     // ========================================
     // 🚀 v1.0.7-beta: ASYNC STORAGE ENGINE
     // Dedicated worker thread with micro-batching for permanent mining stall fix
     // AI Consensus (5/5 experts, 95% confidence): Root cause = blocking RocksDB I/O under async RwLock
+    // (Windows: AsyncStorageEngine, pointer integrity, preflight check not available - RocksDB-dependent)
     // ========================================
+    #[cfg(not(target_os = "windows"))]
+    {
     info!("🚀 ════════════════════════════════════════════════════════");
     info!("🚀 Initializing AsyncStorageEngine (v1.0.7-beta)...");
 
@@ -3003,6 +3112,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("✅ AsyncStorageEngine ready for block production");
     info!("🚀 ════════════════════════════════════════════════════════");
+    } // end #[cfg(not(target_os = "windows"))] block for AsyncStorageEngine + pointer integrity + preflight
 
     // ========================================
     // 🔄 v3.5.10-beta: WALLET INDEX MIGRATION (BACKGROUND)
@@ -3039,37 +3149,44 @@ async fn main() -> anyhow::Result<()> {
     // ========================================
     // 🔮 v1.4.2-beta: QNO STORAGE INITIALIZATION
     // Persistent storage for Quantum Neural Oracle prediction staking
+    // (Gated: q_storage::qno_storage not available on Windows)
     // ========================================
-    info!("🔮 ════════════════════════════════════════════════════════");
-    info!("🔮 Initializing QNO Storage (v1.4.2-beta)...");
+    #[cfg(not(target_os = "windows"))]
+    {
+        info!("🔮 ════════════════════════════════════════════════════════");
+        info!("🔮 Initializing QNO Storage (v1.4.2-beta)...");
 
-    let qno_storage = Arc::new(QnoStorage::new(db.clone()));
+        // Re-obtain db handle (original `db` is scoped inside previous #[cfg] block)
+        let hot_db = state.storage_engine.get_hot_db();
+        let db = hot_db.db();
+        let qno_storage = Arc::new(QnoStorage::new(db.clone()));
 
-    // Initialize QNO storage (loads positions/domains from disk or creates defaults)
-    match qno_storage.initialize().await {
-        Ok(()) => {
-            info!("✅ QNO Storage initialized successfully");
+        // Initialize QNO storage (loads positions/domains from disk or creates defaults)
+        match qno_storage.initialize().await {
+            Ok(()) => {
+                info!("✅ QNO Storage initialized successfully");
 
-            // Store in AppState
-            *state.qno_storage.write().await = Some(qno_storage.clone());
+                // Store in AppState
+                *state.qno_storage.write().await = Some(qno_storage.clone());
 
-            // Start background reward accrual task
-            let qno_storage_task = state.qno_storage.clone();
-            qno_api::start_reward_accrual_task(qno_storage_task.clone());
-            info!("✅ QNO reward accrual task started (60-second interval)");
+                // Start background reward accrual task
+                let qno_storage_task = state.qno_storage.clone();
+                qno_api::start_reward_accrual_task(qno_storage_task.clone());
+                info!("✅ QNO reward accrual task started (60-second interval)");
 
-            // Start background resolution task (v1.4.3-beta)
-            qno_api::start_resolution_task(qno_storage_task);
-            info!("✅ QNO resolution task started (hourly oracle check)");
+                // Start background resolution task (v1.4.3-beta)
+                qno_api::start_resolution_task(qno_storage_task);
+                info!("✅ QNO resolution task started (hourly oracle check)");
+            }
+            Err(e) => {
+                error!("❌ Failed to initialize QNO Storage: {}", e);
+                error!("   QNO prediction staking will be unavailable");
+                // Non-fatal: continue without QNO
+            }
         }
-        Err(e) => {
-            error!("❌ Failed to initialize QNO Storage: {}", e);
-            error!("   QNO prediction staking will be unavailable");
-            // Non-fatal: continue without QNO
-        }
+
+        info!("🔮 ════════════════════════════════════════════════════════");
     }
-
-    info!("🔮 ════════════════════════════════════════════════════════");
 
     // ========================================
     // 🔐 v1.1.25-beta: MAINNET SAFETY INFRASTRUCTURE
@@ -4319,74 +4436,81 @@ async fn main() -> anyhow::Result<()> {
     // ========================================
     // QUILLON RESONANCE CONSENSUS - K-PARAMETER PHASE ANALYSIS
     // ========================================
-    info!("🌊 Initializing Quillon Resonance Consensus with K-Parameter analysis...");
+    #[cfg(feature = "resonance")]
+    {
+        info!("🌊 Initializing Quillon Resonance Consensus with K-Parameter analysis...");
 
-    let k_analyzer = q_resonance::KParameterAnalyzer::new()
-        .with_planck_constant(1.0)
-        .with_threshold(1.0);
+        let k_analyzer = q_resonance::KParameterAnalyzer::new()
+            .with_planck_constant(1.0)
+            .with_threshold(1.0);
 
-    info!("✅ K-Parameter analyzer initialized");
-    info!("   Formula: K = 2π √(ΔH · Δs · ℏ) / τ");
-    info!("   Phase detection: Stable → Approaching → Critical");
-    info!("   Dynamic parameter tuning: ACTIVE");
+        info!("✅ K-Parameter analyzer initialized");
+        info!("   Formula: K = 2π √(ΔH · Δs · ℏ) / τ");
+        info!("   Phase detection: Stable → Approaching → Critical");
+        info!("   Dynamic parameter tuning: ACTIVE");
 
-    state.k_parameter_analyzer = Some(Arc::new(k_analyzer));
+        state.k_parameter_analyzer = Some(Arc::new(k_analyzer));
 
-    // ========================================
-    // SHADOW MODE: DAG-Knight (Primary) + Q-Resonance (Shadow)
-    // ========================================
-    // Initialize Shadow Mode Coordinator if DAG-Knight is active
-    if let Some(ref dag_knight_ref) = dag_knight {
-        info!("🎭 Initializing Shadow Mode Coordinator...");
+        // ========================================
+        // SHADOW MODE: DAG-Knight (Primary) + Q-Resonance (Shadow)
+        // ========================================
+        // Initialize Shadow Mode Coordinator if DAG-Knight is active
+        if let Some(ref dag_knight_ref) = dag_knight {
+            info!("🎭 Initializing Shadow Mode Coordinator...");
 
-        // Create ResonanceCoordinator for shadow mode
-        let resonance = q_resonance::ResonanceCoordinator::new(node_id.to_vec());
-        let resonance_arc = Arc::new(resonance);
+            // Create ResonanceCoordinator for shadow mode
+            let resonance = q_resonance::ResonanceCoordinator::new(node_id.to_vec());
+            let resonance_arc = Arc::new(resonance);
 
-        // Configure shadow mode - v3.4.8-beta: HYBRID MODE ENABLED
-        // Resonance complements DAG-Knight with physics-based consensus validation
-        let shadow_config = q_resonance::ShadowModeConfig {
-            enabled: true,
-            agreement_threshold: 0.85, // 85% agreement required for migration
-            observation_rounds: 100,   // Observe 100 rounds before auto-adjust
-            hybrid_mode: true,         // 🎭 HYBRID MODE: Resonance complements DAG-Knight
-            resonance_weight: 0.1,     // Start at 10% resonance influence (cautious)
-            auto_adjust_weight: true,  // Auto-adjust based on agreement rate
-            log_interval_rounds: 10,   // Log detailed metrics every 10 rounds
-        };
+            // Configure shadow mode - v3.4.8-beta: HYBRID MODE ENABLED
+            // Resonance complements DAG-Knight with physics-based consensus validation
+            let shadow_config = q_resonance::ShadowModeConfig {
+                enabled: true,
+                agreement_threshold: 0.85, // 85% agreement required for migration
+                observation_rounds: 100,   // Observe 100 rounds before auto-adjust
+                hybrid_mode: true,         // 🎭 HYBRID MODE: Resonance complements DAG-Knight
+                resonance_weight: 0.1,     // Start at 10% resonance influence (cautious)
+                auto_adjust_weight: true,  // Auto-adjust based on agreement rate
+                log_interval_rounds: 10,   // Log detailed metrics every 10 rounds
+            };
 
-        // Create ShadowModeCoordinator
-        match q_resonance::ShadowModeCoordinator::new(
-            dag_knight_ref.clone(),
-            resonance_arc.clone(),
-            shadow_config,
-        )
-        .await
-        {
-            Ok(shadow_coordinator) => {
-                info!("✅ Hybrid Mode Coordinator initialized - v3.4.8-beta");
-                info!("   🎯 Primary: DAG-Knight Consensus (90% weight)");
-                info!("   🌊 Complement: Quillon Resonance Consensus (10% weight)");
-                info!("   📊 Agreement Threshold: 85.0%");
-                info!("   🔄 Observation Rounds: 100");
-                info!("   ⚖️  Auto-weight adjustment: ENABLED");
-                info!("   🎭 MODE: HYBRID - Resonance complements DAG-Knight");
-                info!("   🎻 String-theoretic consensus: ACTIVE");
-                info!("   ⚡ Energy minimization: ENABLED");
-                info!("   🛡️  Spectral BFT Byzantine detection: ENABLED");
+            // Create ShadowModeCoordinator
+            match q_resonance::ShadowModeCoordinator::new(
+                dag_knight_ref.clone(),
+                resonance_arc.clone(),
+                shadow_config,
+            )
+            .await
+            {
+                Ok(shadow_coordinator) => {
+                    info!("✅ Hybrid Mode Coordinator initialized - v3.4.8-beta");
+                    info!("   🎯 Primary: DAG-Knight Consensus (90% weight)");
+                    info!("   🌊 Complement: Quillon Resonance Consensus (10% weight)");
+                    info!("   📊 Agreement Threshold: 85.0%");
+                    info!("   🔄 Observation Rounds: 100");
+                    info!("   ⚖️  Auto-weight adjustment: ENABLED");
+                    info!("   🎭 MODE: HYBRID - Resonance complements DAG-Knight");
+                    info!("   🎻 String-theoretic consensus: ACTIVE");
+                    info!("   ⚡ Energy minimization: ENABLED");
+                    info!("   🛡️  Spectral BFT Byzantine detection: ENABLED");
 
-                // Store both coordinators in app state
-                state.resonance_coordinator = Some(resonance_arc);
-                state.shadow_coordinator =
-                    Some(Arc::new(tokio::sync::Mutex::new(shadow_coordinator)));
-            }
-            Err(e) => {
-                warn!("⚠️  Shadow Mode Coordinator initialization failed: {}", e);
-                warn!("   Continuing with ResonanceCoordinator only (no shadow mode)");
-                // Still store resonance coordinator without shadow mode
-                state.resonance_coordinator = Some(resonance_arc);
-            }
-        };
+                    // Store both coordinators in app state
+                    state.resonance_coordinator = Some(resonance_arc);
+                    state.shadow_coordinator =
+                        Some(Arc::new(tokio::sync::Mutex::new(shadow_coordinator)));
+                }
+                Err(e) => {
+                    warn!("⚠️  Shadow Mode Coordinator initialization failed: {}", e);
+                    warn!("   Continuing with ResonanceCoordinator only (no shadow mode)");
+                    // Still store resonance coordinator without shadow mode
+                    state.resonance_coordinator = Some(resonance_arc);
+                }
+            };
+        }
+    }
+    #[cfg(not(feature = "resonance"))]
+    {
+        info!("🌊 Quillon Resonance Consensus: DISABLED (feature not enabled)");
     }
 
     // ========================================
@@ -4794,8 +4918,131 @@ async fn main() -> anyhow::Result<()> {
     let app_state = Arc::new(state);
 
     // ========================================
-    // ✅ v0.9.76-beta: AUTOMATIC DATABASE INTEGRITY CHECK & REPAIR
+    // 🔐 v4.2.0-beta: VAULT RWA TOKEN - Register as built-in token
+    // Physical hardware wallet token owned by BANK_MASTER_ACCOUNT
+    // Persists across testnet phase transitions like QUG and QUGUSD
     // ========================================
+    {
+        use q_types::{VAULT_TOKEN_ADDRESS, VAULT_DECIMALS, BANK_MASTER_ACCOUNT};
+        use q_vm::contracts::{ContractAddress, ContractType, DeployedSmartContract, ContractState, ContractMetadata};
+
+        let vault_contract_addr = ContractAddress(VAULT_TOKEN_ADDRESS);
+
+        // Check if VAULT is already registered
+        let already_registered = {
+            let contracts = app_state.orobit_ecosystem.deployed_contracts.read().await;
+            contracts.contains_key(&vault_contract_addr)
+        };
+
+        if !already_registered {
+            info!("🔐 [VAULT] Registering $VAULT RWA token as built-in contract...");
+
+            let mut deployment_params = std::collections::HashMap::new();
+            deployment_params.insert("name".to_string(), serde_json::json!("Quillon Vault"));
+            deployment_params.insert("symbol".to_string(), serde_json::json!("VAULT"));
+            deployment_params.insert("decimals".to_string(), serde_json::json!(VAULT_DECIMALS));
+            deployment_params.insert("initialSupply".to_string(), serde_json::json!("1000"));
+            deployment_params.insert("tokenType".to_string(), serde_json::json!("PhysicalGood"));
+            deployment_params.insert("description".to_string(), serde_json::json!(
+                "Physical hardware wallet token. 1 VAULT = 1 Quillon Vault device (3.8mm titanium, QRNG, Dilithium5). Burn to redeem physical device."
+            ));
+
+            let vault_contract = DeployedSmartContract {
+                address: vault_contract_addr.clone(),
+                contract_type: ContractType::PhysicalGoodsToken,
+                deployer: BANK_MASTER_ACCOUNT,
+                deployment_params,
+                deployed_at: chrono::Utc::now().timestamp() as u64,
+                deployment_tx: "genesis-vault-rwa".to_string(),
+                verified: true,
+                contract_state: ContractState {
+                    active: true,
+                    paused: false,
+                    total_calls: 0,
+                    last_interaction: chrono::Utc::now().timestamp() as u64,
+                    storage_root: [0u8; 32],
+                },
+                metadata: ContractMetadata {
+                    name: "Quillon Vault".to_string(),
+                    symbol: Some("VAULT".to_string()),
+                    description: "Physical hardware wallet RWA token — 1 token = 1 device".to_string(),
+                    features: {
+                        let mut f = std::collections::HashMap::new();
+                        f.insert("burnable".to_string(), true);
+                        f.insert("mintable".to_string(), true);
+                        f.insert("physical_redemption".to_string(), true);
+                        f
+                    },
+                    governance_enabled: false,
+                    upgrade_history: vec![],
+                },
+            };
+
+            let mut contracts = app_state.orobit_ecosystem.deployed_contracts.write().await;
+            contracts.insert(vault_contract_addr.clone(), vault_contract);
+            drop(contracts);
+
+            // Register symbol → address mapping for oracle lookups
+            app_state.symbol_to_address.insert(
+                "VAULT".to_string(),
+                format!("qnk{}", hex::encode(VAULT_TOKEN_ADDRESS)),
+            );
+
+            info!("✅ [VAULT] $VAULT RWA token registered (owner: BANK_MASTER_ACCOUNT, supply: 1000, decimals: 0)");
+        } else {
+            // Ensure ownership is set to BANK_MASTER_ACCOUNT even for existing registrations
+            let mut contracts = app_state.orobit_ecosystem.deployed_contracts.write().await;
+            if let Some(contract) = contracts.get_mut(&vault_contract_addr) {
+                if contract.deployer != BANK_MASTER_ACCOUNT {
+                    info!("🔐 [VAULT] Transferring VAULT ownership to BANK_MASTER_ACCOUNT");
+                    contract.deployer = BANK_MASTER_ACCOUNT;
+                }
+            }
+            drop(contracts);
+            info!("✅ [VAULT] $VAULT already registered, ownership verified");
+        }
+
+        // Migrate balance from old contract address to canonical VAULT_TOKEN_ADDRESS if needed
+        // Old address: qnk78f62d27e3e3dee1ddb83c1850e58fce6fd95c6bb2a77380f04e3cdc7deed0f0
+        let old_vault_addr_hex = "78f62d27e3e3dee1ddb83c1850e58fce6fd95c6bb2a77380f04e3cdc7deed0f0";
+        if let Ok(old_addr_bytes) = hex::decode(old_vault_addr_hex) {
+            if old_addr_bytes.len() == 32 {
+                let mut old_addr = [0u8; 32];
+                old_addr.copy_from_slice(&old_addr_bytes);
+
+                let mut token_balances = app_state.token_balances.write().await;
+                // Find all balances with the old contract address and migrate them
+                let old_entries: Vec<([u8; 32], u128)> = token_balances.iter()
+                    .filter(|((_, contract), _)| *contract == old_addr)
+                    .map(|((wallet, _), balance)| (*wallet, *balance))
+                    .collect();
+
+                for (wallet, balance) in old_entries {
+                    if balance > 0 {
+                        // Add to new canonical address
+                        let new_key = (wallet, VAULT_TOKEN_ADDRESS);
+                        let existing = token_balances.get(&new_key).copied().unwrap_or(0);
+                        token_balances.insert(new_key, existing + balance);
+                        // Remove old entry
+                        token_balances.remove(&(wallet, old_addr));
+                        info!(
+                            "🔐 [VAULT] Migrated {} VAULT tokens for wallet {}",
+                            balance,
+                            hex::encode(&wallet[..8])
+                        );
+                    }
+                }
+                drop(token_balances);
+            }
+        }
+    }
+
+    // ========================================
+    // ✅ v0.9.76-beta: AUTOMATIC DATABASE INTEGRITY CHECK & REPAIR
+    // (Windows: integrity checker not available - RocksDB-dependent)
+    // ========================================
+    #[cfg(not(target_os = "windows"))]
+    {
     info!("🔍 Running automatic database integrity check...");
 
     let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data".to_string());
@@ -4860,6 +5107,7 @@ async fn main() -> anyhow::Result<()> {
             warn!("   Continuing startup - will attempt P2P sync");
         }
     }
+    } // end #[cfg(not(target_os = "windows"))] block for integrity checker
 
     // ========================================
     // ✨ v1.4.2-beta: INITIALIZE UPGRADE MANAGER
@@ -5430,12 +5678,74 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             ).await;
 
-                            // 2. Calculate price from updated reserves and emit TokenPriceUpdate
+                            // 2. v4.1.1: Calculate USD price from reserves and emit TokenPriceUpdate
+                            // Previously used raw reserve0/reserve1 ratio (NOT USD price!)
                             if swap.new_reserve0 > 0 && swap.new_reserve1 > 0 {
-                                // Price of to_token in terms of from_token
-                                // Both reserves are stored in 24-decimal format
-                                let price = swap.new_reserve0 as f64 / swap.new_reserve1 as f64;
-                                let inverse_price = if price > 0.0 { 1.0 / price } else { 1.0 };
+                                // Determine which token is the base (QUG/QUGUSD)
+                                let to_upper = swap.to_token.to_uppercase();
+                                let from_upper = swap.from_token.to_uppercase();
+
+                                // Get QUG USD price for conversion
+                                let qug_usd = app_state_gossip.collateral_vault.read().await.get_qug_price();
+
+                                // Figure out which reserve is which based on pool structure
+                                // P2P swap has new_reserve0/new_reserve1 matching pool's token0/token1
+                                let from_is_qug = from_upper == "QUG" || from_upper == "NATIVE-QUG";
+                                let from_is_qugusd = from_upper == "QUGUSD";
+                                let to_is_qug = to_upper == "QUG" || to_upper == "NATIVE-QUG";
+
+                                // to_token price: base_reserve/token_reserve * base_usd
+                                // If from=QUG, to=custom: reserve1=QUG(base), reserve0=custom(token) [reversed pool]
+                                // Actually, reserve order matches pool order, not swap direction
+                                // Let's use the pool lookup to determine structure
+                                let pools = app_state_gossip.liquidity_pools.read().await;
+                                let price = if let Some(pool) = pools.values().find(|p|
+                                    (p.token0.eq_ignore_ascii_case(&swap.to_token) || p.token1.eq_ignore_ascii_case(&swap.to_token)) &&
+                                    (p.token0.eq_ignore_ascii_case(&swap.from_token) || p.token1.eq_ignore_ascii_case(&swap.from_token))
+                                ) {
+                                    let t0 = pool.token0.to_uppercase();
+                                    let t0_is_to = t0 == to_upper || pool.token0.eq_ignore_ascii_case(&swap.to_token);
+                                    let (tok_r, base_r) = if t0_is_to {
+                                        (pool.reserve0 as f64, pool.reserve1 as f64)
+                                    } else {
+                                        (pool.reserve1 as f64, pool.reserve0 as f64)
+                                    };
+                                    if tok_r > 0.0 {
+                                        let base_per_token = base_r / tok_r;
+                                        if from_is_qug || to_is_qug {
+                                            base_per_token * qug_usd
+                                        } else if from_is_qugusd {
+                                            base_per_token // Already USD
+                                        } else {
+                                            base_per_token * qug_usd // Assume QUG base
+                                        }
+                                    } else { 0.0 }
+                                } else {
+                                    // Fallback: raw ratio (better than nothing)
+                                    swap.new_reserve0 as f64 / swap.new_reserve1 as f64
+                                };
+                                drop(pools);
+
+                                let inverse_price = if from_is_qug {
+                                    qug_usd
+                                } else if from_is_qugusd {
+                                    1.0
+                                } else if price > 0.0 {
+                                    // Estimate from_token USD price
+                                    let fr_pools = app_state_gossip.liquidity_pools.read().await;
+                                    let mut fp = qug_usd; // fallback
+                                    for p in fr_pools.values() {
+                                        let t0 = p.token0.to_uppercase();
+                                        let t1 = p.token1.to_uppercase();
+                                        if t0 == from_upper || t1 == from_upper || p.token0.eq_ignore_ascii_case(&swap.from_token) || p.token1.eq_ignore_ascii_case(&swap.from_token) {
+                                            let is_t0 = t0 == from_upper || p.token0.eq_ignore_ascii_case(&swap.from_token);
+                                            let (tok_r, base_r) = if is_t0 { (p.reserve0 as f64, p.reserve1 as f64) } else { (p.reserve1 as f64, p.reserve0 as f64) };
+                                            if tok_r > 0.0 { fp = (base_r / tok_r) * qug_usd; }
+                                            break;
+                                        }
+                                    }
+                                    fp
+                                } else { 1.0 };
 
                                 // Update volume tracker
                                 let volume_display = swap.amount_in as f64 / QUG_DISPLAY_DIVISOR;
@@ -5682,10 +5992,22 @@ async fn main() -> anyhow::Result<()> {
                             let token0_decimals = if is_qug_or_qugusd(&announcement.token0) { 24 } else { 8 };
                             let token1_decimals = if is_qug_or_qugusd(&announcement.token1) { 24 } else { 8 };
 
+                            // v4.0.4: Canonicalize P2P pool token names to match local format
+                            // Local pools use "QUG", "QUGUSD", or "qnk{hex}" for custom tokens.
+                            // P2P pools send raw [u8; 32] addresses. Convert to canonical format.
+                            let canonicalize_pool_token = |addr: &[u8; 32]| -> String {
+                                if *addr == [0u8; 32] {
+                                    "QUG".to_string()
+                                } else if *addr == q_types::QUGUSD_TOKEN_ADDRESS {
+                                    "QUGUSD".to_string()
+                                } else {
+                                    format!("qnk{}", hex::encode(addr))
+                                }
+                            };
                             let pool = q_api_server::LiquidityPool {
                                 pool_id: pool_id.clone(),
-                                token0: hex::encode(&announcement.token0),
-                                token1: hex::encode(&announcement.token1),
+                                token0: canonicalize_pool_token(&announcement.token0),
+                                token1: canonicalize_pool_token(&announcement.token1),
                                 reserve0: announcement.reserve0,
                                 reserve1: announcement.reserve1,
                                 provider: announcement.creator,
@@ -10221,6 +10543,7 @@ async fn main() -> anyhow::Result<()> {
                             // Hybrid approach: AsyncStorageEngine runs ALONGSIDE existing RwLock path
                             // This allows performance comparison and easy rollback if needed
                             // ========================================
+                            #[cfg(not(target_os = "windows"))]
                             if let Some(ref async_storage) = app_state_mining.async_storage {
                                 // 🔧 v1.0.21-beta: CRITICAL DEDUPLICATION FIX
                                 // Problem: All 8 producers write the SAME block (8x write amplification!)
@@ -10520,14 +10843,36 @@ async fn main() -> anyhow::Result<()> {
                                                             .unwrap_or(0.0)
                                                     };
 
-                                                    // Get current price from pool reserves (price = reserve0/reserve1)
+                                                    // v4.1.1: Get current USD price from pool reserves
+                                                    // Previously used raw reserve0/reserve1 ratio (NOT USD!)
+                                                    // Now properly converts to USD using QUG price
                                                     let price = {
                                                         let pools = app_state_mining.liquidity_pools.read().await;
                                                         if let Some(pool) = pools.get(&pool_id_hex) {
-                                                            if pool.reserve1 > 0 {
-                                                                pool.reserve0 as f64 / pool.reserve1 as f64
-                                                            } else { 1.0 }
-                                                        } else { 1.0 }
+                                                            // Determine which side is to_token and which is the base
+                                                            let t0_upper = pool.token0.to_uppercase();
+                                                            let t1_upper = pool.token1.to_uppercase();
+                                                            let to_upper = to_token.to_uppercase();
+
+                                                            let (token_reserve, base_reserve, base_is_qug) = if t0_upper == to_upper || pool.token0.eq_ignore_ascii_case(&to_token) {
+                                                                // token0 is to_token, token1 is base
+                                                                (pool.reserve0 as f64, pool.reserve1 as f64, t1_upper == "QUG" || t1_upper == "NATIVE-QUG")
+                                                            } else {
+                                                                // token1 is to_token, token0 is base
+                                                                (pool.reserve1 as f64, pool.reserve0 as f64, t0_upper == "QUG" || t0_upper == "NATIVE-QUG")
+                                                            };
+
+                                                            if token_reserve > 0.0 {
+                                                                let base_per_token = base_reserve / token_reserve;
+                                                                if base_is_qug {
+                                                                    // Convert QUG ratio to USD
+                                                                    let qug_usd = app_state_mining.collateral_vault.read().await.get_qug_price();
+                                                                    base_per_token * qug_usd
+                                                                } else {
+                                                                    base_per_token // QUGUSD base = already USD
+                                                                }
+                                                            } else { 0.0 }
+                                                        } else { 0.0 }
                                                     };
 
                                                     // 🔧 v2.9.22-beta: Calculate change_1h, change_24h, change_7d from price_snapshots
@@ -10591,8 +10936,43 @@ async fn main() -> anyhow::Result<()> {
                                                                to_token, price, change_1h, change_24h, change_7d, volume_24h);
                                                     }
 
-                                                    // 🔧 v2.4.8: Also emit TokenPriceUpdate for from_token (price changed after swap)
-                                                    let from_price = if price > 0.0 { 1.0 / price } else { 1.0 };
+                                                    // v4.1.1: Compute from_token USD price from its pool reserves
+                                                    // Previously used 1/to_token_price which is meaningless
+                                                    let from_price = {
+                                                        let pools = app_state_mining.liquidity_pools.read().await;
+                                                        let mut fp = 0.0f64;
+                                                        let from_upper = from_token.to_uppercase();
+                                                        if from_upper == "QUG" || from_upper == "NATIVE-QUG" {
+                                                            fp = app_state_mining.collateral_vault.read().await.get_qug_price();
+                                                        } else if from_upper == "QUGUSD" {
+                                                            fp = 1.0;
+                                                        } else {
+                                                            // Custom token: find its pool and compute
+                                                            for p in pools.values() {
+                                                                let t0 = p.token0.to_uppercase();
+                                                                let t1 = p.token1.to_uppercase();
+                                                                if t0 == from_upper || p.token0.eq_ignore_ascii_case(&from_token) ||
+                                                                   t1 == from_upper || p.token1.eq_ignore_ascii_case(&from_token) {
+                                                                    let is_t0 = t0 == from_upper || p.token0.eq_ignore_ascii_case(&from_token);
+                                                                    let (tok_r, base_r) = if is_t0 {
+                                                                        (p.reserve0 as f64, p.reserve1 as f64)
+                                                                    } else {
+                                                                        (p.reserve1 as f64, p.reserve0 as f64)
+                                                                    };
+                                                                    if tok_r > 0.0 {
+                                                                        let base_is_qug = if is_t0 { t1 == "QUG" || t1 == "NATIVE-QUG" } else { t0 == "QUG" || t0 == "NATIVE-QUG" };
+                                                                        let ratio = base_r / tok_r;
+                                                                        fp = if base_is_qug {
+                                                                            let qug_usd = app_state_mining.collateral_vault.read().await.get_qug_price();
+                                                                            ratio * qug_usd
+                                                                        } else { ratio };
+                                                                    }
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        fp
+                                                    };
                                                     let from_volume_24h = {
                                                         let tracker = app_state_mining.volume_tracker.read().await;
                                                         tracker.get(&from_token)
@@ -10963,6 +11343,7 @@ async fn main() -> anyhow::Result<()> {
                                     let processing_start = std::time::Instant::now();
 
                                     // Use shadow coordinator if available for resonance metrics
+                                    #[cfg(feature = "resonance")]
                                     let commit_decisions = if let Some(ref shadow_coord) = app_state_mining.shadow_coordinator {
                                         // Extract transactions for resonance processing
                                         let narwhal_txs: Vec<q_resonance::NarwhalTransaction> = new_block.transactions.iter().map(|tx| {
@@ -10994,10 +11375,13 @@ async fn main() -> anyhow::Result<()> {
                                         // No shadow coordinator, use primary consensus directly
                                         consensus.process_certificate(certificate).await.unwrap_or_default()
                                     };
+                                    #[cfg(not(feature = "resonance"))]
+                                    let commit_decisions = consensus.process_certificate(certificate).await.unwrap_or_default();
 
                                     let processing_time_ms = processing_start.elapsed().as_secs_f64() * 1000.0;
 
                                     // Update shadow mode metrics for block-based tracking
+                                    #[cfg(feature = "resonance")]
                                     if let Some(ref shadow_coord) = app_state_mining.shadow_coordinator {
                                         let coord = shadow_coord.lock().await;
                                         coord.process_block_round(
@@ -11006,6 +11390,8 @@ async fn main() -> anyhow::Result<()> {
                                             processing_time_ms,
                                         ).await;
                                     }
+                                    #[cfg(not(feature = "resonance"))]
+                                    let _ = processing_time_ms;
 
                                     if !commit_decisions.is_empty() {
                                         for decision in commit_decisions {
@@ -12857,6 +13243,8 @@ async fn main() -> anyhow::Result<()> {
                             // 🚀 v1.0.4-beta: PHASE 2 DAG-AWARE SYNC - 20-40x Faster, Deadlock-Free
                             // Replaces old batch sync with parallel DAG layer fetching
                             // Architecture: Short-lived locks only, no blocking operations while holding mutex
+                            // (Windows: DagSyncManager not available - RocksDB-dependent)
+                            #[cfg(not(target_os = "windows"))]
                             if blocks_behind > 100 && app_state_sync.enable_dag_sync {
                                 info!("═══════════════════════════════════════════════════════");
                                 info!("🚀 [PHASE 2 DAG SYNC] Activating parallel sync engine");
@@ -13569,6 +13957,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // Only prune if we have sufficient blockchain data
                 if current_height > 100_000 {
+                    #[cfg(not(target_os = "windows"))]
+                    {
                     info!("✂️  Running adaptive pruning at height {}", current_height);
 
                     // Clone storage engine reference for blocking task
@@ -13602,6 +13992,7 @@ async fn main() -> anyhow::Result<()> {
                             warn!("⚠️  Pruning task panicked: {}", e);
                         }
                     }
+                    } // end #[cfg(not(target_os = "windows"))] pruning block
                 } else {
                     debug!(
                         "⏳ Skipping pruning (current height: {} < 100K minimum)",
@@ -14856,22 +15247,30 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/stablecoin/liquidate",
             post(stablecoin_api::liquidate_position),
-        )
-        // ✅ v3.0 - Quantum Neural Oracle (QNO) Prediction Staking API
-        // v1.4.2-beta: Added RocksDB persistence, unstake, reward accrual, P2P sync
-        .route("/api/v1/qno/domains", get(qno_api::get_prediction_domains))
-        .route("/api/v1/qno/stats", get(qno_api::get_staking_stats))
-        .route("/api/v1/qno/stakes", get(qno_api::get_staking_positions))
-        .route("/api/v1/qno/stake", post(qno_api::stake_prediction))
-        .route("/api/v1/qno/unstake", post(qno_api::unstake_prediction))  // v1.4.2: Early withdrawal with penalty
-        .route("/api/v1/qno/claim", post(qno_api::claim_reward))
-        .route("/api/v1/qno/domain/:domain_id", get(qno_api::get_domain_details))
-        .route("/api/v1/qno/leaderboard", get(qno_api::get_leaderboard))
-        // v1.4.3-beta: QNO Prediction Resolution System
-        .route("/api/v1/qno/oracle/outcome", post(qno_api::submit_oracle_outcome))
-        .route("/api/v1/qno/slashing/history", get(qno_api::get_slashing_history))
-        .route("/api/v1/qno/prediction/:stake_id", get(qno_api::get_prediction_status))
-        .route("/api/v1/qno/resolution/config", get(qno_api::get_resolution_config))
+        );
+
+    // ✅ v3.0 - Quantum Neural Oracle (QNO) Prediction Staking API
+    // v1.4.2-beta: Added RocksDB persistence, unstake, reward accrual, P2P sync
+    // (Gated: q_storage::qno_storage not available on Windows)
+    #[cfg(not(target_os = "windows"))]
+    {
+        app = app
+            .route("/api/v1/qno/domains", get(qno_api::get_prediction_domains))
+            .route("/api/v1/qno/stats", get(qno_api::get_staking_stats))
+            .route("/api/v1/qno/stakes", get(qno_api::get_staking_positions))
+            .route("/api/v1/qno/stake", post(qno_api::stake_prediction))
+            .route("/api/v1/qno/unstake", post(qno_api::unstake_prediction))  // v1.4.2: Early withdrawal with penalty
+            .route("/api/v1/qno/claim", post(qno_api::claim_reward))
+            .route("/api/v1/qno/domain/:domain_id", get(qno_api::get_domain_details))
+            .route("/api/v1/qno/leaderboard", get(qno_api::get_leaderboard))
+            // v1.4.3-beta: QNO Prediction Resolution System
+            .route("/api/v1/qno/oracle/outcome", post(qno_api::submit_oracle_outcome))
+            .route("/api/v1/qno/slashing/history", get(qno_api::get_slashing_history))
+            .route("/api/v1/qno/prediction/:stake_id", get(qno_api::get_prediction_status))
+            .route("/api/v1/qno/resolution/config", get(qno_api::get_resolution_config));
+    }
+
+    app = app
         // Address Book API - ZK-STARK/SNARK proof generation and P2P sync
         .route("/api/v1/addressbook", get(handlers::get_address_book))
         .route("/api/v1/addressbook", post(handlers::save_address))
@@ -15290,7 +15689,7 @@ async fn main() -> anyhow::Result<()> {
         {
             error!("TUI mode requested but not compiled with --features tui");
             error!("Please rebuild with: cargo build --features tui");
-            return Err("TUI feature not enabled".into());
+            return Err(anyhow::anyhow!("TUI feature not enabled"));
         }
     } else {
         // ========================================================================
@@ -15347,6 +15746,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::Duration::from_millis(500),
                 async {
                     // Quick metrics dump (non-blocking attempt)
+                    #[cfg(not(target_os = "windows"))]
                     if let Some(ref metrics) = app_state.fast_sync_metrics {
                         if let Ok(m) = tokio::time::timeout(
                             tokio::time::Duration::from_millis(50),
@@ -15364,6 +15764,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let async_storage_shutdown = async {
+        #[cfg(not(target_os = "windows"))]
         if let Some(ref async_storage) = app_state.async_storage {
             // 🚀 v1.3.4: Parallel flush + shutdown with 500ms total budget
             let flush_result = tokio::time::timeout(

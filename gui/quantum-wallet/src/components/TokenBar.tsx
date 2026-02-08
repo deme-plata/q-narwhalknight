@@ -192,6 +192,18 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
         const response = await qnkAPI.getSupportedTokens();
         let enrichedTokens = nativeTokens;
 
+        // v4.0.12: Fetch actual Nitro boost data from backend
+        let nitroBoostMap: Record<string, number> = {};
+        try {
+          const nitroResponse = await qnkAPI.getNitroBoosts();
+          if (nitroResponse.success && nitroResponse.data) {
+            nitroBoostMap = nitroResponse.data;
+            console.log('🚀 TokenBar: Loaded Nitro boosts:', Object.keys(nitroBoostMap).length, 'tokens boosted');
+          }
+        } catch (error) {
+          console.log('ℹ️ TokenBar: No Nitro boost data available');
+        }
+
         // v2.8.1-beta: Minimum requirements for TokenBar display
         // This prevents brand new tokens from appearing immediately in the top bar
         const MIN_MARKET_CAP = 10000;      // $10,000 minimum market cap
@@ -206,7 +218,8 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
               let customPrice = 0;
               let customChange = 0.0;
               let customVolume = 0.0;
-              let hasNitroBoost = false;
+              // v4.0.12: Check actual Nitro boost data from backend instead of hardcoded thresholds
+              let hasNitroBoost = !!(nitroBoostMap[apiToken.address] && nitroBoostMap[apiToken.address] > 0);
 
               try {
                 const oracleResponse = await qnkAPI.getOraclePrice(apiToken.address);
@@ -214,8 +227,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
                   customPrice = oracleResponse.data.price || 0;
                   customChange = oracleResponse.data.change_24h || 0;
                   customVolume = oracleResponse.data.volume_24h || 0;
-                  // Nitro Boost enabled if token has volume > 100k and price > 0.1
-                  hasNitroBoost = customVolume > 100000 && customPrice > 0.1;
+                  // v4.0.12: hasNitroBoost is now set from actual backend data above
                 }
               } catch (error) {
                 console.log(`ℹ️ No oracle price for ${apiToken.symbol}`);

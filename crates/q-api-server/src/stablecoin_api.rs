@@ -279,20 +279,57 @@ pub async fn get_multi_token_balance(
             } else {
                 u128::MAX // Very high decimals - don't validate
             };
-            let final_balance = if *balance > max_sane_balance {
+            // v4.3.0: Auto-repair balances inflated by swap bug.
+            // Before v4.3.0, swap handler stored final_amount_out in 24-decimal format,
+            // but minted balances use 2*decimals format. For 8-decimal tokens, swap amounts
+            // are 10^8x too large. Detect and correct: if display value > 100 billion tokens,
+            // the balance is almost certainly from the swap bug and should be divided by
+            // 10^(24 - 2*decimals) to convert from 24-dec to 2*decimals format.
+            let target_exp = 2u32 * decimals as u32;
+            let final_balance = if decimals < 12 && target_exp < 24 {
+                let correction_shift = 24 - target_exp;
+                let correction_factor = 10u128.pow(correction_shift);
+                let display_at_correct_format = *balance as f64 / 10f64.powi(target_exp as i32);
+                // If display value > 100 billion, balance is in 24-decimal format (swap bug)
+                if display_at_correct_format > 1e11 {
+                    let corrected = *balance / correction_factor;
+                    let corrected_display = corrected as f64 / 10f64.powi(target_exp as i32);
+                    warn!(
+                        "🔧 [v4.3.0] Auto-repairing swap-inflated balance for {} {}: {} → {} (display: {:.2} → {:.2}, shift={})",
+                        &address_hex[..8], symbol, balance, corrected, display_at_correct_format, corrected_display, correction_shift
+                    );
+                    // Persist the corrected balance to both in-memory and RocksDB
+                    let wa = *wallet_addr;
+                    let ta = *token_addr;
+                    {
+                        let mut token_balances = state.token_balances.write().await;
+                        token_balances.insert((wa, ta), corrected);
+                    }
+                    let _ = state.storage_engine.save_token_balance(&wa, &ta, corrected).await;
+                    corrected
+                } else {
+                    *balance
+                }
+            } else if *balance > max_sane_balance {
                 warn!(
                     "🚨 [v3.9.5] Suspicious balance for {} {}: {} base_units (exceeds max for {} decimals)",
                     &address_hex[..8], symbol, balance, decimals
                 );
-                // v3.9.5: Do NOT reset to zero - just log the warning.
-                // Previous version permanently destroyed legitimate balances.
-                // Let the user see the balance and investigate.
                 *balance
             } else {
                 *balance
             };
 
-            let balance_display = final_balance as f64 / 10f64.powi(decimals as i32);
+            // v4.1.0: Token balances are stored in 10^(2*decimals) format due to double-conversion
+            // (frontend sends base_units = display*10^decimals, backend multiplies by 10^decimals again).
+            // For 8-decimal tokens: stored as display * 10^16, so divide by 10^(2*decimals).
+            // For 24-decimal tokens (QUG/QUGUSD): divide by 10^24 (handled separately above).
+            let balance_divisor = if decimals < 24 {
+                10f64.powi(target_exp as i32)
+            } else {
+                1e24
+            };
+            let balance_display = final_balance as f64 / balance_divisor;
 
             tokens.insert(
                 symbol.clone(),
@@ -303,7 +340,7 @@ pub async fn get_multi_token_balance(
                     name: Some(contract_info.metadata.name.clone()),
                     // v2.4.2: Include qnk prefix so oracle price lookup matches pool addresses
                     contract_address: Some(format!("qnk{}", hex::encode(token_addr))),
-                    decimals: Some(decimals),
+                    decimals: Some(decimals), // v4.1.0: Use actual token decimals
                 },
             );
 
@@ -319,6 +356,57 @@ pub async fn get_multi_token_balance(
                     &address_hex[..8], symbol, balance_display, balance
                 );
             }
+        } else if token_addr[0] == 0x1F {
+            // v4.3.0: Index fund tokens (QNK10, DEFI5) use deterministic blake3 addresses
+            // marked with first byte 0x1F. They won't match deployed_contracts.
+            // Identify which fund by checking known addresses.
+            let (fund_symbol, fund_name) = {
+                let mut known_fund: Option<(&str, &str)> = None;
+                for (sym, name) in &[("QNK10", "QNK Top 10 Index"), ("DEFI5", "DeFi Top 5 Index")] {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"QNK-INDEX-FUND:");
+                    hasher.update(sym.as_bytes());
+                    let hash = hasher.finalize();
+                    let mut expected_addr = [0u8; 32];
+                    expected_addr.copy_from_slice(hash.as_bytes());
+                    expected_addr[0] = 0x1F;
+                    if &expected_addr == token_addr {
+                        known_fund = Some((sym, name));
+                        break;
+                    }
+                }
+                known_fund.unwrap_or(("INDEX", "Index Fund"))
+            };
+
+            // Index funds use 24 decimals (same as QUG/QUGUSD)
+            let balance_display = *balance as f64 / 1e24;
+
+            // v4.5.0: Calculate actual USD value based on NAV
+            // QNK10 = 3x QUG price per share, DEFI5 = 2x QUG price per share
+            let nav_multiplier = if fund_symbol == "QNK10" { 3.0 } else { 2.0 };
+            let qug_price = {
+                let vault = state.collateral_vault.read().await;
+                vault.qug_price_usd
+            };
+            let nav_per_share = qug_price * nav_multiplier;
+            let usd_value = balance_display * nav_per_share;
+
+            info!(
+                "🏦 [v4.5.0] Index fund for {}: {} = {:.4} shares @ ${:.2}/share = ${:.2} (QUG@${:.2}, {}x)",
+                &address_hex[..8], fund_symbol, balance_display, nav_per_share, usd_value, qug_price, nav_multiplier
+            );
+
+            tokens.insert(
+                fund_symbol.to_string(),
+                TokenBalance {
+                    balance: format!("{:.8}", balance_display),
+                    balance_base_units: *balance,
+                    usd_value,
+                    name: Some(fund_name.to_string()),
+                    contract_address: Some(format!("qnk{}", hex::encode(token_addr))),
+                    decimals: Some(24),
+                },
+            );
         }
     }
 

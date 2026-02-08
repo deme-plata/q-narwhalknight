@@ -132,6 +132,7 @@ impl StakingTier {
 }
 
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
+#[cfg(not(target_os = "windows"))]
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_consensus;
 pub mod batch_sync;
@@ -139,18 +140,23 @@ pub mod sharded_balance;  // 🚀 v3.4.6-beta: 16-shard balance cache for 2-3x l
 pub mod checkpoint; // ✅ v1.0.79-beta: Height checkpoint files for data loss detection
 pub mod block_writer; // ✅ v0.9.93-beta: Single-writer queue to prevent database corruption
 pub mod chain_reorganization; // v0.9.37-beta: Cross-fork blockchain synchronization
+#[cfg(not(target_os = "windows"))]
 pub mod db_util; // ✅ v1.0.2-beta: Spawn_blocking helpers for all RocksDB operations
 pub mod emission_controller; // ✅ v0.9.99-beta: Adaptive block rewards for throughput-independent emission
 pub mod fork_detector; // ✅ v0.9.67-beta: Comprehensive fork detection & automatic reorg
 pub mod height_state; // ✅ v1.0.2-beta: Height cache to eliminate binary search storms
+#[cfg(not(target_os = "windows"))]
 pub mod integrity; // ✅ v0.9.76-beta: Database corruption detection & auto-repair
 pub mod kv;
 pub mod manifest;
 pub mod metrics;
 pub mod ordered_block_buffer; // ✅ v1.0.2-beta: Height-ordered reorder buffer for consensus safety
+#[cfg(not(target_os = "windows"))]
 pub mod pointer_integrity; // ✅ v1.0.14-beta: Database pointer corruption detection & auto-repair
+#[cfg(not(target_os = "windows"))]
 pub mod preflight_check;  // ✅ v3.3.7-beta: Mainnet-safe pre-flight verification before serving requests
 pub mod pruning;
+#[cfg(not(target_os = "windows"))]
 pub mod safe_batched_writer; // ✅ v1.0.2-beta: WAL-based batched writes for 150-250 BPS (Phase 1A)
 pub mod snapshot;
 pub mod sync;
@@ -178,6 +184,7 @@ pub mod sync_state_manager;  // Checkpoint/resume for crash recovery
 pub mod dag_layer_detector;  // Topological DAG layer organization
 pub mod parallel_batch_fetcher;  // Concurrent block fetching with concurrency limits
 pub mod causal_validator;  // DAG parent dependency enforcement
+#[cfg(not(target_os = "windows"))]
 pub mod dag_sync_manager;  // Orchestration layer (wires all Phase 2 components)
 
 // ========== v1.0.5-beta: Request Pipelining (libp2p-rust Phase 2) ==========
@@ -191,7 +198,9 @@ pub mod crypto_enhanced_sync;  // Incremental verification, adaptive timeout, ch
 
 // ========== v1.0.60-beta: Comprehensive State Sync ==========
 pub mod state_processor;  // Transaction to StateChange processing for full decentralization
+#[cfg(not(target_os = "windows"))]
 pub mod state_applicator;  // Apply StateChanges to RocksDB column families
+#[cfg(not(target_os = "windows"))]
 pub mod block_state_processor;  // Block-level state processing pipeline
 pub mod sparse_merkle_trie;  // Cryptographic state root verification with O(log n) proofs
 
@@ -209,6 +218,7 @@ pub mod orphan_rate_limiter;  // Rate limits orphan blocks per peer to prevent D
 pub mod ml_batch_optimizer;  // Online linear regression for optimal batch size prediction
 
 // ========== v1.4.2-beta: QNO (Quantum Neural Oracle) Prediction Staking ==========
+#[cfg(not(target_os = "windows"))]
 pub mod qno_storage;  // Persistent storage for prediction staking with P2P sync
 
 // ========== v1.5.0-beta: CHIRON Parallel State Applicator ==========
@@ -218,6 +228,7 @@ pub mod parallel_state_applicator;  // CHIRON-style parallel block processing (~
 pub mod nemo_executor;  // NEMO-style executor for high contention (+42% over Block-STM)
 
 // ========== v1.5.0-beta: Reddio-Style Async Storage Pipeline ==========
+#[cfg(not(target_os = "windows"))]
 pub mod async_pipeline;  // Async storage pipeline (70% overhead reduction)
 
 // ========== v1.8.0-HOHMANN: Project APOLLO Phase 3 - Staged Sync ==========
@@ -255,23 +266,27 @@ pub use aegis_sync::{
     SignedBlockPack, SyncAffirmationCertificate, PeerTrustRegistry, PeerTrustMetrics,
     compute_merkle_root, verify_timestamp,
 };
+#[cfg(not(target_os = "windows"))]
 pub use async_engine::AsyncStorageEngine;
 pub use balance_consensus::{
     BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, BalanceUpdate,
     ChangeReason, ConsensusStats, GENESIS_TIMESTAMP, DEV_FEE_PERCENT, FOUNDER_WALLET,
 };
 pub use block_writer::BlockWriter;
+#[cfg(not(target_os = "windows"))]
 pub use db_util::write_batch_sync;
 pub use height_state::HeightState;
 pub use chain_reorganization::{
     detect_fork, find_common_ancestor, reorganize_chain, ForkStatus, ReorgStats,
 };
 pub use ordered_block_buffer::OrderedBlockBuffer;
+#[cfg(not(target_os = "windows"))]
 pub use pointer_integrity::{
     check_and_repair_on_startup, PointerIntegrityChecker, IntegrityCheckResult,
     CorruptionSeverity, IntegrityThresholds,
 };
 pub use memory_limiter::{MemoryLimiter, MemoryLimiterConfig, MemoryPressure, MemoryStats};
+#[cfg(not(target_os = "windows"))]
 pub use safe_batched_writer::{SafeBatchedWriter, BatchConfig, BatchMetrics};
 pub use manifest::StorageManifest;
 pub use metrics::StorageMetrics;
@@ -307,6 +322,7 @@ pub use sync_state_manager::{SyncStateManager, SyncCheckpoint, SyncProgress};
 pub use dag_layer_detector::{DagLayerDetector, BlockHeader as DagBlockHeader};
 pub use parallel_batch_fetcher::{ParallelBatchFetcher, BatchFetchConfig, NetworkFetcher};
 pub use causal_validator::CausalValidator;
+#[cfg(not(target_os = "windows"))]
 pub use dag_sync_manager::{DagSyncManager, DagSyncConfig, SyncStats};
 
 // ========== v1.0.60-beta: Comprehensive State Sync Exports ==========
@@ -315,7 +331,9 @@ pub use state_processor::{
     TokenMetadata, PoolState, VaultState,
     BASE_GAS, GAS_PER_DATA_BYTE, GAS_PER_STORAGE_WRITE, GAS_PER_STORAGE_READ, MAX_GAS_PER_TX,
 };
+#[cfg(not(target_os = "windows"))]
 pub use state_applicator::StateApplicator;
+#[cfg(not(target_os = "windows"))]
 pub use block_state_processor::{BlockStateProcessor, BlockProcessingResult, TxProcessingResult};
 pub use sparse_merkle_trie::{SparseMerkleTrie, MerkleProof, TrieNode, TrieStats, CF_STATE_TRIE, EMPTY_HASH};
 
@@ -1869,8 +1887,15 @@ impl QStorage {
     /// 🚀 v1.0.60-beta: Get raw RocksDB handle for state sync processing
     /// Used by BlockStateProcessor for direct state access
     /// Returns None if the underlying storage doesn't expose RocksDB directly
+    #[cfg(not(target_os = "windows"))]
     pub fn get_rocks_db_handle(&self) -> Option<Arc<rocksdb::DB>> {
         Some(self.hot_db_concrete.get_raw_db())
+    }
+
+    /// Windows stub: RocksDB not available on Windows
+    #[cfg(target_os = "windows")]
+    pub fn get_rocks_db_handle(&self) -> Option<()> {
+        None
     }
 
     /// Get highest contiguous block height (no gaps from genesis)
@@ -3043,6 +3068,7 @@ impl QStorage {
 
         // v1.4.8-beta: Check CF_TOKEN_BALANCES (state sync storage) for synced transfers
         // State sync writes to this CF when processing TokenTransfer transactions from other nodes
+        #[cfg(not(target_os = "windows"))]
         if let Some(db) = self.get_rocks_db_handle() {
             if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
                 // Build key: account (32 bytes) + token (32 bytes)
@@ -3147,6 +3173,7 @@ impl QStorage {
 
         // v1.4.8-beta: Also load from CF_TOKEN_BALANCES (state sync storage)
         // This captures balances from synced TokenTransfer transactions
+        #[cfg(not(target_os = "windows"))]
         if let Some(db) = self.get_rocks_db_handle() {
             if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
                 let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
@@ -4765,6 +4792,7 @@ impl QStorage {
 
     /// Execute adaptive pruning on the hot database
     /// This is a wrapper method that allows calling pruning without dealing with thread safety issues
+    #[cfg(not(target_os = "windows"))]
     pub async fn prune_old_blocks(&self, current_height: u64) -> Result<crate::pruning::PruningStats> {
         self.hot_db_concrete.prune_old_blocks(current_height).await
     }

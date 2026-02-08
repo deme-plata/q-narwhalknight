@@ -44,6 +44,7 @@
 
 use anyhow::{Context, Result};
 use q_types::{QBlock, StateChange, Transaction, TransactionType};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::DB;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};

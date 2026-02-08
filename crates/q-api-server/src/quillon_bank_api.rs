@@ -326,11 +326,12 @@ pub async fn mint_qnkusd(
     // We need to convert back to human-readable for collateral ratio calculation
     let amount_usd = (request.amount as f64) / 1e24; // Convert base units to USD
 
-    // Calculate actual collateral ratio before the mint call
+    // v4.0.4: Use live vault QUG price instead of hardcoded $42.50
+    let qug_price = state.collateral_vault.read().await.qug_price_usd;
     let collateral_value_usd = match &collateral_type {
-        AssetType::ORB => request.collateral_amount * 42.50, // QUG price ~$42.50
-        AssetType::BTC => request.collateral_amount * 70_000.0,
-        AssetType::ETH => request.collateral_amount * 3_500.0,
+        AssetType::ORB => request.collateral_amount * qug_price,
+        AssetType::BTC => request.collateral_amount * 70_000.0, // TODO: get live BTC price
+        AssetType::ETH => request.collateral_amount * 3_500.0,  // TODO: get live ETH price
         AssetType::USDC => request.collateral_amount,
         _ => 0.0,
     };
@@ -971,11 +972,12 @@ pub async fn apply_loan(
     }
 
     // 3. Calculate interest rate based on collateral ratio and term
-    const QUG_PRICE: f64 = 42.50; // $42.50 per QUG
+    // v4.0.4: Use live vault QUG price instead of hardcoded $42.50
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
     const MINIMUM_COLLATERAL_RATIO: f64 = 1.5; // 150%
 
     let loan_amount_f64 = request.loan_amount as f64 / 1e8;
-    let collateral_ratio = (request.collateral_amount * QUG_PRICE) / loan_amount_f64;
+    let collateral_ratio = (request.collateral_amount * qug_price) / loan_amount_f64;
 
     if collateral_ratio < MINIMUM_COLLATERAL_RATIO {
         error!(

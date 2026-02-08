@@ -311,6 +311,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Result<String, Statu
     metrics.push_str(&format!("qnk_node_height {}\n", current_height));
 
     // ✅ v1.0.7-beta: AsyncStorageEngine metrics
+    #[cfg(not(target_os = "windows"))]
     if let Some(async_storage) = &state.async_storage {
         let queue_depth = async_storage.queue_depth();
         let is_congested = async_storage.is_congested();
@@ -899,6 +900,7 @@ pub async fn get_resonance_metrics(
     debug!("Getting resonance hybrid mode metrics");
 
     // Check if shadow coordinator is initialized
+    #[cfg(feature = "resonance")]
     if let Some(shadow_coord) = &state.shadow_coordinator {
         let coord = shadow_coord.lock().await;
         let metrics = coord.get_metrics().await;
@@ -2586,6 +2588,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
 
                 // SHADOW MODE: Feed batch to Quillon Resonance for analysis
                 // This collects K-parameter metrics without affecting consensus
+                #[cfg(feature = "resonance")]
                 if let Some(resonance) = &state.resonance_coordinator {
                     if let Some(k_analyzer) = &state.k_parameter_analyzer {
                         // Calculate system metrics for K-parameter
@@ -6133,21 +6136,15 @@ pub async fn get_oracle_price(
 
     let (price, change_1h, change_24h, change_7d, volume_24h, confidence) = match feed_id.as_str() {
         "QUG/USD" | "QUG-USD" | "QUG" => {
-            // Native QUG token - get from oracle or use network valuation
-            let qug_price = match quillon_bank
-                .oracle_integration
-                .get_price(&q_quillon_bank::AssetType::ORB)
-                .await
-            {
-                Ok(oracle_price) => {
-                    let price_f64 = oracle_price.to_string().parse::<f64>().unwrap_or(42.50);
-                    tracing::debug!("📊 Fetched QUG price from oracle: ${}", price_f64);
-                    price_f64
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ Oracle fetch failed for QUG, using default: {}", e);
-                    42.50 // Fallback
-                }
+            // v4.0.8: Use CollateralVault as single source of truth for QUG price
+            // Vault is updated after EVERY swap (AMM + oracle path) and persisted to RocksDB.
+            // Pool reserves are synced to vault after updates (v4.0.8), so they match.
+            // Previously used pool reserves which could lag behind vault updates.
+            let qug_price = {
+                let vault = state.collateral_vault.read().await;
+                let vp = vault.qug_price_usd;
+                tracing::debug!("📊 QUG price from vault (authoritative): ${:.4}", vp);
+                vp
             };
 
             // v3.7.1-beta: Get real price changes from persistent consensus-verified history
@@ -6250,13 +6247,43 @@ pub async fn get_oracle_price(
                 let mut total_price = 0.0;
                 let mut total_weight = 0.0;
 
-                // v2.4.0: Get QUG price in USD for conversion
-                // Fetch from Quillon Bank oracle (same as QUG/USD endpoint)
+                // v4.0.3: Get QUG price from pool reserves first, oracle second
+                // Previously used oracle that always returned $42.50, causing price mismatch
+                // between SSE updates (pool-based) and oracle refreshes (hardcoded)
                 let qug_usd_price = {
-                    let quillon_bank_ref = state.quillon_bank.read().await;
-                    match quillon_bank_ref.oracle_integration.get_price(&q_quillon_bank::AssetType::ORB).await {
-                        Ok(oracle_price) => oracle_price.to_string().parse::<f64>().unwrap_or(42.50),
-                        Err(_) => 42.50 // Fallback
+                    // Primary: derive from QUG/QUGUSD pool (same method as swap handler)
+                    // v4.0.7: Match by symbol OR hex address (P2P pools use hex)
+                    let mut pool_qug_price: f64 = 0.0;
+                    for p in pools.values() {
+                        let t0 = p.token0.to_uppercase();
+                        let t1 = p.token1.to_uppercase();
+                        let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG"
+                            || t0 == hex::encode([0u8; 32]).to_uppercase();
+                        let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG"
+                            || t1 == hex::encode([0u8; 32]).to_uppercase();
+                        let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS).to_uppercase();
+                        let t0_is_qugusd = t0 == "QUGUSD" || t0 == qugusd_hex
+                            || t0 == format!("QNK{}", qugusd_hex);
+                        let t1_is_qugusd = t1 == "QUGUSD" || t1 == qugusd_hex
+                            || t1 == format!("QNK{}", qugusd_hex);
+                        if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                            let (qug_r, usd_r) = if t0_is_qug {
+                                (p.reserve0 as f64, p.reserve1 as f64)
+                            } else {
+                                (p.reserve1 as f64, p.reserve0 as f64)
+                            };
+                            if qug_r > 0.0 {
+                                pool_qug_price = usd_r / qug_r;
+                            }
+                            break;
+                        }
+                    }
+                    if pool_qug_price > 0.0 {
+                        pool_qug_price
+                    } else {
+                        // Fallback: Quillon Bank oracle or vault price
+                        let vault = state.collateral_vault.read().await;
+                        vault.qug_price_usd
                     }
                 };
 
@@ -6352,9 +6379,38 @@ pub async fn get_oracle_price(
 
                     // v2.4.7: Get real 24h volume with case-insensitive lookup
                     // v2.4.8: Try both resolved address and symbol for volume tracking
+                    // v4.0.1: CRITICAL FIX - Volume is tracked by SYMBOL (e.g. "CHAD") in swap handler,
+                    // but this endpoint receives contract ADDRESS. Must resolve symbol to find volume.
                     let volume_tracker = state.volume_tracker.read().await;
-                    let vol_24h = get_volume_24h(&volume_tracker, &resolved_feed_id)
+                    let mut vol_24h = get_volume_24h(&volume_tracker, &resolved_feed_id)
                         .max(get_volume_24h(&volume_tracker, &feed_id));
+
+                    // If volume still 0, look up by token symbol from deployed contracts
+                    if vol_24h == 0.0 {
+                        let hex_addr = if resolved_feed_id.starts_with("qnk") {
+                            &resolved_feed_id[3..]
+                        } else {
+                            &resolved_feed_id
+                        };
+                        if let Ok(addr_vec) = hex::decode(hex_addr) {
+                            if addr_vec.len() == 32 {
+                                let mut addr_arr = [0u8; 32];
+                                addr_arr.copy_from_slice(&addr_vec);
+                                let contract_addr = q_vm::contracts::ContractAddress(addr_arr);
+                                let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+                                if let Some(contract) = deployed.get(&contract_addr) {
+                                    if let Some(sym) = &contract.metadata.symbol {
+                                        let sym_vol = get_volume_24h(&volume_tracker, sym);
+                                        if sym_vol > 0.0 {
+                                            tracing::debug!("📊 [VOLUME] Resolved {} -> symbol '{}' vol=${:.2}", feed_id, sym, sym_vol);
+                                        }
+                                        vol_24h = vol_24h.max(sym_vol);
+                                    }
+                                }
+                                drop(deployed);
+                            }
+                        }
+                    }
                     drop(volume_tracker);
 
                     // Confidence based on liquidity depth
@@ -7781,6 +7837,95 @@ pub async fn submit_mining_solution(
     let mut miner_address = [0u8; 32];
     miner_address.copy_from_slice(&miner_address_bytes);
 
+    // ========================================
+    // 🔒 v4.1.3: SERVER-SIDE DIFFICULTY ENFORCEMENT + CHALLENGE FRESHNESS + NONCE DEDUP
+    // Don't trust client-submitted difficulty_target — use the server's current challenge
+    // ========================================
+    {
+        let cached_challenge = state.current_challenge.read().await;
+        if let Some(ref challenge) = *cached_challenge {
+            // 1. CHALLENGE FRESHNESS: Reject submissions against expired challenges
+            let now = chrono::Utc::now();
+            let challenge_age_secs = (now - challenge.issued_at).num_seconds();
+            if challenge_age_secs > 300 {
+                // Challenge older than 5 minutes — likely stale
+                warn!(
+                    "🚨 [MINING v4.1.3] Expired challenge from miner {} (age: {}s)",
+                    &request.miner_address[..16], challenge_age_secs
+                );
+                return Ok(Json(ApiResponse::error(
+                    "Challenge expired. Please request a new mining challenge.".to_string(),
+                )));
+            }
+
+            // 2. SERVER-SIDE DIFFICULTY: Override client difficulty with server's value
+            if let Ok(server_target_bytes) = hex::decode(&challenge.difficulty_target) {
+                if server_target_bytes.len() == 32 {
+                    difficulty_target.copy_from_slice(&server_target_bytes);
+                }
+            }
+
+            // 3. NONCE DEDUPLICATION: Reject duplicate (height, nonce) pairs
+            let challenge_height = challenge.block_height;
+            let dedup_key = (challenge_height, nonce);
+
+            if state.mining_nonce_dedup.contains_key(&dedup_key) {
+                warn!(
+                    "🚨 [MINING v4.1.3] Duplicate nonce from miner {} (height={}, nonce={})",
+                    &request.miner_address[..16], challenge_height, nonce
+                );
+                return Ok(Json(ApiResponse::error(
+                    "Duplicate nonce: this solution was already submitted.".to_string(),
+                )));
+            }
+
+            // Record this nonce (will be cleaned up when challenge height changes)
+            let timestamp = now.timestamp() as u64;
+            state.mining_nonce_dedup.insert(dedup_key, timestamp);
+
+            // Cleanup: Remove entries from old challenge heights (keep current ± 1)
+            if state.mining_nonce_dedup.len() > 10_000 {
+                state.mining_nonce_dedup.retain(|k, _| {
+                    k.0 >= challenge_height.saturating_sub(1)
+                });
+            }
+        }
+    }
+
+    // v4.1.2: Server-side hash recomputation — don't trust miner-submitted hash
+    // Recompute: blake3(challenge_hash || nonce) with 100 VDF iterations
+    if let Some(ref challenge_hex) = request.challenge_hash {
+        if let Ok(challenge_bytes) = hex::decode(challenge_hex) {
+            if challenge_bytes.len() == 32 {
+                let mut hash_input = [0u8; 40];
+                hash_input[..32].copy_from_slice(&challenge_bytes);
+                hash_input[32..].copy_from_slice(&nonce.to_le_bytes());
+
+                // Initial blake3 hash
+                let initial = blake3::hash(&hash_input);
+                let mut current = *initial.as_bytes();
+
+                // 100 VDF iterations (must match miner's compute_dag_knight_hash_optimized)
+                for _ in 0..100 {
+                    current = *blake3::hash(&current).as_bytes();
+                }
+
+                // Compare recomputed hash with submitted hash
+                if current != hash {
+                    warn!(
+                        "🚨 [MINING v4.1.2] Hash mismatch! Miner {} submitted fake hash. Submitted: {}, Recomputed: {}",
+                        &request.miner_address[..16],
+                        hex::encode(&hash[..8]),
+                        hex::encode(&current[..8])
+                    );
+                    return Ok(Json(ApiResponse::error(
+                        "Hash verification failed: submitted hash does not match recomputed hash".to_string(),
+                    )));
+                }
+            }
+        }
+    }
+
     // Verify the VDF proof meets difficulty
     if !verify_mining_difficulty(&hash, &difficulty_target) {
         return Ok(Json(ApiResponse::error(
@@ -8624,27 +8769,31 @@ mod tests {
 pub async fn k_parameter_metrics(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    if let Some(ref k_analyzer) = state.k_parameter_analyzer {
-        let k_history = k_analyzer.get_k_history();
-        let k_trend = k_analyzer.get_k_trend();
+    #[cfg(feature = "resonance")]
+    {
+        if let Some(ref k_analyzer) = state.k_parameter_analyzer {
+            let k_history = k_analyzer.get_k_history();
+            let k_trend = k_analyzer.get_k_trend();
 
-        let current_k = k_history.last().copied().unwrap_or(0.0);
+            let current_k = k_history.last().copied().unwrap_or(0.0);
 
-        let metrics = serde_json::json!({
-            "current_k": current_k,
-            "k_trend": k_trend,
-            "k_history_len": k_history.len(),
-            "recent_k_values": k_history.iter().rev().take(10).collect::<Vec<_>>(),
-            "formula": "K = 2π √(ΔH · Δs · ℏ) / τ",
-            "description": "Kristensen K-Parameter for quantum phase transition detection"
-        });
+            let metrics = serde_json::json!({
+                "current_k": current_k,
+                "k_trend": k_trend,
+                "k_history_len": k_history.len(),
+                "recent_k_values": k_history.iter().rev().take(10).collect::<Vec<_>>(),
+                "formula": "K = 2π √(ΔH · Δs · ℏ) / τ",
+                "description": "Kristensen K-Parameter for quantum phase transition detection"
+            });
 
-        Ok(Json(ApiResponse::success(metrics)))
-    } else {
-        Ok(Json(ApiResponse::error(
-            "K-Parameter analyzer not initialized".to_string(),
-        )))
+            return Ok(Json(ApiResponse::success(metrics)));
+        }
     }
+    #[cfg(not(feature = "resonance"))]
+    let _ = &state;
+    Ok(Json(ApiResponse::error(
+        "K-Parameter analyzer not initialized".to_string(),
+    )))
 }
 
 /// Resonance consensus status endpoint
@@ -8780,6 +8929,7 @@ pub async fn add_nitro_boost(
 
 /// Swap request structure
 /// v2.8.2: Flexible deserializer handles scientific notation & string numbers
+/// v4.5.0: Added optional slippage_tolerance for server-side recalculation
 #[derive(Debug, Deserialize)]
 pub struct SwapRequest {
     pub from_token: String,     // Token ID or "QUG" for native
@@ -8789,6 +8939,11 @@ pub struct SwapRequest {
     #[serde(deserialize_with = "deserialize_u128_from_any")]
     pub min_amount_out: u128,   // Minimum expected output (slippage protection)
     pub wallet_address: String, // User's wallet address
+    /// v4.5.0: Optional slippage tolerance (e.g., 0.5 = 0.5%, 1.0 = 1%).
+    /// When present, backend recalculates min from actual output instead of trusting
+    /// potentially stale frontend quote. Defaults to 0.5% if absent.
+    #[serde(default)]
+    pub slippage_tolerance: Option<f64>,
 }
 
 /// DEX Swap Event for gossipsub synchronization across nodes
@@ -8949,6 +9104,12 @@ pub async fn execute_swap(
         from_token_normalized == "QUGUSD" || from_token_normalized == "QUGUSD-STABLE";
     let to_is_qugusd = to_token_normalized == "QUGUSD" || to_token_normalized == "QUGUSD-STABLE";
 
+    // v4.0.9: Determine if tokens are index fund tokens (QNK10, DEFI5, etc.)
+    let from_upper = from_token_normalized.to_uppercase();
+    let to_upper = to_token_normalized.to_uppercase();
+    let from_is_index_fund = from_upper.starts_with("INDEX-FUND-") || from_upper == "QNK10" || from_upper == "DEFI5";
+    let to_is_index_fund = to_upper.starts_with("INDEX-FUND-") || to_upper == "QNK10" || to_upper == "DEFI5";
+
     // Resolve token addresses for non-native tokens (QUGUSD gets special address)
     let from_token_addr = if from_is_native {
         [0u8; 32]
@@ -9061,9 +9222,11 @@ pub async fn execute_swap(
                 }
             }
         } else if from_is_qugusd {
-            // Check QUGUSD balance from CollateralVault
-            let vault = state.collateral_vault.read().await;
-            let balance = vault.get_balance(&wallet_addr) as u128;
+            // v4.0.4: Check QUGUSD balance from token_balances (where swaps credit it)
+            // Previously checked CollateralVault which returned 0 for swap-credited QUGUSD
+            let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+            let qugusd_key = (wallet_addr, qugusd_addr);
+            let balance = token_balances.get(&qugusd_key).copied().unwrap_or(0);
             if balance < request.amount_in {
                 // v3.6.3-beta: Add tolerance for floating-point precision issues
                 let tolerance = request.amount_in / 1_000_000;
@@ -9094,8 +9257,25 @@ pub async fn execute_swap(
                 if balance + effective_tolerance >= amount_in_u128 {
                     debug!("🔍 [SWAP] Allowing token swap within tolerance");
                 } else {
-                    let required_tokens = request.amount_in as f64 / 1e24;
-                    let available_tokens = balance as f64 / 1e24;
+                    // v4.0.1: Use token's actual decimals for display, not always 1e24
+                    let token_decimals: u32 = if from_is_native || from_is_qugusd {
+                        24
+                    } else {
+                        let pools_ref = state.liquidity_pools.read().await;
+                        let mut dec = 24u32;
+                        for p in pools_ref.values() {
+                            if p.token0.to_uppercase() == request.from_token.to_uppercase() {
+                                dec = p.token0_decimals as u32; break;
+                            } else if p.token1.to_uppercase() == request.from_token.to_uppercase() {
+                                dec = p.token1_decimals as u32; break;
+                            }
+                        }
+                        drop(pools_ref);
+                        dec
+                    };
+                    let divisor = 10f64.powi(token_decimals as i32);
+                    let required_tokens = request.amount_in as f64 / divisor;
+                    let available_tokens = balance as f64 / divisor;
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient {} balance. Required: {:.6}, Available: {:.6}",
                         request.from_token, required_tokens, available_tokens
@@ -9239,6 +9419,59 @@ pub async fn execute_swap(
         );
 
         (true, calculated_out)
+    } else if pool_id.is_none() && (to_is_index_fund || from_is_index_fund) {
+        // v4.0.9: Index Fund synthetic minting/redeeming (no pool needed)
+        // Index fund shares are minted/redeemed at NAV price directly
+        let vault = state.collateral_vault.read().await;
+        let qug_price = vault.qug_price_usd;
+        drop(vault);
+
+        // NAV multiplier: QNK10 = 3x QUG price, DEFI5 = 2x QUG price (matches frontend)
+        let fund_id = if to_is_index_fund { &to_upper } else { &from_upper };
+        let nav_multiplier = if fund_id.contains("QNK10") { 3.0 } else { 2.0 };
+        let nav_per_share = qug_price * nav_multiplier;
+
+        if nav_per_share <= 0.0 {
+            return Ok(Json(ApiResponse::error("Index fund NAV calculation failed: QUG price unavailable".to_string())));
+        }
+
+        // Apply 0.1% mint/redeem fee
+        let fee_rate = 0.999;
+
+        let calculated_out = if (from_is_qugusd || from_is_native) && to_is_index_fund {
+            // MINT: QUGUSD/QUG → Index shares
+            let input_usd = if from_is_qugusd {
+                request.amount_in as f64 / 1e24 // QUGUSD = 1:1 USD
+            } else {
+                (request.amount_in as f64 / 1e24) * qug_price // QUG → USD
+            };
+            let shares = input_usd / nav_per_share * fee_rate;
+            (shares * 1e24) as u128
+        } else if from_is_index_fund && (to_is_qugusd || to_is_native) {
+            // REDEEM: Index shares → QUGUSD/QUG
+            let shares_amount = request.amount_in as f64 / 1e24;
+            let output_usd = shares_amount * nav_per_share * fee_rate;
+            if to_is_qugusd {
+                (output_usd * 1e24) as u128
+            } else {
+                // Convert USD to QUG
+                (output_usd / qug_price * 1e24) as u128
+            }
+        } else {
+            return Ok(Json(ApiResponse::error(
+                "Index fund shares can only be minted with QUGUSD/QUG or redeemed to QUGUSD/QUG".to_string(),
+            )));
+        };
+
+        info!(
+            "📊 [INDEX FUND v4.0.9] {} | NAV=${:.2}/share ({}x QUG@${:.2}) | fee=0.1% | in={:.6} {} → out={:.6} {}",
+            if to_is_index_fund { "MINT" } else { "REDEEM" },
+            nav_per_share, nav_multiplier, qug_price,
+            request.amount_in as f64 / 1e24, request.from_token,
+            calculated_out as f64 / 1e24, request.to_token
+        );
+
+        (true, calculated_out)
     } else if pool_id.is_none() {
         // No pool and not a QUG<->QUGUSD swap - return error
         return Ok(Json(ApiResponse::error(format!(
@@ -9274,23 +9507,42 @@ pub async fn execute_swap(
                     StatusCode::BAD_REQUEST
                 })?;
 
-            // v3.2.16-beta: CROSS-DECIMAL NORMALIZATION for AMM calculation
-            // When swapping between tokens with different decimal places (e.g., QUG=24, custom=8),
-            // we must normalize reserves and amounts to a common scale (24 decimals).
-            //
-            // Helper functions for normalization (inline to avoid cross-module dependency)
-            // v3.2.23-beta: AMM calculation WITHOUT normalization to avoid overflow
-            // For very large token supplies (1e28+), normalizing to 24 decimals causes overflow.
-            // Instead, we use the formula directly and scale only the final result.
+            // v4.0.11: ALL pool reserves are stored in 24-decimal format internally.
+            // The amount_in from the frontend may be in the token's native decimals
+            // (8 for custom tokens, 24 for QUG/QUGUSD). We normalize amount_in to 24
+            // decimals before the AMM calculation, so everything is consistent.
+            // The output is also in 24-decimal format (same as reserves).
             //
             // AMM constant product: x * y = k
             // For a swap: (reserve_in + amount_in) * (reserve_out - amount_out) = k
             // Solving: amount_out = (amount_in * reserve_out) / (reserve_in + amount_in)
-            //
-            // Cross-decimal adjustment: when decimals differ, we must scale the output.
-            // If amount_in has dec_in decimals and reserve_out has dec_out decimals:
-            //   amount_out (in dec_out units) = formula_result
-            // This naturally gives the result in reserve_out's native decimals.
+
+            // v4.0.11: Frontend now sends ALL amounts in 24-decimal format.
+            // Pool reserves are also in 24-decimal format.
+            // No normalization needed - amount_in_with_fee is already in 24-dec.
+
+            // v4.0.13: POOL CORRUPTION DETECTION - Reject swaps on obviously corrupted pools.
+            // A healthy pool should have reserves within a reasonable ratio.
+            // If one side is >1 billion tokens (display) while the other is <1 token (display),
+            // the pool is almost certainly corrupted from a previous bug.
+            let r0_display = p.reserve0 as f64 / 1e24;
+            let r1_display = p.reserve1 as f64 / 1e24;
+            let reserve_ratio = if r0_display > 0.0 && r1_display > 0.0 {
+                (r0_display / r1_display).max(r1_display / r0_display)
+            } else {
+                f64::INFINITY
+            };
+            // Max ratio of 1 billion:1 - anything beyond this is certainly corrupted
+            if reserve_ratio > 1_000_000_000.0 {
+                warn!(
+                    "🚨 [SWAP v4.0.13] POOL CORRUPTION DETECTED! Pool {} has extreme reserve ratio: {:.2e} ({:.6} / {:.6}). Rejecting swap to protect user funds.",
+                    id, reserve_ratio, r0_display, r1_display
+                );
+                return Ok(Json(ApiResponse::error(format!(
+                    "Pool reserves are severely imbalanced ({:.2} / {:.2}). This pool may be corrupted. Please contact support or try again later.",
+                    r0_display, r1_display
+                ))));
+            }
 
             let (res_in, res_out, amt_out) = if !reversed {
                 // Forward: from_token = token0, to_token = token1
@@ -9298,12 +9550,11 @@ pub async fn execute_swap(
                 let dec_out = p.token1_decimals;
 
                 debug!(
-                    "📊 [SWAP v3.2.23] Forward swap: dec_in={}, dec_out={}, r0={}, r1={}, amt_in={}",
+                    "📊 [SWAP v4.0.11] Forward swap: dec_in={}, dec_out={}, r0={}, r1={}, amt_in={}",
                     dec_in, dec_out, p.reserve0, p.reserve1, amount_in_with_fee
                 );
 
-                // Use native decimals - no normalization needed if both have same decimals
-                // The AMM formula works correctly when amount_in and reserve_in share decimals
+                // v4.0.11: All values are in 24-decimal format (frontend sends 24-dec, reserves are 24-dec)
                 let numerator_high = (amount_in_with_fee as u128).checked_mul(p.reserve1 as u128);
                 let denominator = p.reserve0.checked_add(amount_in_with_fee);
 
@@ -9315,41 +9566,18 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    // v3.6.10-beta: IMPROVED high-precision calculation for large values AND extreme imbalance
-                    // When amount_in * reserve_out overflows u128, use adaptive scaled arithmetic.
-                    // For extreme pool imbalances (e.g., 784B PEPEG vs 38 QUG), fixed 10^12 scaling
-                    // can truncate the result to zero. We use adaptive scaling to preserve precision.
-                    warn!("📊 [SWAP v3.6.10] Large value - using adaptive scaled arithmetic (no f64)");
+                    // v4.0.11: Overflow handling with normalized amounts (all 24-decimal)
+                    warn!("📊 [SWAP v4.0.11] Large value - using adaptive scaled arithmetic (no f64)");
 
-                    // v3.6.10-beta: Calculate the optimal scale factor to maximize precision
-                    // We want to scale down just enough to prevent overflow, but not so much
-                    // that we lose precision for imbalanced pools.
-                    //
-                    // AMM formula: out = (amt × res_out) / (res_in + amt)
-                    // Ratio approach: out = amt × (res_out / res_in) when res_in >> amt
-                    //
-                    // For extreme imbalance, use ratio-based calculation:
                     let denom = denominator.unwrap();
 
-                    // First, try with the ratio approach for extreme imbalances
-                    // If reserve_in >> amount_in, then: out ≈ amt × (res_out / res_in)
                     let ratio_result = if p.reserve0 > amount_in_with_fee.saturating_mul(1000) {
-                        // Pool is highly imbalanced - use ratio approach
-                        // Calculate (amt × res_out) / res_in in a way that preserves precision
-
-                        // Find the scale factor adaptively
                         let amt_bits = 128 - amount_in_with_fee.leading_zeros();
                         let res_out_bits = 128 - p.reserve1.leading_zeros();
                         let combined_bits = amt_bits + res_out_bits;
-
-                        // We need to scale down by enough to fit in 128 bits
                         let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
-                        let adaptive_scale = 1u128 << scale_bits.min(60); // Max 2^60 scale
+                        let adaptive_scale = 1u128 << scale_bits.min(60);
 
-                        debug!("📊 [SWAP v3.6.10] Adaptive scale: 2^{} = {} (combined_bits={})",
-                               scale_bits, adaptive_scale, combined_bits);
-
-                        // Scale only the larger value to preserve precision on the smaller
                         let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve1 {
                             (amount_in_with_fee / adaptive_scale, p.reserve1)
                         } else {
@@ -9358,16 +9586,9 @@ pub async fn execute_swap(
 
                         let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
                         let result = scaled_num / denom;
-
-                        // Scale back up
-                        if amount_in_with_fee > p.reserve1 {
-                            result.saturating_mul(adaptive_scale)
-                        } else {
-                            result.saturating_mul(adaptive_scale)
-                        }
+                        result.saturating_mul(adaptive_scale)
                     } else {
-                        // Use standard scaled arithmetic for moderate imbalance
-                        const SCALE: u128 = 1_000_000_000_000; // 10^12
+                        const SCALE: u128 = 1_000_000_000_000;
                         let scaled_amt = amount_in_with_fee / SCALE;
                         let scaled_res_out = p.reserve1 / SCALE;
                         let scaled_res_in = p.reserve0 / SCALE;
@@ -9380,20 +9601,13 @@ pub async fn execute_swap(
                         }
                     };
 
-                    // v3.6.10-beta: If ratio approach gave zero but amounts are non-zero, try precise fractional
                     if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve1 > 0 {
-                        warn!("📊 [SWAP v3.6.10] Zero result from adaptive scaling, using fractional approximation");
-
-                        // For tiny outputs, calculate: out = (amt / denom) × res_out
-                        // This reorders to prevent overflow while maintaining some precision
-                        let fraction = amount_in_with_fee / denom; // Will be 0 or small for extreme imbalance
+                        warn!("📊 [SWAP v4.0.11] Zero result from adaptive scaling, using fractional approximation");
+                        let fraction = amount_in_with_fee / denom;
                         if fraction > 0 {
                             fraction.saturating_mul(p.reserve1)
                         } else {
-                            // Even more extreme: calculate proportionally
-                            // out = res_out × (amt / denom) ≈ res_out × amt / denom
-                            // Scale down both to fit
-                            let scale = 1u128 << 40; // 2^40 scale
+                            let scale = 1u128 << 40;
                             let scaled_res = p.reserve1 / scale;
                             let result = (amount_in_with_fee.saturating_mul(scaled_res)) / denom;
                             result.saturating_mul(scale)
@@ -9403,20 +9617,11 @@ pub async fn execute_swap(
                     }
                 };
 
-                // Cross-decimal adjustment: scale output if decimals differ
-                let amt_out = if dec_in != dec_out {
-                    if dec_in > dec_out {
-                        // Input has more decimals, scale down output
-                        amt_out / 10u128.pow((dec_in - dec_out) as u32)
-                    } else {
-                        // Output has more decimals, scale up output
-                        amt_out.saturating_mul(10u128.pow((dec_out - dec_in) as u32))
-                    }
-                } else {
-                    amt_out
-                };
+                // v4.0.11: NO cross-decimal adjustment needed.
+                // All reserves are in 24-decimal format, amount_in was normalized to 24-dec,
+                // so AMM output is already in 24-decimal format.
 
-                debug!("📊 [SWAP v3.2.23] Output: {}", amt_out);
+                debug!("📊 [SWAP v4.0.11] Forward output: {} (24-dec)", amt_out);
                 (p.reserve0, p.reserve1, amt_out)
             } else {
                 // Reversed: from_token = token1, to_token = token0
@@ -9424,10 +9629,11 @@ pub async fn execute_swap(
                 let dec_out = p.token0_decimals;
 
                 debug!(
-                    "📊 [SWAP v3.2.23] Reversed swap: dec_in={}, dec_out={}, r0={}, r1={}, amt_in={}",
+                    "📊 [SWAP v4.0.11] Reversed swap: dec_in={}, dec_out={}, r0={}, r1={}, amt_in={}",
                     dec_in, dec_out, p.reserve0, p.reserve1, amount_in_with_fee
                 );
 
+                // v4.0.11: All values are in 24-decimal format (frontend sends 24-dec, reserves are 24-dec)
                 let numerator_high = (amount_in_with_fee as u128).checked_mul(p.reserve0 as u128);
                 let denominator = p.reserve1.checked_add(amount_in_with_fee);
 
@@ -9439,23 +9645,17 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    // v3.6.10-beta: IMPROVED high-precision calculation for large values AND extreme imbalance (reversed)
-                    warn!("📊 [SWAP v3.6.10] Large value - using adaptive scaled arithmetic (reversed, no f64)");
+                    // v4.0.11: Overflow handling with normalized amounts (all 24-decimal)
+                    warn!("📊 [SWAP v4.0.11] Large value - using adaptive scaled arithmetic (reversed, no f64)");
 
                     let denom = denominator.unwrap();
 
-                    // v3.6.10-beta: For extreme imbalance, use ratio-based calculation
-                    // Note: For reversed, reserve_in = reserve1, reserve_out = reserve0
                     let ratio_result = if p.reserve1 > amount_in_with_fee.saturating_mul(1000) {
-                        // Pool is highly imbalanced - use adaptive scaling
                         let amt_bits = 128 - amount_in_with_fee.leading_zeros();
                         let res_out_bits = 128 - p.reserve0.leading_zeros();
                         let combined_bits = amt_bits + res_out_bits;
                         let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
                         let adaptive_scale = 1u128 << scale_bits.min(60);
-
-                        debug!("📊 [SWAP v3.6.10] Reversed adaptive scale: 2^{} = {} (combined_bits={})",
-                               scale_bits, adaptive_scale, combined_bits);
 
                         let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve0 {
                             (amount_in_with_fee / adaptive_scale, p.reserve0)
@@ -9465,15 +9665,9 @@ pub async fn execute_swap(
 
                         let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
                         let result = scaled_num / denom;
-
-                        if amount_in_with_fee > p.reserve0 {
-                            result.saturating_mul(adaptive_scale)
-                        } else {
-                            result.saturating_mul(adaptive_scale)
-                        }
+                        result.saturating_mul(adaptive_scale)
                     } else {
-                        // Standard scaled arithmetic for moderate imbalance
-                        const SCALE: u128 = 1_000_000_000_000; // 10^12
+                        const SCALE: u128 = 1_000_000_000_000;
                         let scaled_amt = amount_in_with_fee / SCALE;
                         let scaled_res_out = p.reserve0 / SCALE;
                         let scaled_res_in = p.reserve1 / SCALE;
@@ -9486,9 +9680,8 @@ pub async fn execute_swap(
                         }
                     };
 
-                    // v3.6.10-beta: Fallback for zero result
                     if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve0 > 0 {
-                        warn!("📊 [SWAP v3.6.10] Zero result from adaptive scaling (reversed), using fractional approximation");
+                        warn!("📊 [SWAP v4.0.11] Zero result from adaptive scaling (reversed), using fractional approximation");
                         let fraction = amount_in_with_fee / denom;
                         if fraction > 0 {
                             fraction.saturating_mul(p.reserve0)
@@ -9503,18 +9696,11 @@ pub async fn execute_swap(
                     }
                 };
 
-                // Cross-decimal adjustment
-                let amt_out = if dec_in != dec_out {
-                    if dec_in > dec_out {
-                        amt_out / 10u128.pow((dec_in - dec_out) as u32)
-                    } else {
-                        amt_out.saturating_mul(10u128.pow((dec_out - dec_in) as u32))
-                    }
-                } else {
-                    amt_out
-                };
+                // v4.0.11: NO cross-decimal adjustment needed.
+                // All reserves are in 24-decimal format, amount_in was normalized to 24-dec,
+                // so AMM output is already in 24-decimal format.
 
-                debug!("📊 [SWAP v3.4.19] Reversed output: {}", amt_out);
+                debug!("📊 [SWAP v4.0.11] Reversed output: {} (24-dec)", amt_out);
                 (p.reserve1, p.reserve0, amt_out)
             };
 
@@ -9565,35 +9751,102 @@ pub async fn execute_swap(
     // If frontend sends a min_amount_out larger than the pool's entire reserve,
     // the frontend calculation is clearly wrong (common with high-supply meme tokens).
     // In this case, use a reasonable default: 95% of actual output (5% slippage tolerance).
+    // v4.5.0: Improved slippage protection that handles stale frontend quotes.
+    // When multiple users swap simultaneously, user B's frontend may still have
+    // old reserves cached from before user A's swap. The frontend's min_amount_out
+    // is based on stale pool state and will be too high.
+    //
+    // Solution: Use the BACKEND's actual output as ground truth. Apply a generous
+    // but safe slippage tolerance (5%) relative to the actual output. The frontend's
+    // min_amount_out is treated as a hint, not an absolute gate.
     let effective_min_amount_out = if request.min_amount_out > reserve_out {
         warn!(
-            "⚠️ [SWAP v3.6.5] Frontend min_amount_out ({}) exceeds pool reserve ({}). Using 95% of actual output instead.",
+            "⚠️ [SWAP v4.5.0] Frontend min_amount_out ({}) exceeds pool reserve ({}). Using 95% of actual output.",
             request.min_amount_out, reserve_out
         );
-        // Use 95% of actual output as minimum (5% slippage tolerance)
         final_amount_out.saturating_mul(95) / 100
     } else if request.min_amount_out > final_amount_out.saturating_mul(1000) {
-        // min_amount_out is more than 1000x the actual output - clearly wrong
         warn!(
-            "⚠️ [SWAP v3.6.5] Frontend min_amount_out ({}) is >1000x actual output ({}). Using 95% of actual output instead.",
+            "⚠️ [SWAP v4.5.0] Frontend min_amount_out ({}) is >1000x actual output ({}). Using 95% of actual output.",
             request.min_amount_out, final_amount_out
         );
         final_amount_out.saturating_mul(95) / 100
+    } else if request.min_amount_out > final_amount_out {
+        // v4.5.0: Frontend quote is stale (another swap moved the pool).
+        // The frontend expected more than the pool can currently give.
+        // Allow the swap if actual output is within 50% of what frontend expected
+        // (user can see the real amount in the confirmation). This prevents
+        // false rejections when two users swap the same pool simultaneously.
+        let stale_ratio = if request.min_amount_out > 0 {
+            (final_amount_out as f64) / (request.min_amount_out as f64)
+        } else {
+            1.0
+        };
+        if stale_ratio < 0.50 {
+            // More than 50% worse than expected - this is genuinely bad, reject
+            warn!(
+                "⚠️ [SWAP v4.5.0] Stale quote AND >50% price impact. Frontend expected {}, actual {}. Rejecting.",
+                request.min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24
+            );
+            request.min_amount_out
+        } else {
+            // Within 50% - accept with actual output as the minimum
+            info!(
+                "📊 [SWAP v4.5.0] Stale frontend quote detected (expected {:.6}, actual {:.6}, ratio {:.1}%). Pool moved since quote. Allowing swap.",
+                request.min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24, stale_ratio * 100.0
+            );
+            final_amount_out.saturating_mul(95) / 100
+        }
     } else {
         request.min_amount_out
     };
 
-    let slippage_adjusted_minimum = effective_min_amount_out.saturating_mul(99) / 100;
+    // v4.5.0: Server-side slippage protection.
+    // The frontend's min_amount_out may be stale (calculated from cached reserves).
+    // Use the user's slippage_tolerance against the ACTUAL AMM output for the real check.
+    let user_slippage_pct = request.slippage_tolerance.unwrap_or(0.5).max(0.1).min(50.0);
+    // Convert: if user wants 0.5% tolerance, server_side_min = final_amount_out * 0.995
+    // But we check against the FRONTEND's min to catch genuinely wrong swaps.
+    // If frontend min is within 50% of actual output, the quote was just stale → use server-side min.
+    // If frontend min is wildly different (>2x), something is fundamentally wrong.
+    let frontend_vs_actual_ratio = if final_amount_out > 0 {
+        effective_min_amount_out as f64 / final_amount_out as f64
+    } else {
+        f64::INFINITY
+    };
+
+    let slippage_adjusted_minimum = if frontend_vs_actual_ratio > 1.0 && frontend_vs_actual_ratio < 2.0 {
+        // Frontend quote was stale but reasonable (within 2x). Use server-side slippage check instead.
+        // This handles the common case where pool reserves changed between quote and execution.
+        let server_min = (final_amount_out as f64 * (1.0 - user_slippage_pct / 100.0)) as u128;
+        info!(
+            "📊 [SWAP v4.5.0] Frontend min ({:.4}) > actual output ({:.4}) by {:.1}%. Using server-side slippage check: {:.4} ({}% tolerance)",
+            effective_min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24,
+            (frontend_vs_actual_ratio - 1.0) * 100.0,
+            server_min as f64 / 1e24, user_slippage_pct
+        );
+        server_min
+    } else {
+        // Frontend min is either below actual (great!) or wildly off (>2x, reject)
+        effective_min_amount_out.saturating_mul(99) / 100
+    };
+
     if !use_oracle && final_amount_out < slippage_adjusted_minimum {
+        // v4.5.0: Better error message with actionable advice
+        let price_impact_pct = if effective_min_amount_out > 0 {
+            ((effective_min_amount_out as f64 - final_amount_out as f64) / effective_min_amount_out as f64) * 100.0
+        } else { 0.0 };
         return Ok(Json(ApiResponse::error(format!(
-            "❌ Slippage too high. Expected minimum: {:.6}, Got: {:.6}. Pool reserves: {:.6} / {:.6}. Pool may have insufficient liquidity for this swap size.",
+            "❌ Slippage too high ({:.1}% price impact). Expected: {:.6}, Got: {:.6}. Pool reserves: {:.6} / {:.6}. Try increasing slippage tolerance or reducing swap size.",
+            price_impact_pct,
             effective_min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24,
             reserve_in as f64 / 1e24, reserve_out as f64 / 1e24
         ))));
     } else if use_oracle {
-        // For oracle-based swaps, only require that output is at least 50% of requested minimum
-        // (allows for frontend miscalculation of min_amount_out due to price data issues)
-        let lenient_minimum = request.min_amount_out / 2;
+        // v4.0.1: Tightened from 50% to 10% tolerance - 50% was MEV-exploitable
+        // Oracle swaps get a bit more tolerance than pool swaps since frontend price
+        // may differ slightly from oracle price, but 10% is still protective.
+        let lenient_minimum = request.min_amount_out.saturating_mul(90) / 100;
         if final_amount_out < lenient_minimum {
             return Ok(Json(ApiResponse::error(format!(
                 "Oracle swap output too low. Expected minimum: {} (lenient: {}), Got: {}",
@@ -9692,11 +9945,11 @@ pub async fn execute_swap(
         );
     }
 
-    // 🔧 v2.9.26-beta: Immediately update pool reserves for instant price reflection
+    // 🔧 v4.0.11: Immediately update pool reserves for instant price reflection
     // This ensures the price changes IMMEDIATELY after a swap, not just after P2P propagation
     let (new_reserve_in, new_reserve_out) = if !use_oracle {
-        // Calculate new reserves after swap
-        // When buying token B with token A: reserve_A increases, reserve_B decreases
+        // v4.0.11: Frontend sends amount_in in 24-decimal format (same as reserves)
+        // No normalization needed - both are 24-dec.
         let new_res_in = reserve_in.saturating_add(request.amount_in);
         let new_res_out = reserve_out.saturating_sub(final_amount_out);
 
@@ -9733,10 +9986,132 @@ pub async fn execute_swap(
             }
         }
 
+        // v4.0.7: Vault price update moved OUTSIDE this block (see below)
+        // so it also runs for oracle-based QUG<->QUGUSD swaps
+
         (new_res_in, new_res_out)
     } else {
         (reserve_in, reserve_out)
     };
+
+    // v4.0.7: Update vault QUG price after EVERY swap (not just pool-based swaps)
+    // Previously this was inside if !use_oracle, so oracle QUG<->QUGUSD swaps never updated the vault price.
+    // Now we try pool reserves first, then fall back to swap amounts for oracle path.
+    {
+        let mut vault_updated = false;
+        // Try to get price from QUG/QUGUSD pool reserves
+        let pools = state.liquidity_pools.read().await;
+        for p in pools.values() {
+            let t0 = p.token0.to_uppercase();
+            let t1 = p.token1.to_uppercase();
+            // v4.0.7: Match by symbol OR by known hex address (P2P pools use hex)
+            let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG"
+                || t0 == hex::encode([0u8; 32]).to_uppercase();
+            let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG"
+                || t1 == hex::encode([0u8; 32]).to_uppercase();
+            let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS).to_uppercase();
+            let t0_is_qugusd = t0 == "QUGUSD" || t0 == qugusd_hex
+                || t0 == format!("QNK{}", qugusd_hex);
+            let t1_is_qugusd = t1 == "QUGUSD" || t1 == qugusd_hex
+                || t1 == format!("QNK{}", qugusd_hex);
+            if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                let (qug_r, usd_r) = if t0_is_qug {
+                    (p.reserve0, p.reserve1)
+                } else {
+                    (p.reserve1, p.reserve0)
+                };
+                if qug_r > 0 && usd_r > 0 {
+                    let mut vault = state.collateral_vault.write().await;
+                    if let Err(e) = vault.update_price_from_amm(qug_r, usd_r) {
+                        debug!("⚠️ [SWAP v4.0.7] Failed to update vault QUG price from AMM: {}", e);
+                    } else {
+                        let new_price = usd_r as f64 / qug_r as f64;
+                        info!("💱 [SWAP v4.0.7] Updated vault QUG price to ${:.4} from QUG/QUGUSD pool", new_price);
+                        vault_updated = true;
+                    }
+                }
+                break;
+            }
+        }
+        drop(pools);
+
+        // v4.0.7: For oracle-based QUG<->QUGUSD swaps, compute price from swap amounts
+        // This handles the case where no QUG/QUGUSD pool exists (oracle path was used)
+        if !vault_updated && use_oracle && (from_is_native || to_is_native) {
+            // Compute effective price from the swap amounts
+            let (qug_amount, qugusd_amount) = if from_is_native {
+                (request.amount_in, final_amount_out)
+            } else {
+                (final_amount_out, request.amount_in)
+            };
+            if qug_amount > 0 && qugusd_amount > 0 {
+                let effective_price = qugusd_amount as f64 / qug_amount as f64;
+                if effective_price > 0.0 && effective_price < 1_000_000.0 {
+                    let mut vault = state.collateral_vault.write().await;
+                    vault.qug_price_usd = effective_price;
+                    vault.last_price_update = chrono::Utc::now().timestamp();
+                    info!("💱 [SWAP v4.0.7] Updated vault QUG price to ${:.4} from oracle swap amounts", effective_price);
+                    vault_updated = true;
+                }
+            }
+        }
+
+        // v4.0.7: Persist vault to RocksDB after price update so it survives restarts
+        if vault_updated {
+            let vault_snapshot = state.collateral_vault.read().await.clone();
+            let new_qug_price = vault_snapshot.qug_price_usd;
+            if let Ok(vault_bytes) = bincode::serialize(&vault_snapshot) {
+                if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
+                    debug!("⚠️ [SWAP v4.0.7] Failed to persist vault price: {}", e);
+                }
+            }
+
+            // v4.0.8: Sync QUG/QUGUSD bootstrap pool reserves to match vault price
+            // Without this, the oracle endpoint reads stale pool reserves and the price
+            // reverts after SSE update (user sees price change briefly then go back).
+            // Keep total pool value constant (k = qug * qugusd) while adjusting the ratio.
+            if new_qug_price > 0.0 {
+                let mut pools = state.liquidity_pools.write().await;
+                for p in pools.values_mut() {
+                    let t0 = p.token0.to_uppercase();
+                    let t1 = p.token1.to_uppercase();
+                    let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG";
+                    let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG";
+                    let t0_is_qugusd = t0 == "QUGUSD";
+                    let t1_is_qugusd = t1 == "QUGUSD";
+                    if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                        // v4.0.13: PRECISION FIX - Use display-scale f64 math instead of raw u128→f64.
+                        // Converting raw 24-decimal u128 reserves directly to f64 causes catastrophic
+                        // precision loss (e.g., 1e30 * 1e30 = 1e60 has only ~15 digits of precision).
+                        // Instead, divide to display scale first (÷1e24), do math, then multiply back.
+                        let r0_display = p.reserve0 as f64 / 1e24;
+                        let r1_display = p.reserve1 as f64 / 1e24;
+                        let k_display = r0_display * r1_display; // Now ~e6 scale, well within f64 precision
+
+                        // Rebalance: new_qugusd = sqrt(k * price), new_qug = k / new_qugusd
+                        let new_qugusd_display = (k_display * new_qug_price).sqrt();
+                        let new_qug_display = k_display / new_qugusd_display;
+
+                        if new_qug_display > 0.0 && new_qugusd_display > 0.0 {
+                            // Convert back to 24-decimal u128
+                            let new_qug_raw = (new_qug_display * 1e24) as u128;
+                            let new_qugusd_raw = (new_qugusd_display * 1e24) as u128;
+                            if t0_is_qug {
+                                p.reserve0 = new_qug_raw;
+                                p.reserve1 = new_qugusd_raw;
+                            } else {
+                                p.reserve0 = new_qugusd_raw;
+                                p.reserve1 = new_qug_raw;
+                            }
+                            info!("💱 [SWAP v4.0.13] Synced QUG/QUGUSD pool reserves to ${:.4}/QUG (qug={:.2}, qugusd={:.2})",
+                                  new_qug_price, new_qug_display, new_qugusd_display);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // v3.6.8-beta: CRITICAL FIX - Credit output token to user's balance IMMEDIATELY
     // Previously, swaps updated pool reserves but never credited the user's token_balances,
@@ -9745,6 +10120,10 @@ pub async fn execute_swap(
         // Determine from/to token addresses
         let from_is_qug = request.from_token.to_uppercase() == "QUG";
         let to_is_qug = request.to_token.to_uppercase() == "QUG";
+        // v4.0.3: Handle QUGUSD as a known token (not a custom hex-encoded token)
+        // Previously hex::decode("QUGUSD") failed silently, causing balance credits/debits to be skipped
+        let from_is_qugusd = request.from_token.to_uppercase() == "QUGUSD";
+        let to_is_qugusd = request.to_token.to_uppercase() == "QUGUSD";
 
         // Update token balances
         let mut token_balances = state.token_balances.write().await;
@@ -9767,6 +10146,38 @@ pub async fn execute_swap(
                 warn!("⚠️ [SWAP v3.6.9] Failed to persist deducted QUG balance: {}", e);
             }
             token_balances = state.token_balances.write().await;
+        } else if from_is_qugusd {
+            // v4.0.3: Deduct QUGUSD from token_balances using standard QUGUSD_TOKEN_ADDRESS
+            let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+            let from_key = (wallet_addr, qugusd_addr);
+            let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+            token_balances.insert(from_key, new_balance);
+            info!("💸 [SWAP v4.0.3] Deducted {} QUGUSD from user (was: {}, now: {})",
+                request.amount_in as f64 / 1e24, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &qugusd_addr, new_balance).await {
+                warn!("⚠️ [SWAP v4.0.3] Failed to persist deducted QUGUSD balance: {}", e);
+            }
+            token_balances = state.token_balances.write().await;
+        } else if from_is_index_fund {
+            // v4.0.9: Deducting index fund shares (redeem)
+            // Use pre-resolved from_token_addr (deterministic address from resolve_token_address)
+            let from_key = (wallet_addr, from_token_addr);
+            let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+            token_balances.insert(from_key, new_balance);
+            info!("💸 [INDEX v4.0.9] Deducted {} {} shares from user (was: {}, now: {})",
+                request.amount_in as f64 / 1e24, request.from_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &from_token_addr, new_balance).await {
+                warn!("⚠️ [INDEX v4.0.9] Failed to persist deducted index fund balance: {}", e);
+            }
+            token_balances = state.token_balances.write().await;
         } else {
             // Deducting custom token
             if let Ok(from_token_bytes) = hex::decode(request.from_token.trim_start_matches("qnk").trim_start_matches("0x")) {
@@ -9775,10 +10186,27 @@ pub async fn execute_swap(
                     from_token_addr.copy_from_slice(&from_token_bytes);
                     let from_key = (wallet_addr, from_token_addr);
                     let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
-                    let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+
+                    // v4.3.0: Convert request.amount_in from 24-decimal to 2*decimals format.
+                    // Balances are stored in 2*decimals format (due to contracts_api double-conversion).
+                    // Frontend sends amount_in in 24-decimal. Must match formats for correct debit.
+                    let from_decimals = if is_reversed { pool.token1_decimals } else { pool.token0_decimals };
+                    let target_exp = 2u32 * from_decimals as u32;
+                    let debit_amount: u128 = if target_exp < 24 {
+                        (request.amount_in as u128) / 10u128.pow(24 - target_exp)
+                    } else if target_exp > 24 {
+                        (request.amount_in as u128).saturating_mul(10u128.pow(target_exp - 24))
+                    } else {
+                        request.amount_in as u128
+                    };
+
+                    let new_balance = old_balance.saturating_sub(debit_amount);
                     token_balances.insert(from_key, new_balance);
-                    info!("💸 [SWAP v3.6.9] Deducted {} {} from user (was: {}, now: {})",
-                        request.amount_in as f64 / 1e24, request.from_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+                    let display_divisor = 10f64.powi(target_exp as i32);
+                    info!("💸 [SWAP v4.3.0] Deducted {} {} from user (was: {}, now: {}, decimals={}, target_exp={})",
+                        debit_amount as f64 / display_divisor, request.from_token,
+                        old_balance as f64 / display_divisor, new_balance as f64 / display_divisor,
+                        from_decimals, target_exp);
 
                     // Persist to storage
                     drop(token_balances);
@@ -9791,27 +10219,7 @@ pub async fn execute_swap(
         }
 
         // Credit output token to user
-        if !to_is_qug {
-            // Crediting custom token
-            if let Ok(to_token_bytes) = hex::decode(request.to_token.trim_start_matches("qnk").trim_start_matches("0x")) {
-                if to_token_bytes.len() == 32 {
-                    let mut to_token_addr = [0u8; 32];
-                    to_token_addr.copy_from_slice(&to_token_bytes);
-                    let to_key = (wallet_addr, to_token_addr);
-                    let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
-                    let new_balance = old_balance.saturating_add(final_amount_out as u128);
-                    token_balances.insert(to_key, new_balance);
-                    info!("💰 [SWAP v3.6.8] Credited {} {} to user (was: {}, now: {})",
-                        final_amount_out as f64 / 1e24, request.to_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
-
-                    // Persist to storage
-                    drop(token_balances);
-                    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
-                        warn!("⚠️ [SWAP v3.6.8] Failed to persist credited to-token balance: {}", e);
-                    }
-                }
-            }
-        } else {
+        if to_is_qug {
             // Crediting QUG - update wallet_balances
             drop(token_balances);
             let mut wallet_balances = state.wallet_balances.write().await;
@@ -9825,6 +10233,74 @@ pub async fn execute_swap(
             // Persist QUG balance to storage
             if let Err(e) = state.storage_engine.set_balance(&hex::encode(wallet_addr), new_qug_balance).await {
                 warn!("⚠️ [SWAP v3.6.8] Failed to persist QUG balance: {}", e);
+            }
+        } else if to_is_qugusd {
+            // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS
+            let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+            let to_key = (wallet_addr, qugusd_addr);
+            let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_add(final_amount_out as u128);
+            token_balances.insert(to_key, new_balance);
+            info!("💰 [SWAP v4.0.3] Credited {} QUGUSD to user (was: {}, now: {})",
+                final_amount_out as f64 / 1e24, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &qugusd_addr, new_balance).await {
+                warn!("⚠️ [SWAP v4.0.3] Failed to persist credited QUGUSD balance: {}", e);
+            }
+        } else if to_is_index_fund {
+            // v4.0.9: Credit index fund shares to user (mint)
+            // Use pre-resolved to_token_addr (deterministic address from resolve_token_address)
+            let to_key = (wallet_addr, to_token_addr);
+            let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_add(final_amount_out as u128);
+            token_balances.insert(to_key, new_balance);
+            info!("💰 [INDEX v4.0.9] Credited {} {} shares to user (was: {}, now: {})",
+                final_amount_out as f64 / 1e24, request.to_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
+                warn!("⚠️ [INDEX v4.0.9] Failed to persist credited index fund balance: {}", e);
+            }
+        } else {
+            // Crediting custom token
+            if let Ok(to_token_bytes) = hex::decode(request.to_token.trim_start_matches("qnk").trim_start_matches("0x")) {
+                if to_token_bytes.len() == 32 {
+                    let mut to_token_addr = [0u8; 32];
+                    to_token_addr.copy_from_slice(&to_token_bytes);
+                    let to_key = (wallet_addr, to_token_addr);
+                    let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
+
+                    // v4.3.0: Convert final_amount_out from 24-decimal to 2*decimals format.
+                    // Minted balances (from contracts_api.rs) are stored as display * 10^(2*decimals)
+                    // due to double-conversion. Swap outputs are in 24-decimal. We must match formats.
+                    // For 8-decimal tokens: 24-dec → 16-dec, divide by 10^8.
+                    let to_decimals = if is_reversed { pool.token0_decimals } else { pool.token1_decimals };
+                    let target_exp = 2u32 * to_decimals as u32;
+                    let credit_amount: u128 = if target_exp < 24 {
+                        (final_amount_out as u128) / 10u128.pow(24 - target_exp)
+                    } else if target_exp > 24 {
+                        (final_amount_out as u128).saturating_mul(10u128.pow(target_exp - 24))
+                    } else {
+                        final_amount_out as u128
+                    };
+
+                    let new_balance = old_balance.saturating_add(credit_amount);
+                    token_balances.insert(to_key, new_balance);
+                    let display_divisor = 10f64.powi(target_exp as i32);
+                    info!("💰 [SWAP v4.3.0] Credited {} {} to user (was: {}, now: {}, decimals={}, target_exp={})",
+                        credit_amount as f64 / display_divisor, request.to_token,
+                        old_balance as f64 / display_divisor, new_balance as f64 / display_divisor,
+                        to_decimals, target_exp);
+
+                    // Persist to storage
+                    drop(token_balances);
+                    if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
+                        warn!("⚠️ [SWAP v3.6.8] Failed to persist credited to-token balance: {}", e);
+                    }
+                }
             }
         }
     }
@@ -9843,8 +10319,16 @@ pub async fn execute_swap(
         amount_in: request.amount_in,
         amount_out: final_amount_out, // Estimated output
         wallet_address: request.wallet_address.clone(),
+        // v4.0.1: Price impact = how much the swap moves the price
+        // Formula: 1 - (reserve_in / (reserve_in + amount_in)) = amount_in / (reserve_in + amount_in)
+        // This gives a percentage that's always < 100% and accurately reflects the trade size
         price_impact: if !use_oracle && reserve_in > 0 {
-            ((request.amount_in as f64) / (reserve_in as f64)) * 100.0
+            let total = reserve_in.saturating_add(request.amount_in) as f64;
+            if total > 0.0 {
+                (request.amount_in as f64 / total) * 100.0
+            } else {
+                0.0
+            }
         } else {
             0.0
         },
@@ -9872,8 +10356,17 @@ pub async fn execute_swap(
             },
             buy_order_id: format!("swap-{}", &tx_id_hex[2..18]),
             sell_order_id: format!("pool-{}", hex::encode(&pool_id_bytes[..8])),
+            // v4.0.13: PRECISION FIX - Use checked_mul to prevent u128 overflow,
+            // and saturate u64 cast to prevent silent truncation
             price: if request.amount_in > 0 {
-                ((final_amount_out as u128 * 1_000_000_000) / request.amount_in as u128) as u64
+                let ratio = (final_amount_out as u128)
+                    .checked_mul(1_000_000_000)
+                    .map(|v| v / request.amount_in as u128)
+                    .unwrap_or_else(|| {
+                        // Overflow: scale down both sides first
+                        (final_amount_out / (request.amount_in / 1_000_000_000).max(1)) as u128
+                    });
+                ratio.min(u64::MAX as u128) as u64
             } else {
                 0
             },
@@ -9993,17 +10486,17 @@ pub async fn execute_swap(
         &tx_id_hex[..18]
     );
 
-    // 🔧 v2.9.23-beta: Record swap in history for UI transaction display
-    // This provides immediate feedback before consensus confirmation
+    // v4.0.15: Record swap in history. ALL amounts are in 24-decimal format.
     record_swap_in_history(
         &state,
         &request.from_token,
         &request.to_token,
         request.amount_in,
         final_amount_out,
-        &wallet_addr,         // Use the parsed wallet address [u8; 32]
+        &wallet_addr,
         &tx_id_hex,
-        exchange_rate,        // Add exchange rate parameter
+        24, // v4.0.15: all amounts in 24-decimal
+        24, // v4.0.15: all amounts in 24-decimal
     ).await;
 
     // 📊 v3.7.2-beta: Track 24h volume for BOTH tokens in the swap
@@ -10039,26 +10532,8 @@ pub async fn execute_swap(
             request.to_token.clone()
         };
 
-        // Calculate volume in display units (use QUG amount for both tokens)
-        let volume_display = request.amount_in as f64 / QUG_DISPLAY_DIVISOR;
-
-        let mut tracker = state.volume_tracker.write().await;
-
-        // Track from_token volume
-        let from_entries = tracker.entry(from_symbol.to_uppercase()).or_insert_with(Vec::new);
-        from_entries.retain(|(ts, _)| *ts > day_ago); // Clean up old entries
-        from_entries.push((now, volume_display));
-        let from_vol_24h: f64 = from_entries.iter().map(|(_, v)| *v).sum();
-
-        // Track to_token volume
-        let to_entries = tracker.entry(to_symbol.to_uppercase()).or_insert_with(Vec::new);
-        to_entries.retain(|(ts, _)| *ts > day_ago); // Clean up old entries
-        to_entries.push((now, volume_display));
-        let to_vol_24h: f64 = to_entries.iter().map(|(_, v)| *v).sum();
-
-        info!("📊 [VOLUME] Updated: {} vol={:.4} QUG, {} vol={:.4} QUG",
-              from_symbol.to_uppercase(), from_vol_24h,
-              to_symbol.to_uppercase(), to_vol_24h);
+        // v4.0.1: Volume tracking moved after from_token_usd calculation (see below)
+        // to properly compute USD volume instead of raw token units.
     }
 
     // v3.7.4-beta: Get from_token's USD price for proper conversion
@@ -10071,12 +10546,23 @@ pub async fn execute_swap(
         } else {
             // Get QUG/USD price from QUG/QUGUSD pool reserves
             let pools_read = state.liquidity_pools.read().await;
-            let mut qug_usd = 1.0; // default if no QUG/QUGUSD pool
+            let mut qug_usd = 0.0; // Will be set from pool or vault fallback
             for p in pools_read.values() {
                 let t0 = p.token0.to_uppercase();
                 let t1 = p.token1.to_uppercase();
-                if (t0 == "QUG" && t1 == "QUGUSD") || (t0 == "QUGUSD" && t1 == "QUG") {
-                    let (qug_r, usd_r) = if t0 == "QUG" {
+                // v4.0.4: Match QUG/QUGUSD pool by symbol OR by known address
+                // P2P-received pools store tokens as hex addresses, not symbols
+                let t0_is_qug = t0 == "QUG" || t0 == "NATIVE-QUG"
+                    || t0 == hex::encode([0u8; 32]).to_uppercase();
+                let t1_is_qug = t1 == "QUG" || t1 == "NATIVE-QUG"
+                    || t1 == hex::encode([0u8; 32]).to_uppercase();
+                let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS).to_uppercase();
+                let t0_is_qugusd = t0 == "QUGUSD" || t0 == qugusd_hex
+                    || t0 == format!("QNK{}", qugusd_hex);
+                let t1_is_qugusd = t1 == "QUGUSD" || t1 == qugusd_hex
+                    || t1 == format!("QNK{}", qugusd_hex);
+                if (t0_is_qug && t1_is_qugusd) || (t0_is_qugusd && t1_is_qug) {
+                    let (qug_r, usd_r) = if t0_is_qug {
                         (p.reserve0 as f64, p.reserve1 as f64)
                     } else {
                         (p.reserve1 as f64, p.reserve0 as f64)
@@ -10087,6 +10573,11 @@ pub async fn execute_swap(
                     }
                     break;
                 }
+            }
+            // v4.0.4: Fallback to vault price if no QUG/QUGUSD pool found
+            // (P2P pools may store addresses in formats we didn't match)
+            if qug_usd <= 0.0 {
+                qug_usd = state.collateral_vault.read().await.get_qug_price();
             }
 
             if ft == "QUG" || ft == "NATIVE-QUG" {
@@ -10114,6 +10605,65 @@ pub async fn execute_swap(
         }
     };
 
+    // 📊 v4.0.1: Track 24h volume in USD (not raw token units)
+    // Bug fix: was dividing by QUG_DISPLAY_DIVISOR (1e24) always, ignoring token decimals
+    // and not converting to USD. User swaps 20 QUG @ $42.5 = $850, but showed ~$20.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let day_ago = now - 86400;
+
+        // v4.0.15: ALL amounts (amount_in, final_amount_out, reserves) are in 24-decimal format
+        // after the AMM cross-decimal fix. NEVER use pool.tokenX_decimals for amount conversion.
+        let volume_in_tokens = request.amount_in as f64 / 1e24;
+        let volume_usd = volume_in_tokens * from_token_usd;
+
+        // Resolve token symbols for volume tracking keys
+        let from_sym = if request.from_token.starts_with("qnk") || request.from_token.starts_with("0x") {
+            let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+            deployed.values()
+                .find(|c| {
+                    let addr_hex = format!("qnk{}", hex::encode(&c.address.0));
+                    addr_hex.eq_ignore_ascii_case(&request.from_token)
+                })
+                .and_then(|c| c.metadata.symbol.clone())
+                .unwrap_or_else(|| request.from_token.clone())
+                .to_uppercase()
+        } else {
+            request.from_token.to_uppercase()
+        };
+
+        let to_sym = if request.to_token.starts_with("qnk") || request.to_token.starts_with("0x") {
+            let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+            deployed.values()
+                .find(|c| {
+                    let addr_hex = format!("qnk{}", hex::encode(&c.address.0));
+                    addr_hex.eq_ignore_ascii_case(&request.to_token)
+                })
+                .and_then(|c| c.metadata.symbol.clone())
+                .unwrap_or_else(|| request.to_token.clone())
+                .to_uppercase()
+        } else {
+            request.to_token.to_uppercase()
+        };
+
+        let mut tracker = state.volume_tracker.write().await;
+
+        // Track from_token volume in USD
+        let from_entries = tracker.entry(from_sym.clone()).or_insert_with(Vec::new);
+        from_entries.retain(|(ts, _)| *ts > day_ago);
+        from_entries.push((now, volume_usd));
+        let from_vol_24h: f64 = from_entries.iter().map(|(_, v)| *v).sum();
+
+        // Track to_token volume in USD
+        let to_entries = tracker.entry(to_sym.clone()).or_insert_with(Vec::new);
+        to_entries.retain(|(ts, _)| *ts > day_ago);
+        to_entries.push((now, volume_usd));
+        let to_vol_24h: f64 = to_entries.iter().map(|(_, v)| *v).sum();
+
+        info!("📊 [VOLUME] Updated in USD: {} vol=${:.2}, {} vol=${:.2} (swap=${:.2}, from_usd=${:.4})",
+              from_sym, from_vol_24h, to_sym, to_vol_24h, volume_usd, from_token_usd);
+    }
+
     // 📈 v3.7.4-beta: Record price in persistent consensus-verified price history
     // CRITICAL: Only record the to_token's USD price. The from_token's price does NOT change
     // from this swap. Recording from_token's price as the inverse swap ratio pollutes
@@ -10121,22 +10671,17 @@ pub async fn execute_swap(
     if !use_oracle {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
-        let (in_decimals, out_decimals) = if is_reversed {
-            (pool.token1_decimals, pool.token0_decimals)
-        } else {
-            (pool.token0_decimals, pool.token1_decimals)
-        };
 
+        // v4.0.15: ALL amounts are in 24-decimal format. Use 24 for both, not pool.tokenX_decimals.
         // Record USD price for to_token only
         // price_usd = (from_amount / to_amount) * from_token_usd
-        // e.g., QUG→BONKG: (1 QUG / 1000 BONKG) * $1.00 = $0.001 per BONKG ✓
         if let Err(e) = state.price_history_indexer.record_price_from_swap(
             &to_token_addr,
             now_ms,
             final_amount_out,   // amount_in param = to_token amount (received)
             request.amount_in,  // amount_out param = from_token amount (spent)
-            out_decimals,
-            in_decimals,
+            24,                 // v4.0.15: all amounts in 24-decimal
+            24,                 // v4.0.15: all amounts in 24-decimal
             from_token_usd,     // Convert swap ratio to USD
             current_height,
         ).await {
@@ -10149,22 +10694,87 @@ pub async fn execute_swap(
     // swap_ratio * from_token_usd = to_token_usd
     // from_token_usd was computed above when recording price history.
     {
-        let price_usd = if !use_oracle && request.amount_in > 0 && final_amount_out > 0 {
-            let (in_decimals, out_decimals) = if is_reversed {
-                (pool.token1_decimals, pool.token0_decimals)
+        // v4.1.1: CRITICAL FIX - Compute price from UPDATED pool reserves instead of swap amounts.
+        // The swap-amount-based formula `(amount_in / amount_out) * from_token_usd` was emitting
+        // price_usd=0.000000 for custom tokens due to precision loss in adaptive scaling.
+        // Using pool reserves is the same approach the oracle endpoint uses, and always returns
+        // correct values. After a buy, the pool has more QUG and less of the token, so the
+        // price correctly INCREASES.
+        let price_usd = if !use_oracle {
+            // Read the UPDATED pool reserves (already modified at line 9785-9786)
+            let pools_for_price = state.liquidity_pools.read().await;
+            let pool_price = if let Some(pool) = pools_for_price.get(&pool_id_str) {
+                // Find which side is the to_token (being bought) and which is the base/pair
+                let t0_upper = pool.token0.to_uppercase();
+                let t1_upper = pool.token1.to_uppercase();
+
+                // Determine which reserve is the token and which is the base (QUG/QUGUSD)
+                let (token_reserve, base_reserve, base_is_qug, base_is_qugusd) = {
+                    let to_upper = request.to_token.to_uppercase();
+                    // Check by address comparison (more reliable than symbol)
+                    let pool_t0_is_to = if pool.token0.starts_with("qnk") || pool.token0.starts_with("0x") {
+                        pool.token0.eq_ignore_ascii_case(&request.to_token)
+                    } else {
+                        t0_upper == to_upper
+                    };
+
+                    if pool_t0_is_to {
+                        // token0 is the to_token, token1 is the base
+                        let base_qug = t1_upper == "QUG" || t1_upper == "NATIVE-QUG";
+                        let base_qugusd = t1_upper == "QUGUSD";
+                        (pool.reserve0 as f64, pool.reserve1 as f64, base_qug, base_qugusd)
+                    } else {
+                        // token1 is the to_token, token0 is the base
+                        let base_qug = t0_upper == "QUG" || t0_upper == "NATIVE-QUG";
+                        let base_qugusd = t0_upper == "QUGUSD";
+                        (pool.reserve1 as f64, pool.reserve0 as f64, base_qug, base_qugusd)
+                    }
+                };
+
+                if token_reserve > 0.0 {
+                    let base_per_token = base_reserve / token_reserve;
+                    let base_usd = if base_is_qugusd {
+                        1.0 // QUGUSD = $1
+                    } else if base_is_qug {
+                        from_token_usd // Already computed QUG USD price above
+                    } else {
+                        from_token_usd // Fallback
+                    };
+                    let p = base_per_token * base_usd;
+                    info!("🔍 [PRICE v4.1.1] Pool-based price: token_r={:.2}, base_r={:.2}, base_per_token={:.8}, base_usd={:.4}, price_usd={:.8}",
+                          token_reserve / 1e24, base_reserve / 1e24, base_per_token, base_usd, p);
+                    p
+                } else {
+                    0.0
+                }
             } else {
-                (pool.token0_decimals, pool.token1_decimals)
+                0.0
             };
-            let in_display = request.amount_in as f64 / 10f64.powi(in_decimals as i32);
-            let out_display = final_amount_out as f64 / 10f64.powi(out_decimals as i32);
-            if out_display > 0.0 {
-                // Price in USD = (from_amount / to_amount) * from_token_usd
-                (in_display / out_display) * from_token_usd
+            drop(pools_for_price);
+
+            // Fallback to swap-amount-based price if pool lookup failed
+            if pool_price > 0.0 {
+                pool_price
+            } else if request.amount_in > 0 && final_amount_out > 0 {
+                let in_display = request.amount_in as f64 / 1e24;
+                let out_display = final_amount_out as f64 / 1e24;
+                if out_display > 0.0 {
+                    (in_display / out_display) * from_token_usd
+                } else {
+                    0.0
+                }
             } else {
-                exchange_rate * from_token_usd
+                0.0
             }
         } else {
-            exchange_rate * from_token_usd
+            // Oracle-based swaps use exchange_rate
+            if request.amount_in > 0 && final_amount_out > 0 {
+                let in_display = request.amount_in as f64 / 1e24;
+                let out_display = final_amount_out as f64 / 1e24;
+                if out_display > 0.0 { (in_display / out_display) * from_token_usd } else { 0.0 }
+            } else {
+                0.0
+            }
         };
 
         // Resolve token symbol from address if to_token is an address
@@ -10202,7 +10812,7 @@ pub async fn execute_swap(
             change_1h,
             change_24h,
             change_7d,
-            volume_24h + (request.amount_in as f64 / QUG_DISPLAY_DIVISOR),
+            volume_24h, // v4.0.1: Already includes this swap's USD volume from tracker
         ).await {
             debug!("⚠️ Failed to emit TokenPriceUpdate for {}: {}", to_token_symbol, e);
         } else {
@@ -10222,23 +10832,11 @@ pub async fn execute_swap(
     {
         let wallet_address_str = request.wallet_address.clone();
 
-        // v3.6.15: Calculate display divisors based on token decimals
-        // For pool-based swaps, use pool's token decimals
-        // For native QUG/QUGUSD, use 24 decimals
-        let (from_divisor, to_divisor) = if !use_oracle {
-            // Pool-based swap - use pool's token decimals
-            let (from_dec, to_dec) = if is_reversed {
-                (pool.token1_decimals, pool.token0_decimals)
-            } else {
-                (pool.token0_decimals, pool.token1_decimals)
-            };
-            (10f64.powi(from_dec as i32), 10f64.powi(to_dec as i32))
-        } else {
-            // Oracle swap - use 24 decimals for native tokens, 8 for custom
-            let from_dec = if from_is_native || from_is_qugusd { 24 } else { 8 };
-            let to_dec = if to_is_native || to_is_qugusd { 24 } else { 8 };
-            (10f64.powi(from_dec), 10f64.powi(to_dec))
-        };
+        // v4.0.1: CRITICAL FIX - ALL internal balances use 24-decimal base units
+        // Previously used pool.tokenX_decimals (8 for custom) causing 10^16x inflation in SSE events
+        // The swap handler stores amounts using 24-decimal units for ALL tokens.
+        let from_divisor: f64 = 1e24;
+        let to_divisor: f64 = 1e24;
 
         // Get current balances to calculate optimistic new balances
         let (old_from_balance, old_to_balance) = {
@@ -10248,8 +10846,13 @@ pub async fn execute_swap(
             let from_bal = if from_is_native {
                 wallet_balances.get(&wallet_addr).copied().unwrap_or(0) as u128
             } else if from_is_qugusd {
+                // v4.0.4: Check BOTH sources - minted (vault) + swapped (token_balances)
                 let vault = state.collateral_vault.read().await;
-                vault.get_balance(&wallet_addr) as u128
+                let minted = vault.minted_qugusd.get(&wallet_addr).copied().unwrap_or(0) as u128;
+                drop(vault);
+                let qugusd_key = (wallet_addr, q_types::QUGUSD_TOKEN_ADDRESS);
+                let swapped = token_balances.get(&qugusd_key).copied().unwrap_or(0);
+                minted.saturating_add(swapped)
             } else {
                 let key = (wallet_addr, from_token_addr);
                 token_balances.get(&key).copied().unwrap_or(0)
@@ -10258,8 +10861,13 @@ pub async fn execute_swap(
             let to_bal = if to_is_native {
                 wallet_balances.get(&wallet_addr).copied().unwrap_or(0) as u128
             } else if to_is_qugusd {
+                // v4.0.4: Check BOTH sources - minted (vault) + swapped (token_balances)
                 let vault = state.collateral_vault.read().await;
-                vault.get_balance(&wallet_addr) as u128
+                let minted = vault.minted_qugusd.get(&wallet_addr).copied().unwrap_or(0) as u128;
+                drop(vault);
+                let qugusd_key = (wallet_addr, q_types::QUGUSD_TOKEN_ADDRESS);
+                let swapped = token_balances.get(&qugusd_key).copied().unwrap_or(0);
+                minted.saturating_add(swapped)
             } else {
                 let key = (wallet_addr, to_token_addr);
                 token_balances.get(&key).copied().unwrap_or(0)
@@ -10433,6 +11041,7 @@ async fn resolve_token_address(state: &Arc<AppState>, token_id: &str) -> Result<
 pub async fn shadow_mode_metrics(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
+    #[cfg(feature = "resonance")]
     if let Some(ref shadow_coordinator) = state.shadow_coordinator {
         let coordinator_guard = shadow_coordinator.lock().await;
         let metrics = coordinator_guard.get_metrics().await;
@@ -10467,18 +11076,20 @@ pub async fn shadow_mode_metrics(
             }
         });
 
-        Ok(Json(ApiResponse::success(response)))
-    } else {
-        Ok(Json(ApiResponse::error(
-            "Shadow mode not initialized".to_string(),
-        )))
+        return Ok(Json(ApiResponse::success(response)));
     }
+    #[cfg(not(feature = "resonance"))]
+    let _ = &state;
+    Ok(Json(ApiResponse::error(
+        "Shadow mode not initialized".to_string(),
+    )))
 }
 
 /// Get migration report - detailed readiness assessment
 pub async fn shadow_mode_migration_report(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
+    #[cfg(feature = "resonance")]
     if let Some(ref shadow_coordinator) = state.shadow_coordinator {
         let coordinator_guard = shadow_coordinator.lock().await;
         let report = coordinator_guard.generate_migration_report().await;
@@ -10519,12 +11130,13 @@ pub async fn shadow_mode_migration_report(
             }
         });
 
-        Ok(Json(ApiResponse::success(response)))
-    } else {
-        Ok(Json(ApiResponse::error(
-            "Shadow mode not initialized".to_string(),
-        )))
+        return Ok(Json(ApiResponse::success(response)));
     }
+    #[cfg(not(feature = "resonance"))]
+    let _ = &state;
+    Ok(Json(ApiResponse::error(
+        "Shadow mode not initialized".to_string(),
+    )))
 }
 
 /// Migrate to resonance consensus - founder-only with AEGIS-QL signature
@@ -10532,6 +11144,7 @@ pub async fn migrate_to_resonance(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
+    #[cfg(feature = "resonance")]
     if let Some(ref shadow_coordinator) = state.shadow_coordinator {
         // Extract wallet address and signature from payload
         let wallet_address = payload
@@ -10579,12 +11192,16 @@ pub async fn migrate_to_resonance(
             "fallback": "DAG-Knight (available for emergency rollback)"
         });
 
-        Ok(Json(ApiResponse::success(response)))
-    } else {
-        Ok(Json(ApiResponse::error(
-            "Shadow mode not initialized".to_string(),
-        )))
+        return Ok(Json(ApiResponse::success(response)));
     }
+    #[cfg(not(feature = "resonance"))]
+    {
+        let _ = &state;
+        let _ = &payload;
+    }
+    Ok(Json(ApiResponse::error(
+        "Shadow mode not initialized".to_string(),
+    )))
 }
 
 /// POST /api/v1/benchmark - Run blockchain performance benchmark (once per 24 hours per IP)
@@ -12008,11 +12625,14 @@ pub async fn get_sync_metrics(
         })));
     }
 
+    #[cfg(not(target_os = "windows"))]
     let metrics = if let Some(ref m) = state.fast_sync_metrics {
         Some(m.lock().await.clone())
     } else {
         None
     };
+    #[cfg(target_os = "windows")]
+    let metrics: Option<serde_json::Value> = None;
 
     Ok(Json(ApiResponse::success(SyncMetricsResponse {
         enabled: true,
@@ -12023,7 +12643,10 @@ pub async fn get_sync_metrics(
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SyncMetricsResponse {
     pub enabled: bool,
+    #[cfg(not(target_os = "windows"))]
     pub metrics: Option<q_storage::BatchMetrics>,
+    #[cfg(target_os = "windows")]
+    pub metrics: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -12272,14 +12895,58 @@ pub async fn get_token_price_history(
         }
     }
 
-    // Fallback: Generate synthetic price data from current pool state
+    // v4.0.3: Fallback 2 - Query price_history_indexer (stores snapshots by token address)
+    // This is where swap prices are actually recorded via record_price_from_swap()
+    // Resolve token_id to a [u8; 32] address for indexer lookup
+    let resolved_token_addr: Option<[u8; 32]> = if token_id.starts_with("qnk") || token_id.starts_with("QNK") {
+        // It's an address like "qnk1234..." - decode hex
+        hex::decode(token_id.trim_start_matches("qnk").trim_start_matches("QNK"))
+            .ok()
+            .and_then(|bytes| if bytes.len() == 32 {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&bytes);
+                Some(addr)
+            } else {
+                None
+            })
+    } else if token_upper == "QUGUSD" {
+        Some(q_types::QUGUSD_TOKEN_ADDRESS)
+    } else {
+        // It's a symbol - look it up in deployed contracts
+        let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
+        let found = deployed.values()
+            .find(|c| c.metadata.symbol.as_deref().map(|s| s.to_uppercase()) == Some(token_upper.clone()))
+            .map(|c| c.address.0);
+        drop(deployed);
+        found
+    };
+
+    if let Some(token_addr) = resolved_token_addr {
+        let since_ms = chrono::Utc::now().timestamp_millis() - (duration_hours * 3_600_000);
+        let snapshots = state.price_history_indexer
+            .get_price_history(&token_addr, since_ms, 500)
+            .await;
+
+        if !snapshots.is_empty() {
+            let data_points: Vec<PriceDataPoint> = snapshots.iter().map(|(ts, price)| {
+                PriceDataPoint {
+                    timestamp: *ts,
+                    price: *price,
+                    volume: 0.0,
+                }
+            }).collect();
+
+            info!("✅ Returning {} price data points from indexer for {}", data_points.len(), token_id);
+            return Ok(Json(ApiResponse::success(data_points)));
+        }
+    }
+
+    // Fallback 3: Generate synthetic price data from current pool state
     let pools = state.liquidity_pools.read().await;
     let mut current_price: f64 = 1.0;
 
     // v3.7.3: Resolve token symbol to address for pool lookup
-    // If token_id is a symbol like "BONKG", we need to find its address
     let resolved_token = if !token_id.starts_with("qnk") && !token_id.starts_with("0x") && !token_id.starts_with("QNK") {
-        // It's a symbol - look it up in deployed contracts
         let deployed = state.orobit_ecosystem.deployed_contracts.read().await;
         let found_addr = deployed.values()
             .find(|c| c.metadata.symbol.as_deref().map(|s| s.to_uppercase()) == Some(token_upper.clone()))
@@ -12306,7 +12973,6 @@ pub async fn get_token_price_history(
         let is_token1 = pool_token1 == resolved_token || pool_token1.contains(&token_upper);
 
         if is_token0 || is_token1 {
-            // v3.7.3: FIX - Normalize reserves using decimals for accurate price
             let (reserve_token, reserve_qug, token_decimals, qug_decimals) = if is_token0 {
                 (pool.reserve0 as f64, pool.reserve1 as f64, pool.token0_decimals, pool.token1_decimals)
             } else {
@@ -12314,9 +12980,7 @@ pub async fn get_token_price_history(
             };
 
             // v3.7.3-beta: CRITICAL FIX - Use 24 decimals for both reserves
-            // Pool reserves are stored in 24-decimal format (frontend sends amounts * 1e24)
-            // but pool.tokenX_decimals records official decimals (8 for custom tokens)
-            let _ = (token_decimals, qug_decimals); // Suppress unused warnings
+            let _ = (token_decimals, qug_decimals);
             let token_display = reserve_token / 1e24;
             let qug_display = reserve_qug / 1e24;
 
@@ -12487,6 +13151,36 @@ pub async fn get_token_transactions(
     }
     drop(swap_history);
 
+    // =========================================================================
+    // v4.0.1: PERSISTENT SWAP HISTORY from RocksDB
+    // Load string-keyed swap records saved by record_swap_in_history()
+    // This ensures transaction history survives server restarts
+    // =========================================================================
+    if let Ok(persisted_records) = state.storage_engine.load_swap_history(&token_upper).await {
+        for json_val in persisted_records {
+            // Parse the JSON record back into a SwapHistoryRecord
+            let id = json_val.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if id.is_empty() || all_records.iter().any(|r| r.id == id) {
+                continue; // Skip empty or duplicate
+            }
+            let record = SwapHistoryRecord {
+                id,
+                timestamp: json_val.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+                tx_type: json_val.get("type").and_then(|v| v.as_str()).unwrap_or("swap").to_string(),
+                from_token: json_val.get("fromToken").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                to_token: json_val.get("toToken").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                amount: json_val.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                price: json_val.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                value: json_val.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                from_address: json_val.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                to_address: json_val.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                tx_hash: json_val.get("txHash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            };
+            all_records.push(record);
+        }
+        info!("💾 [v4.0.1] Loaded persisted swap history for {} from RocksDB", token_upper);
+    }
+
     // Sort by timestamp descending (most recent first)
     all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -12507,15 +13201,58 @@ pub async fn record_swap_in_history(
     amount_out: u128,
     wallet_address: &[u8; 32],
     pool_id: &str,
-    exchange_rate: f64,
+    in_decimals: u8,
+    out_decimals: u8,
 ) {
     let now = chrono::Utc::now().timestamp_millis();
     let tx_id = format!("swap-{}-{}", now, hex::encode(&wallet_address[..8]));
     let wallet_hex = format!("qnk{}", hex::encode(wallet_address));
 
-    // Calculate amounts in display units
-    let amount_in_display = amount_in as f64 / QUG_DISPLAY_DIVISOR;
-    let amount_out_display = amount_out as f64 / QUG_DISPLAY_DIVISOR;
+    // v4.0.5: Use token-specific decimals instead of QUG_DISPLAY_DIVISOR (1e24) for all
+    // Bug: Custom tokens (8 decimals) had amount / 1e24 ≈ 0, causing "Amount: 0" in history
+    let amount_in_display = amount_in as f64 / 10f64.powi(in_decimals as i32);
+    let amount_out_display = amount_out as f64 / 10f64.powi(out_decimals as i32);
+
+    // v4.0.5: Calculate proper USD prices using pool reserves instead of raw exchange_rate
+    // Bug: exchange_rate was amount_out/amount_in in BASE UNITS (not display), giving nonsense ratios
+    // e.g., 100 CHAD(8dec) → 0.025 QUG(24dec): ratio = 0.025*1e24 / 100*1e8 = 2.5e13, not a price!
+    // Correct: from_price_usd = value of from_token in USD per display unit
+    let from_token_usd = {
+        let ft = from_token.to_uppercase();
+        if ft == "QUGUSD" {
+            1.0
+        } else if ft == "QUG" || ft == "NATIVE-QUG" {
+            state.collateral_vault.read().await.qug_price_usd.max(1.0)
+        } else {
+            // Custom token: derive from swap ratio
+            // from_value = to_value → from_amount * from_price = to_amount * to_price
+            // But we don't know to_price independently... use QUG price if to_token is QUG
+            let tt = to_token.to_uppercase();
+            if tt == "QUG" || tt == "NATIVE-QUG" {
+                let qug_usd = state.collateral_vault.read().await.qug_price_usd.max(1.0);
+                if amount_in_display > 0.0 {
+                    (amount_out_display / amount_in_display) * qug_usd
+                } else { 0.0 }
+            } else if tt == "QUGUSD" {
+                if amount_in_display > 0.0 {
+                    amount_out_display / amount_in_display
+                } else { 0.0 }
+            } else {
+                // token→token swap, use vault for rough estimate
+                state.collateral_vault.read().await.qug_price_usd.max(1.0)
+            }
+        }
+    };
+
+    let to_token_usd = if amount_out_display > 0.0 && amount_in_display > 0.0 {
+        // Conservation of value: from_amount * from_price = to_amount * to_price
+        (amount_in_display * from_token_usd) / amount_out_display
+    } else {
+        0.0
+    };
+
+    let from_value_usd = amount_in_display * from_token_usd;
+    let to_value_usd = amount_out_display * to_token_usd;
 
     // Save normalized token names for persistence
     let from_token_upper = from_token.to_uppercase();
@@ -12529,8 +13266,8 @@ pub async fn record_swap_in_history(
         from_token: from_token_upper.clone(),
         to_token: to_token_upper.clone(),
         amount: amount_in_display,
-        price: exchange_rate,
-        value: amount_in_display * exchange_rate,
+        price: from_token_usd,
+        value: from_value_usd,
         from_address: wallet_hex.clone(),
         to_address: pool_id.to_string(),
         tx_hash: tx_id.clone(),
@@ -12544,8 +13281,8 @@ pub async fn record_swap_in_history(
         from_token: from_token_upper.clone(),
         to_token: to_token_upper.clone(),
         amount: amount_out_display,
-        price: if exchange_rate > 0.0 { 1.0 / exchange_rate } else { 0.0 },
-        value: amount_out_display,
+        price: to_token_usd,
+        value: to_value_usd,
         from_address: pool_id.to_string(),
         to_address: wallet_hex,
         tx_hash: tx_id,
@@ -12626,25 +13363,23 @@ pub async fn record_swap_in_history(
         let mut price_snapshots = state.price_snapshots.write().await;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // Record price for FROM token (sell price = exchange_rate)
+        // Record price for FROM token (USD price per unit)
         let from_snapshots = price_snapshots
             .entry(from_token_upper.clone())
             .or_insert_with(Vec::new);
-        from_snapshots.push((now_ms, exchange_rate));
+        from_snapshots.push((now_ms, from_token_usd));
 
         // Keep only last 7 days of snapshots (roughly 1 snapshot per swap)
-        // Max ~10k entries should be enough for accurate 7d calculations
         if from_snapshots.len() > 10_000 {
             from_snapshots.drain(0..1000);
         }
 
-        // Record price for TO token (buy price = 1/exchange_rate)
-        if exchange_rate > 0.0 {
-            let to_price = 1.0 / exchange_rate;
+        // Record price for TO token (USD price per unit)
+        if to_token_usd > 0.0 {
             let to_snapshots = price_snapshots
                 .entry(to_token_upper.clone())
                 .or_insert_with(Vec::new);
-            to_snapshots.push((now_ms, to_price));
+            to_snapshots.push((now_ms, to_token_usd));
 
             if to_snapshots.len() > 10_000 {
                 to_snapshots.drain(0..1000);
@@ -12653,8 +13388,8 @@ pub async fn record_swap_in_history(
 
         info!(
             "📈 Recorded price snapshot: {} @ ${:.4}, {} @ ${:.4}",
-            from_token_upper, exchange_rate,
-            to_token_upper, if exchange_rate > 0.0 { 1.0 / exchange_rate } else { 0.0 }
+            from_token_upper, from_token_usd,
+            to_token_upper, to_token_usd
         );
     }
 }
@@ -12693,38 +13428,36 @@ pub async fn get_token_price(
 ) -> Result<Json<ApiResponse<TokenPriceResponse>>, StatusCode> {
     let token_upper = token.to_uppercase();
 
-    // For QUG: Get price from CollateralVault (which is updated by AMM oracle)
+    // v4.0.8: For QUG: Use CollateralVault as single source of truth
+    // Vault is updated after EVERY swap and persisted. Pool reserves are synced to vault.
     if token_upper == "QUG" || token.to_lowercase() == "native-qug" {
         let vault = state.collateral_vault.read().await;
-        let price = vault.get_qug_price();
+        let price = vault.qug_price_usd;
         let last_updated = vault.last_price_update;
         drop(vault);
 
-        // Also get pool reserves if available
-        let pool_info = {
+        // Also include pool reserves info for display
+        let pool_info_opt = {
             let pools = state.liquidity_pools.read().await;
-            pools.values()
-                .find(|p| {
-                    let t0 = p.token0.to_uppercase();
-                    let t1 = p.token1.to_uppercase();
-                    (t0 == "QUG" && t1 == "QUGUSD") || (t1 == "QUG" && t0 == "QUGUSD")
-                        || (t0 == "QUG" && t1.contains("QUGUSD")) || (t1 == "QUG" && t0.contains("QUGUSD"))
-                })
-                .map(|p| PoolReservesInfo {
-                    token0: p.token0.clone(),
-                    token1: p.token1.clone(),
-                    reserve0: p.reserve0 as f64 / QUG_DISPLAY_DIVISOR,
-                    reserve1: p.reserve1 as f64 / QUG_DISPLAY_DIVISOR,
-                    pool_id: p.pool_id.clone(),
-                })
+            pools.values().find(|p| {
+                let t0 = p.token0.to_uppercase();
+                let t1 = p.token1.to_uppercase();
+                (t0 == "QUG" && t1 == "QUGUSD") || (t1 == "QUG" && t0 == "QUGUSD")
+            }).map(|p| PoolReservesInfo {
+                token0: p.token0.clone(),
+                token1: p.token1.clone(),
+                reserve0: p.reserve0 as f64 / QUG_DISPLAY_DIVISOR,
+                reserve1: p.reserve1 as f64 / QUG_DISPLAY_DIVISOR,
+                pool_id: p.pool_id.clone(),
+            })
         };
 
         return Ok(Json(ApiResponse::success(TokenPriceResponse {
             token: "QUG".to_string(),
             price_usd: price,
-            source: "amm_oracle".to_string(),
+            source: "vault".to_string(),
             last_updated,
-            pool_reserves: pool_info,
+            pool_reserves: pool_info_opt,
         })));
     }
 
