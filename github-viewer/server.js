@@ -2,8 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readdir, stat, readFile } from 'fs/promises';
-import { existsSync } from 'fs';
+import { readFile } from 'fs/promises';
+import { existsSync, statSync } from 'fs';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -18,50 +19,49 @@ const REPO_PATH = '/opt/orobit/shared/q-narwhalknight';
 app.use(cors());
 app.use(express.json());
 
-// Helper function to recursively get all files and folders
-async function getFileTree(dirPath, basePath = '') {
-  const items = [];
-
+// Get file tree using git ls-tree (respects .gitignore, only shows tracked files)
+async function getGitFileTree() {
   try {
-    const entries = await readdir(dirPath, { withFileTypes: true });
+    const output = execSync('git ls-tree -r --name-only HEAD', {
+      cwd: REPO_PATH,
+      encoding: 'utf-8',
+      maxBuffer: 50 * 1024 * 1024
+    });
 
-    for (const entry of entries) {
-      const fullPath = join(dirPath, entry.name);
-      const relativePath = basePath ? join(basePath, entry.name) : entry.name;
+    const files = output.trim().split('\n').filter(Boolean);
+    const result = [];
 
-      // Skip common directories we don't want to show
-      if (entry.name === 'node_modules' ||
-          entry.name === 'target' ||
-          entry.name === '.git' ||
-          entry.name === 'dist' ||
-          entry.name === 'dist-final' ||
-          entry.name.startsWith('.')) {
-        continue;
+    // Track directories we've already added
+    const dirs = new Set();
+
+    for (const filePath of files) {
+      // Add parent directories as tree entries
+      const parts = filePath.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const dirPath = parts.slice(0, i).join('/');
+        if (!dirs.has(dirPath)) {
+          dirs.add(dirPath);
+          result.push({ path: dirPath, type: 'tree' });
+        }
       }
 
-      if (entry.isDirectory()) {
-        const children = await getFileTree(fullPath, relativePath);
-        items.push({
-          path: relativePath,
-          type: 'tree',
-          name: entry.name,
-          children
-        });
-      } else {
-        const stats = await stat(fullPath);
-        items.push({
-          path: relativePath,
-          type: 'blob',
-          name: entry.name,
-          size: stats.size
-        });
-      }
+      // Add file entry - get size from filesystem if available
+      let size = 0;
+      try {
+        const fullPath = join(REPO_PATH, filePath);
+        if (existsSync(fullPath)) {
+          size = statSync(fullPath).size;
+        }
+      } catch {}
+
+      result.push({ path: filePath, type: 'blob', size });
     }
-  } catch (error) {
-    console.error(`Error reading directory ${dirPath}:`, error);
-  }
 
-  return items;
+    return result;
+  } catch (error) {
+    console.error('Error running git ls-tree:', error.message);
+    return [];
+  }
 }
 
 // Endpoint: Get repository info
@@ -83,38 +83,21 @@ app.get('/api/repo', async (req, res) => {
   }
 });
 
-// Endpoint: Get file tree
+// Endpoint: Get file tree (uses git ls-tree, respects .gitignore)
 app.get('/api/tree', async (req, res) => {
   try {
-    const tree = await getFileTree(REPO_PATH);
+    const tree = await getGitFileTree();
 
     res.json({
       sha: 'local',
       url: 'local',
-      tree: flattenTree(tree),
+      tree,
       truncated: false
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Helper to flatten tree structure to match GitHub API format
-function flattenTree(items, result = []) {
-  for (const item of items) {
-    result.push({
-      path: item.path,
-      type: item.type,
-      size: item.size
-    });
-
-    if (item.children && item.children.length > 0) {
-      flattenTree(item.children, result);
-    }
-  }
-
-  return result;
-}
 
 // Endpoint: Get file content
 app.get('/api/contents/*', async (req, res) => {
