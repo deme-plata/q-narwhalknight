@@ -88,6 +88,134 @@ use crate::warp_sync::{MultiPeerDownloader, PrefetchPipeline, ChunkAssignment, C
 // Phase 6 DELTA-V: Pre-compressed storage for zero-CPU P2P serving
 use crate::precompressed_storage::{PrecompressedBlock, CompressionAlgorithm};
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v5.2.0: Enhanced Peer Registry - Monotonicity enforcement & stale eviction
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Per-peer height tracking with monotonicity enforcement
+#[derive(Debug, Clone)]
+pub struct PeerHeightRecord {
+    pub peer_id: PeerId,
+    pub height: u64,
+    pub tip_hash: Option<[u8; 32]>,
+    pub last_updated: Instant,
+    pub violations: u32,
+}
+
+/// Enhanced peer registry with Byzantine-resistant height consensus
+#[derive(Debug)]
+pub struct EnhancedPeerRegistry {
+    peers: HashMap<PeerId, PeerHeightRecord>,
+}
+
+impl EnhancedPeerRegistry {
+    pub fn new() -> Self {
+        Self {
+            peers: HashMap::new(),
+        }
+    }
+
+    /// Update peer height with monotonicity check.
+    /// Warns on height decrease, rejects after 5 violations.
+    pub fn update_peer(&mut self, peer_id: PeerId, height: u64, tip_hash: Option<[u8; 32]>) -> bool {
+        if let Some(record) = self.peers.get_mut(&peer_id) {
+            if height < record.height {
+                record.violations += 1;
+                warn!(
+                    "⚠️ [MONOTONICITY] Peer {} height decreased {} → {} (violation #{}/5)",
+                    peer_id, record.height, height, record.violations
+                );
+                if record.violations >= 5 {
+                    warn!("🚫 [MONOTONICITY] Peer {} rejected: too many height decreases", peer_id);
+                    return false;
+                }
+            }
+            record.height = height;
+            record.tip_hash = tip_hash;
+            record.last_updated = Instant::now();
+        } else {
+            self.peers.insert(peer_id, PeerHeightRecord {
+                peer_id,
+                height,
+                tip_hash,
+                last_updated: Instant::now(),
+                violations: 0,
+            });
+        }
+        true
+    }
+
+    /// Remove peers not heard from in `stale_secs` seconds
+    pub fn evict_stale(&mut self, stale_secs: u64) -> usize {
+        let cutoff = Duration::from_secs(stale_secs);
+        let before = self.peers.len();
+        self.peers.retain(|_, record| record.last_updated.elapsed() < cutoff);
+        let evicted = before - self.peers.len();
+        if evicted > 0 {
+            info!("🧹 [PEER EVICTION] Evicted {} stale peers (>{stale_secs}s since last update)", evicted);
+        }
+        evicted
+    }
+
+    /// Byzantine-resistant median height from active peers
+    pub fn median_height(&self) -> Option<u64> {
+        let mut heights: Vec<u64> = self.peers.values().map(|r| r.height).collect();
+        if heights.is_empty() {
+            return None;
+        }
+        heights.sort_unstable();
+        let mid = heights.len() / 2;
+        Some(heights[mid])
+    }
+
+    /// Number of active (non-stale) peers
+    pub fn active_peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Get peers sorted by height descending
+    pub fn active_peers_by_height(&self) -> Vec<&PeerHeightRecord> {
+        let mut peers: Vec<_> = self.peers.values().collect();
+        peers.sort_by(|a, b| b.height.cmp(&a.height));
+        peers
+    }
+
+    /// Max height across all peers
+    pub fn max_height(&self) -> Option<u64> {
+        self.peers.values().map(|r| r.height).max()
+    }
+
+    /// Convert to legacy format for backward compat
+    pub fn to_legacy_vec(&self) -> Vec<(PeerId, u64)> {
+        self.peers.values().map(|r| (r.peer_id, r.height)).collect()
+    }
+
+    /// Get the age (in seconds) of the most recent peer update
+    pub fn newest_update_age_secs(&self) -> Option<u64> {
+        self.peers.values()
+            .map(|r| r.last_updated.elapsed().as_secs())
+            .min()
+    }
+
+    // --- Backward-compat delegation methods (Vec<(PeerId, u64)> API) ---
+
+    /// Number of peers (backward compat for `registry.len()`)
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Is empty (backward compat for `registry.is_empty()`)
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    /// Iterate as (PeerId, u64) tuples (backward compat for Vec<(PeerId, u64)>::iter())
+    /// Returns an iterator yielding owned tuples for chainable .filter()/.map() use
+    pub fn iter(&self) -> impl Iterator<Item = (PeerId, u64)> + '_ {
+        self.peers.values().map(|r| (r.peer_id, r.height))
+    }
+}
+
 /// Configuration for Turbo Sync
 #[derive(Clone, Debug)]
 pub struct TurboSyncConfig {
@@ -262,10 +390,43 @@ impl Default for TurboSyncConfig {
             // - Q_TURBO_CHUNK_SIZE=5000
             // - Q_TURBO_COMPRESSION_LEVEL=1
             // - Q_TURBO_CHUNK_TIMEOUT_SECS=45
+            // v6.0.4: RAM-aware parallel streams to prevent OOM on small nodes
+            // 32 streams × 1000 blocks = 32,000 blocks in-flight → ~4-6 GB for Gamma
+            // Reduced for small RAM nodes to prevent OOM kills
             parallel_streams: std::env::var("Q_TURBO_PARALLEL_STREAMS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v3.4.9: 32 streams for parallel fetching
+                .ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    let ram_mb = {
+                        use sysinfo::System;
+                        let mut sys = System::new();
+                        sys.refresh_memory();
+                        (sys.total_memory() / (1024 * 1024)) as usize
+                    };
+                    match ram_mb {
+                        0..=3999     => 1,    // micro: 1 stream (OOM prevention)
+                        4000..=7999  => 1,    // small (Gamma 7.8GB): 1 stream (v6.1.0 OOM fix)
+                        8000..=15999 => 4,    // medium: 4 streams
+                        16000..=31999 => 8,   // large: 8 streams
+                        _            => 16,   // xlarge: 16 streams
+                    }
+                }),
+            // v6.0.9: RAM-aware chunk size to reduce per-chunk memory footprint
+            // Each chunk allocates ~50KB × chunk_size for serialization/deserialization
+            // On Gamma (7.8GB): 500 blocks × 50KB = ~25MB per chunk (was 50MB with 1000)
             chunk_size: std::env::var("Q_TURBO_CHUNK_SIZE")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(1000),  // v3.4.10: 1k blocks (10k was too slow for tx-heavy blocks)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    let ram_mb = {
+                        use sysinfo::System;
+                        let mut sys = System::new();
+                        sys.refresh_memory();
+                        (sys.total_memory() / (1024 * 1024)) as u64
+                    };
+                    match ram_mb {
+                        0..=3999     => 50,    // micro: tiny chunks (OOM prevention)
+                        4000..=7999  => 100,   // small (Gamma): 100 blocks/chunk (v6.1.0 OOM fix)
+                        8000..=15999 => 500,   // medium
+                        _            => 1000,  // large: bigger chunks
+                    }
+                }),
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1),  // Level 1 for speed
             chunk_timeout: Duration::from_secs(
@@ -276,7 +437,7 @@ impl Default for TurboSyncConfig {
             delta_compression: true,
             enable_pipelining: true,
             max_peer_connections: std::env::var("Q_MAX_PEER_CONNECTIONS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v3.4.9: 32 peers for faster sync
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(16),  // v6.0.4: 16 peers (was 32)
             smart_protocol: true,
 
             // 🚀 v1.0.89-beta: TURBO SYNC - Batched writes now default TRUE
@@ -1013,8 +1174,8 @@ pub struct TurboSyncManager {
     /// Metrics for monitoring
     pub metrics: Arc<TurboSyncMetrics>,
 
-    /// Peer registry (peer_id -> highest_block)
-    peer_registry: Arc<RwLock<Vec<(PeerId, u64)>>>,
+    /// v5.2.0: Enhanced peer registry with monotonicity enforcement
+    peer_registry: Arc<RwLock<EnhancedPeerRegistry>>,
 
     /// 🌐 TRUE P2P INTEGRATION - Network communication channel
     /// Send network requests (block pack requests via gossipsub)
@@ -1236,9 +1397,13 @@ impl TurboSyncManager {
         // 🤖 v1.4.0-beta: Initialize ML-driven batch size optimizer
         // Uses online linear regression to predict optimal batch sizes
         // v2.7.4-beta FIX: min_batch_size 10 → 500 to fix slow peer sync (was 6-block chunks)
+        // v6.1.4 FIX: Ensure min_batch_size <= max_batch_size (was panicking on low-RAM systems
+        //   where chunk_size=100 but min_batch_size=500 → clamp(500,100) assertion failure)
+        let max_batch = config.chunk_size as u64;
+        let min_batch = 500u64.min(max_batch); // Never exceed max on low-RAM systems
         let batch_config = crate::ml_batch_optimizer::BatchOptimizerConfig {
-            min_batch_size: 500,  // ⬆️ v2.7.4: was 10, caused 6-block chunks and slow sync
-            max_batch_size: config.chunk_size as u64,  // Cap at configured chunk size
+            min_batch_size: min_batch,
+            max_batch_size: max_batch,
             learning_rate: 0.01,
             ema_decay: 0.1,  // Fast adaptation for changing network conditions
             cold_start_threshold: 50,  // Use heuristics until 50 samples
@@ -1344,15 +1509,26 @@ impl TurboSyncManager {
             None
         };
 
-        // 🚀 v1.6.0-SCRAMJET (THRUST VECTORING): Match decompression to download parallelism
-        // BEFORE: 16 decompressions for 64 downloads = 4:1 bottleneck
-        // AFTER:  64 decompressions for 64 downloads = 1:1 balanced pipeline
-        // With LZ4 (3-5x faster than zstd), 64 concurrent decompressions is feasible
-        // Each LZ4 decompression is ~20-50ms, so 64 concurrent = 1280-3200 chunks/second
+        // 🚀 v6.0.5: RAM-aware decompression parallelism
+        // Each concurrent decompression holds a full pack in memory (~5-25MB each)
+        // On 7.8GB Gamma, 64 concurrent decompressions = potential 1.6GB memory spike
+        let default_decomp = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            let ram_mb = (sys.total_memory() / (1024 * 1024)) as usize;
+            match ram_mb {
+                0..=3999     => 2usize,   // micro: minimal
+                4000..=7999  => 4,         // small (Gamma): conservative
+                8000..=15999 => 8,         // medium
+                16000..=31999 => 16,       // large
+                _            => 32,        // xlarge
+            }
+        };
         let decompression_parallelism = std::env::var("Q_DECOMPRESSION_PARALLELISM")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(64);  // v1.6.0-SCRAMJET: 64 concurrent (was 16) - matches downloads
+            .unwrap_or(default_decomp);
         info!("🚀 [v1.6.0-SCRAMJET] Decompression semaphore: {} concurrent tasks (THRUST VECTORING)",
               decompression_parallelism);
 
@@ -1433,7 +1609,7 @@ impl TurboSyncManager {
             chunks_since_wal_sync: AtomicU64::new(0),
             last_wal_sync_time: AtomicU64::new(0),
             metrics: Arc::new(TurboSyncMetrics::default()),
-            peer_registry: Arc::new(RwLock::new(Vec::new())),
+            peer_registry: Arc::new(RwLock::new(EnhancedPeerRegistry::new())),
             network_tx: None, // Set via set_network_channel()
             aegis: Arc::new(Mutex::new(aegis)),
             aegis_secret_key: Arc::new(RwLock::new(secret_key)),
@@ -1819,6 +1995,20 @@ impl TurboSyncManager {
         Ok(self.storage.get_highest_contiguous_block().await.unwrap_or(0))
     }
 
+    /// v6.0.9: Read process RSS from /proc/self/statm (near-zero overhead)
+    /// Returns RSS in megabytes, or None on non-Linux or read failure.
+    #[cfg(target_os = "linux")]
+    fn get_rss_mb() -> Option<u64> {
+        let data = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let rss_pages: u64 = data.split_whitespace().nth(1)?.parse().ok()?;
+        Some(rss_pages * 4 / 1024) // pages (4KB each) → MB
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn get_rss_mb() -> Option<u64> {
+        None // Not available on non-Linux
+    }
+
     /// 🚀 v2.3.3-beta: ENDGAME SYNC OPTIMIZATION
     /// Find the highest block we have stored near the target, even if there are gaps.
     /// This enables "endgame mode" - when we have most blocks but are missing the tip.
@@ -1878,15 +2068,19 @@ impl TurboSyncManager {
         (highest_found, has_gap_blocks)
     }
 
-    /// Register a peer with their highest block height
+    /// Register a peer with their highest block height (v5.2.0: with monotonicity enforcement)
     pub async fn register_peer(&self, peer_id: PeerId, highest_block: u64) {
+        self.register_peer_with_tip(peer_id, highest_block, None).await;
+    }
+
+    /// Register a peer with height and optional tip hash (v5.2.0)
+    pub async fn register_peer_with_tip(&self, peer_id: PeerId, highest_block: u64, tip_hash: Option<[u8; 32]>) {
         let mut registry = self.peer_registry.write().await;
 
-        // Update or insert
-        if let Some(entry) = registry.iter_mut().find(|(p, _)| p == &peer_id) {
-            entry.1 = highest_block;
-        } else {
-            registry.push((peer_id, highest_block));
+        let accepted = registry.update_peer(peer_id, highest_block, tip_hash);
+        if !accepted {
+            warn!("🚫 [PEER REGISTRY] Rejected update from peer {} (monotonicity violations)", peer_id);
+            return;
         }
 
         // 🚀 v2.3.10-beta: Also register with Warp Sync MultiPeerDownloader
@@ -1896,10 +2090,21 @@ impl TurboSyncManager {
         info!("📡 Registered peer {} with height {} (Warp Sync enabled)", peer_id, highest_block);
     }
 
-    /// Get peer registry information for debugging
+    /// Get peer registry information for debugging (backward-compat format)
     pub async fn get_peer_registry_info(&self) -> Vec<(PeerId, u64)> {
         let registry = self.peer_registry.read().await;
-        registry.clone()
+        registry.to_legacy_vec()
+    }
+
+    /// v5.2.0: Get read access to the enhanced peer registry
+    pub async fn get_enhanced_registry(&self) -> tokio::sync::RwLockReadGuard<'_, EnhancedPeerRegistry> {
+        self.peer_registry.read().await
+    }
+
+    /// v5.2.0: Evict stale peers (not heard from in `stale_secs` seconds)
+    pub async fn evict_stale_peers(&self, stale_secs: u64) -> usize {
+        let mut registry = self.peer_registry.write().await;
+        registry.evict_stale(stale_secs)
     }
 
     /// 🤖 v1.4.0-beta: Extract sync features for ML batch size prediction
@@ -2051,7 +2256,7 @@ impl TurboSyncManager {
                 } else {
                     self.peer_trust.get_trust_score(&peer_id_str).unwrap_or(0.5)
                 };
-                (*peer, *height, trust)
+                (peer, height, trust)
             })
             .collect();
 
@@ -2432,13 +2637,29 @@ impl TurboSyncManager {
             // errors when the prepended size didn't match the hint.
 
             tokio::task::spawn_blocking(move || {
-                // 🚀 v2.1.6: Always use None - LZ4 will read prepended size automatically
+                // 🛡️ v5.1.1: Validate prepended size BEFORE decompression to prevent DoS
+                // LZ4 with prepend_size=true stores uncompressed size as first 4 bytes (little-endian u32)
+                // A malicious/corrupted peer could set this to 0xFFFFFFFF (4GB) causing OOM crash
+                const MAX_DECOMPRESSED_SIZE: u32 = 200_000_000; // 200MB limit (matches zstd safety)
+                if compressed_data.len() >= 4 {
+                    let prepended_size = u32::from_le_bytes([
+                        compressed_data[0], compressed_data[1],
+                        compressed_data[2], compressed_data[3],
+                    ]);
+                    if prepended_size > MAX_DECOMPRESSED_SIZE {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("LZ4 prepended size {} exceeds safety limit of {} bytes (possible DoS or corruption)",
+                                    prepended_size, MAX_DECOMPRESSED_SIZE),
+                        ));
+                    }
+                }
                 lz4::block::decompress(&compressed_data, None)
             })
             .await
             .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {}", e))?
             .map_err(|e| {
-                error!("🔍 [LZ4 DEBUG v2.1.6] Decompression failed for pack {}-{}:", pack.start_height, pack.end_height);
+                error!("🔍 [LZ4 DEBUG v5.1.1] Decompression failed for pack {}-{}:", pack.start_height, pack.end_height);
                 error!("   Compressed size: {} bytes", compressed_len);
                 error!("   Expected uncompressed: {} bytes (from pack metadata, NOT used as hint)", uncompressed_size);
                 error!("   First 16 bytes: {:02x?}", first_bytes);
@@ -2750,7 +2971,7 @@ impl TurboSyncManager {
 
             let estimated_network_height_for_balance = {
                 let registry = self.peer_registry.read().await;
-                registry.iter().map(|(_, h)| *h).max().unwrap_or(pack.end_height)
+                registry.max_height().unwrap_or(pack.end_height)
             };
             let blocks_behind_for_balance = estimated_network_height_for_balance
                 .saturating_sub(self.storage.height_cache.cached());
@@ -2879,7 +3100,7 @@ impl TurboSyncManager {
             // Use peer registry to estimate network height (highest known peer)
             let estimated_network_height = {
                 let registry = self.peer_registry.read().await;
-                registry.iter().map(|(_, h)| *h).max().unwrap_or(pack.end_height)
+                registry.max_height().unwrap_or(pack.end_height)
             };
             let blocks_behind = estimated_network_height.saturating_sub(self.storage.height_cache.cached());
 
@@ -3215,6 +3436,178 @@ impl TurboSyncManager {
         Ok(())
     }
 
+    /// v6.1.0 OOM FIX: Apply pre-deserialized blocks directly (zero-copy path)
+    ///
+    /// This bypasses the BlockPack serialize→compress→decompress→deserialize cycle
+    /// that was creating 3 copies of block data in memory simultaneously.
+    /// Saves ~66MB peak memory per chunk on small-tier nodes.
+    async fn apply_blocks_vec(
+        &self,
+        mut blocks: Vec<QBlock>,
+        balance_engine: Option<&BalanceConsensusEngine>,
+        range_start: u64,
+        range_end: u64,
+    ) -> Result<()> {
+        let apply_start = Instant::now();
+
+        // Sort blocks by height (same as apply_block_pack line 2703)
+        if blocks.len() > 100 {
+            blocks.par_sort_unstable_by_key(|b| b.header.height);
+        } else {
+            blocks.sort_by_key(|b| b.header.height);
+        }
+
+        // SHA3 verification (same as apply_block_pack line 2781)
+        let (sha3_valid_count, failed_heights) = self.sha3_verifier.verify_blocks_batch_parallel(&blocks);
+        if !failed_heights.is_empty() {
+            warn!(
+                "⚠️  [SHA3-256 DIRECT] {}/{} blocks failed verification in range {}-{}: {:?}",
+                failed_heights.len(), blocks.len(), range_start, range_end,
+                &failed_heights[..std::cmp::min(5, failed_heights.len())]
+            );
+        } else {
+            debug!(
+                "🚀 [SHA3-256 DIRECT] All {}/{} blocks verified in range {}-{}",
+                sha3_valid_count, blocks.len(), range_start, range_end
+            );
+        }
+
+        // Height safety checks (same as apply_block_pack line 2802)
+        let current_height = self.storage.get_latest_qblock_height().await?.unwrap_or(0);
+        let mut highest_contiguous = current_height;
+        let mut blocks_below_current = 0usize;
+        let mut blocks_forward = 0usize;
+
+        for block in &blocks {
+            if block.header.height <= current_height {
+                blocks_below_current += 1;
+                continue;
+            }
+            if block.header.height == highest_contiguous + 1 {
+                highest_contiguous = block.header.height;
+                blocks_forward += 1;
+            } else if block.header.height > highest_contiguous + 1 {
+                let gap_size = block.header.height - (highest_contiguous + 1);
+                if blocks_forward == 0 && gap_size > 0 {
+                    warn!(
+                        "🚨 [v6.1.0 GAP SKIP] Gap at START! Missing blocks {}-{}",
+                        highest_contiguous + 1, block.header.height - 1
+                    );
+                    highest_contiguous = block.header.height;
+                    blocks_forward += 1;
+                } else {
+                    break; // Stop at gap
+                }
+            }
+        }
+
+        // Safety: never regress height
+        if highest_contiguous < current_height {
+            anyhow::bail!(
+                "SAFETY ABORT: Height regression from {} to {} in direct apply",
+                current_height, highest_contiguous
+            );
+        }
+
+        // Save blocks using batched writes (same as apply_block_pack line 2900)
+        if self.config.enable_batched_writes {
+            // Skip balance processing for extreme sync (same logic as apply_block_pack)
+            let estimated_network_height = {
+                let registry = self.peer_registry.read().await;
+                registry.max_height().unwrap_or(range_end)
+            };
+            let blocks_behind = estimated_network_height.saturating_sub(self.storage.height_cache.cached());
+            let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+            let skip_balances = std::env::var("Q_EXTREME_SKIP_BALANCES")
+                .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+                || blocks_behind > extreme_skip_balances_threshold;
+
+            // Process state changes
+            #[cfg(not(target_os = "windows"))]
+            if let Some(ref state_proc) = self.state_processor {
+                for block in &blocks {
+                    let _ = state_proc.process_block(block);
+                }
+            }
+
+            // Process balance consensus if needed
+            if let Some(engine) = balance_engine {
+                if !skip_balances {
+                    let tx = self.storage.begin_transaction().await?;
+                    for block in &blocks {
+                        match engine.process_block_mining_rewards_tx(&tx, block).await {
+                            Ok(_) => {}
+                            Err(BalanceConsensusError::AlreadyProcessed(_)) => {}
+                            Err(e) => {
+                                error!("❌ [DIRECT] Balance processing failed for block {}: {:?}",
+                                    block.header.height, e);
+                            }
+                        }
+                    }
+                    tx.commit().await?;
+                }
+            }
+
+            // Batch save blocks
+            self.storage.save_qblocks_batch_turbo(&blocks).await
+                .context(format!("Failed to batch save {} blocks (direct apply)", blocks.len()))?;
+
+            // Update height cache
+            let contiguous_height = self.storage.get_highest_contiguous_block().await.unwrap_or(0);
+            let safe_height = contiguous_height.min(range_end);
+            if safe_height > self.storage.height_cache.cached() {
+                self.storage.update_height_cache(safe_height).await;
+            }
+
+            // WAL sync (same logic as apply_block_pack)
+            let use_extreme = std::env::var("Q_EXTREME_SYNC")
+                .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+                || blocks_behind > std::env::var("Q_AUTO_EXTREME_THRESHOLD")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(50_000u64);
+
+            if !use_extreme {
+                let chunks_processed = self.chunks_since_wal_sync.fetch_add(1, Ordering::Relaxed) + 1;
+                let wal_sync_batch_size = std::env::var("Q_WAL_SYNC_BATCH_SIZE")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(50u64);
+                if chunks_processed >= wal_sync_batch_size {
+                    self.storage.sync_wal().await?;
+                    self.chunks_since_wal_sync.store(0, Ordering::Relaxed);
+                }
+            }
+        } else {
+            // Legacy per-block save
+            let _global_guard = self.storage.acquire_global_write_lock().await;
+            let tx = self.storage.begin_transaction().await?;
+            for block in &blocks {
+                tx.save_qblock(block).await?;
+            }
+            tx.commit().await?;
+            self.storage.sync_wal().await?;
+        }
+
+        // Update height pointer if increased
+        if highest_contiguous > current_height {
+            let _global_guard = self.storage.acquire_global_write_lock().await;
+            let actual_current = self.storage.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
+            if highest_contiguous > actual_current {
+                let tx = self.storage.begin_transaction().await?;
+                let latest_height_bytes = highest_contiguous.to_be_bytes().to_vec();
+                tx.put("blocks", b"qblock:latest", &latest_height_bytes).await?;
+                tx.commit().await?;
+                info!("📈 [DIRECT APPLY] Height: {} → {} (+{})",
+                    actual_current, highest_contiguous, highest_contiguous - actual_current);
+            }
+        }
+
+        debug!(
+            "✅ [DIRECT APPLY v6.1.0] {} blocks in {:?} ({} forward, {} skipped)",
+            blocks.len(), apply_start.elapsed(), blocks_forward, blocks_below_current
+        );
+
+        Ok(())
+    }
+
     /// Download and apply a single chunk from a peer
     async fn download_and_apply_chunk(
         &self,
@@ -3225,52 +3618,78 @@ impl TurboSyncManager {
     ) -> Result<()> {
         let chunk_start = Instant::now();
 
-        // 🚀 v1.5.1-beta: BACKPRESSURE MEMORY CHECK - Prevents 100k block stall!
-        // PROBLEM: Without backpressure, downloads queue faster than processing,
-        // causing memory exhaustion at ~100,000 blocks (2-4GB accumulated buffers).
-        // FIX: Check memory pressure before starting download. If memory is High or Critical,
-        // wait for processing to catch up.
-        //
-        // Uses MemoryLimiter.get_memory_pressure() which returns:
-        // - Low: < 60% memory usage (OK to proceed)
-        // - Medium: 60-80% usage (OK to proceed, but be careful)
-        // - High: 80-90% usage (PAUSE downloads until pressure drops)
-        // - Critical: > 90% usage (CRITICAL - definitely pause)
+        // v6.0.9: RSS-BASED BACKPRESSURE - reads /proc/self/statm (zero overhead)
+        // The old MemoryLimiter called sysinfo::System::refresh_processes_specifics which
+        // allocates memory itself and measures SYSTEM memory (includes page cache).
+        // This new check reads OUR OWN RSS directly from procfs - near zero cost.
         let memory_check_start = Instant::now();
         let mut memory_wait_loops = 0u32;
-        // 🚀 v2.3.12-beta: SYNC SPEED FIX - Reduced from 60s max to 6s max
-        // At 1000ms intervals, nodes were waiting up to 60 seconds per chunk!
-        // Now: 100ms intervals x 60 loops = 6 seconds max (10x faster backpressure response)
-        const MAX_MEMORY_WAIT_LOOPS: u32 = 60; // Max 6 seconds of waiting (60 x 100ms)
-        const MEMORY_WAIT_INTERVAL_MS: u64 = 100; // Check every 100ms (was 1000ms - 10x faster!)
+        const MAX_MEMORY_WAIT_LOOPS: u32 = 120; // Max 12 seconds (120 x 100ms)
+        const MEMORY_WAIT_INTERVAL_MS: u64 = 100;
+
+        // v6.1.0: CGROUP-AWARE RSS limit for backpressure
+        // v6.0.9 used sys.total_memory() which reads HOST RAM, but containers/systemd
+        // services have cgroup MemoryMax limits that are lower.
+        // Now reads /sys/fs/cgroup/memory.max (cgroup v2) or memory.limit_in_bytes (v1)
+        // Fallback: 60% of system RAM if cgroup not configured
+        let rss_limit_mb: u64 = {
+            use std::sync::OnceLock;
+            static RSS_LIMIT: OnceLock<u64> = OnceLock::new();
+            *RSS_LIMIT.get_or_init(|| {
+                // Try cgroup v2 first, then v1
+                let cgroup_limit_mb = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+                    .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+                    .ok()
+                    .and_then(|s| {
+                        let s = s.trim();
+                        if s == "max" || s == "-1" { None } // unlimited
+                        else { s.parse::<u64>().ok().map(|b| b / (1024 * 1024)) }
+                    });
+
+                let mut sys = sysinfo::System::new();
+                sys.refresh_memory();
+                let total_mb = sys.total_memory() / (1024 * 1024);
+
+                let effective_mb = cgroup_limit_mb.unwrap_or(total_mb);
+                // Use 55% of effective limit (leave 45% for RocksDB, OS, page cache)
+                let limit = (effective_mb as f64 * 0.55) as u64;
+                info!("🧠 [RSS BACKPRESSURE v6.1.0] RSS limit: {}MB (55% of {}MB effective, cgroup: {:?}, system: {}MB)",
+                    limit, effective_mb, cgroup_limit_mb, total_mb);
+                limit
+            })
+        };
 
         loop {
-            let pressure = self.memory_limiter.get_memory_pressure().await;
-            let memory_ok = matches!(pressure, crate::memory_limiter::MemoryPressure::Low | crate::memory_limiter::MemoryPressure::Medium);
-
-            if memory_ok {
+            // Read RSS from /proc/self/statm (page count, multiply by 4096)
+            let rss_mb = Self::get_rss_mb().unwrap_or(0);
+            if rss_mb < rss_limit_mb {
                 break;
             }
 
             memory_wait_loops += 1;
 
+            // Force malloc to return freed pages WHILE waiting
+            #[cfg(target_os = "linux")]
+            {
+                extern "C" { fn malloc_trim(pad: usize) -> i32; }
+                unsafe { malloc_trim(0); }
+            }
+
             if memory_wait_loops == 1 {
                 warn!(
-                    "⏸️  [BACKPRESSURE v1.5.1] Memory pressure {:?}, pausing download {}..={} (waiting for processing to catch up)",
-                    pressure, start_height, end_height
+                    "⏸️  [RSS BACKPRESSURE v6.0.9] RSS {}MB > {}MB limit, pausing chunk {}..={} + calling malloc_trim",
+                    rss_mb, rss_limit_mb, start_height, end_height
                 );
             }
 
             if memory_wait_loops > MAX_MEMORY_WAIT_LOOPS {
-                // After 60 seconds of waiting, proceed anyway
                 warn!(
-                    "⚠️  [BACKPRESSURE v1.5.1] Memory still {:?} after {}s, proceeding anyway (chunk {}..={})",
-                    pressure, memory_wait_loops, start_height, end_height
+                    "⚠️  [RSS BACKPRESSURE] RSS still {}MB after {}s, proceeding (chunk {}..={})",
+                    rss_mb, memory_wait_loops as u64 * MEMORY_WAIT_INTERVAL_MS / 1000, start_height, end_height
                 );
                 break;
             }
 
-            // Wait for processing to catch up
             tokio::time::sleep(Duration::from_millis(MEMORY_WAIT_INTERVAL_MS)).await;
         }
 
@@ -3343,57 +3762,48 @@ impl TurboSyncManager {
                                 timeout_calc.record_rtt(rtt_ms);
                             }
 
-                            // 🚀 v1.3.9-beta: Convert Vec<QBlock> to BlockPack for apply_block_pack
                             let block_count = blocks.len() as u32;
                             let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(start_height);
                             let actual_end = blocks.last().map(|b| b.header.height).unwrap_or(end_height);
-
-                            // Serialize blocks with postcard (compact binary format)
-                            let serialized = postcard::to_allocvec(&blocks)
-                                .context("Failed to serialize blocks for BlockPack")?;
-                            let uncompressed_size = serialized.len() as u64;
-
-                            // 🚀 v1.6.0-SCRAMJET: Standardize on LZ4 (3-5x faster than zstd)
-                            // LZ4 is optimized for speed over compression ratio - perfect for real-time sync
-                            // Tradeoff: ~15-20% larger output, but 3-5x faster compress/decompress
-                            let compressed = lz4::block::compress(&serialized, None, true)
-                                .context("LZ4 compression failed")?;
-                            let compression_ratio = if uncompressed_size > 0 {
-                                compressed.len() as f32 / uncompressed_size as f32
-                            } else {
-                                1.0f32
-                            };
-
-                            // Calculate checksum with blake3 (fast, cryptographic)
-                            let checksum_hash = blake3::hash(&compressed);
-                            let mut checksum = [0u8; 32];
-                            checksum.copy_from_slice(checksum_hash.as_bytes());
-
-                            let pack = BlockPack {
-                                start_height: actual_start,
-                                end_height: actual_end,
-                                block_count,
-                                compressed_data: compressed.clone(),
-                                compression_ratio,
-                                uncompressed_size,
-                                checksum,
-                                request_id: None,
-                            };
 
                             // 🚀 v1.0.50-beta: Track successful download for peer scoring
                             {
                                 let mut tracker = self.progress_tracker.write().await;
                                 tracker.record_success(
                                     &peer.to_string(),
-                                    compressed.len() as u64,
+                                    (block_count as u64) * 1024, // estimate
                                     block_count as u64,
                                 ).await;
                             }
 
-                            // 📦 v1.3.9-beta: LOUD successful direct response
-                            info!("📦 [P2P DIRECT] ✅ Received {} blocks: {}..={} ({} bytes, RTT: {}ms)",
-                                  block_count, actual_start, actual_end, compressed.len(), rtt_ms);
-                            pack
+                            info!("📦 [P2P DIRECT] ✅ Received {} blocks: {}..={} (RTT: {}ms)",
+                                  block_count, actual_start, actual_end, rtt_ms);
+
+                            // 🚀 v6.1.0 OOM FIX: Apply blocks DIRECTLY without re-serializing
+                            // BEFORE: Vec<QBlock> → postcard serialize → LZ4 compress → BlockPack
+                            //         → LZ4 decompress → postcard deserialize → process
+                            // This created 3 copies of block data in memory simultaneously!
+                            // AFTER: Vec<QBlock> → process directly (zero-copy)
+                            // Saves ~66MB per chunk peak memory (3x reduction)
+                            self.apply_blocks_vec(blocks, None, actual_start, actual_end).await?;
+
+                            // v6.1.0: Record metrics manually since we bypass BlockPack
+                            self.metrics.total_blocks_synced.fetch_add(block_count as u64, Ordering::Relaxed);
+
+                            self.metrics.active_parallel_streams.fetch_sub(1, Ordering::Relaxed);
+
+                            // v6.0.9: Force glibc malloc to return freed pages to OS
+                            #[cfg(target_os = "linux")]
+                            {
+                                extern "C" { fn malloc_trim(pad: usize) -> i32; }
+                                unsafe { malloc_trim(0); }
+                            }
+
+                            let chunk_time = chunk_start.elapsed();
+                            info!("🚀 Downloaded+applied chunk {}-{} from {} in {}ms (direct, retry: {})",
+                                  start_height, end_height, peer, chunk_time.as_millis(), retry_count);
+
+                            return Ok(());
                         }
                         Err(e) => {
                             // 🚀 v1.0.50-beta: Track failure for peer scoring
@@ -3479,6 +3889,17 @@ impl TurboSyncManager {
         self.apply_block_pack(pack, None).await?;
 
         self.metrics.active_parallel_streams.fetch_sub(1, Ordering::Relaxed);
+
+        // v6.0.9: CRITICAL OOM FIX - Force glibc malloc to return freed pages to OS
+        // During sync, each chunk cycle allocates 50-200MB for serialization/deserialization.
+        // glibc malloc keeps freed memory in its arena (fragmentation) and RSS grows unbounded.
+        // malloc_trim(0) releases all freed memory pages back to the OS immediately.
+        // On Gamma (7.8GB RAM), without this, RSS grows from 800MB to 7.2GB in 5 minutes.
+        #[cfg(target_os = "linux")]
+        {
+            extern "C" { fn malloc_trim(pad: usize) -> i32; }
+            unsafe { malloc_trim(0); }
+        }
 
         let chunk_time = chunk_start.elapsed();
 
@@ -4467,6 +4888,18 @@ impl TurboSyncManager {
             zstd::bulk::decompress(&pack.compressed_blocks, 10_000_000)?
         } else {
             // v1.6.0-SCRAMJET: LZ4 (3-5x faster)
+            // 🛡️ v5.1.1: Validate prepended size BEFORE decompression to prevent DoS/OOM
+            const MAX_DECOMPRESSED_SIZE: u32 = 200_000_000; // 200MB limit
+            if pack.compressed_blocks.len() >= 4 {
+                let prepended_size = u32::from_le_bytes([
+                    pack.compressed_blocks[0], pack.compressed_blocks[1],
+                    pack.compressed_blocks[2], pack.compressed_blocks[3],
+                ]);
+                if prepended_size > MAX_DECOMPRESSED_SIZE {
+                    anyhow::bail!("LZ4 prepended size {} exceeds safety limit of {} bytes (possible DoS or corruption)",
+                                  prepended_size, MAX_DECOMPRESSED_SIZE);
+                }
+            }
             lz4::block::decompress(&pack.compressed_blocks, None)
                 .map_err(|e| anyhow::anyhow!("LZ4 decompression failed: {}", e))?
         };

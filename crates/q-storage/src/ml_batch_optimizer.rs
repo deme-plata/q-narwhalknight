@@ -275,7 +275,13 @@ pub struct BatchSizePredictor {
 
 impl BatchSizePredictor {
     /// Create a new batch size predictor with default weights
-    pub fn new(config: BatchOptimizerConfig) -> Self {
+    pub fn new(mut config: BatchOptimizerConfig) -> Self {
+        // v6.1.4: Defensive fix - ensure min <= max to prevent Ord::clamp panic
+        if config.min_batch_size > config.max_batch_size {
+            warn!("🤖 [BATCH OPTIMIZER] min_batch_size ({}) > max_batch_size ({}) - clamping min to max",
+                  config.min_batch_size, config.max_batch_size);
+            config.min_batch_size = config.max_batch_size;
+        }
         // Initialize weights with small values favoring larger batches
         // (will be learned, but start with reasonable priors)
         let weights = [
