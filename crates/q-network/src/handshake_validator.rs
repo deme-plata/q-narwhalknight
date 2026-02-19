@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_handshake_validation_wrong_network() {
         let genesis = vec![1, 2, 3, 4];
-        let validator = HandshakeValidator::new("mainnet".to_string(), genesis.clone());
+        let validator = HandshakeValidator::new("mainnet2026.2".to_string(), genesis.clone());
 
         let peer_handshake = HandshakeMessage::new(
             "testnet".to_string(),

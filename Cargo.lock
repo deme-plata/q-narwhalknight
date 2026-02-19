@@ -552,9 +552,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
 dependencies = [
  "clipboard-win",
+ "image 0.25.8",
  "log",
  "objc2 0.6.3",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "parking_lot 0.12.5",
  "percent-encoding",
@@ -2188,26 +2191,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.70.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
-dependencies = [
- "bitflags 2.10.0",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex",
- "syn 2.0.110",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
@@ -2340,6 +2323,12 @@ checksum = "73290177011694f38ec25e165d0387ab7ea749a4b81cd4c80dae5988229f7a57"
 
 [[package]]
 name = "bitcoin_hashes"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90064b8dee6815a6470d60bad07bbbaee885c0e12d04177138fa3291a01b7bc4"
+
+[[package]]
+name = "bitcoin_hashes"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d7066118b13d4b20b23645932dfb3a81ce7e29f95726c2036fa33cd7b092501"
@@ -2357,6 +2346,32 @@ dependencies = [
  "bitcoin-internals",
  "hex-conservative",
  "serde",
+]
+
+[[package]]
+name = "bitcoincore-rpc"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d6c0ee9354e3dac217db4cb1dd31941073a87fe53c86bcf3eb2b8bc97f00a08"
+dependencies = [
+ "bitcoin-private",
+ "bitcoincore-rpc-json",
+ "jsonrpc",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bitcoincore-rpc-json"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d30ce6f40fb0a2e8d98522796219282504b7a4b14e2b4c26139a7bea6aec6586"
+dependencies = [
+ "bitcoin 0.30.2",
+ "bitcoin-private",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2378,31 +2393,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "bitnet-cpp"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "245980875f0ce11a1246bdf1039513da872862e6714367ba44f007b03180da23"
-dependencies = [
- "bitnet-cpp-sys",
- "enumflags2",
- "thiserror 2.0.17",
- "tracing",
-]
-
-[[package]]
-name = "bitnet-cpp-sys"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be00ca9092d4cd9c30967e8fa3c001b15d1398d021423f0524afb86c00af51f7"
-dependencies = [
- "bindgen 0.70.1",
- "cc",
- "cmake",
- "glob",
- "patch-apply",
 ]
 
 [[package]]
@@ -2758,12 +2748,6 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
-
-[[package]]
-name = "bytecount"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
 name = "bytemuck"
@@ -6866,6 +6850,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 
 [[package]]
+name = "find_cuda_helper"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f9e65c593dd01ac77daad909ea4ad17f0d6d1776193fc8ea766356177abdad"
+dependencies = [
+ "glob",
+]
+
+[[package]]
 name = "fixed-hash"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9942,26 +9935,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jemalloc-sys"
-version = "0.5.4+5.3.0-patched"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac6c1946e1cea1788cbfde01c993b52a10e2da07f4bac608228d1bed20bfebf2"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
-name = "jemallocator"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0de374a9f8e63150e6f5e8a60cc14c668226d7a347d8aee1a45766e3c4dd3bc"
-dependencies = [
- "jemalloc-sys",
- "libc",
-]
-
-[[package]]
 name = "jiff"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10045,6 +10018,17 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "jsonrpc"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8128f36b47411cd3f044be8c1f5cc0c9e24d1d1bfdc45f0a57897b32513053f2"
+dependencies = [
+ "base64 0.13.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -10432,6 +10416,16 @@ name = "libm"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
+
+[[package]]
+name = "libmimalloc-sys"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "667f4fec20f29dfc6bc7357c582d91796c169ad7e2fce709468aefeb2c099870"
+dependencies = [
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "libp2p"
@@ -12004,6 +11998,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "llama-cpp-2"
+version = "0.1.128"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69c4c0faf7e1585af7a04eed504307e54100efd36f9f4e3e171175c8c287d2c2"
+dependencies = [
+ "enumflags2",
+ "llama-cpp-sys-2",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-core",
+]
+
+[[package]]
+name = "llama-cpp-sys-2"
+version = "0.1.128"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2948859dc7b8fc50641d55afacdd134f30317959296dcefe00d06e8d244b382"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "cmake",
+ "find_cuda_helper",
+ "glob",
+ "walkdir",
+]
+
+[[package]]
 name = "llguidance"
 version = "1.0.0"
 source = "git+https://github.com/guidance-ai/llguidance.git?rev=c432092#c432092d37b8ccd1afeeff3e7f9c9a29aae0a87e"
@@ -12213,6 +12234,15 @@ name = "lz4_flex"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05304f8e67dfc93d1b4b990137fd1a7a4c6ad44b60a9c486c8c4486f9d2027ae"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "lzma-sys"
@@ -12544,6 +12574,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimalloc"
+version = "0.1.48"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1ee66a4b64c74f4ef288bcbb9192ad9c3feaad75193129ac8509af543894fd8"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12621,7 +12660,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "candle-core 0.9.2-alpha.2",
@@ -12644,7 +12683,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "apodize",
@@ -12654,7 +12693,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "accelerate-src",
  "ahash 0.8.12",
@@ -12756,7 +12795,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12777,7 +12816,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-paged-attn"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
@@ -12792,7 +12831,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-quant"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
@@ -12820,7 +12859,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "candle-core 0.9.2-alpha.2",
  "image 0.25.8",
@@ -13420,17 +13459,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr 2.7.6",
-]
-
-[[package]]
-name = "nom_locate"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e3c83c053b0713da60c5b8de47fe8e494fe3ece5267b2f23090a07a053ba8f3"
-dependencies = [
- "bytecount",
- "memchr 2.7.6",
- "nom 7.1.3",
 ]
 
 [[package]]
@@ -14785,17 +14813,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "patch-apply"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fe95476ec50a4e9b95ed12a4677ff5996aba4329bf2535fb21c49afaad20809"
-dependencies = [
- "chrono",
- "nom 7.1.3",
- "nom_locate",
-]
-
-[[package]]
 name = "path-slash"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15975,7 +15992,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15994,14 +16011,13 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
  "anyhow",
  "async-trait",
  "bincode 1.3.3",
- "bitnet-cpp",
  "candle-core 0.9.1",
  "candle-nn 0.9.1",
  "chrono",
@@ -16014,6 +16030,7 @@ dependencies = [
  "indexmap 2.12.0",
  "itertools 0.14.0",
  "libp2p 0.54.1",
+ "llama-cpp-2",
  "mistralrs",
  "mistralrs-core",
  "num_cpus",
@@ -16043,7 +16060,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -16061,6 +16078,7 @@ dependencies = [
  "bytes",
  "candle-core 0.9.2-alpha.2",
  "chrono",
+ "ciborium",
  "clap 4.5.51",
  "colored 2.2.0",
  "config",
@@ -16074,9 +16092,12 @@ dependencies = [
  "futures-util",
  "governor",
  "hex",
+ "hickory-resolver 0.24.4",
+ "hmac",
  "hyper 1.8.1",
  "hyper-util",
  "image 0.25.8",
+ "libc",
  "libp2p 0.53.2",
  "lopdf 0.32.0",
  "lru",
@@ -16096,12 +16117,14 @@ dependencies = [
  "q-aegis-ql",
  "q-ai-inference",
  "q-benchmarks",
+ "q-bitcoin-bridge",
  "q-consensus-guard",
  "q-crypto-advanced",
  "q-crypto-simd",
  "q-dag-knight",
  "q-dandelion",
  "q-dex",
+ "q-eternal-cypher",
  "q-governance",
  "q-ipfs-storage",
  "q-kernel-io",
@@ -16117,6 +16140,7 @@ dependencies = [
  "q-quillon-bank",
  "q-recursive-proofs",
  "q-resonance",
+ "q-robot-control",
  "q-sharding",
  "q-storage",
  "q-temporal-shield",
@@ -16143,6 +16167,7 @@ dependencies = [
  "socket2 0.5.10",
  "sysinfo 0.30.13",
  "thiserror 1.0.69",
+ "tikv-jemallocator",
  "tokio",
  "tokio-stream",
  "tokio-test",
@@ -16201,6 +16226,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "q-bitcoin-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "bincode 1.3.3",
+ "bitcoin 0.30.2",
+ "bitcoin_hashes 0.11.0",
+ "bitcoincore-rpc",
+ "blake3",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "libp2p 0.56.0",
+ "lz4_flex 0.11.5",
+ "proptest",
+ "q-network",
+ "q-tor-client",
+ "q-types",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
+ "reqwest 0.12.24",
+ "ring 0.17.14",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.8",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-socks",
+ "tokio-test",
+ "tracing",
+ "uuid 1.18.1",
+]
+
+[[package]]
 name = "q-bitnet-ffi"
 version = "0.1.0"
 dependencies = [
@@ -16220,7 +16281,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16241,6 +16302,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.8",
+ "sled",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -16250,7 +16312,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -16267,6 +16329,7 @@ dependencies = [
  "q-types",
  "serde",
  "serde_json",
+ "sha3 0.10.8",
  "thiserror 1.0.69",
  "tokio",
  "tower 0.4.13",
@@ -16278,7 +16341,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16349,13 +16412,14 @@ dependencies = [
 
 [[package]]
 name = "q-crypto-advanced"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "aegis",
  "anyhow",
  "argon2",
  "async-trait",
  "bincode 1.3.3",
+ "blake3",
  "bulletproofs",
  "criterion 0.5.1",
  "curve25519-dalek",
@@ -16415,7 +16479,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16443,7 +16507,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16471,7 +16535,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16505,8 +16569,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "q-eternal-cypher"
+version = "7.4.2"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "q-crypto-advanced",
+ "q-types",
+ "rand 0.9.2",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "q-fairqueue"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16639,7 +16718,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16726,7 +16805,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16784,12 +16863,13 @@ dependencies = [
  "egui_plot",
  "eventsource-client",
  "futures",
+ "futures-util",
  "half 2.7.1",
  "hex",
  "indicatif",
- "jemallocator",
  "jsonrpc-core",
  "memmap2 0.9.9",
+ "mimalloc",
  "num_cpus",
  "opencl3",
  "openssl",
@@ -16816,9 +16896,11 @@ dependencies = [
  "target-lexicon 0.12.16",
  "tempfile",
  "thiserror 1.0.69",
+ "tikv-jemallocator",
  "tokio",
  "tokio-socks",
  "tokio-test",
+ "tokio-tungstenite 0.21.0",
  "toml 0.8.23",
  "tower-http 0.5.2",
  "tracing",
@@ -16903,7 +16985,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16950,7 +17032,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17036,7 +17118,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17068,7 +17150,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "backoff",
@@ -17109,6 +17191,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.8",
+ "sled",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -17240,7 +17323,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17269,7 +17352,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17304,7 +17387,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17370,7 +17453,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17508,7 +17591,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17538,7 +17621,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17566,7 +17649,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -17591,6 +17674,7 @@ dependencies = [
  "lru",
  "lz4",
  "memmap2 0.9.9",
+ "num_cpus",
  "parking_lot 0.12.5",
  "postcard",
  "prometheus",
@@ -17663,7 +17747,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17683,7 +17767,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -17719,7 +17803,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -17761,7 +17845,7 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -17796,7 +17880,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17828,7 +17912,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -17930,7 +18014,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "3.9.3-beta"
+version = "7.4.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -18091,6 +18175,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+dependencies = [
+ "image 0.25.8",
 ]
 
 [[package]]
@@ -20157,6 +20250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25996b82292a7a57ed3508f052cfff8640d38d32018784acd714758b43da9c8f"
 dependencies = [
  "bitcoin_hashes 0.12.0",
+ "rand 0.8.5",
  "secp256k1-sys 0.8.2",
  "serde",
 ]
@@ -20973,6 +21067,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "spin_on",
+]
+
+[[package]]
+name = "slint-wallet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "bip39",
+ "blake3",
+ "chrono",
+ "core_affinity",
+ "ed25519-dalek",
+ "hex",
+ "num_cpus",
+ "qrcode",
+ "rand 0.8.5",
+ "raw-cpuid 11.6.0",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "sha3 0.10.8",
+ "slint",
+ "slint-build",
+ "tokio",
+ "winapi 0.3.9",
+ "winres",
 ]
 
 [[package]]
@@ -22232,6 +22353,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
 name = "time"
 version = "0.3.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22545,7 +22686,9 @@ checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite 0.21.0",
 ]
 
@@ -24092,6 +24235,7 @@ dependencies = [
  "http 1.3.1",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.8.5",
  "sha1",
  "thiserror 1.0.69",
@@ -24155,6 +24299,12 @@ dependencies = [
  "tokio-util",
  "webrtc-util",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "type1-encoding-parser"
@@ -24872,7 +25022,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "flate2",
- "lz4_flex",
+ "lz4_flex 0.7.5",
  "nom 3.2.1",
  "num-derive 0.3.3",
  "num-traits",
@@ -27187,6 +27337,15 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "winres"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
+dependencies = [
+ "toml 0.5.11",
 ]
 
 [[package]]

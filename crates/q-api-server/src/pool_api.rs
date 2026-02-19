@@ -320,6 +320,180 @@ pub async fn get_payout_stats(
     })))
 }
 
+/// Round history entry for API response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundResponse {
+    /// Round number
+    pub round_id: u64,
+    /// Block height found
+    pub block_height: u64,
+    /// Block hash (hex)
+    pub block_hash: String,
+    /// Total block reward (atomic units)
+    pub block_reward: u64,
+    /// Pool fee (atomic units)
+    pub pool_fee: u64,
+    /// Dev fee (atomic units)
+    pub dev_fee: u64,
+    /// Miner rewards (atomic units)
+    pub miner_rewards: u64,
+    /// Number of payouts
+    pub payout_count: usize,
+    /// Worker who found the block
+    pub found_by: String,
+    /// Timestamp
+    pub timestamp: i64,
+    /// Total shares in round
+    pub total_shares: u64,
+    /// Total difficulty in round
+    pub total_difficulty: f64,
+}
+
+/// Get round history
+pub async fn get_rounds(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PayoutHistoryQuery>,
+) -> Result<Json<Vec<RoundResponse>>, StatusCode> {
+    let pool = state.mining_pool.as_ref().ok_or_else(|| {
+        warn!("Mining pool not initialized");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let limit = query.limit.unwrap_or(50);
+    let rounds = pool.get_round_history();
+
+    let responses: Vec<RoundResponse> = rounds
+        .into_iter()
+        .rev() // Most recent first
+        .take(limit)
+        .map(|r| RoundResponse {
+            round_id: r.round_id,
+            block_height: r.block_height,
+            block_hash: hex::encode(&r.block_hash),
+            block_reward: r.block_reward,
+            pool_fee: r.pool_fee,
+            dev_fee: r.dev_fee,
+            miner_rewards: r.miner_rewards,
+            payout_count: r.payouts.len(),
+            found_by: r.found_by.to_string(),
+            timestamp: r.timestamp.timestamp(),
+            total_shares: r.total_shares,
+            total_difficulty: r.total_difficulty,
+        })
+        .collect();
+
+    Ok(Json(responses))
+}
+
+/// Get specific round by ID
+pub async fn get_round(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pool = state.mining_pool.as_ref().ok_or_else(|| {
+        warn!("Mining pool not initialized");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let rounds = pool.get_round_history();
+    let round = rounds.into_iter()
+        .find(|r| r.round_id == round_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let payouts: Vec<serde_json::Value> = round.payouts.iter().map(|p| {
+        serde_json::json!({
+            "wallet_address": p.wallet_address,
+            "amount": p.amount,
+            "proportion": p.proportion,
+            "difficulty_contribution": p.difficulty_contribution,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "round_id": round.round_id,
+        "block_height": round.block_height,
+        "block_hash": hex::encode(&round.block_hash),
+        "block_reward": round.block_reward,
+        "pool_fee": round.pool_fee,
+        "dev_fee": round.dev_fee,
+        "miner_rewards": round.miner_rewards,
+        "found_by": round.found_by.to_string(),
+        "timestamp": round.timestamp.timestamp(),
+        "total_shares": round.total_shares,
+        "total_difficulty": round.total_difficulty,
+        "payouts": payouts,
+    })))
+}
+
+/// Pool node info response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolNodeResponse {
+    /// Peer ID (hex)
+    pub peer_id: String,
+    /// Stratum port
+    pub stratum_port: u16,
+    /// Current hashrate (H/s)
+    pub hashrate: f64,
+    /// Worker count
+    pub worker_count: u32,
+    /// Region
+    pub region: String,
+    /// Version
+    pub version: String,
+    /// Last seen (unix timestamp)
+    pub last_seen: u64,
+    /// Is accepting connections
+    pub accepting_connections: bool,
+}
+
+/// Get discovered pool nodes
+pub async fn get_pool_nodes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PoolNodeResponse>>, StatusCode> {
+    let coordinator = state.distributed_pool_coordinator.as_ref().ok_or_else(|| {
+        warn!("Distributed pool coordinator not initialized");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let coord = coordinator.read().await;
+    let nodes = coord.known_nodes().await;
+
+    let responses: Vec<PoolNodeResponse> = nodes
+        .into_iter()
+        .map(|n| PoolNodeResponse {
+            peer_id: hex::encode(&n.peer_id),
+            stratum_port: n.stratum_port,
+            hashrate: n.hashrate,
+            worker_count: n.worker_count,
+            region: n.region.clone(),
+            version: n.version.clone(),
+            last_seen: n.last_seen,
+            accepting_connections: n.accepting_connections,
+        })
+        .collect();
+
+    Ok(Json(responses))
+}
+
+/// Hashrate history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashrateEntry {
+    /// Hashrate (H/s)
+    pub hashrate: f64,
+    /// Worker count
+    pub workers: usize,
+    /// Timestamp (unix seconds)
+    pub timestamp: i64,
+}
+
+/// Get hashrate history
+pub async fn get_hashrate_history(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<HashrateEntry>>, StatusCode> {
+    let history = state.pool_hashrate_history.read().await;
+    Ok(Json(history.clone()))
+}
+
 /// Create the pool API router
 pub fn create_pool_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -332,4 +506,11 @@ pub fn create_pool_router() -> Router<Arc<AppState>> {
         .route("/balance/:wallet", get(get_pending_balance))
         .route("/payouts", get(get_payout_history))
         .route("/payouts/stats", get(get_payout_stats))
+        // Round history (v5.7.0)
+        .route("/rounds", get(get_rounds))
+        .route("/rounds/:round_id", get(get_round))
+        // Pool nodes (v5.7.0)
+        .route("/nodes", get(get_pool_nodes))
+        // Hashrate history (v5.7.0)
+        .route("/hashrate/history", get(get_hashrate_history))
 }

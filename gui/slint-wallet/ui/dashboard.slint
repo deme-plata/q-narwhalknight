@@ -1,0 +1,195 @@
+import { Theme, Card, NavButton } from "theme.slint";
+
+export struct TokenInfo {
+    name: string,
+    symbol: string,
+    balance: string,
+    value-usd: string,
+}
+
+export component DashboardScreen inherits Rectangle {
+    in property <string> address: "";
+    in property <string> qug-balance: "0.00";
+    in property <string> qug-value-usd: "$0.00";
+    in property <[TokenInfo]> tokens: [];
+
+    callback navigate(int);
+    callback copy-address();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            alignment: space-between;
+            height: 32px;
+
+            Text {
+                text: "Dashboard";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        // Wallet Address Card
+        Card {
+            height: 52px;
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-md;
+                padding-right: Theme.spacing-md;
+                alignment: space-between;
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Wallet Address";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                    }
+                    Text {
+                        text: root.address;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    width: 60px;
+                    border-radius: Theme.radius-sm;
+                    background: copy-touch.has-hover ? Theme.bg-hover : transparent;
+
+                    copy-touch := TouchArea {
+                        clicked => { root.copy-address(); }
+                    }
+
+                    Text {
+                        text: "Copy";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // QUG Balance Card
+        Card {
+            height: 120px;
+
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                alignment: center;
+                spacing: Theme.spacing-xs;
+
+                Text {
+                    text: "QUG Balance";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.qug-balance;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-3xl;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.qug-value-usd;
+                    color: Theme.accent-green;
+                    font-size: Theme.font-lg;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Custom Tokens
+        Text {
+            text: "My Tokens";
+            color: Theme.text-primary;
+            font-size: Theme.font-lg;
+            font-weight: 600;
+        }
+
+        // Token list (scrollable)
+        Flickable {
+            viewport-height: root.tokens.length * 64px;
+
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+
+                for token[i] in root.tokens : Card {
+                    height: 56px;
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-md;
+                        padding-right: Theme.spacing-md;
+                        alignment: space-between;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: token.name;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-md;
+                                font-weight: 500;
+                            }
+                            Text {
+                                text: token.symbol;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 0;
+                            Text {
+                                text: token.balance;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-md;
+                                horizontal-alignment: right;
+                            }
+                            Text {
+                                text: token.value-usd;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick Actions
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+
+            NavButton {
+                label: "Receive";
+                clicked => { root.navigate(5); }
+            }
+            NavButton {
+                label: "Send";
+                clicked => { root.navigate(2); }
+            }
+            NavButton {
+                label: "History";
+                clicked => { root.navigate(3); }
+            }
+            NavButton {
+                label: "Miner";
+                clicked => { root.navigate(4); }
+            }
+        }
+    }
+}

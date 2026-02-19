@@ -547,7 +547,7 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
           header: {
             height: apiBlock.height || 0,
             phase: apiBlock.phase || 19,
-            networkId: apiBlock.network_id || 'testnet-phase19',
+            networkId: apiBlock.network_id || 'mainnet2026.2',
             prevBlockHash: apiBlock.prev_hash ? hexToUint8Array(apiBlock.prev_hash) : emptyHash,
             solutionsRoot: apiBlock.solutions_root ? hexToUint8Array(apiBlock.solutions_root) : emptyHash,
             txRoot: apiBlock.tx_root ? hexToUint8Array(apiBlock.tx_root) : emptyHash,
@@ -560,15 +560,24 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
             producerId: apiBlock.producer_id || 0,
             totalDifficulty: BigInt(apiBlock.total_difficulty || 0),
           },
-          transactions: (apiBlock.transactions || []).map((tx: any) => ({
-            from: tx.from || tx.sender || '',
-            to: tx.to || tx.recipient || '',
-            amount: tx.amount || tx.value || 0,
-            timestamp: tx.timestamp || apiBlock.timestamp || 0,
-            signature: tx.signature ? hexToUint8Array(tx.signature) : undefined,
-            nonce: tx.nonce,
-          })),
-          miningSolutions: apiBlock.mining_solutions || [],
+          transactions: Array.isArray(apiBlock.transactions)
+            ? apiBlock.transactions.map((tx: any) => ({
+                from: tx.from || tx.sender || '',
+                to: tx.to || tx.recipient || '',
+                amount: tx.amount || tx.value || 0,
+                timestamp: tx.timestamp || apiBlock.timestamp || 0,
+                signature: tx.signature ? hexToUint8Array(tx.signature) : undefined,
+                nonce: tx.nonce,
+              }))
+            : Array.from({ length: apiBlock.tx_count || 0 }, () => ({
+                from: apiBlock.proposer || '',
+                to: '',
+                amount: 0,
+                timestamp: apiBlock.timestamp || 0,
+              })),
+          miningSolutions: Array.isArray(apiBlock.mining_solutions)
+            ? apiBlock.mining_solutions
+            : [],
           dagParents: apiBlock.dag_parents || [],
           quantumMetadata: apiBlock.quantum_metadata || { coherence: 0, entanglement: 0, measurement: 0 },
           balanceUpdates: apiBlock.balance_updates || [],
@@ -587,18 +596,22 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
           lastHttpBlockHeight.current = maxHeight
         }
 
-        // Add blocks to history
+        // Add blocks to history (each block in its own try/catch so one failure doesn't block others)
         newBlocks.forEach(block => {
-          setLatestBlock(block)
-          setLatestBlockSummary(createBlockSummary(block))
-          setBlockHistory(prev => {
-            // Avoid duplicates
-            if (prev.some(b => b.header.height === block.header.height)) {
-              return prev
-            }
-            const newHistory = [block, ...prev]
-            return newHistory.slice(0, MAX_BLOCK_HISTORY)
-          })
+          try {
+            setLatestBlock(block)
+            setLatestBlockSummary(createBlockSummary(block))
+            setBlockHistory(prev => {
+              // Avoid duplicates
+              if (prev.some(b => b.header.height === block.header.height)) {
+                return prev
+              }
+              const newHistory = [block, ...prev]
+              return newHistory.slice(0, MAX_BLOCK_HISTORY)
+            })
+          } catch (blockErr) {
+            console.warn(`[HTTP FALLBACK] Error processing block ${block?.header?.height}:`, blockErr)
+          }
         })
       }
     } catch (err) {

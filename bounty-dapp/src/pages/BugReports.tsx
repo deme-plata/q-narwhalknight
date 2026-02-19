@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Bug, AlertCircle, Check, AlertTriangle } from 'lucide-react'
-import bountyApi, { type BugReportRequest } from '../services/api'
+import bountyApi from '../services/api'
 
 export default function BugReports() {
   const [userId, setUserId] = useState('')
-  const [githubUrl, setGithubUrl] = useState('')
+  const [issueUrl, setIssueUrl] = useState('')
   const [severity, setSeverity] = useState<'Critical' | 'High' | 'Medium' | 'Low'>('Medium')
   const [description, setDescription] = useState('')
   const [success, setSuccess] = useState(false)
@@ -13,12 +13,12 @@ export default function BugReports() {
   const [pointsAwarded, setPointsAwarded] = useState(0)
 
   const submitMutation = useMutation({
-    mutationFn: (data: BugReportRequest) => bountyApi.submitBugReport(data),
+    mutationFn: (data: { user_id: string; issue_url: string; severity: string; description: string }) => bountyApi.submitBugReport(data as any),
     onSuccess: (data) => {
       setSuccess(true)
       setReportId(data.report_id)
       setPointsAwarded(data.points_awarded)
-      setGithubUrl('')
+      setIssueUrl('')
       setDescription('')
     },
   })
@@ -27,7 +27,7 @@ export default function BugReports() {
     e.preventDefault()
     submitMutation.mutate({
       user_id: userId,
-      github_issue_url: githubUrl,
+      issue_url: issueUrl,
       severity,
       description,
     })
@@ -84,7 +84,7 @@ export default function BugReports() {
                 type="text"
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
-                placeholder="Enter your testnet bounty user ID"
+                placeholder="Enter your bounty user ID"
                 className="w-full px-4 py-3 bg-slate-900/50 border border-purple-500/30 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
                 required
               />
@@ -92,16 +92,19 @@ export default function BugReports() {
 
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-2">
-                GitHub Issue URL <span className="text-red-400">*</span>
+                Issue / PR URL <span className="text-red-400">*</span>
               </label>
               <input
                 type="url"
-                value={githubUrl}
-                onChange={(e) => setGithubUrl(e.target.value)}
-                placeholder="https://github.com/org/repo/issues/123"
+                value={issueUrl}
+                onChange={(e) => setIssueUrl(e.target.value)}
+                placeholder="https://code.quillon.xyz/issues/123 or branch URL"
                 className="w-full px-4 py-3 bg-slate-900/50 border border-purple-500/30 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
                 required
               />
+              <p className="text-xs text-slate-400 mt-1">
+                Link to your issue or merge request on code.quillon.xyz
+              </p>
             </div>
 
             <div>

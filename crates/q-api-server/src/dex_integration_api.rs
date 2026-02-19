@@ -197,7 +197,7 @@ pub struct DexApiResponse<T> {
     pub error: Option<String>,
     pub timestamp: u64,
     pub api_version: String,
-    pub network: String, // "mainnet", "testnet"
+    pub network: String, // "mainnet2026.2", "testnet"
 }
 
 impl<T> DexApiResponse<T> {
@@ -208,7 +208,7 @@ impl<T> DexApiResponse<T> {
             error: None,
             timestamp: chrono::Utc::now().timestamp() as u64,
             api_version: "1.0.0".to_string(),
-            network: "mainnet".to_string(), // TODO: Make configurable
+            network: "mainnet2026.2".to_string(), // TODO: Make configurable
         }
     }
 
@@ -219,7 +219,7 @@ impl<T> DexApiResponse<T> {
             error: Some(message),
             timestamp: chrono::Utc::now().timestamp() as u64,
             api_version: "1.0.0".to_string(),
-            network: "mainnet".to_string(),
+            network: "mainnet2026.2".to_string(),
         }
     }
 }
@@ -384,9 +384,84 @@ pub async fn get_supported_tokens(
         },
     ];
 
+    // ✅ v7.2.5: Add wrapped bridge tokens (wBTC, wZEC, wIRON, wETH)
+    {
+        use q_types::{
+            WBTC_TOKEN_ADDRESS, WBTC_DECIMALS,
+            WZEC_TOKEN_ADDRESS, WZEC_DECIMALS,
+            WIRON_TOKEN_ADDRESS, WIRON_DECIMALS,
+            WETH_TOKEN_ADDRESS, WETH_DECIMALS,
+        };
+
+        // Get total supply from token_balances (sum of all minted wrapped tokens)
+        let token_bals = state.token_balances.read().await;
+        let wbtc_supply: u128 = token_bals.iter()
+            .filter(|((_, t), _)| *t == WBTC_TOKEN_ADDRESS)
+            .map(|(_, a)| *a).sum();
+        let wzec_supply: u128 = token_bals.iter()
+            .filter(|((_, t), _)| *t == WZEC_TOKEN_ADDRESS)
+            .map(|(_, a)| *a).sum();
+        let wiron_supply: u128 = token_bals.iter()
+            .filter(|((_, t), _)| *t == WIRON_TOKEN_ADDRESS)
+            .map(|(_, a)| *a).sum();
+        let weth_supply: u128 = token_bals.iter()
+            .filter(|((_, t), _)| *t == WETH_TOKEN_ADDRESS)
+            .map(|(_, a)| *a).sum();
+        drop(token_bals);
+
+        tokens.push(TokenInfo {
+            address: hex::encode(WBTC_TOKEN_ADDRESS),
+            name: "Wrapped Bitcoin".to_string(),
+            symbol: "wBTC".to_string(),
+            decimals: WBTC_DECIMALS,
+            total_supply: wbtc_supply.to_string(),
+            contract_type: "Wrapped".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/bridge/wbtc".to_string()),
+        });
+
+        tokens.push(TokenInfo {
+            address: hex::encode(WZEC_TOKEN_ADDRESS),
+            name: "Wrapped Zcash".to_string(),
+            symbol: "wZEC".to_string(),
+            decimals: WZEC_DECIMALS,
+            total_supply: wzec_supply.to_string(),
+            contract_type: "Wrapped".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/bridge/wzec".to_string()),
+        });
+
+        tokens.push(TokenInfo {
+            address: hex::encode(WIRON_TOKEN_ADDRESS),
+            name: "Wrapped Iron Fish".to_string(),
+            symbol: "wIRON".to_string(),
+            decimals: WIRON_DECIMALS,
+            total_supply: wiron_supply.to_string(),
+            contract_type: "Wrapped".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/bridge/wiron".to_string()),
+        });
+
+        tokens.push(TokenInfo {
+            address: hex::encode(WETH_TOKEN_ADDRESS),
+            name: "Wrapped Ethereum".to_string(),
+            symbol: "wETH".to_string(),
+            decimals: WETH_DECIMALS,
+            total_supply: weth_supply.to_string(),
+            contract_type: "Wrapped".to_string(),
+            verified: true,
+            audit_report: Some("https://audits.q-narwhalknight.dev/bridge/weth".to_string()),
+        });
+    }
+
     // ✅ Add custom tokens from deployed contracts
+    let genesis_ts = q_storage::emission_controller::GENESIS_TIMESTAMP;
     let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
     for contract in deployed_contracts.values() {
+        // v7.1.7: Skip pre-genesis (testnet) contracts
+        if contract.deployed_at < genesis_ts {
+            continue;
+        }
         // Check if this contract has token metadata (symbol indicates it's a token)
         if let Some(symbol) = &contract.metadata.symbol {
             // Get token details from deployment params
@@ -418,7 +493,13 @@ pub async fn get_supported_tokens(
             } else {
                 contract.metadata.name.clone()
             };
-            let decimals = 8; // All Q-NarwhalKnight tokens use 8 decimals (Bitcoin standard)
+            // v5.1.3: Read actual decimals from deployment params instead of hardcoding 8.
+            // Tokens can have different decimal values (e.g. BORK=7, custom=18, etc.)
+            let decimals = contract
+                .deployment_params
+                .get("decimals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(8) as u8;
 
             tokens.push(TokenInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)),

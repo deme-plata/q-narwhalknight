@@ -1,6 +1,7 @@
 pub mod config;
 pub mod cpu;
 pub mod gpu;
+pub mod miner_link;
 pub mod network;
 pub mod ui;
 pub mod utils;

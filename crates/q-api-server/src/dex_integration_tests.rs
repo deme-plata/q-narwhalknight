@@ -545,7 +545,7 @@ mod tests {
         assert!(success_response.data.is_some());
         assert!(success_response.error.is_none());
         assert_eq!(success_response.api_version, "1.0.0");
-        assert_eq!(success_response.network, "mainnet");
+        assert_eq!(success_response.network, "mainnet2026.2");
 
         let error_response: DexApiResponse<String> = DexApiResponse::error("test error".to_string());
         assert!(!error_response.success);

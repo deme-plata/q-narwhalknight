@@ -36,8 +36,18 @@ const LoanApplicationModal: React.FC<LoanApplicationModalProps> = ({
   const [monthlyPayment, setMonthlyPayment] = useState<number>(0);
   const [totalRepayment, setTotalRepayment] = useState<number>(0);
 
-  // Get current QUG price (assuming $42.50 as per implementation doc)
-  const QUG_PRICE = 42.50;
+  // Fetch live QUG price from oracle
+  const [qugPrice, setQugPrice] = useState<number>(42.50);
+  useEffect(() => {
+    fetch('/api/v1/defi/oracle/price/QUG/USD')
+      .then(r => r.json())
+      .then(data => {
+        const price = data?.data?.price || data?.price;
+        if (price && price > 0) setQugPrice(price);
+      })
+      .catch(() => {}); // Fallback to default $42.50
+  }, []);
+  const QUG_PRICE = qugPrice;
 
   // Get available QUG balance
   const qugWallet = walletBalances.find(w => w.symbol === 'QUG');
@@ -95,8 +105,9 @@ const LoanApplicationModal: React.FC<LoanApplicationModalProps> = ({
     try {
       console.log('🏦 Submitting loan application to backend...');
 
-      // Convert frontend amount (100M base) to backend amount (1T base)
-      const loanAmountBackend = parseFloat(loanAmount) * 1e24;
+      // Convert frontend display amount to backend base units (24 decimals)
+      // Must send as string to avoid JSON float precision loss (e.g., 1e27)
+      const loanAmountBackend = (BigInt(Math.round(parseFloat(loanAmount))) * BigInt(10) ** BigInt(24)).toString();
 
       const response = await fetch('/api/v1/quillon-bank/lending/apply', {
         method: 'POST',

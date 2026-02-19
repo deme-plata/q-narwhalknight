@@ -39,6 +39,7 @@ pub mod lattice_aggregate;
 pub mod genus2_vdf;
 pub mod sqisign;
 pub mod bulletproofs_v2;
+pub mod timelock;
 pub mod errors;
 
 pub use frost::{
@@ -66,6 +67,7 @@ pub use bulletproofs_v2::{
     AggregatedRangeProof, AggregatedProver, InnerProductProof,
     DEFAULT_RANGE_BITS,
 };
+pub use timelock::{TimeLockConfig, TimeLockedCiphertext, VDFChallenge};
 pub use errors::CryptoError;
 
 /// Version of the crypto module

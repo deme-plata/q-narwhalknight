@@ -1,18 +1,18 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Share2, Twitter, Github, MessageCircle, Youtube, FileText, Check, AlertCircle } from 'lucide-react'
-import bountyApi, { type SocialActivityRequest } from '../services/api'
+import { Share2, Twitter, Code2, MessageCircle, Youtube, FileText, Check, AlertCircle } from 'lucide-react'
+import bountyApi from '../services/api'
 
 export default function SocialActivity() {
   const [userId, setUserId] = useState('')
-  const [platform, setPlatform] = useState<'twitter' | 'github' | 'discord' | 'medium' | 'youtube'>('twitter')
+  const [platform, setPlatform] = useState<'twitter' | 'code_quillon' | 'discord' | 'medium' | 'youtube'>('twitter')
   const [activityUrl, setActivityUrl] = useState('')
-  const [activityType, setActivityType] = useState<SocialActivityRequest['activity_type']>('Tweet')
+  const [activityType, setActivityType] = useState<string>('Tweet')
   const [success, setSuccess] = useState(false)
   const [basePoints, setBasePoints] = useState(0)
 
   const submitMutation = useMutation({
-    mutationFn: (data: SocialActivityRequest) => bountyApi.submitSocialActivity(data),
+    mutationFn: (data: any) => bountyApi.submitSocialActivity(data),
     onSuccess: (data) => {
       setSuccess(true)
       setBasePoints(data.base_points)
@@ -32,15 +32,23 @@ export default function SocialActivity() {
 
   const platformIcon = {
     twitter: <Twitter className="w-5 h-5" />,
-    github: <Github className="w-5 h-5" />,
+    code_quillon: <Code2 className="w-5 h-5" />,
     discord: <MessageCircle className="w-5 h-5" />,
     medium: <FileText className="w-5 h-5" />,
     youtube: <Youtube className="w-5 h-5" />,
   }
 
+  const platformLabels: Record<string, string> = {
+    twitter: 'Twitter',
+    code_quillon: 'Code',
+    discord: 'Discord',
+    medium: 'Medium',
+    youtube: 'YouTube',
+  }
+
   const activityTypesByPlatform = {
     twitter: ['Tweet', 'Thread'],
-    github: ['GitHubPR', 'GitHubIssue'],
+    code_quillon: ['MergeRequest', 'CodeIssue'],
     discord: ['DiscordMessage'],
     medium: ['Article'],
     youtube: ['Video'],
@@ -94,7 +102,7 @@ export default function SocialActivity() {
                 type="text"
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
-                placeholder="Enter your testnet bounty user ID"
+                placeholder="Enter your bounty user ID"
                 className="w-full px-4 py-3 bg-slate-900/50 border border-purple-500/30 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
                 required
               />
@@ -105,7 +113,7 @@ export default function SocialActivity() {
                 Platform <span className="text-red-400">*</span>
               </label>
               <div className="grid grid-cols-5 gap-2">
-                {(['twitter', 'github', 'discord', 'medium', 'youtube'] as const).map((p) => (
+                {(['twitter', 'code_quillon', 'discord', 'medium', 'youtube'] as const).map((p) => (
                   <button
                     key={p}
                     type="button"
@@ -120,7 +128,7 @@ export default function SocialActivity() {
                     }`}
                   >
                     {platformIcon[p]}
-                    <span className="text-xs mt-1 capitalize">{p}</span>
+                    <span className="text-xs mt-1">{platformLabels[p] || p}</span>
                   </button>
                 ))}
               </div>
@@ -187,9 +195,9 @@ export default function SocialActivity() {
             <div className="space-y-3">
               <ActivityPoints type="Video" points={50} />
               <ActivityPoints type="Article" points={40} />
-              <ActivityPoints type="GitHub PR" points={35} />
+              <ActivityPoints type="Merge Request" points={35} />
               <ActivityPoints type="Thread" points={30} />
-              <ActivityPoints type="GitHub Issue" points={15} />
+              <ActivityPoints type="Code Issue" points={15} />
               <ActivityPoints type="Tweet" points={10} />
               <ActivityPoints type="Discord Message" points={5} />
             </div>

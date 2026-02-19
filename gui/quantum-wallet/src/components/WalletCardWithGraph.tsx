@@ -42,7 +42,19 @@ const MiniGraph = memo(function MiniGraph({
       return { path: '', gradient: '', trend: 0, percentChange: 0 };
     }
 
-    const values = data.map(d => d.balance);
+    // Sort by timestamp and deduplicate consecutive same-balance points
+    const sorted = [...data].sort((a, b) => a.timestamp - b.timestamp);
+    const deduped = sorted.filter((point, i) => {
+      if (i === 0) return true;
+      return point.balance !== sorted[i - 1].balance;
+    });
+    // Need at least 2 unique points
+    const plotData = deduped.length >= 2 ? deduped : sorted;
+    if (plotData.length < 2) {
+      return { path: '', gradient: '', trend: 0, percentChange: 0 };
+    }
+
+    const values = plotData.map(d => d.balance);
     const min = Math.min(...values);
     const max = Math.max(...values);
     const range = max - min || 1;
@@ -55,8 +67,8 @@ const MiniGraph = memo(function MiniGraph({
     const trendDirection = change > 0 ? 1 : change < 0 ? -1 : 0;
 
     // Create SVG path points
-    const points = data.map((d, i) => {
-      const x = (i / (data.length - 1)) * width;
+    const points = plotData.map((d, i) => {
+      const x = (i / (plotData.length - 1)) * width;
       const y = height - ((d.balance - min) / range) * (height - 10) - 5;
       return { x, y };
     });
@@ -233,10 +245,15 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
     }, null, 2));
   }
 
-  // v3.6.10-beta: Always show full 24 decimal precision
+  // Format balance with appropriate decimal places per currency
   const formatBalance = (amount: number) => {
-    // Show full 24 decimal precision for all amounts
-    return amount.toFixed(24);
+    if (wallet.symbol === 'QUGUSD' || wallet.symbol === 'USD') {
+      return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    // QUG and others: show up to 6 significant decimals
+    if (amount >= 1000) return amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    if (amount >= 1) return amount.toLocaleString('en-US', { maximumFractionDigits: 4 });
+    return amount.toLocaleString('en-US', { maximumFractionDigits: 6 });
   };
 
   return (
@@ -299,11 +316,11 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
       </div>
 
       {/* Balance Display */}
-      {/* 🚨 v2.3.7-beta: Show loading state when balance is 0 and no history (data hasn't loaded yet) */}
+      {/* 🚨 v2.3.7-beta: Show loading state only when history is undefined (not yet fetched) */}
       <div className={`mb-3 ${wallet.comingSoon ? 'text-gray-500' : ''}`}>
         {wallet.comingSoon ? (
           <div className="text-2xl font-bold text-gray-500">0.00</div>
-        ) : displayBalance === 0 && (!wallet.history || wallet.history.length === 0) ? (
+        ) : displayBalance === 0 && wallet.history === undefined ? (
           <div className="text-2xl font-bold text-amber-300/60 animate-pulse">Loading...</div>
         ) : (
           <motion.div
@@ -339,8 +356,12 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
           />
         </div>
       ) : !wallet.comingSoon && (
-        <div className="mt-3 mb-2 h-16 relative text-xs text-gray-500">
-          {wallet.history ? `Waiting for data (${wallet.history.length}/2 points)` : 'No history data'}
+        <div className="mt-3 mb-2 h-16 relative flex items-center justify-center text-xs text-gray-500">
+          {wallet.history && wallet.history.length === 0
+            ? 'Click to open bridge'
+            : wallet.history
+              ? `Waiting for data (${wallet.history.length}/2 points)`
+              : 'No history data'}
         </div>
       )}
 

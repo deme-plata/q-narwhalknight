@@ -34,7 +34,7 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
       const response = await fetch('/api/v1/quillon-bank/lending/applications');
       const data = await response.json();
 
-      if (data.success && data.data?.applications) {
+      if (data.success && Array.isArray(data.data?.applications)) {
         // Filter for approved loans only
         const approved = data.data.applications.filter(
           (loan: ActiveLoan) => loan.status === 'approved'

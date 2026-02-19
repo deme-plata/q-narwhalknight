@@ -20,7 +20,10 @@ import {
   Shield, X, Server, Activity, CheckCircle, XCircle,
   AlertTriangle, RefreshCw, Rocket, RotateCcw, Wifi, WifiOff,
   Clock, Layers, Users, Zap, Globe, Radio, ArrowRight,
-  Database, TrendingUp, MonitorSmartphone, Timer, DollarSign, Settings, Save
+  Database, TrendingUp, MonitorSmartphone, Timer, DollarSign, Settings, Save,
+  Landmark, CreditCard, FileText, Send, Eye, Trash2, BadgeCheck, Banknote,
+  ChevronDown, ChevronRight, Copy, Terminal, AlertCircle, Wallet,
+  Key, Cpu, Lock, Fingerprint, Hash, Award
 } from 'lucide-react';
 import { getConnectionInfo } from '../services/api';
 
@@ -159,6 +162,38 @@ function getOutcomeInfo(outcome: any): { name: string; color: string; desc: stri
   return { name: 'Unknown', color: 'text-slate-400', desc: '' };
 }
 
+/** Rich tooltip wrapper - shows educational popover on hover */
+function KTooltip({ children, text, wide }: { children: React.ReactNode; text: string; wide?: boolean }) {
+  const [show, setShow] = useState(false);
+  const [pos, setPos] = useState<'above' | 'below'>('above');
+  const ref = useRef<HTMLDivElement>(null);
+
+  const handleEnter = () => {
+    if (ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setPos(rect.top < 220 ? 'below' : 'above');
+    }
+    setShow(true);
+  };
+
+  return (
+    <div className="relative inline-block" ref={ref}
+      onMouseEnter={handleEnter} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <div className={`absolute z-[9999] ${wide ? 'w-72' : 'w-60'} px-3 py-2.5 rounded-lg
+          bg-slate-900/95 border border-amber-500/30 shadow-xl shadow-amber-900/20 backdrop-blur-sm
+          text-[10px] leading-relaxed text-amber-100/80 pointer-events-none
+          ${pos === 'above' ? 'bottom-full mb-2' : 'top-full mt-2'} left-1/2 -translate-x-1/2`}>
+          <div className="whitespace-pre-line">{text}</div>
+          <div className={`absolute left-1/2 -translate-x-1/2 w-2 h-2 rotate-45 bg-slate-900/95 border-amber-500/30
+            ${pos === 'above' ? 'top-full -mt-1 border-r border-b' : 'bottom-full -mb-1 border-l border-t'}`} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** K-Parameter gauge mini-component */
 function KGauge({ value, label, size = 'sm' }: { value: number; label: string; size?: 'sm' | 'lg' }) {
   const percent = Math.min(value * 100, 100);
@@ -207,9 +242,10 @@ function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
               <div className={`h-full rounded-full ${color} transition-all duration-700`}
                 style={{ width: `${f.value * 100}%` }} />
             </div>
-            <div className="opacity-0 group-hover:opacity-100 absolute -top-8 left-1/2 -translate-x-1/2
-              bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-[9px] text-amber-200/80 whitespace-nowrap z-10 pointer-events-none transition-opacity">
-              {f.key}={f.value.toFixed(2)} (^{f.exp})
+            <div className="opacity-0 group-hover:opacity-100 absolute -top-10 left-1/2 -translate-x-1/2
+              bg-slate-900/95 border border-amber-500/30 rounded-lg px-2 py-1.5 text-[9px] text-amber-200/80 whitespace-nowrap z-[9999] pointer-events-none transition-opacity shadow-lg shadow-amber-900/20">
+              <span className="font-bold text-amber-300">{f.key}</span>={f.value.toFixed(2)} <span className="text-amber-200/50">(weight ^{f.exp})</span>
+              <div className="text-[8px] text-amber-200/50 mt-0.5">{f.label} factor</div>
             </div>
           </div>
         );
@@ -386,17 +422,72 @@ export default function DeployControlPanel() {
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty'>('overview');
+
+  // Bounty admin state
+  const [bountyStats, setBountyStats] = useState<any>(null);
+  const [bountyBugs, setBountyBugs] = useState<any[]>([]);
+  const [bountySocials, setBountySocials] = useState<any[]>([]);
+  const [bountyLoading, setBountyLoading] = useState(false);
+  const [bountyTab, setBountyTab] = useState<'bugs' | 'social'>('bugs');
+
+  // v7.3.0: Node admin settings state
+  const [isNodeAdmin, setIsNodeAdmin] = useState(false);
+  const [adminSettings, setAdminSettings] = useState<any>(null);
+  const [oauthConsents, setOauthConsents] = useState<any[]>([]);
+  const [nodeInfo, setNodeInfo] = useState<any>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+
+  // Bridge state (v7.2.5)
+  const [bridgeData, setBridgeData] = useState<any>(null);
+
+  // Bank CLI state
+  const [bankMetrics, setBankMetrics] = useState<any>(null);
+  const [bankLoans, setBankLoans] = useState<any[]>([]);
+  const [bankAtRisk, setBankAtRisk] = useState<any[]>([]);
+  const [bankReserves, setBankReserves] = useState<any>(null);
+  const [bankMessages, setBankMessages] = useState<any[]>([]);
+  const [bankLoading, setBankLoading] = useState(false);
+  const [bankSection, setBankSection] = useState<string>('dashboard');
+  const [bankCmdLog, setBankCmdLog] = useState<Array<{ cmd: string; result: string; ok: boolean; ts: number }>>([]);
+  const [mintAmount, setMintAmount] = useState('');
+  const [mintCollateral, setMintCollateral] = useState('');
+  const [mintWallet, setMintWallet] = useState('');
+  const [selectedLoanId, setSelectedLoanId] = useState('');
+  const [respondMsgId, setRespondMsgId] = useState('');
+  const [respondContent, setRespondContent] = useState('');
+  const bankLogRef = useRef<HTMLDivElement>(null);
+
   // Check if current wallet is master
   const walletAddress = localStorage.getItem('walletAddress') || '';
   const cleanWallet = walletAddress.replace('qnk', '').replace('qug', '');
-  const isMaster = cleanWallet === MASTER_WALLET;
+  const isMasterWallet = cleanWallet === MASTER_WALLET;
+  const isMaster = isMasterWallet || isNodeAdmin; // Node admin can also open the panel
+
+  // v7.3.0: Check if current wallet is the node's --admin-wallet
+  useEffect(() => {
+    if (!walletAddress) return;
+    fetch('/api/v1/admin/is-admin', {
+      headers: { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}` },
+    })
+      .then(r => r.json())
+      .then(data => setIsNodeAdmin(data.is_admin === true))
+      .catch(() => setIsNodeAdmin(false));
+  }, [walletAddress]);
 
   // Listen for open event from TopBar admin button
   useEffect(() => {
-    const handler = () => setIsOpen(true);
+    const handler = () => {
+      // If node admin but not founder, default to settings tab
+      if (isNodeAdmin && !isMasterWallet) {
+        setActiveTab('settings');
+      }
+      setIsOpen(true);
+    };
     window.addEventListener('open-deploy-panel', handler);
     return () => window.removeEventListener('open-deploy-panel', handler);
-  }, []);
+  }, [isNodeAdmin, isMasterWallet]);
 
   // Track connection info changes (failover events)
   useEffect(() => {
@@ -515,18 +606,162 @@ export default function DeployControlPanel() {
     }
   }, [isMaster, walletAddress]);
 
+  // Bank API helper
+  const bankHeaders = {
+    'X-Wallet-Auth': walletAddress,
+    'Authorization': `Bearer ${walletAddress}`,
+    'Content-Type': 'application/json',
+  };
+
+  const addBankLog = useCallback((cmd: string, result: string, ok: boolean) => {
+    setBankCmdLog(prev => [...prev.slice(-49), { cmd, result, ok, ts: Date.now() }]);
+    setTimeout(() => bankLogRef.current?.scrollTo({ top: bankLogRef.current.scrollHeight, behavior: 'smooth' }), 100);
+  }, []);
+
+  const fetchBankData = useCallback(async () => {
+    if (!isMaster) return;
+    setBankLoading(true);
+    try {
+      const [metricsR, loansR, riskR, reservesR, msgsR] = await Promise.all([
+        fetch('/api/v1/quillon-bank/metrics', { headers: bankHeaders }).catch(() => null),
+        fetch('/api/v1/quillon-bank/lending/applications', { headers: bankHeaders }).catch(() => null),
+        fetch('/api/v1/quillon-bank/lending/at-risk', { headers: bankHeaders }).catch(() => null),
+        fetch('/api/v1/quillon-bank/treasury/reserves', { headers: bankHeaders }).catch(() => null),
+        fetch('/api/v1/quillon-bank/messages/admin/list', { headers: bankHeaders }).catch(() => null),
+      ]);
+
+      if (metricsR?.ok) {
+        try { const j = await metricsR.json(); setBankMetrics(j.data || j); } catch {}
+      }
+      if (loansR?.ok) {
+        try { const j = await loansR.json(); const d = j.data || j; setBankLoans(Array.isArray(d) ? d : []); } catch {}
+      }
+      if (riskR?.ok) {
+        try { const j = await riskR.json(); const d = j.data || j; setBankAtRisk(Array.isArray(d) ? d : []); } catch {}
+      }
+      if (reservesR?.ok) {
+        try { const j = await reservesR.json(); setBankReserves(j.data || j); } catch {}
+      }
+      if (msgsR?.ok) {
+        try { const j = await msgsR.json(); const d = j.data || j; setBankMessages(Array.isArray(d) ? d : []); } catch {}
+      }
+    } catch {}
+    setBankLoading(false);
+  }, [isMaster, walletAddress]);
+
+  // Bank admin actions
+  const bankAction = useCallback(async (cmd: string, method: string, path: string, body?: any) => {
+    addBankLog(cmd, 'Executing...', true);
+    try {
+      const resp = await fetch(path, {
+        method,
+        headers: bankHeaders,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await resp.text();
+      let parsed: any;
+      try { parsed = JSON.parse(text); } catch { parsed = text; }
+      if (resp.ok) {
+        addBankLog(cmd, typeof parsed === 'string' ? parsed : JSON.stringify(parsed.data || parsed, null, 2), true);
+        fetchBankData();
+      } else {
+        addBankLog(cmd, `Error ${resp.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`, false);
+      }
+    } catch (e: any) {
+      addBankLog(cmd, `Network error: ${e.message}`, false);
+    }
+  }, [walletAddress, addBankLog, fetchBankData]);
+
   // Auto-refresh when panel opens
   useEffect(() => {
     if (isOpen && isMaster) {
       fetchStatus();
       setConnInfo(getConnectionInfo());
+      if (activeTab === 'bank') fetchBankData();
+      if (activeTab === 'bridge') {
+        fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
+      }
       const interval = setInterval(() => {
         fetchStatus();
         setConnInfo(getConnectionInfo());
+        if (activeTab === 'bank') fetchBankData();
+        if (activeTab === 'bridge') {
+          fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
+        }
       }, 15000);
       return () => clearInterval(interval);
     }
-  }, [isOpen, isMaster, fetchStatus]);
+  }, [isOpen, isMaster, fetchStatus, activeTab, fetchBankData]);
+
+  // v7.3.0: Fetch node settings data when settings tab is active
+  const fetchSettingsData = useCallback(async () => {
+    const hdrs = { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}` };
+    setSettingsLoading(true);
+    try {
+      const [settingsRes, consentsRes, nodeRes] = await Promise.all([
+        fetch('/api/v1/admin/settings', { headers: hdrs }).catch(() => null),
+        fetch('/api/v1/admin/oauth2/consents', { headers: hdrs }).catch(() => null),
+        fetch('/api/v1/admin/node/info', { headers: hdrs }).catch(() => null),
+      ]);
+      if (settingsRes?.ok) setAdminSettings(await settingsRes.json());
+      if (consentsRes?.ok) setOauthConsents(await consentsRes.json());
+      if (nodeRes?.ok) setNodeInfo(await nodeRes.json());
+    } catch { /* ignore */ }
+    setSettingsLoading(false);
+  }, [walletAddress]);
+
+  useEffect(() => {
+    if (isOpen && isNodeAdmin && activeTab === 'settings') {
+      fetchSettingsData();
+    }
+  }, [isOpen, isNodeAdmin, activeTab, fetchSettingsData]);
+
+  // Fetch bounty admin data
+  const BOUNTY_API = '/bounty-api';
+  const bountyAdminHeaders = { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}` };
+  const fetchBountyData = useCallback(async () => {
+    setBountyLoading(true);
+    try {
+      const hdrs = { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}` };
+      const [statsRes, bugsRes, socialsRes] = await Promise.all([
+        fetch(`${BOUNTY_API}/v1/admin/stats`, { headers: hdrs }).catch(() => null),
+        fetch(`${BOUNTY_API}/v1/admin/bug-reports`, { headers: hdrs }).catch(() => null),
+        fetch(`${BOUNTY_API}/v1/admin/social-activities`, { headers: hdrs }).catch(() => null),
+      ]);
+      if (statsRes?.ok) setBountyStats(await statsRes.json());
+      if (bugsRes?.ok) setBountyBugs(await bugsRes.json());
+      if (socialsRes?.ok) setBountySocials(await socialsRes.json());
+    } catch { /* ignore */ }
+    setBountyLoading(false);
+  }, [walletAddress]);
+
+  useEffect(() => {
+    if (isOpen && isMasterWallet && activeTab === 'bounty') {
+      fetchBountyData();
+    }
+  }, [isOpen, isMasterWallet, activeTab, fetchBountyData]);
+
+  const updateBugStatus = async (userId: string, timestamp: number, status: string) => {
+    try {
+      const res = await fetch(`${BOUNTY_API}/v1/admin/bug-report/update`, {
+        method: 'POST',
+        headers: { ...bountyAdminHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, timestamp, status }),
+      });
+      if (res.ok) fetchBountyData();
+    } catch { /* ignore */ }
+  };
+
+  const updateSocialStatus = async (userId: string, platform: number, timestamp: number, verified: boolean) => {
+    try {
+      const res = await fetch(`${BOUNTY_API}/v1/admin/social-activity/update`, {
+        method: 'POST',
+        headers: { ...bountyAdminHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, platform, timestamp, verified }),
+      });
+      if (res.ok) fetchBountyData();
+    } catch { /* ignore */ }
+  };
 
   // Compute sync metrics (speed, ETA) whenever deployStatus changes
   useEffect(() => {
@@ -776,12 +1011,14 @@ export default function DeployControlPanel() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between p-5 border-b border-emerald-500/20">
+            <div className="flex items-center justify-between p-5 pb-3 border-b border-emerald-500/20">
               <div className="flex items-center gap-3">
                 <Shield className="w-6 h-6 text-emerald-400" />
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
-                  <p className="text-xs text-emerald-300/60">Deploy Control Panel</p>
+                  <p className="text-xs text-emerald-300/60">
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : 'Quillon Bank CLI'}
+                  </p>
                 </div>
               </div>
               <button
@@ -792,7 +1029,41 @@ export default function DeployControlPanel() {
               </button>
             </div>
 
+            {/* Tab Bar */}
+            <div className="flex items-center gap-1 px-5 pt-3 pb-0">
+              {([
+                ...(isMasterWallet ? [
+                  { id: 'overview' as const, icon: Server, label: 'Servers' },
+                  { id: 'bank' as const, icon: Landmark, label: 'Bank CLI' },
+                  { id: 'bridge' as const, icon: Globe, label: 'Bridge Pairs' },
+                  { id: 'bounty' as const, icon: Award, label: 'Bounty' },
+                ] : []),
+                ...(isNodeAdmin ? [
+                  { id: 'settings' as const, icon: Settings, label: 'Node Settings' },
+                ] : []),
+              ]).map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveTab(tab.id);
+                    if (tab.id === 'bank') fetchBankData();
+                    if (tab.id === 'settings') fetchSettingsData();
+                    if (tab.id === 'bounty') fetchBountyData();
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all ${
+                    activeTab === tab.id
+                      ? 'bg-slate-800/60 text-emerald-300 border border-b-0 border-emerald-500/30'
+                      : 'text-amber-200/50 hover:text-amber-200/80 hover:bg-slate-800/30'
+                  }`}
+                >
+                  <tab.icon className="w-3.5 h-3.5" />
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
             <div className="p-5 space-y-4">
+              {activeTab === 'overview' && (<>
               {/* Connection Info Bar */}
               <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3">
                 <div className="flex items-center gap-2 mb-2">
@@ -907,40 +1178,77 @@ export default function DeployControlPanel() {
                       {/* Phase Header */}
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
-                          <span className="text-lg">{getPhaseInfo(convergence.cosmic_phase).icon}</span>
+                          <KTooltip wide text={(() => {
+                            const p = getPhaseInfo(convergence.cosmic_phase).name;
+                            if (p === 'Isolation') return `Isolation Phase — Each server is operating independently, like separate galaxies drifting through space before they discover each other. In cosmology, this mirrors the era before gravitational attraction pulls matter together. During this deployment phase, Alpha and Delta are receiving the new binary in parallel but haven't yet verified compatibility with the primary network. No traffic is being shifted yet — the servers are "isolated" test environments. Think of it like running an experiment in a sealed lab before releasing results to the world.`;
+                            if (p === 'Convergence') return `Convergence Phase — The servers are beginning to find each other and synchronize, like galaxies drawn together by gravity. In physics, convergence describes systems approaching a stable equilibrium point. During this deployment phase, Gamma has received the new binary and is actively syncing its blockchain state with Beta (the primary). The system is verifying that the new version produces identical consensus results. This is the critical "trust but verify" stage — Gamma must prove it can handle real-world traffic before the network commits.`;
+                            if (p === 'Aeon Transition') return `Aeon Transition Phase — A conformal boundary crossing, like the moment a star collapses into a new state of matter. In Roger Penrose's Conformal Cyclic Cosmology, an "aeon transition" is the boundary between one universe-epoch and the next. During this deployment phase, Beta (the primary production server) is being upgraded. Traffic has been shifted to Gamma, and Beta is crossing the boundary from old-version to new-version. This is the most delicate moment — like performing heart surgery while the patient is still alive. The network continues serving users through Gamma while Beta transforms.`;
+                            if (p === 'Harmony') return `Harmony Phase — All servers have converged into a unified, synchronized state — like a solar system where all planets orbit in resonance. In physics, harmonic resonance occurs when oscillating systems naturally synchronize their frequencies. During this deployment phase, all 4 servers (Alpha, Beta, Gamma, Delta) are running the same version, synced to the same blockchain height, and serving traffic together. This is the ideal end-state: maximum redundancy, zero version mismatch, and the network is at peak resilience. The cosmic gardener's garden is in full bloom.`;
+                            return `Cosmic Phase — The current stage of the deployment lifecycle, modeled after phases of cosmic evolution. Each phase represents a different level of network convergence and stability.`;
+                          })()}>
+                            <span className="text-lg cursor-help">{getPhaseInfo(convergence.cosmic_phase).icon}</span>
+                          </KTooltip>
                           <div>
                             <div className="flex items-center gap-1.5">
                               <span className={`text-xs font-bold uppercase tracking-wider ${getPhaseInfo(convergence.cosmic_phase).color}`}>
                                 {getPhaseInfo(convergence.cosmic_phase).name}
                               </span>
-                              <span className="text-[9px] text-amber-200/40">Cosmic Phase</span>
+                              <KTooltip text="Cosmic Phase — Borrowed from cosmology, this label describes where the network sits in its deployment lifecycle. Just like the universe progresses through distinct eras (radiation era, matter era, dark energy era), a distributed network progresses through Isolation → Convergence → Aeon Transition → Harmony as servers adopt new software. The phase determines how cautious the system should be about rolling out changes.">
+                                <span className="text-[9px] text-amber-200/40 cursor-help border-b border-dotted border-amber-200/20">Cosmic Phase</span>
+                              </KTooltip>
                             </div>
-                            <div className="text-[10px] text-amber-200/50 mt-0.5">
-                              K-Kristensen Convergence Readiness
-                            </div>
+                            <KTooltip wide text="K-Kristensen Convergence Readiness — A composite health metric inspired by the Drake Equation in astrobiology. Just as the Drake Equation multiplies several probability factors to estimate how many civilizations exist in our galaxy, the K-Parameter multiplies five independent node-health factors (Genetic stability, Quantum coherence, Thermodynamic efficiency, Information density, and network Resilience) to produce a single readiness score between 0 and 1. A score near 1.0 means the network is perfectly healthy and ready for deployment. The name honors the mathematical tradition of using single-letter parameters (like Boltzmann's k) to capture complex system behavior in one elegant number.">
+                              <div className="text-[10px] text-amber-200/50 mt-0.5 cursor-help border-b border-dotted border-amber-200/20 inline-block">
+                                K-Kristensen Convergence Readiness
+                              </div>
+                            </KTooltip>
                           </div>
                         </div>
 
                         {/* Collective K gauge */}
                         <div className="flex items-center gap-3">
-                          <KGauge value={convergence.collective_k} label="Collective K" size="lg" />
+                          <KTooltip wide text={`Collective K = ${convergence.collective_k.toFixed(2)} — This is the geometric mean of all active nodes' individual K-Parameters. Think of it like a class GPA: one struggling student drags down the average. If any single server has a low K (say 0.31), the collective score drops significantly. This is by design — in distributed systems, you're only as strong as your weakest link. A Collective K above 0.85 means all servers are healthy. Below 0.50 means at least one server needs attention before deploying. The geometric mean (rather than arithmetic mean) is used because it penalizes outliers more heavily — a single failing node cannot be hidden by the others performing well.`}>
+                            <div className="cursor-help">
+                              <KGauge value={convergence.collective_k} label="Collective K" size="lg" />
+                            </div>
+                          </KTooltip>
                           <div className="flex flex-col items-end gap-0.5">
-                            <div className={`text-[10px] font-bold ${getOutcomeInfo(convergence.predicted_outcome).color}`}>
-                              {getOutcomeInfo(convergence.predicted_outcome).name}
-                            </div>
-                            <div className="text-[9px] text-amber-200/40">
-                              {getOutcomeInfo(convergence.predicted_outcome).desc}
-                            </div>
+                            <KTooltip wide text={(() => {
+                              const o = getOutcomeInfo(convergence.predicted_outcome).name;
+                              if (o === 'Communion') return `Communion — The best possible outcome. Like two galaxies merging peacefully into a larger, more beautiful spiral, all servers are in near-perfect agreement. Version match is confirmed, blockchain heights are synchronized, and the synergy bonus means the combined network is actually stronger than the sum of its parts. In game theory, this is a cooperative equilibrium — all players benefit from working together. Safe to deploy without hesitation.`;
+                              if (o === 'Observation') return `Observation — A cautious but stable state. Like astronomers studying a distant galaxy before deciding to send a probe, the network is watching and gathering data. The servers are mostly in agreement but there may be minor version differences or slight height gaps. In diplomacy terms, this is "safe limited contact" — proceed carefully but the risk is low. Deployment is possible but double-check the metrics first.`;
+                              if (o === 'Competition') return `Competition — A state of resource equilibrium with tension. Like two species competing for the same ecological niche, the servers are functional but not in perfect harmony. There may be version mismatches, height differences, or one server lagging behind. In economics, this is a Nash equilibrium — no single server can improve without the others adjusting. Deployment is risky: you should verify that the lagging server catches up before pushing new code, or you might create a network split.`;
+                              if (o === 'Conflict') return `Conflict — A dangerous state where servers disagree on fundamental state. Like tectonic plates building pressure before an earthquake, the network has significant discrepancies. Servers may be on different versions, different chain heights, or producing conflicting blocks. In distributed systems, this is a "split brain" scenario. DO NOT deploy in this state — resolve the conflicts first by checking server logs, resyncing the lagging node, or rolling back a bad deployment.`;
+                              if (o === 'Absorption') return `Absorption — The worst outcome. Like a black hole consuming a star, one version of the network is overwhelming the other. This usually means a deployment went wrong and the new version is incompatible with the old. Emergency rollback is required immediately. In biology, this is analogous to a hostile immune response — the body is rejecting the transplant. Stop all deployment activity and restore the previous binary.`;
+                              return `Predicted Outcome — Based on the current K-Parameters and convergence metrics, this is the system's forecast of what will happen if you deploy now.`;
+                            })()}>
+                              <div className={`text-[10px] font-bold cursor-help ${getOutcomeInfo(convergence.predicted_outcome).color}`}>
+                                {getOutcomeInfo(convergence.predicted_outcome).name}
+                              </div>
+                            </KTooltip>
+                            <KTooltip text={(() => {
+                              const o = getOutcomeInfo(convergence.predicted_outcome).name;
+                              if (o === 'Competition') return `Resource Equilibrium — The servers are in a balanced tension state, like two equally matched chess players. Neither side is winning or losing, but the system isn't fully cooperating either. Resources (CPU, memory, bandwidth, block production) are being contested rather than shared. This often happens when one server is on a newer version than another — they can still communicate, but they're not optimally synchronized. Resolve by ensuring all servers run the same version.`;
+                              return getOutcomeInfo(convergence.predicted_outcome).desc;
+                            })()}>
+                              <div className="text-[9px] text-amber-200/40 cursor-help">
+                                {getOutcomeInfo(convergence.predicted_outcome).desc}
+                              </div>
+                            </KTooltip>
                             {convergence.convergence_safe ? (
-                              <div className="flex items-center gap-0.5 mt-0.5">
-                                <CheckCircle className="w-2.5 h-2.5 text-emerald-400" />
-                                <span className="text-[9px] text-emerald-400 font-medium">Safe to deploy</span>
-                              </div>
+                              <KTooltip text="Safe to Deploy — All pre-flight checks have passed. The Collective K is above the safety threshold, servers are synchronized, and the predicted outcome is cooperative. Like a green traffic light, this means you can proceed with the rolling deployment. The system has high confidence that pushing new code will not cause a network disruption, consensus failure, or data loss. Go ahead and hit that deploy button.">
+                                <div className="flex items-center gap-0.5 mt-0.5 cursor-help">
+                                  <CheckCircle className="w-2.5 h-2.5 text-emerald-400" />
+                                  <span className="text-[9px] text-emerald-400 font-medium">Safe to deploy</span>
+                                </div>
+                              </KTooltip>
                             ) : (
-                              <div className="flex items-center gap-0.5 mt-0.5">
-                                <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
-                                <span className="text-[9px] text-amber-400 font-medium">Verify first</span>
-                              </div>
+                              <KTooltip wide text="Verify First — The system is NOT confident that deploying right now is safe. This is like a yellow traffic light — you CAN proceed, but you should slow down and check your mirrors. Common reasons: a server is lagging behind in block height, version mismatch between nodes, one node has a low K-Parameter score, or the predicted outcome is competitive/conflictual. Before deploying: check that all servers show the same version, verify block heights are within 5 of each other, and ensure no server has a K below 0.50. If in doubt, wait for the metrics to stabilize.">
+                                <div className="flex items-center gap-0.5 mt-0.5 cursor-help">
+                                  <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
+                                  <span className="text-[9px] text-amber-400 font-medium">Verify first</span>
+                                </div>
+                              </KTooltip>
                             )}
                           </div>
                         </div>
@@ -950,33 +1258,44 @@ export default function DeployControlPanel() {
                       <div className="space-y-1.5 mb-2">
                         {convergence.nodes.filter(n => n.k_parameter > 0).map(node => (
                           <div key={node.name} className="flex items-center gap-2">
-                            <span className="text-[10px] text-amber-200/60 w-16 truncate">{node.name.replace('Server ', '')}</span>
+                            <KTooltip wide text={(() => {
+                              const n = node.name.replace('Server ', '');
+                              const k = node.k_parameter;
+                              const health = k > 0.9 ? 'excellent — performing at peak capacity, like a straight-A student' : k > 0.7 ? 'good — healthy and contributing to the network, like a solid B+ student' : k > 0.5 ? 'moderate — functional but with room for improvement. Some factors are pulling the score down' : 'poor — this node needs immediate attention. One or more critical factors are failing';
+                              return `${n} Server — Individual K-Parameter: ${k.toFixed(2)}\n\nThis server's overall health is ${health}.\n\nThe five colored bars represent the individual health factors. Hover each bar to see the exact value. The final K score is calculated by multiplying all five factors together (with different weights), so a single weak factor can significantly drag down the overall score. For example, if Thermodynamic efficiency (T) drops to 0.10 while everything else is 0.66+, the K drops to just ${k.toFixed(2)} because the formula penalizes bottlenecks.`;
+                            })()}>
+                              <span className="text-[10px] text-amber-200/60 w-16 truncate cursor-help">{node.name.replace('Server ', '')}</span>
+                            </KTooltip>
                             <div className="flex-1">
                               <KMetricsBar metrics={node} />
                             </div>
-                            <span className={`text-[10px] font-mono font-bold w-8 text-right ${
-                              node.k_parameter > 0.9 ? 'text-emerald-400' :
-                              node.k_parameter > 0.7 ? 'text-blue-400' :
-                              node.k_parameter > 0.5 ? 'text-amber-400' : 'text-red-400'
-                            }`}>
-                              {node.k_parameter.toFixed(2)}
-                            </span>
+                            <KTooltip text={`K = ${node.k_parameter.toFixed(2)} — This node's composite readiness score. Calculated as:\n\nG^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nColor coding:\n  Green (>0.90): Excellent\n  Blue (>0.70): Good\n  Amber (>0.50): Needs attention\n  Red (<0.50): Critical — investigate immediately\n\nThe exponents (0.25, 0.20, etc.) are weights that determine how much each factor influences the final score. Genetic stability (G) has the highest weight because version compatibility is the most fundamental requirement.`}>
+                              <span className={`text-[10px] font-mono font-bold w-8 text-right cursor-help ${
+                                node.k_parameter > 0.9 ? 'text-emerald-400' :
+                                node.k_parameter > 0.7 ? 'text-blue-400' :
+                                node.k_parameter > 0.5 ? 'text-amber-400' : 'text-red-400'
+                              }`}>
+                                {node.k_parameter.toFixed(2)}
+                              </span>
+                            </KTooltip>
                           </div>
                         ))}
                       </div>
 
                       {/* K-Formula legend */}
-                      <div className="flex items-center justify-center gap-2 text-[8px] text-amber-200/30 mb-2">
-                        <span>k = G<sup>.25</sup></span>
-                        <span>&times;</span>
-                        <span>Q<sup>.20</sup></span>
-                        <span>&times;</span>
-                        <span>T<sup>.20</sup></span>
-                        <span>&times;</span>
-                        <span>I<sup>.15</sup></span>
-                        <span>&times;</span>
-                        <span>R<sup>.20</sup></span>
-                      </div>
+                      <KTooltip wide text={`The K-Parameter Formula — Inspired by the Drake Equation from astrobiology.\n\nk = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nEach letter represents a measurable property of a network node:\n\n• G (Genetic Stability, weight 25%) — Are all servers running compatible software versions? Like DNA compatibility in biology, mismatched versions cause "genetic" conflicts. This has the highest weight because version mismatch is the #1 cause of deployment failures.\n\n• Q (Quantum Coherence, weight 20%) — How well is the node maintaining consensus with its peers? Named after quantum coherence in physics, where particles maintain correlated states. High Q means the node's blockchain state is identical to the network's.\n\n• T (Thermodynamic Efficiency, weight 20%) — Is the node using its resources (CPU, memory, disk I/O) efficiently? In thermodynamics, efficiency measures useful work vs. wasted energy. A node with high CPU usage but low block production has poor T.\n\n• I (Information Density, weight 15%) — How much useful data is the node processing per unit time? In information theory, density measures signal vs. noise. A node producing many blocks with valid transactions has high I. This has the lowest weight because information throughput varies naturally with network load.\n\n• R (Network Resilience, weight 20%) — Can the node recover from failures and maintain connections? Like ecological resilience, this measures how well the node bounces back from disruptions — network partitions, peer disconnections, or high latency.\n\nThe final K is always between 0 and 1. Because the factors are MULTIPLIED (not averaged), a single zero factor kills the entire score — just like one broken link breaks a chain.`}>
+                        <div className="flex items-center justify-center gap-2 text-[8px] text-amber-200/30 mb-2 cursor-help border-b border-dotted border-amber-200/10 pb-1 mx-auto w-fit">
+                          <span>k = G<sup>.25</sup></span>
+                          <span>&times;</span>
+                          <span>Q<sup>.20</sup></span>
+                          <span>&times;</span>
+                          <span>T<sup>.20</sup></span>
+                          <span>&times;</span>
+                          <span>I<sup>.15</sup></span>
+                          <span>&times;</span>
+                          <span>R<sup>.20</sup></span>
+                        </div>
+                      </KTooltip>
 
                       {/* Gardener Wisdom */}
                       <div className="rounded-lg bg-slate-800/30 border border-slate-700/20 px-3 py-2">
@@ -1325,6 +1644,1286 @@ export default function DeployControlPanel() {
                 <RotateCcw className="w-4 h-4" />
                 Rollback
               </motion.button>
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* BANK CLI TAB                                               */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'bank' && (<>
+                {/* Bank CLI Header */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Terminal className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-amber-200/80 uppercase tracking-wider">
+                      Quillon Bank Administration
+                    </span>
+                  </div>
+                  <motion.button
+                    onClick={fetchBankData}
+                    disabled={bankLoading}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] text-emerald-300/70 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${bankLoading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </motion.button>
+                </div>
+
+                {/* Bank Nav Sections */}
+                <div className="flex flex-wrap gap-1">
+                  {([
+                    { id: 'dashboard', icon: Eye, label: 'Dashboard' },
+                    { id: 'mint', icon: Banknote, label: 'Mint/Burn' },
+                    { id: 'loans', icon: FileText, label: 'Loans' },
+                    { id: 'messages', icon: Send, label: 'Messages' },
+                    { id: 'treasury', icon: Wallet, label: 'Treasury' },
+                    { id: 'log', icon: Terminal, label: 'Command Log' },
+                  ] as const).map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => setBankSection(s.id)}
+                      className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                        bankSection === s.id
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-400/40'
+                          : 'text-amber-200/40 hover:text-amber-200/70 hover:bg-slate-800/40 border border-transparent'
+                      }`}
+                    >
+                      <s.icon className="w-3 h-3" />
+                      {s.label}
+                      {s.id === 'loans' && bankLoans.filter(l => l.status === 'pending').length > 0 && (
+                        <span className="ml-0.5 px-1 rounded-full bg-red-500/30 text-red-300 text-[8px] font-bold">
+                          {bankLoans.filter(l => l.status === 'pending').length}
+                        </span>
+                      )}
+                      {s.id === 'messages' && bankMessages.filter((m: any) => !m.read && m.from !== 'Bank').length > 0 && (
+                        <span className="ml-0.5 px-1 rounded-full bg-red-500/30 text-red-300 text-[8px] font-bold">
+                          {bankMessages.filter((m: any) => !m.read && m.from !== 'Bank').length}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                {/* ─── Dashboard Section ─── */}
+                {bankSection === 'dashboard' && (
+                  <div className="space-y-3">
+                    {bankMetrics ? (
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { label: 'Total Accounts', value: bankMetrics.total_accounts ?? 0, icon: Users, color: 'text-blue-400' },
+                          { label: 'Active Loans', value: bankMetrics.active_loans ?? bankLoans.filter(l => l.status === 'approved').length, icon: FileText, color: 'text-amber-400' },
+                          { label: 'Pending Loans', value: bankLoans.filter(l => l.status === 'pending').length, icon: Clock, color: 'text-purple-400' },
+                          { label: 'At-Risk Loans', value: bankAtRisk?.length ?? 0, icon: AlertTriangle, color: 'text-red-400' },
+                          { label: 'Total Deposits', value: `${((bankMetrics.total_deposits ?? 0) / 1e24).toFixed(2)} QUG`, icon: DollarSign, color: 'text-emerald-400' },
+                          { label: 'Messages', value: bankMessages?.length ?? 0, icon: Send, color: 'text-indigo-400' },
+                        ].map(stat => (
+                          <div key={stat.label} className="rounded-lg border border-slate-700/30 bg-slate-800/30 p-2.5">
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <stat.icon className={`w-3 h-3 ${stat.color}`} />
+                              <span className="text-[9px] text-amber-200/50 uppercase tracking-wider">{stat.label}</span>
+                            </div>
+                            <span className="text-sm font-bold text-amber-50">
+                              {typeof stat.value === 'number' ? stat.value.toLocaleString() : stat.value}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-6 text-amber-200/40 text-xs">
+                        {bankLoading ? (
+                          <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-emerald-400/50" />
+                        ) : (
+                          <Landmark className="w-5 h-5 mx-auto mb-2 text-amber-200/30" />
+                        )}
+                        {bankLoading ? 'Loading bank data...' : 'Click Refresh to load bank data'}
+                      </div>
+                    )}
+
+                    {/* Stablecoin Quick Stats */}
+                    <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <CreditCard className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-[10px] font-semibold text-emerald-200/80 uppercase">Quick Actions</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {[
+                          { label: 'Stablecoin Status', cmd: 'GET stablecoin/status', path: '/api/v1/quillon-bank/stablecoin/status' },
+                          { label: 'Risk Assessment', cmd: 'GET risk/status', path: '/api/v1/quillon-bank/risk/status' },
+                          { label: 'Peg Status', cmd: 'GET stablecoin/peg', path: '/api/v1/quillon-bank/stablecoin/peg' },
+                          { label: 'Daily Summary', cmd: 'GET analytics/daily-summary', path: '/api/v1/quillon-bank/analytics/daily-summary' },
+                        ].map(action => (
+                          <motion.button
+                            key={action.label}
+                            onClick={() => { setBankSection('log'); bankAction(action.cmd, 'GET', action.path); }}
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            className="p-2 rounded-lg text-[10px] text-amber-200/60 hover:text-amber-200 bg-slate-700/20 hover:bg-slate-700/40 border border-slate-600/20 hover:border-amber-400/30 transition-all text-center"
+                          >
+                            {action.label}
+                          </motion.button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── Mint/Burn Section ─── */}
+                {bankSection === 'mint' && (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                      <div className="flex items-center gap-1.5 mb-3">
+                        <Banknote className="w-4 h-4 text-emerald-400" />
+                        <span className="text-xs font-semibold text-emerald-200">Mint QUGUSD</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 mb-3">
+                        <div>
+                          <label className="text-[9px] text-amber-200/50 uppercase tracking-wider block mb-1">Amount (QUGUSD)</label>
+                          <input
+                            type="number"
+                            value={mintAmount}
+                            onChange={e => setMintAmount(e.target.value)}
+                            placeholder="1000"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-slate-600/30 text-xs text-amber-50 placeholder-amber-200/20 focus:border-emerald-500/50 focus:outline-none transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] text-amber-200/50 uppercase tracking-wider block mb-1">Collateral (QUG)</label>
+                          <input
+                            type="number"
+                            value={mintCollateral}
+                            onChange={e => setMintCollateral(e.target.value)}
+                            placeholder="25"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-slate-600/30 text-xs text-amber-50 placeholder-amber-200/20 focus:border-emerald-500/50 focus:outline-none transition-colors"
+                          />
+                        </div>
+                      </div>
+                      <div className="mb-3">
+                        <label className="text-[9px] text-amber-200/50 uppercase tracking-wider block mb-1">Recipient Wallet (optional, default: founder)</label>
+                        <input
+                          type="text"
+                          value={mintWallet}
+                          onChange={e => setMintWallet(e.target.value)}
+                          placeholder="qnk..."
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-slate-600/30 text-xs text-amber-50 placeholder-amber-200/20 focus:border-emerald-500/50 focus:outline-none transition-colors font-mono"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <motion.button
+                          onClick={() => {
+                            if (!mintAmount) return;
+                            const amt = Math.round(parseFloat(mintAmount) * 1e24);
+                            const body: any = {
+                              amount: amt,
+                              collateral_type: 'QUG',
+                              collateral_amount: parseFloat(mintCollateral) || parseFloat(mintAmount) / 42.5 * 1.5,
+                            };
+                            if (mintWallet) body.wallet_address = mintWallet;
+                            setBankSection('log');
+                            bankAction(
+                              `MINT ${mintAmount} QUGUSD (collateral: ${body.collateral_amount.toFixed(2)} QUG)`,
+                              'POST',
+                              '/api/v1/quillon-bank/stablecoin/mint',
+                              body,
+                            );
+                          }}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition-all"
+                        >
+                          <Banknote className="w-3.5 h-3.5" />
+                          Mint QUGUSD
+                        </motion.button>
+                        <motion.button
+                          onClick={() => {
+                            if (!mintAmount) return;
+                            const amt = Math.round(parseFloat(mintAmount) * 1e24);
+                            setBankSection('log');
+                            bankAction(
+                              `BURN ${mintAmount} QUGUSD`,
+                              'POST',
+                              '/api/v1/quillon-bank/stablecoin/burn',
+                              { amount: amt, recipient: walletAddress, collateral_type: 'QUG' },
+                            );
+                          }}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium bg-red-500/20 text-red-300 border border-red-500/40 hover:bg-red-500/30 transition-all"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Burn QUGUSD
+                        </motion.button>
+                      </div>
+                    </div>
+
+                    {/* Add Collateral */}
+                    <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Database className="w-3.5 h-3.5 text-blue-400" />
+                        <span className="text-[10px] font-semibold text-blue-200/80 uppercase">Collateral Management</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <motion.button
+                          onClick={() => { setBankSection('log'); bankAction('GET stablecoin/collateral', 'GET', '/api/v1/quillon-bank/stablecoin/collateral'); }}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="p-2 rounded-lg text-[10px] text-blue-200/60 hover:text-blue-200 bg-slate-700/20 hover:bg-slate-700/40 border border-slate-600/20 hover:border-blue-400/30 transition-all"
+                        >
+                          View Collateral
+                        </motion.button>
+                        <motion.button
+                          onClick={() => {
+                            const amt = prompt('QUG amount to add as collateral:');
+                            if (!amt) return;
+                            setBankSection('log');
+                            bankAction(
+                              `ADD COLLATERAL ${amt} QUG`,
+                              'POST',
+                              '/api/v1/quillon-bank/stablecoin/collateral/add',
+                              { collateral_type: 'QUG', amount: parseFloat(amt), reason: 'Admin deposit' },
+                            );
+                          }}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="p-2 rounded-lg text-[10px] text-emerald-200/60 hover:text-emerald-200 bg-slate-700/20 hover:bg-slate-700/40 border border-slate-600/20 hover:border-emerald-400/30 transition-all"
+                        >
+                          + Add Collateral
+                        </motion.button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── Loans Section ─── */}
+                {bankSection === 'loans' && (
+                  <div className="space-y-3">
+                    {/* Pending Loans */}
+                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <FileText className="w-3.5 h-3.5 text-amber-400" />
+                        <span className="text-[10px] font-semibold text-amber-200/80 uppercase">Pending Loan Applications</span>
+                        <span className="ml-auto text-[9px] text-amber-200/40">{bankLoans.filter(l => l.status === 'pending').length} pending</span>
+                      </div>
+
+                      {bankLoans.filter(l => l.status === 'pending').length === 0 ? (
+                        <div className="text-center py-3 text-[10px] text-amber-200/30">No pending loan applications</div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                          {bankLoans.filter(l => l.status === 'pending').map((loan: any) => (
+                            <div key={loan.loan_id} className="flex items-center gap-2 p-2 rounded-lg bg-slate-800/40 border border-slate-700/30">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[10px] font-mono text-amber-200/60 truncate">{loan.borrower_address?.slice(0, 20)}...</span>
+                                  <span className="px-1 py-0.5 rounded bg-amber-500/20 text-[8px] text-amber-300 font-bold">PENDING</span>
+                                </div>
+                                <div className="text-[9px] text-amber-200/40 mt-0.5">
+                                  {((loan.loan_amount || 0) / 1e24).toFixed(2)} QUGUSD | {loan.collateral_amount?.toFixed(2)} {loan.collateral_type} collateral | {loan.term_months}mo @ {loan.interest_rate?.toFixed(1)}%
+                                </div>
+                              </div>
+                              <motion.button
+                                onClick={() => {
+                                  setBankSection('log');
+                                  bankAction(
+                                    `APPROVE LOAN ${loan.loan_id?.slice(0, 8)}`,
+                                    'POST',
+                                    '/api/v1/quillon-bank/lending/approve',
+                                    { loan_id: loan.loan_id },
+                                  );
+                                }}
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                className="px-2 py-1 rounded-lg text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition-all whitespace-nowrap"
+                              >
+                                <BadgeCheck className="w-3 h-3 inline mr-0.5" />
+                                Approve
+                              </motion.button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* At-Risk Loans */}
+                    {bankAtRisk.length > 0 && (
+                      <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                          <span className="text-[10px] font-semibold text-red-200/80 uppercase">At-Risk Loans (below 120%)</span>
+                        </div>
+                        <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                          {bankAtRisk.map((loan: any, i: number) => (
+                            <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-slate-800/40 border border-red-500/20">
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[10px] font-mono text-red-200/60 truncate">{loan.loan_id?.slice(0, 16) || loan.borrower_address?.slice(0, 20)}...</div>
+                                <div className="text-[9px] text-red-200/40">
+                                  Ratio: {loan.collateral_ratio?.toFixed(0)}% | {((loan.loan_amount || 0) / 1e24).toFixed(2)} QUGUSD
+                                </div>
+                              </div>
+                              <motion.button
+                                onClick={() => {
+                                  if (!confirm(`Liquidate loan ${loan.loan_id?.slice(0, 8)}? This seizes collateral.`)) return;
+                                  setBankSection('log');
+                                  bankAction(
+                                    `LIQUIDATE ${loan.loan_id?.slice(0, 8)}`,
+                                    'POST',
+                                    '/api/v1/quillon-bank/lending/liquidate',
+                                    { loan_id: loan.loan_id },
+                                  );
+                                }}
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                className="px-2 py-1 rounded-lg text-[10px] font-medium bg-red-500/20 text-red-300 border border-red-500/40 hover:bg-red-500/30 transition-all whitespace-nowrap"
+                              >
+                                Liquidate
+                              </motion.button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* All Loans Summary */}
+                    <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Layers className="w-3.5 h-3.5 text-blue-400" />
+                        <span className="text-[10px] font-semibold text-blue-200/80 uppercase">All Loans ({bankLoans.length})</span>
+                      </div>
+                      {bankLoans.length === 0 ? (
+                        <div className="text-center py-2 text-[10px] text-amber-200/30">No loans found</div>
+                      ) : (
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                          {bankLoans.map((loan: any) => {
+                            const statusColor = loan.status === 'approved' ? 'text-emerald-300 bg-emerald-500/20' : loan.status === 'pending' ? 'text-amber-300 bg-amber-500/20' : loan.status === 'paid' ? 'text-blue-300 bg-blue-500/20' : 'text-red-300 bg-red-500/20';
+                            return (
+                              <div key={loan.loan_id} className="flex items-center gap-2 p-1.5 rounded bg-slate-800/30 border border-slate-700/20 text-[10px]">
+                                <span className={`px-1 py-0.5 rounded ${statusColor} text-[8px] font-bold uppercase`}>{loan.status}</span>
+                                <span className="font-mono text-amber-200/50 truncate flex-1">{loan.borrower_address?.slice(0, 16)}...</span>
+                                <span className="text-amber-200/60">{((loan.loan_amount || 0) / 1e24).toFixed(2)} QUGUSD</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── Messages Section ─── */}
+                {bankSection === 'messages' && (
+                  <div className="space-y-3">
+                    {/* Unread Messages */}
+                    <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Send className="w-3.5 h-3.5 text-indigo-400" />
+                        <span className="text-[10px] font-semibold text-indigo-200/80 uppercase">User Messages</span>
+                        <span className="ml-auto text-[9px] text-amber-200/40">{bankMessages.length} total</span>
+                      </div>
+
+                      {bankMessages.length === 0 ? (
+                        <div className="text-center py-3 text-[10px] text-amber-200/30">No messages</div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                          {bankMessages.slice(0, 20).map((msg: any) => (
+                            <div key={msg.id} className={`p-2 rounded-lg border ${
+                              msg.from === 'Bank' || msg.from?.Bank !== undefined
+                                ? 'bg-emerald-500/5 border-emerald-500/20'
+                                : msg.read ? 'bg-slate-800/30 border-slate-700/20' : 'bg-indigo-500/10 border-indigo-400/30'
+                            }`}>
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className={`text-[9px] font-bold uppercase ${
+                                  msg.from === 'Bank' || msg.from?.Bank !== undefined ? 'text-emerald-300' : 'text-indigo-300'
+                                }`}>
+                                  {msg.from === 'Bank' || msg.from?.Bank !== undefined ? 'Bank' : 'User'}
+                                </span>
+                                {msg.subject && <span className="text-[9px] text-amber-200/50">- {msg.subject}</span>}
+                                <span className="ml-auto text-[8px] text-amber-200/30 font-mono">
+                                  {msg.wallet_address?.slice(0, 12)}...
+                                </span>
+                                {!msg.read && msg.from !== 'Bank' && msg.from?.Bank === undefined && (
+                                  <span className="px-1 rounded bg-indigo-500/30 text-[7px] text-indigo-300 font-bold">NEW</span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-amber-200/60 line-clamp-2">{msg.content}</div>
+                              {msg.from !== 'Bank' && msg.from?.Bank === undefined && (
+                                <div className="flex gap-1 mt-1.5">
+                                  <motion.button
+                                    onClick={() => { setRespondMsgId(msg.id); setRespondContent(''); }}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    className="px-1.5 py-0.5 rounded text-[9px] text-indigo-300 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 transition-all"
+                                  >
+                                    Reply
+                                  </motion.button>
+                                </div>
+                              )}
+                              {respondMsgId === msg.id && (
+                                <div className="mt-2 space-y-1.5">
+                                  <textarea
+                                    value={respondContent}
+                                    onChange={e => setRespondContent(e.target.value)}
+                                    placeholder="Type your response..."
+                                    rows={2}
+                                    className="w-full px-2 py-1.5 rounded-lg bg-slate-800/60 border border-slate-600/30 text-[10px] text-amber-50 placeholder-amber-200/20 focus:border-indigo-500/50 focus:outline-none resize-none"
+                                  />
+                                  <div className="flex gap-1">
+                                    <motion.button
+                                      onClick={() => {
+                                        if (!respondContent.trim()) return;
+                                        setBankSection('log');
+                                        bankAction(
+                                          `RESPOND to msg ${msg.id?.slice(0, 8)}`,
+                                          'POST',
+                                          '/api/v1/quillon-bank/messages/admin/respond',
+                                          { message_id: msg.id, wallet_address: msg.wallet_address, content: respondContent },
+                                        );
+                                        setRespondMsgId('');
+                                        setRespondContent('');
+                                      }}
+                                      whileHover={{ scale: 1.05 }}
+                                      whileTap={{ scale: 0.95 }}
+                                      className="px-2 py-1 rounded text-[9px] text-emerald-300 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30"
+                                    >
+                                      Send
+                                    </motion.button>
+                                    <button
+                                      onClick={() => setRespondMsgId('')}
+                                      className="px-2 py-1 rounded text-[9px] text-amber-200/40 hover:text-amber-200/60"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── Treasury Section ─── */}
+                {bankSection === 'treasury' && (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-[10px] font-semibold text-emerald-200/80 uppercase">Treasury Reserves</span>
+                      </div>
+                      {bankReserves ? (
+                        <pre className="text-[10px] text-amber-200/60 font-mono bg-slate-900/50 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
+                          {JSON.stringify(bankReserves, null, 2)}
+                        </pre>
+                      ) : (
+                        <div className="text-center py-3 text-[10px] text-amber-200/30">Loading...</div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { label: 'Fetch Reserves', cmd: 'GET treasury/reserves', path: '/api/v1/quillon-bank/treasury/reserves' },
+                        { label: 'Fetch Profits', cmd: 'GET treasury/profits', path: '/api/v1/quillon-bank/treasury/profits' },
+                        { label: 'Customer Analytics', cmd: 'GET analytics/customers', path: '/api/v1/quillon-bank/analytics/customers' },
+                        { label: 'Dev Fee Stats', cmd: 'GET devfee/stats', path: '/api/v1/quillon-bank/devfee/stats' },
+                      ].map(action => (
+                        <motion.button
+                          key={action.label}
+                          onClick={() => { setBankSection('log'); bankAction(action.cmd, 'GET', action.path); }}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="p-2 rounded-lg text-[10px] text-amber-200/60 hover:text-amber-200 bg-slate-700/20 hover:bg-slate-700/40 border border-slate-600/20 hover:border-amber-400/30 transition-all"
+                        >
+                          {action.label}
+                        </motion.button>
+                      ))}
+                    </div>
+
+                    {/* Execute liquidations */}
+                    <motion.button
+                      onClick={() => {
+                        if (!confirm('Execute all pending liquidations?')) return;
+                        setBankSection('log');
+                        bankAction('EXECUTE LIQUIDATIONS', 'POST', '/api/v1/quillon-bank/risk/liquidations/execute', {});
+                      }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      className="w-full p-2 rounded-lg text-[10px] font-medium text-red-200/60 hover:text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 hover:border-red-500/40 transition-all"
+                    >
+                      Execute Pending Liquidations
+                    </motion.button>
+                  </div>
+                )}
+
+                {/* ─── Command Log Section ─── */}
+                {bankSection === 'log' && (
+                  <div className="rounded-lg border border-slate-700/30 bg-slate-900/60 overflow-hidden">
+                    <div className="flex items-center gap-1.5 px-3 py-2 bg-slate-800/50 border-b border-slate-700/30">
+                      <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[10px] font-semibold text-emerald-200/80 uppercase">Command Log</span>
+                      <span className="ml-auto text-[9px] text-amber-200/30">{bankCmdLog.length} entries</span>
+                      {bankCmdLog.length > 0 && (
+                        <button
+                          onClick={() => setBankCmdLog([])}
+                          className="text-[9px] text-red-300/50 hover:text-red-300 transition-colors"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <div ref={bankLogRef} className="max-h-80 overflow-y-auto p-2 space-y-1.5 font-mono">
+                      {bankCmdLog.length === 0 ? (
+                        <div className="text-center py-6 text-[10px] text-amber-200/20">
+                          Run a command to see results here
+                        </div>
+                      ) : (
+                        bankCmdLog.map((entry, i) => (
+                          <div key={i} className="space-y-0.5">
+                            <div className="flex items-start gap-1.5">
+                              <span className="text-emerald-400 text-[10px] select-none shrink-0">$</span>
+                              <span className="text-[10px] text-amber-200/80 break-all">{entry.cmd}</span>
+                              <span className="ml-auto text-[8px] text-amber-200/20 shrink-0">
+                                {new Date(entry.ts).toLocaleTimeString()}
+                              </span>
+                            </div>
+                            <pre className={`text-[9px] ml-4 p-1.5 rounded whitespace-pre-wrap break-all max-h-40 overflow-auto ${
+                              entry.ok ? 'text-emerald-200/60 bg-emerald-500/5' : 'text-red-300/70 bg-red-500/5'
+                            }`}>
+                              {entry.result}
+                            </pre>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* BRIDGE PAIRS TAB (v7.2.5)                                 */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'bridge' && (<>
+                {/* Bridge Header */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-amber-200/80 uppercase tracking-wider">
+                      Cross-Chain Bridge Management
+                    </span>
+                  </div>
+                  <motion.button
+                    onClick={async () => {
+                      try {
+                        const resp = await fetch('/api/v1/bridge/status');
+                        const data = await resp.json();
+                        if (data.success) setBridgeData(data.data);
+                      } catch {}
+                    }}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] text-emerald-300/70 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Refresh
+                  </motion.button>
+                </div>
+
+                {/* Bridge Chain Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { chain: 'Bitcoin', symbol: 'BTC', wrapped: 'wBTC', color: 'amber', icon: '₿', nodeIp: '5.79.79.158:8332', data: bridgeData?.bitcoin },
+                    { chain: 'Zcash', symbol: 'ZEC', wrapped: 'wZEC', color: 'blue', icon: '🛡', nodeIp: '5.79.79.158:8232', data: bridgeData?.zcash },
+                    { chain: 'Iron Fish', symbol: 'IRON', wrapped: 'wIRON', color: 'cyan', icon: '🐟', nodeIp: '5.79.79.158:8021', data: bridgeData?.ironfish },
+                    { chain: 'Ethereum', symbol: 'ETH', wrapped: 'wETH', color: 'indigo', icon: '⟠', nodeIp: '5.79.79.158:8545', data: bridgeData?.ethereum },
+                  ].map(bridge => (
+                    <div key={bridge.chain} className={`rounded-xl border border-${bridge.color}-500/30 bg-${bridge.color}-500/5 p-3`}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className={`w-8 h-8 rounded-lg bg-${bridge.color}-500/20 flex items-center justify-center text-lg`}>
+                          {bridge.icon}
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-white">{bridge.chain}</div>
+                          <div className="text-[10px] text-gray-400">{bridge.wrapped} / QUG</div>
+                        </div>
+                        <div className="ml-auto">
+                          <div className={`w-2 h-2 rounded-full ${bridge.data?.node_connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'}`} />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">Node</span>
+                          <span className={bridge.data?.node_connected ? 'text-emerald-300' : 'text-red-400'}>
+                            {bridge.data?.node_connected ? 'Connected' : 'Offline'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">Synced</span>
+                          <span className={bridge.data?.node_synced ? 'text-emerald-300' : 'text-yellow-300'}>
+                            {bridge.data?.node_synced ? 'Yes' : 'Syncing...'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">Total Locked</span>
+                          <span className="text-white font-mono">
+                            {(bridge.data?.total_locked || 0).toFixed(bridge.symbol === 'BTC' ? 8 : 4)} {bridge.symbol}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">Total Minted</span>
+                          <span className="text-amber-300 font-mono">
+                            {(bridge.data?.total_minted || 0).toFixed(bridge.symbol === 'BTC' ? 8 : 4)} {bridge.wrapped}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">Active Bridges</span>
+                          <span className="text-white">{bridge.data?.active_bridges || 0}</span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-400">RPC Endpoint</span>
+                          <span className="text-gray-500 font-mono text-[8px]">{bridge.nodeIp}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Bridge Pool Management */}
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Database className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-amber-200">Bridge Liquidity Pools</span>
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      { pair: 'wBTC / QUG', poolId: 'pool-qug-wbtc-bridge', color: 'amber' },
+                      { pair: 'wZEC / QUG', poolId: 'pool-qug-wzec-bridge', color: 'blue' },
+                      { pair: 'wIRON / QUG', poolId: 'pool-qug-wiron-bridge', color: 'cyan' },
+                      { pair: 'wETH / QUG', poolId: 'pool-qug-weth-bridge', color: 'indigo' },
+                    ].map(pool => (
+                      <div key={pool.poolId} className="flex items-center justify-between bg-slate-800/40 rounded-lg p-2.5">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-6 h-6 rounded-full bg-${pool.color}-500/30 flex items-center justify-center text-[10px]`}>
+                            {pool.pair.split(' ')[0].charAt(0)}
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-white">{pool.pair}</div>
+                            <div className="text-[9px] text-gray-500 font-mono">{pool.poolId}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-[9px] text-emerald-300 font-medium">ACTIVE</span>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-[9px] text-amber-300 font-medium">MASTER</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-amber-500/10">
+                    <p className="text-[9px] text-amber-200/40 italic">
+                      Bridge pools are system-owned by the master wallet. Liquidity is automatically managed
+                      through the mint/burn bridge mechanism. Pools were bootstrapped at node startup.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Multi-Sig Committee Status (v7.3.2) */}
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Shield className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-bold text-emerald-200">Multi-Sig Bridge Committee</span>
+                    <span className="ml-auto px-1.5 py-0.5 rounded bg-emerald-500/20 text-[9px] text-emerald-300 font-medium">
+                      7-of-11 THRESHOLD
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                      <div className="text-lg font-bold text-emerald-300">{bridgeData?.committee?.size || 11}</div>
+                      <div className="text-[9px] text-gray-400">Committee Size</div>
+                    </div>
+                    <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                      <div className="text-lg font-bold text-amber-300">{bridgeData?.committee?.epoch || '--'}</div>
+                      <div className="text-[9px] text-gray-400">Current Epoch</div>
+                    </div>
+                    <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                      <div className="text-lg font-bold text-purple-300">{bridgeData?.committee?.attestations_total || 0}</div>
+                      <div className="text-[9px] text-gray-400">Total Attestations</div>
+                    </div>
+                  </div>
+
+                  {/* Committee Members */}
+                  <div className="space-y-1 mb-3">
+                    <div className="text-[10px] text-gray-400 font-medium mb-1">Active Committee Members</div>
+                    {(bridgeData?.committee?.members || []).length > 0 ? (
+                      (bridgeData?.committee?.members || []).slice(0, 5).map((member: any, i: number) => (
+                        <div key={i} className="flex items-center justify-between bg-slate-800/30 rounded px-2 py-1">
+                          <div className="flex items-center gap-1.5">
+                            <div className={`w-1.5 h-1.5 rounded-full ${member.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
+                            <span className="text-[9px] text-gray-300 font-mono">{(member.peer_id || '').slice(0, 16)}...</span>
+                          </div>
+                          <span className="text-[9px] text-emerald-300">{member.attestations || 0} att.</span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-[9px] text-gray-500 italic">Committee initializing... (need 7+ peers)</div>
+                    )}
+                    {(bridgeData?.committee?.members || []).length > 5 && (
+                      <div className="text-[9px] text-gray-500 text-center">
+                        +{(bridgeData?.committee?.members || []).length - 5} more members
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Attestation Metrics */}
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Pending Claims</span>
+                      <span className="text-amber-300">{bridgeData?.committee?.pending_claims || 0}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Approved Claims</span>
+                      <span className="text-emerald-300">{bridgeData?.committee?.approved_claims || 0}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Rejected Claims</span>
+                      <span className="text-red-400">{bridgeData?.committee?.rejected_claims || 0}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Avg Response</span>
+                      <span className="text-gray-300">{bridgeData?.committee?.avg_response_ms || '--'}ms</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Epoch Rotation</span>
+                      <span className="text-gray-300">Every 100 blocks</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Mode</span>
+                      <span className={`${(bridgeData?.committee?.members || []).length >= 7 ? 'text-emerald-300' : 'text-yellow-300'}`}>
+                        {(bridgeData?.committee?.members || []).length >= 7 ? 'Multi-Sig' : 'Single-Node Fallback'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bridge Architecture Diagram */}
+                <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Layers className="w-4 h-4 text-purple-400" />
+                    <span className="text-xs font-bold text-purple-200">Decentralized Bridge Architecture (v2.0)</span>
+                  </div>
+                  <pre className="text-[9px] text-slate-400 font-mono leading-relaxed whitespace-pre">
+{`  Bitcoin     Zcash      Iron Fish    Ethereum
+  (Knots)    (Zebra)      (Node)      (Geth)
+     |          |            |           |
+  [Lock]     [Lock]      [Lock]      [Lock ETH]
+     |          |            |           |
+     └──────────┴────────────┴───────────┘
+                      |
+              ┌───────┴───────┐
+              │  7-of-11      │
+              │  Committee    │ ← Gossipsub Attestations
+              │  Validation   │   (CBOR/Ed25519 signed)
+              └───────┬───────┘
+                      |
+         ┌────────────┼────────────┐
+         │    QNK Bridge Engine    │
+         │   Mint/Burn + AMM DEX  │
+         └─┬─────┬─────┬──────┬───┘
+           │     │     │      │
+       wBTC  wZEC  wIRON  wETH  / QUG
+        Pool  Pool  Pool   Pool`}
+                  </pre>
+                </div>
+
+                {/* Bridge Server Info */}
+                <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Server className="w-4 h-4 text-indigo-400" />
+                    <span className="text-xs font-bold text-indigo-200">Server Delta (Bridge Nodes)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">IP Address</span>
+                      <span className="text-white font-mono">5.79.79.158</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Role</span>
+                      <span className="text-amber-300">Bridge Node Host</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Bitcoin Knots</span>
+                      <span className="text-amber-300 font-mono">:8332</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Zcash Zebra</span>
+                      <span className="text-blue-300 font-mono">:8232</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Iron Fish</span>
+                      <span className="text-cyan-300 font-mono">:8021</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Storage</span>
+                      <span className="text-gray-300">/home/data/ (7.2TB)</span>
+                    </div>
+                  </div>
+                </div>
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* BOUNTY ADMIN TAB                                          */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'bounty' && (<>
+                {bountyLoading && !bountyStats ? (
+                  <div className="flex items-center justify-center py-16">
+                    <RefreshCw className="w-6 h-6 text-emerald-400 animate-spin" />
+                  </div>
+                ) : (
+                  <>
+                    {/* Stats Summary */}
+                    {bountyStats && (
+                      <div className="grid grid-cols-5 gap-2">
+                        {[
+                          { label: 'Users', value: bountyStats.total_users, color: 'text-emerald-400' },
+                          { label: 'Bug Reports', value: bountyStats.total_bug_reports, color: 'text-blue-400' },
+                          { label: 'Pending Bugs', value: bountyStats.pending_bug_reports, color: 'text-amber-400' },
+                          { label: 'Social Posts', value: bountyStats.total_social_activities, color: 'text-purple-400' },
+                          { label: 'Pending Social', value: bountyStats.pending_social_activities, color: 'text-pink-400' },
+                        ].map(s => (
+                          <div key={s.label} className="rounded-lg border border-slate-700/50 bg-slate-800/30 p-3 text-center">
+                            <div className={`text-lg font-bold ${s.color}`}>{s.value}</div>
+                            <div className="text-[10px] text-amber-200/40 uppercase tracking-wider">{s.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Sub-tabs: Bugs / Social */}
+                    <div className="flex items-center gap-2">
+                      {(['bugs', 'social'] as const).map(t => (
+                        <button
+                          key={t}
+                          onClick={() => setBountyTab(t)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                            bountyTab === t
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                              : 'text-amber-200/50 hover:text-amber-200/80 hover:bg-slate-800/30'
+                          }`}
+                        >
+                          {t === 'bugs' ? 'Bug Reports' : 'Social Activities'}
+                        </button>
+                      ))}
+                      <button
+                        onClick={fetchBountyData}
+                        className="ml-auto p-1.5 rounded-lg text-amber-200/40 hover:text-emerald-300 hover:bg-emerald-500/10 transition-all"
+                        title="Refresh"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${bountyLoading ? 'animate-spin' : ''}`} />
+                      </button>
+                    </div>
+
+                    {/* Bug Reports Table */}
+                    {bountyTab === 'bugs' && (
+                      <div className="space-y-2">
+                        {bountyBugs.length === 0 ? (
+                          <div className="text-center py-8 text-amber-200/30 text-xs">No bug reports submitted yet</div>
+                        ) : bountyBugs.map((bug: any, i: number) => (
+                          <div key={i} className="rounded-lg border border-slate-700/40 bg-slate-800/20 p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    bug.severity === 'Critical' ? 'bg-red-500/20 text-red-400' :
+                                    bug.severity === 'High' ? 'bg-orange-500/20 text-orange-400' :
+                                    bug.severity === 'Medium' ? 'bg-amber-500/20 text-amber-400' :
+                                    'bg-slate-500/20 text-slate-400'
+                                  }`}>{bug.severity}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                    bug.status === 'Submitted' ? 'bg-blue-500/20 text-blue-300' :
+                                    bug.status === 'Verified' ? 'bg-emerald-500/20 text-emerald-300' :
+                                    bug.status === 'Fixed' ? 'bg-green-500/20 text-green-300' :
+                                    bug.status === 'Duplicate' || bug.status === 'Invalid' ? 'bg-red-500/20 text-red-300' :
+                                    'bg-amber-500/20 text-amber-300'
+                                  }`}>{bug.status}</span>
+                                  <span className="text-[10px] text-amber-200/30">{bug.points} pts</span>
+                                </div>
+                                <div className="text-xs text-white/80 truncate">{bug.description || 'No description'}</div>
+                                <div className="flex items-center gap-3 mt-1">
+                                  {bug.issue_url && (
+                                    <a href={bug.issue_url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-blue-400 hover:underline truncate max-w-[200px]">
+                                      {bug.issue_url}
+                                    </a>
+                                  )}
+                                  <span className="text-[10px] text-amber-200/20">
+                                    User: {bug.user_id?.slice(0, 8)}...
+                                  </span>
+                                  <span className="text-[10px] text-amber-200/20">
+                                    {new Date(bug.timestamp).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              </div>
+                              {/* Action buttons */}
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                {bug.status === 'Submitted' && (
+                                  <>
+                                    <button
+                                      onClick={() => updateBugStatus(bug.user_id, bug.timestamp, 'Verified')}
+                                      className="px-2 py-1 rounded text-[10px] font-medium bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-all"
+                                      title="Approve"
+                                    >
+                                      <CheckCircle className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => updateBugStatus(bug.user_id, bug.timestamp, 'Invalid')}
+                                      className="px-2 py-1 rounded text-[10px] font-medium bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-all"
+                                      title="Reject"
+                                    >
+                                      <XCircle className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => updateBugStatus(bug.user_id, bug.timestamp, 'Duplicate')}
+                                      className="px-2 py-1 rounded text-[10px] font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-all"
+                                      title="Duplicate"
+                                    >
+                                      <Copy className="w-3 h-3" />
+                                    </button>
+                                  </>
+                                )}
+                                {bug.status === 'Verified' && (
+                                  <button
+                                    onClick={() => updateBugStatus(bug.user_id, bug.timestamp, 'Fixed')}
+                                    className="px-2 py-1 rounded text-[10px] font-medium bg-green-500/20 text-green-300 hover:bg-green-500/30 transition-all"
+                                    title="Mark Fixed"
+                                  >
+                                    Fixed
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Social Activities Table */}
+                    {bountyTab === 'social' && (
+                      <div className="space-y-2">
+                        {bountySocials.length === 0 ? (
+                          <div className="text-center py-8 text-amber-200/30 text-xs">No social activities submitted yet</div>
+                        ) : bountySocials.map((social: any, i: number) => (
+                          <div key={i} className="rounded-lg border border-slate-700/40 bg-slate-800/20 p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                    social.platform === 'Twitter' ? 'bg-sky-500/20 text-sky-400' :
+                                    social.platform === 'GitHub' ? 'bg-slate-500/20 text-slate-300' :
+                                    social.platform === 'Discord' ? 'bg-indigo-500/20 text-indigo-400' :
+                                    social.platform === 'YouTube' ? 'bg-red-500/20 text-red-400' :
+                                    'bg-purple-500/20 text-purple-400'
+                                  }`}>{social.platform}</span>
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-600/30 text-slate-300">{social.activity_type}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                    social.verified ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                                  }`}>{social.verified ? 'Verified' : 'Pending'}</span>
+                                  <span className="text-[10px] text-amber-200/30">{social.engagement_score} pts</span>
+                                </div>
+                                <div className="flex items-center gap-3 mt-1">
+                                  {social.content_url && (
+                                    <a href={social.content_url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-blue-400 hover:underline truncate max-w-[300px]">
+                                      {social.content_url}
+                                    </a>
+                                  )}
+                                  <span className="text-[10px] text-amber-200/20">
+                                    User: {social.user_id?.slice(0, 8)}...
+                                  </span>
+                                  <span className="text-[10px] text-amber-200/20">
+                                    {new Date(social.timestamp).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              </div>
+                              {/* Action buttons */}
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                {!social.verified && (
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        const platformMap: Record<string, number> = { Twitter: 0, GitHub: 1, Discord: 2, Medium: 3, YouTube: 4 };
+                                        updateSocialStatus(social.user_id, platformMap[social.platform] ?? 0, social.timestamp, true);
+                                      }}
+                                      className="px-2 py-1 rounded text-[10px] font-medium bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-all"
+                                      title="Approve"
+                                    >
+                                      <CheckCircle className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        const platformMap: Record<string, number> = { Twitter: 0, GitHub: 1, Discord: 2, Medium: 3, YouTube: 4 };
+                                        updateSocialStatus(social.user_id, platformMap[social.platform] ?? 0, social.timestamp, false);
+                                      }}
+                                      className="px-2 py-1 rounded text-[10px] font-medium bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-all"
+                                      title="Reject"
+                                    >
+                                      <XCircle className="w-3 h-3" />
+                                    </button>
+                                  </>
+                                )}
+                                {social.verified && (
+                                  <span className="text-[10px] text-emerald-400 flex items-center gap-1">
+                                    <BadgeCheck className="w-3 h-3" /> Approved
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* NODE SETTINGS TAB (v7.3.0)                                */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'settings' && (<>
+                {settingsLoading && !adminSettings ? (
+                  <div className="flex items-center justify-center py-16">
+                    <RefreshCw className="w-6 h-6 text-emerald-400 animate-spin" />
+                  </div>
+                ) : adminSettings ? (<>
+                  {/* ── Node Identity Card ── */}
+                  <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-indigo-500/5 p-4 relative overflow-hidden">
+                    {/* Decorative circuit pattern */}
+                    <div className="absolute top-0 right-0 w-24 h-24 opacity-5">
+                      <svg viewBox="0 0 100 100" fill="none" stroke="currentColor" className="text-emerald-400 w-full h-full">
+                        <circle cx="50" cy="50" r="20" strokeWidth="1"/>
+                        <circle cx="50" cy="50" r="35" strokeWidth="0.5"/>
+                        <line x1="50" y1="0" x2="50" y2="30" strokeWidth="0.5"/>
+                        <line x1="50" y1="70" x2="50" y2="100" strokeWidth="0.5"/>
+                        <line x1="0" y1="50" x2="30" y2="50" strokeWidth="0.5"/>
+                        <line x1="70" y1="50" x2="100" y2="50" strokeWidth="0.5"/>
+                        <line x1="15" y1="15" x2="35" y2="35" strokeWidth="0.5"/>
+                        <line x1="65" y1="65" x2="85" y2="85" strokeWidth="0.5"/>
+                      </svg>
+                    </div>
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500/30 to-indigo-500/30 border border-emerald-500/40 flex items-center justify-center">
+                        <Cpu className="w-5 h-5 text-emerald-300" />
+                      </div>
+                      <div>
+                        <div className="text-xs text-amber-200/50 uppercase tracking-wider font-semibold">Node Operator</div>
+                        <div className="text-sm text-white font-mono">{adminSettings.admin_wallet}</div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-3">
+                      <div className="text-center p-2 rounded-lg bg-black/20">
+                        <div className="text-base font-bold text-emerald-300">v{adminSettings.version}</div>
+                        <div className="text-[10px] text-amber-200/40 uppercase">Version</div>
+                      </div>
+                      <div className="text-center p-2 rounded-lg bg-black/20">
+                        <div className="text-base font-bold text-white">{(() => {
+                          const s = adminSettings.uptime_secs;
+                          const d = Math.floor(s / 86400);
+                          const h = Math.floor((s % 86400) / 3600);
+                          return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((s % 3600) / 60)}m`;
+                        })()}</div>
+                        <div className="text-[10px] text-amber-200/40 uppercase">Uptime</div>
+                      </div>
+                      <div className="text-center p-2 rounded-lg bg-black/20">
+                        <div className="text-base font-bold text-indigo-300">{adminSettings.peers}</div>
+                        <div className="text-[10px] text-amber-200/40 uppercase">Peers</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ── Sync Progress ── */}
+                  <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <Database className="w-4 h-4 text-indigo-400" />
+                        <span className="text-xs font-semibold text-indigo-200">Chain Sync</span>
+                      </div>
+                      <span className="text-xs text-amber-200/40 font-mono">{adminSettings.network_id}</span>
+                    </div>
+                    <div className="flex items-end gap-3">
+                      <div className="flex-1">
+                        <div className="flex justify-between text-[10px] text-amber-200/50 mb-1">
+                          <span>{adminSettings.height.toLocaleString()} blocks</span>
+                          <span>{adminSettings.network_height.toLocaleString()} network</span>
+                        </div>
+                        <div className="w-full h-2.5 bg-slate-700/50 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all duration-700"
+                            style={{
+                              width: `${adminSettings.network_height > 0 ? Math.min(100, (adminSettings.height / adminSettings.network_height) * 100) : 100}%`,
+                              background: adminSettings.height >= adminSettings.network_height * 0.995
+                                ? 'linear-gradient(90deg, #22c55e, #4ade80)'
+                                : 'linear-gradient(90deg, #6366f1, #818cf8)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <span className={`text-sm font-bold ${
+                        adminSettings.height >= adminSettings.network_height * 0.995 ? 'text-green-400' : 'text-indigo-300'
+                      }`}>
+                        {adminSettings.network_height > 0
+                          ? `${((adminSettings.height / adminSettings.network_height) * 100).toFixed(1)}%`
+                          : '100%'
+                        }
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* ── Node Health Indicators ── */}
+                  {nodeInfo && (
+                    <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Activity className="w-4 h-4 text-emerald-400" />
+                        <span className="text-xs font-semibold text-emerald-200">Health Monitor</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {[
+                          {
+                            label: 'Mining',
+                            ok: nodeInfo.mining_healthy,
+                            icon: Zap,
+                            detail: nodeInfo.mining_healthy ? 'Solutions arriving' : 'No recent solutions',
+                          },
+                          {
+                            label: 'P2P Network',
+                            ok: nodeInfo.peers > 0,
+                            icon: Wifi,
+                            detail: `${nodeInfo.peers} peer${nodeInfo.peers !== 1 ? 's' : ''} connected`,
+                          },
+                          {
+                            label: 'Block Sync',
+                            ok: nodeInfo.height >= nodeInfo.network_height * 0.99,
+                            icon: Layers,
+                            detail: nodeInfo.height >= nodeInfo.network_height ? 'Fully synced' : `${(nodeInfo.network_height - nodeInfo.height).toLocaleString()} behind`,
+                          },
+                          {
+                            label: 'Uptime',
+                            ok: nodeInfo.uptime_secs > 300,
+                            icon: Clock,
+                            detail: nodeInfo.uptime_secs > 86400 ? `${Math.floor(nodeInfo.uptime_secs / 86400)}d stable` : 'Recently started',
+                          },
+                        ].map(item => (
+                          <div
+                            key={item.label}
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border ${
+                              item.ok
+                                ? 'border-emerald-500/20 bg-emerald-500/5'
+                                : 'border-amber-500/20 bg-amber-500/5'
+                            }`}
+                          >
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                              item.ok ? 'bg-emerald-500/20' : 'bg-amber-500/20'
+                            }`}>
+                              <item.icon className={`w-4 h-4 ${item.ok ? 'text-emerald-400' : 'text-amber-400'}`} />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-[10px] text-amber-200/50 uppercase tracking-wider">{item.label}</div>
+                              <div className={`text-xs font-medium ${item.ok ? 'text-emerald-300' : 'text-amber-300'}`}>
+                                {item.detail}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── OAuth2 Consent Manager ── */}
+                  <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <Lock className="w-4 h-4 text-violet-400" />
+                        <span className="text-xs font-semibold text-violet-200">OAuth2 Integrations</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-violet-400" />
+                          <span className="text-[10px] text-amber-200/40">{adminSettings.oauth2_clients} client{adminSettings.oauth2_clients !== 1 ? 's' : ''}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[10px] text-amber-200/40">{adminSettings.oauth2_active_tokens} active token{adminSettings.oauth2_active_tokens !== 1 ? 's' : ''}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {oauthConsents.length === 0 ? (
+                      <div className="text-center py-6 border border-dashed border-slate-700/50 rounded-lg">
+                        <Fingerprint className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                        <div className="text-xs text-amber-200/30">No third-party apps authorized</div>
+                        <div className="text-[10px] text-amber-200/20 mt-1">OAuth2 consents will appear here</div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {oauthConsents.map((c: any, i: number) => (
+                          <div
+                            key={i}
+                            className="flex items-center justify-between p-3 rounded-lg bg-black/20 border border-slate-700/30 group hover:border-violet-500/30 transition-colors"
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-8 h-8 rounded-lg bg-violet-500/15 border border-violet-500/20 flex items-center justify-center flex-shrink-0">
+                                <Key className="w-3.5 h-3.5 text-violet-400" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-medium text-white truncate">{c.client_id}</div>
+                                <div className="text-[10px] text-amber-200/30 mt-0.5">
+                                  {c.scopes?.join(' ') || 'default'} &middot; {new Date(c.granted_at).toLocaleDateString()}
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              onClick={async () => {
+                                await fetch('/api/v1/admin/oauth2/revoke-consent', {
+                                  method: 'POST',
+                                  headers: { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}`, 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ client_id: c.client_id }),
+                                });
+                                fetchSettingsData();
+                              }}
+                              className="p-1.5 rounded-lg text-red-400/50 hover:text-red-400 hover:bg-red-500/15 opacity-0 group-hover:opacity-100 transition-all"
+                              title="Revoke consent & tokens"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ── CLI Quick Reference ── */}
+                  <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Terminal className="w-4 h-4 text-amber-400" />
+                      <span className="text-xs font-semibold text-amber-200/80">CLI Reference</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {[
+                        { cmd: '--admin-wallet <hex>', desc: 'Set admin wallet for this node' },
+                        { cmd: 'Q_ADMIN_WALLET=<hex>', desc: 'Environment variable alternative' },
+                        { cmd: '--validator-key <path>', desc: 'Enable PQC block signing' },
+                      ].map(item => (
+                        <div key={item.cmd} className="flex items-start gap-2">
+                          <Hash className="w-3 h-3 text-amber-400/40 mt-0.5 flex-shrink-0" />
+                          <div>
+                            <code className="text-[11px] text-emerald-300 font-mono">{item.cmd}</code>
+                            <div className="text-[10px] text-amber-200/30">{item.desc}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>) : (
+                  <div className="text-center py-12 text-amber-200/30 text-xs">
+                    Could not load settings. Make sure your wallet matches --admin-wallet.
+                  </div>
+                )}
+              </>)}
             </div>
           </motion.div>
         </>

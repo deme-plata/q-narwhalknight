@@ -68,13 +68,15 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
     blocksPerSecond: 0,
   });
   const [visualMode, setVisualMode] = useState<'flow' | 'quantum' | 'constellation' | 'matrix'>('quantum');
-  const [particles, setParticles] = useState<Particle[]>([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const scrollOffset = useRef(0);
   const lastBlockTime = useRef(Date.now());
   const animationFrameId = useRef<number | undefined>(undefined);
   const laneOccupancy = useRef<Map<number, number>>(new Map()); // lane -> rightmost x position
+  // v6.0.3: Use ref for particles to avoid infinite re-render loop in animation useEffect
+  // Previously particles was state AND in the animation effect's deps, causing Error #185
+  const particlesRef = useRef<Particle[]>([]);
 
   // Configuration - 4 lanes for better visual density
   const BLOCK_SIZE = 48; // Square blocks
@@ -112,7 +114,7 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         size: 2 + Math.random() * 4,
       });
     }
-    setParticles(prev => [...prev.slice(-100), ...newParticles]); // Keep max 100 particles
+    particlesRef.current = [...particlesRef.current.slice(-100), ...newParticles]; // Keep max 100 particles
   }, []);
 
   // Listen for new blocks via SSE
@@ -287,9 +289,8 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         }
       });
 
-      // Update particles
-      setParticles(prev =>
-        prev
+      // Update particles (mutate ref directly, no setState to avoid re-render loop)
+      particlesRef.current = particlesRef.current
           .map(p => ({
             ...p,
             x: p.x + p.vx * deltaTime,
@@ -298,8 +299,7 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
             vx: p.vx * 0.96,
             vy: p.vy * 0.96,
           }))
-          .filter(p => p.life < p.maxLife)
-      );
+          .filter(p => p.life < p.maxLife);
 
       // Clear canvas with gradient background
       const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
@@ -507,7 +507,7 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
       }
 
       // Draw particles
-      particles.forEach(p => {
+      particlesRef.current.forEach(p => {
         const alpha = Math.max(0, 1 - (p.life / p.maxLife));
         const size = p.size * (1 - p.life / p.maxLife * 0.5);
 
@@ -606,7 +606,7 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         cancelAnimationFrame(animationFrameId.current);
       }
     };
-  }, [blocks, selectedBlock, visualMode, particles]);
+  }, [blocks, selectedBlock, visualMode]);
 
   return (
     <div className="relative">

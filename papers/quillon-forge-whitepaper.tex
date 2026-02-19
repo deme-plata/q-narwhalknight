@@ -1,0 +1,375 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{titlesec}
+
+\geometry{margin=1in}
+
+% Colors matching Quillon branding
+\definecolor{copper}{RGB}{184,115,51}
+\definecolor{titanium}{RGB}{135,134,129}
+\definecolor{darkbg}{RGB}{30,30,30}
+\definecolor{qugold}{RGB}{212,175,55}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=copper,
+    urlcolor=copper,
+    citecolor=copper,
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    frame=single,
+    breaklines=true,
+    backgroundcolor=\color{black!5},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textcolor{copper}{\textsc{Quillon Forge}}}
+\fancyhead[R]{\textcolor{titanium}{v1.0 --- February 2026}}
+\fancyfoot[C]{\thepage}
+
+\title{
+    \vspace{-1cm}
+    {\Huge\textbf{Quillon Forge}}\\[0.3cm]
+    {\Large\textcolor{copper}{Dedicated Post-Quantum Mining Machine}}\\[0.3cm]
+    {\large Hardware Whitepaper \& Plug-and-Play Node Specification}\\[0.5cm]
+    {\normalsize\textit{256 Cores. Post-Quantum. Mine the Future.}}
+}
+\author{
+    Q-NarwhalKnight Development Team\\
+    \texttt{https://quillon.xyz}
+}
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{forge1.png}
+    \caption{The Quillon Forge --- 4U rackmount mining appliance with copper liquid cooling, sapphire crystal viewport, and OLED status display.}
+    \label{fig:forge-exterior}
+\end{figure}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Executive Summary}
+% ============================================================================
+
+The \textbf{Quillon Forge} is a purpose-built mining appliance for the Q-NarwhalKnight post-quantum blockchain. Unlike Bitcoin ASICs that optimize for SHA-256 hash grinding, the Forge is architected around the computational demands of \textbf{post-quantum cryptography} (Dilithium5, Kyber1024), \textbf{Verifiable Delay Functions} (Genus-2 hyperelliptic VDFs), and \textbf{AI inference} (Proof of Inference rewards).
+
+Each Forge unit ships as a \textbf{plug-and-play node} --- power it on, connect Ethernet, and it begins mining within 60 seconds. No Linux expertise required. The on-board firmware handles blockchain synchronization, peer discovery, key generation, and mining optimization automatically.
+
+\subsection{Key Specifications}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Default Configuration} & \textbf{Rationale} \\
+\midrule
+CPU & 2$\times$ AMD EPYC 9755 (128C, Zen 5) & 256 cores, AVX-512 for PQ crypto \\
+RAM & 512\,GB DDR5-6400 ECC (16$\times$32\,GB) & Dilithium5 key generation \\
+GPU (Optional) & 2$\times$ NVIDIA RTX 5090 (32\,GB) & AI Proof of Inference rewards \\
+Storage & 2$\times$ Samsung PM9D3 3.84\,TB NVMe & Full blockchain + GGUF model cache \\
+NIC & Mellanox ConnectX-7 100\,GbE & Sub-ms P2P block propagation \\
+PSU & 2$\times$ 1600\,W 80+ Titanium & Redundant, 2400\,W sustained \\
+Cooling & Copper liquid loop + sapphire viewport & Matches Vault design language \\
+Chassis & 4U rackmount, titanium-anodized & Quillon premium aesthetic \\
+\bottomrule
+\end{tabular}
+\caption{Quillon Forge default hardware specification.}
+\label{tab:specs}
+\end{table}
+
+\subsection{RWA Token Model}
+
+The Forge is tokenized as a \textbf{Real World Asset (RWA)} on the Q-NarwhalKnight blockchain:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Token}: \texttt{\$FORGE} --- 500 total supply, 0 decimals
+    \item \textbf{Contract}: \texttt{PhysicalGoodsToken} with hardware attestation
+    \item \textbf{Redemption}: Burn 1 \texttt{FORGE} token $\rightarrow$ receive physical mining machine
+    \item \textbf{Configuration}: CPU, GPU, RAM, cooling selected at redemption time
+    \item \textbf{Machine ID}: Unique firmware attestation key burned at factory
+\end{itemize}
+
+% ============================================================================
+\section{Why CPU-First Mining}
+% ============================================================================
+
+Q-NarwhalKnight's consensus differs fundamentally from Bitcoin and Ethereum:
+
+\begin{enumerate}
+    \item \textbf{Post-Quantum Signatures} (Dilithium5): Block validation requires lattice-based signature verification --- CPU-bound, AVX-512 accelerated, not GPU-parallelizable.
+
+    \item \textbf{Verifiable Delay Functions} (Genus-2 VDF): Anchor election uses sequential Jacobian doubling on hyperelliptic curves --- \textit{inherently sequential}, benefits from high single-core clock speed.
+
+    \item \textbf{Proof of Inference}: AI model inference earns bonus QUG rewards --- benefits from both CPU (llama.cpp) and GPU (CUDA acceleration).
+
+    \item \textbf{DAG-Knight Consensus}: Block production requires parallel processing of DAG vertices with Bracha's reliable broadcast --- scales linearly with core count.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{forge2.png}
+    \caption{Quillon Forge internal layout --- dual-socket EPYC motherboard, copper liquid cooling manifold, NVMe storage bays, and modular GPU expansion.}
+    \label{fig:forge-internal}
+\end{figure}
+
+\subsection{AMD EPYC vs Intel Xeon}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Metric} & \textbf{EPYC 9755 ($\times$2)} & \textbf{Xeon w9-3595X ($\times$2)} & \textbf{Winner} \\
+\midrule
+Total Cores & 256 & 120 & EPYC \\
+Base Clock & 2.7\,GHz & 3.3\,GHz & Xeon \\
+Boost Clock & 4.1\,GHz & 4.8\,GHz & Xeon \\
+AVX-512 Throughput & 2$\times$ Zen 4 & 1$\times$ & EPYC \\
+DDR5 Channels & 12 per socket & 8 per socket & EPYC \\
+TDP (per socket) & 500\,W & 350\,W & Xeon \\
+Dilithium5 Signs/s & $\sim$12,800 & $\sim$7,200 & EPYC \\
+VDF Sequential & 4.1\,GHz boost & 4.8\,GHz boost & Xeon \\
+Price (dual) & $\sim$\$24,000 & $\sim$\$20,000 & Xeon \\
+\bottomrule
+\end{tabular}
+\caption{CPU comparison for Q-NarwhalKnight mining workloads.}
+\end{table}
+
+The EPYC 9755 is the \textbf{default} because Dilithium5 batch verification scales with core count (parallel), while VDF computation is a smaller fraction of total mining work. Users who prioritize VDF-heavy mining can select the Xeon configuration at redemption.
+
+% ============================================================================
+\section{Software Architecture: Plug-and-Play}
+% ============================================================================
+
+The Forge ships with Q-NarwhalKnight pre-installed on a read-only OS partition with automatic updates. The user experience is:
+
+\begin{enumerate}
+    \item \textbf{Unbox}: Remove from packaging, mount in rack or set on desk.
+    \item \textbf{Connect}: Plug in power (2$\times$ C14) and Ethernet (RJ45 or SFP+).
+    \item \textbf{Wait 60 seconds}: OLED displays ``Syncing...'' then ``Mining''.
+    \item \textbf{Done}: Forge mines QUG and earns AI inference rewards automatically.
+\end{enumerate}
+
+\subsection{Boot Sequence}
+
+\begin{lstlisting}[caption={Forge boot sequence (automated firmware)}]
+[0.0s]  POST: Hardware self-test (CPU, RAM, NVMe, NIC)
+[2.0s]  BIOS: Load Q-NarwhalKnight OS (read-only squashfs)
+[5.0s]  NET:  DHCP or static IP from OLED config
+[6.0s]  KEY:  Load/generate libp2p identity from TPM
+[7.0s]  P2P:  Connect to bootstrap peers (quillon.xyz:9001)
+[8.0s]  SYNC: TurboSync block download (50,000+ blocks/min)
+[30s]   MINE: Start mining with all 256 cores
+[45s]   AI:   Load GGUF model for Proof of Inference
+[60s]   OLED: Display "BLOCKS: 0 | QUG: 0.0 | 256 CORES"
+\end{lstlisting}
+
+\subsection{Automatic Optimization}
+
+The Q-NarwhalKnight node binary (\texttt{q-api-server}) includes automatic hardware detection and optimization (v5.1.0):
+
+\begin{itemize}[noitemsep]
+    \item \textbf{CPU cores}: Auto-detects physical cores via \texttt{num\_cpus::get\_physical()}, spawns one mining thread per core with CPU affinity pinning.
+    \item \textbf{AVX-512}: Runtime detection of AVX-512F/DQ/BW/VL. Batch signature verification uses 512-bit SIMD when available.
+    \item \textbf{NUMA}: Detects dual-socket topology via \texttt{/sys/devices/system/node/}, pins threads to local NUMA nodes to minimize cross-socket memory latency.
+    \item \textbf{RocksDB}: Auto-scales background jobs: $\lfloor\text{cores}/16\rfloor$ background threads (clamped 2--16), $\lfloor\text{cores}/32\rfloor$ compaction threads.
+    \item \textbf{AI inference}: \texttt{LlamaCppEngine} scales concurrent requests: $\lfloor\text{cores}/32\rfloor$ (clamped 2--16), overridable via \texttt{LLAMA\_MAX\_CONCURRENT}.
+    \item \textbf{Batch crypto}: Signature batch size scales to $\min(8 \times \text{cores}, 4096)$, hash batch to $\min(4 \times \text{cores}, 2048)$.
+\end{itemize}
+
+\subsection{Node Configuration}
+
+The Forge exposes a simple OLED + button interface for essential configuration:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Setting} & \textbf{Default} \\
+\midrule
+Network & DHCP (auto) \\
+Mining Wallet & Auto-generated (display QR on OLED) \\
+Mining Pool & Solo mining (default), pool via menu \\
+AI Inference & Enabled (Proof of Inference rewards) \\
+P2P Port & 9001 \\
+API Port & 8080 (local network only) \\
+Tor & Enabled (Dandelion++ anonymity) \\
+Auto-Update & Enabled (signed binary updates) \\
+\bottomrule
+\end{tabular}
+\caption{Forge default node configuration.}
+\end{table}
+
+Advanced users can SSH into the Forge (port 22, key-based auth) for full Linux access.
+
+% ============================================================================
+\section{Mining Economics}
+% ============================================================================
+
+\subsection{Revenue Streams}
+
+A Forge unit earns QUG through three mechanisms:
+
+\begin{enumerate}
+    \item \textbf{Block Mining Rewards}: Standard PoW mining. With 256 cores and AVX-512, a Forge produces $\sim$64$\times$ more hashes/second than a typical 4-core VPS node.
+
+    \item \textbf{Proof of Inference Rewards}: Running AI inference for network users. The Forge loads GGUF quantized models (Mistral-7B at 5--15 tok/s on CPU, 30--80 tok/s with GPU). Each completed inference earns a QUG micropayment.
+
+    \item \textbf{Staking Yield}: FORGE token holders can stake their tokens for additional yield while waiting for physical delivery.
+\end{enumerate}
+
+\subsection{Power Efficiency}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Configuration} & \textbf{TDP} & \textbf{Dilithium5 Signs/W} & \textbf{AI tok/s/W} \\
+\midrule
+EPYC 9755 (dual, no GPU) & 1,000\,W & 12.8 & 0.015 \\
+EPYC 9755 + 2$\times$RTX 5090 & 1,700\,W & 12.8 & 0.047 \\
+Xeon w9-3595X (dual, no GPU) & 700\,W & 10.3 & 0.021 \\
+\bottomrule
+\end{tabular}
+\caption{Power efficiency comparison.}
+\end{table}
+
+% ============================================================================
+\section{Hardware Attestation \& Security}
+% ============================================================================
+
+Each Forge unit contains a hardware attestation subsystem:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{TPM 2.0}: Stores libp2p identity key and mining wallet seed phrase in tamper-resistant hardware.
+    \item \textbf{Machine ID}: Unique 256-bit identifier burned into firmware at factory, recorded on-chain at fulfillment.
+    \item \textbf{Attestation Public Key}: Ed25519 key pair generated in TPM, public key registered on-chain. Used to sign mining submissions, proving they originate from genuine Forge hardware.
+    \item \textbf{Secure Boot}: UEFI Secure Boot with Quillon signing key. Prevents unauthorized firmware modifications.
+    \item \textbf{Encrypted Storage}: NVMe drives encrypted with AES-256-XTS, key derived from TPM + user password.
+\end{itemize}
+
+% ============================================================================
+\section{Design Language}
+% ============================================================================
+
+The Forge extends the \textbf{Quillon Vault} design language to server-scale hardware:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Element} & \textbf{Quillon Vault} & \textbf{Quillon Forge} \\
+\midrule
+Chassis & Titanium-anodized, 3.8\,mm & Titanium-anodized, 4U rack \\
+Window & Sapphire crystal (OLED) & Sapphire crystal (cooling manifold) \\
+Accent & Brushed copper trim & Copper liquid cooling tubes \\
+Display & 0.96'' OLED & 2.0'' OLED + amber LED ring \\
+Port & USB-C sliding cover & USB-C sliding management port \\
+Authentication & Dilithium5 signatures & Hardware attestation + TPM \\
+\bottomrule
+\end{tabular}
+\caption{Design continuity between Quillon Vault and Quillon Forge.}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{vault.png}
+    \caption{The Quillon Vault hardware wallet --- the design language origin for the Forge's premium aesthetic.}
+    \label{fig:vault}
+\end{figure}
+
+% ============================================================================
+\section{RWA Token Lifecycle}
+% ============================================================================
+
+\begin{enumerate}
+    \item \textbf{Mint}: 500 \texttt{FORGE} tokens minted to \texttt{BANK\_MASTER\_ACCOUNT} at genesis.
+    \item \textbf{Purchase}: Users acquire \texttt{FORGE} tokens on the Q-NarwhalKnight DEX or directly from Quillon.
+    \item \textbf{Configure}: At redemption, user selects CPU (EPYC/Xeon), GPU (none/RTX/A100/L40), RAM (512/1024/2048\,GB), cooling, chassis color.
+    \item \textbf{Burn}: Token burned on-chain, creates \texttt{ForgeRedemption} order with unique \texttt{FR-*} ID.
+    \item \textbf{Assemble}: Status progresses: \texttt{pending} $\rightarrow$ \texttt{configured} $\rightarrow$ \texttt{assembling} $\rightarrow$ \texttt{testing} $\rightarrow$ \texttt{shipped} $\rightarrow$ \texttt{delivered}.
+    \item \textbf{Activate}: On first boot, Forge registers its \texttt{machine\_id} and \texttt{attestation\_pubkey} on-chain.
+    \item \textbf{Mine}: Forge begins mining QUG and earning Proof of Inference rewards.
+\end{enumerate}
+
+\subsection{API Endpoints}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{7cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Purpose} \\
+\midrule
+POST & \texttt{/api/v1/contracts/forge/redeem} & Burn FORGE token, create machine order \\
+GET & \texttt{/api/v1/contracts/forge/redemptions} & List redemption orders \\
+POST & \texttt{/api/v1/contracts/forge/fulfill} & Admin: update status, add tracking/serial \\
+GET & \texttt{/api/v1/contracts/forge/stats} & Supply stats, fleet metrics \\
+\bottomrule
+\end{tabular}
+\caption{Forge RWA API endpoints.}
+\end{table}
+
+% ============================================================================
+\section{Performance Optimizations (v5.1.0)}
+% ============================================================================
+
+The Q-NarwhalKnight v5.1.0 release includes automatic hardware-aware optimizations:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lccl@{}}
+\toprule
+\textbf{Parameter} & \textbf{Before v5.1.0} & \textbf{v5.1.0 (256 cores)} & \textbf{Impact} \\
+\midrule
+Mining threads & 4 (hardcoded) & 256 (auto-detect) & 64$\times$ throughput \\
+Signature batch & 256 (fixed) & 2,048 (scaled) & 8$\times$ verification \\
+Hash batch & 128 (fixed) & 1,024 (scaled) & 8$\times$ hashing \\
+RocksDB bg jobs & 2 (fixed) & 16 (auto-scaled) & 8$\times$ IO \\
+RocksDB compactions & 1 (fixed) & 8 (auto-scaled) & 8$\times$ compaction \\
+AI concurrent & 2 (hardcoded) & 8 (auto-scaled) & 4$\times$ inference \\
+\bottomrule
+\end{tabular}
+\caption{v5.1.0 performance scaling on a 256-core Quillon Forge.}
+\end{table}
+
+% ============================================================================
+\section{Conclusion}
+% ============================================================================
+
+The Quillon Forge represents a new category of blockchain mining hardware --- one optimized not for brute-force hashing, but for the computational primitives of post-quantum security: lattice-based signatures, hyperelliptic VDFs, and AI inference. By shipping as a plug-and-play appliance with automatic hardware detection, NUMA optimization, and on-chain hardware attestation, the Forge makes enterprise-grade mining accessible to anyone who can plug in a power cable and an Ethernet cord.
+
+\vspace{0.5cm}
+\noindent\textbf{Total supply}: 500 units\\
+\textbf{Token}: \texttt{\$FORGE} on Q-NarwhalKnight\\
+\textbf{Website}: \url{https://quillon.xyz}
+
+\vspace{1cm}
+\begin{center}
+\textcolor{copper}{\Large\textit{256 Cores. Post-Quantum. Mine the Future.}}
+\end{center}
+
+\end{document}

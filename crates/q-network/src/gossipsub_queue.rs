@@ -47,6 +47,14 @@ impl MessagePriority {
             MessagePriority::High
         } else if topic.contains("/balance") || topic.contains("/wallets") {
             MessagePriority::Normal
+        } else if topic.contains("/state-sync") {
+            // v5.3.0: State sync requests/responses - High priority (no rate limit)
+            // State sync is critical for new/restarted nodes to get contracts, pools, balances
+            MessagePriority::High
+        } else if topic.contains("/bridge-attestations") {
+            // v7.3.1: Bridge attestation messages - Critical priority
+            // Multi-sig bridge validation must be processed immediately
+            MessagePriority::Critical
         } else if topic.contains("/mining-solutions") {
             MessagePriority::Low
         } else {
@@ -413,23 +421,79 @@ impl Default for GossipsubQueue {
     }
 }
 
+/// Network throttle mode controlled by Q_NETWORK_THROTTLE env var.
+///
+/// - `full` (default): No rate limiting on any message type. Maximum throughput.
+/// - `conservative`: Rate-limited mode for bandwidth-constrained nodes.
+///
+/// Example: Q_NETWORK_THROTTLE=conservative ./q-api-server
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThrottleMode {
+    /// No rate limiting — maximum network throughput (default)
+    Full,
+    /// Conservative rate limiting for bandwidth-constrained nodes
+    Conservative,
+}
+
+impl ThrottleMode {
+    pub fn from_env() -> Self {
+        match std::env::var("Q_NETWORK_THROTTLE")
+            .unwrap_or_else(|_| "full".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "conservative" | "slow" | "limited" => ThrottleMode::Conservative,
+            _ => ThrottleMode::Full, // "full", "fast", "unlimited", or anything else
+        }
+    }
+}
+
 /// Global gossipsub queue instance
 lazy_static! {
     static ref GOSSIPSUB_QUEUE: GossipsubQueue = {
-        let config = QueueConfig {
-            max_queue_size: std::env::var("Q_GOSSIPSUB_QUEUE_SIZE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10_000),
-            rate_limit_low_ms: std::env::var("Q_MINING_SOLUTION_RATE_LIMIT_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(100),
-            ..QueueConfig::default()
+        let throttle = ThrottleMode::from_env();
+        let config = match throttle {
+            ThrottleMode::Full => {
+                // Full throttle: no rate limiting on any priority
+                QueueConfig {
+                    max_queue_size: std::env::var("Q_GOSSIPSUB_QUEUE_SIZE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(50_000),
+                    max_message_age_secs: 60,
+                    rate_limit_critical_ms: 0,
+                    rate_limit_high_ms: 0,
+                    rate_limit_normal_ms: 0,
+                    rate_limit_low_ms: 0,
+                    rate_limit_lowest_ms: 0,
+                    target_drain_rate: 10_000,
+                }
+            }
+            ThrottleMode::Conservative => {
+                // Conservative: rate-limited for bandwidth-constrained nodes
+                QueueConfig {
+                    max_queue_size: std::env::var("Q_GOSSIPSUB_QUEUE_SIZE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(10_000),
+                    max_message_age_secs: 30,
+                    rate_limit_critical_ms: 0,    // Blocks always unlimited
+                    rate_limit_high_ms: 10,       // 100/sec for peer heights
+                    rate_limit_normal_ms: 50,     // 20/sec for balance updates
+                    rate_limit_low_ms: std::env::var("Q_MINING_SOLUTION_RATE_LIMIT_MS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(100),          // 10/sec for mining solutions
+                    rate_limit_lowest_ms: 500,    // 2/sec for telemetry
+                    target_drain_rate: 1000,
+                }
+            }
         };
         info!(
-            "Initialized gossipsub queue: max_size={}, mining_rate_limit={}ms",
-            config.max_queue_size, config.rate_limit_low_ms
+            "🌐 Gossipsub queue: mode={:?}, max_size={}, rate_limits=[{},{},{},{},{}]ms",
+            throttle, config.max_queue_size,
+            config.rate_limit_critical_ms, config.rate_limit_high_ms,
+            config.rate_limit_normal_ms, config.rate_limit_low_ms, config.rate_limit_lowest_ms
         );
         GossipsubQueue::with_config(config)
     };

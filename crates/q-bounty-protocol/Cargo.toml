@@ -27,8 +27,8 @@ serde_json = { workspace = true }
 bincode = { workspace = true }
 postcard = { workspace = true }
 
-# RocksDB storage
-rocksdb = { workspace = true }
+# RocksDB storage (not available on Windows - use sled instead)
+# rocksdb is added via platform-specific section below
 
 # Cryptography for identity binding and Merkle trees
 sha3 = { workspace = true }
@@ -60,6 +60,13 @@ rs_merkle = "1.4"
 
 # Social media API integrations
 oauth2 = "4.4"
+
+# Platform-specific storage backends
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sled = "0.34"
 
 [dev-dependencies]
 tokio = { workspace = true }

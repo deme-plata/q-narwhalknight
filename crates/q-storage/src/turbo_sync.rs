@@ -401,12 +401,14 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as usize
                     };
+                    // v7.1.4: Turbo-charged for 32GB+ servers (was 8 for 16-31GB, now 12)
                     match ram_mb {
                         0..=3999     => 1,    // micro: 1 stream (OOM prevention)
                         4000..=7999  => 1,    // small (Gamma 7.8GB): 1 stream (v6.1.0 OOM fix)
-                        8000..=15999 => 4,    // medium: 4 streams
-                        16000..=31999 => 8,   // large: 8 streams
-                        _            => 16,   // xlarge: 16 streams
+                        8000..=15999 => 6,    // medium: 6 streams (was 4)
+                        16000..=31999 => 12,  // large: 12 streams (was 8)
+                        32000..=63999 => 20,  // xlarge 32GB: 20 streams (was 16)
+                        _            => 24,   // xxlarge 64GB+: 24 streams
                     }
                 }),
             // v6.0.9: RAM-aware chunk size to reduce per-chunk memory footprint
@@ -420,11 +422,14 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as u64
                     };
+                    // v7.1.4: Larger chunks for 32GB+ (more blocks per request = fewer round trips)
                     match ram_mb {
                         0..=3999     => 50,    // micro: tiny chunks (OOM prevention)
                         4000..=7999  => 100,   // small (Gamma): 100 blocks/chunk (v6.1.0 OOM fix)
                         8000..=15999 => 500,   // medium
-                        _            => 1000,  // large: bigger chunks
+                        16000..=31999 => 1000, // large: 1000 blocks/chunk
+                        32000..=63999 => 2000, // xlarge 32GB: 2000 blocks/chunk (was 1000)
+                        _            => 3000,  // xxlarge 64GB+: 3000 blocks/chunk
                     }
                 }),
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
@@ -437,7 +442,7 @@ impl Default for TurboSyncConfig {
             delta_compression: true,
             enable_pipelining: true,
             max_peer_connections: std::env::var("Q_MAX_PEER_CONNECTIONS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(16),  // v6.0.4: 16 peers (was 32)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v7.1.4: 32 peers (was 16, more peer diversity)
             smart_protocol: true,
 
             // 🚀 v1.0.89-beta: TURBO SYNC - Batched writes now default TRUE
@@ -533,7 +538,18 @@ impl Default for TurboSyncConfig {
             apollo_target_throughput: std::env::var("Q_APOLLO_TARGET_THROUGHPUT")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(1000.0),  // 1000 BPS target
+                .unwrap_or_else(|| {
+                    let ram_mb = {
+                        use sysinfo::System;
+                        let mut sys = System::new();
+                        sys.refresh_memory();
+                        sys.total_memory() / (1024 * 1024)
+                    };
+                    // v7.1.4: Higher throughput target for beefy servers
+                    if ram_mb >= 32000 { 2000.0 }  // 32GB+: target 2000 BPS
+                    else if ram_mb >= 16000 { 1500.0 }  // 16GB+: target 1500 BPS
+                    else { 1000.0 }  // default: 1000 BPS
+                }),
 
             // ═══════════════════════════════════════════════════════════════════════════════
             // 🎯 v3.2.11-beta: ATOMIC SYNC ENDGAME - Near-Tip Optimization Defaults
@@ -1171,6 +1187,9 @@ pub struct TurboSyncManager {
     /// 🚀 v1.5.1-beta: Last WAL sync timestamp for timer-based syncing
     last_wal_sync_time: AtomicU64,
 
+    /// 🛡️ v7.2.7: Last flush timestamp for periodic disk persistence
+    last_flush_time: AtomicU64,
+
     /// Metrics for monitoring
     pub metrics: Arc<TurboSyncMetrics>,
 
@@ -1534,13 +1553,12 @@ impl TurboSyncManager {
 
         // 🚀 v1.5.1-beta: Configure WAL sync batching for 1000 BPS
         // Sync WAL every 50 chunks (1M blocks) OR every 60 seconds
-        // With 20k block chunks: 50 chunks = 1,000,000 blocks between syncs
-        // Trade-off: If crash during sync, lose up to 1M blocks (re-fetch in ~1000 seconds)
+        // v7.2.7: Reduced to 5 chunks to minimize data loss on crash (~2500 blocks max loss)
         let wal_sync_batch_size = std::env::var("Q_WAL_SYNC_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(50u64);  // v1.5.1: 50 chunks (was 10)
-        info!("🔧 [v1.5.1] WAL sync every {} chunks (optimized for 1000 BPS)", wal_sync_batch_size);
+            .unwrap_or(5u64);  // v7.2.7: 5 chunks (was 50). Max ~2500 blocks loss on crash
+        info!("🔧 [v7.2.7] WAL sync every {} chunks (safe batched sync)", wal_sync_batch_size);
 
         // ═══════════════════════════════════════════════════════════════════════════════
         // 🚀 v2.1.0-DELTA-V: Initialize Project APOLLO Control Systems
@@ -1608,6 +1626,7 @@ impl TurboSyncManager {
             decompression_semaphore: Arc::new(Semaphore::new(decompression_parallelism)),
             chunks_since_wal_sync: AtomicU64::new(0),
             last_wal_sync_time: AtomicU64::new(0),
+            last_flush_time: AtomicU64::new(0),
             metrics: Arc::new(TurboSyncMetrics::default()),
             peer_registry: Arc::new(RwLock::new(EnhancedPeerRegistry::new())),
             network_tx: None, // Set via set_network_channel()
@@ -2233,7 +2252,7 @@ impl TurboSyncManager {
 
         // 🚀 v2.1.4-DELTA-V: Accept ALL peers with sufficient height
         // Sort so bootstrap is first (most reliable), then by height descending
-        const BOOTSTRAP_PEER: &str = "12D3KooWNgqKiWQTn7cVuUJ7Se9HQXZtocx8VEf7v382eNAQDoDk";
+        const BOOTSTRAP_PEER: &str = "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc";
 
         // 🛡️ v1.4.5-beta: Collect peers with height and trust scores
         // 🚀 v2.2.1-beta: CRITICAL FIX - Use local_height not target_height!
@@ -2995,10 +3014,6 @@ impl TurboSyncManager {
             }
 
             if let Some(engine) = balance_engine {
-                // Skip balance processing in extreme mode
-                if skip_balances {
-                    debug!("🔥 [EXTREME] Skipping balance processing for {} blocks", blocks.len());
-                } else {
                 let balance_start = std::time::Instant::now();
 
                 // Create SINGLE transaction for ALL blocks in the batch
@@ -3015,7 +3030,14 @@ impl TurboSyncManager {
                 };
 
                 for block in &blocks {
-                    match engine.process_block_mining_rewards_tx(&tx, block).await {
+                    // v7.1.2: In skip_balances mode, still process coinbase (mining rewards)
+                    let result = if skip_balances {
+                        engine.process_block_coinbase_only_tx(&tx, block).await
+                    } else {
+                        engine.process_block_mining_rewards_tx(&tx, block).await
+                    };
+
+                    match result {
                         Ok(updates) => {
                             balance_updates_total += updates.len();
                             blocks_committed += 1;
@@ -3043,7 +3065,6 @@ impl TurboSyncManager {
                         balance_updates_total, blocks_committed, balance_elapsed
                     );
                 }
-                }  // end of else (not skip_balances)
             }
 
             // ✅ SINGLE BATCH WRITE (instead of 500+ individual writes!)
@@ -3116,20 +3137,34 @@ impl TurboSyncManager {
                 .unwrap_or(true);
 
             if use_extreme {
-                // 🔥 EXTREME MODE: NO WAL SYNC AT ALL!
-                // This is the fastest possible mode - writes go directly to memtable
-                // without any durability guarantees. Perfect for initial sync.
+                // 🔥 EXTREME MODE: WAL sync every 10 chunks for crash safety
+                // 🛡️ v7.2.3: Changed from NO sync to periodic sync.
+                // Previously lost ALL in-flight blocks on crash (up to 500K+).
+                // Now loses at most ~10K blocks (10 chunks × ~1000 blocks).
                 let chunks_processed = self.chunks_since_wal_sync.fetch_add(1, Ordering::Relaxed) + 1;
 
-                // Only log every 100 chunks to avoid log spam
-                if chunks_processed % 100 == 0 {
+                let extreme_sync_interval = std::env::var("Q_EXTREME_WAL_SYNC_INTERVAL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10u64);
+
+                if chunks_processed >= extreme_sync_interval {
+                    let sync_start = std::time::Instant::now();
+                    self.storage.sync_wal().await
+                        .context("Failed to sync WAL in extreme mode")?;
+                    self.chunks_since_wal_sync.store(0, Ordering::Relaxed);
                     let auto_reason = if use_extreme_env { "env" } else { "auto (>50k behind)" };
                     info!(
-                        "🔥 [EXTREME SYNC v3.4.11] {} chunks processed, NO WAL SYNC ({}, {} blocks behind) - TARGET: 2000+ BPS",
-                        chunks_processed, auto_reason, blocks_behind
+                        "🔥 [EXTREME SYNC v7.2.3] WAL synced in {:?} after {} chunks ({}, {} blocks behind)",
+                        sync_start.elapsed(), chunks_processed, auto_reason, blocks_behind
+                    );
+                } else if chunks_processed % 100 == 0 {
+                    let auto_reason = if use_extreme_env { "env" } else { "auto (>50k behind)" };
+                    info!(
+                        "🔥 [EXTREME SYNC v7.2.3] {} chunks processed ({}, {} blocks behind) - next WAL sync in {} chunks",
+                        chunks_processed, auto_reason, blocks_behind, extreme_sync_interval - (chunks_processed % extreme_sync_interval)
                     );
                 }
-                // NO sync_wal() call - maximum speed!
             } else if use_turbo {
                 // Increment chunk counter
                 let chunks_processed = self.chunks_since_wal_sync.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3138,7 +3173,7 @@ impl TurboSyncManager {
                 let wal_sync_batch_size = std::env::var("Q_WAL_SYNC_BATCH_SIZE")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(50u64);  // v1.5.1: 50 chunks (was 10)
+                    .unwrap_or(10u64);  // 🛡️ v7.2.3: 10 chunks (was 50). Reduces max data loss from ~50K to ~10K blocks on crash
 
                 // Get time since last sync
                 let now_ms = std::time::SystemTime::now()
@@ -3148,8 +3183,9 @@ impl TurboSyncManager {
                 let last_sync_ms = self.last_wal_sync_time.load(Ordering::Relaxed);
                 let elapsed_since_sync_ms = now_ms.saturating_sub(last_sync_ms);
 
-                // Sync if: (a) 50+ chunks processed, OR (b) 60+ seconds since last sync
-                let should_sync = chunks_processed >= wal_sync_batch_size || elapsed_since_sync_ms >= 60_000;
+                // 🛡️ v7.2.3: Sync if: (a) 10+ chunks processed, OR (b) 15+ seconds since last sync
+                // (was 50 chunks / 60s - too much data loss risk on crash)
+                let should_sync = chunks_processed >= wal_sync_batch_size || elapsed_since_sync_ms >= 15_000;
 
                 if should_sync {
                     let sync_start = std::time::Instant::now();
@@ -3160,8 +3196,24 @@ impl TurboSyncManager {
                     self.chunks_since_wal_sync.store(0, Ordering::Relaxed);
                     self.last_wal_sync_time.store(now_ms, Ordering::Relaxed);
 
+                    // v7.2.7: Periodic flush every 30s to persist blocks from OS page cache to disk
+                    // Without this, crash loses ALL blocks since last flush (even if WAL synced)
+                    let last_flush = self.last_flush_time.load(Ordering::Relaxed);
+                    if now_ms - last_flush >= 30_000 {
+                        let flush_start = std::time::Instant::now();
+                        if let Err(e) = self.storage.hot_db.flush().await {
+                            warn!("⚠️ [TURBO SYNC v7.2.7] Periodic flush failed: {} (non-fatal)", e);
+                        } else {
+                            info!(
+                                "💾 [TURBO SYNC v7.2.7] Periodic flush in {:?} — blocks persisted to disk",
+                                flush_start.elapsed()
+                            );
+                        }
+                        self.last_flush_time.store(now_ms, Ordering::Relaxed);
+                    }
+
                     info!(
-                        "⚡ [TURBO SYNC v1.5.1] WAL synced in {:?} after {} chunks ({} blocks) - last sync {}ms ago",
+                        "⚡ [TURBO SYNC v7.2.7] WAL synced in {:?} after {} chunks ({} blocks) - last sync {}ms ago",
                         sync_start.elapsed(), chunks_processed, blocks.len(), elapsed_since_sync_ms
                     );
                 } else {
@@ -3531,22 +3583,25 @@ impl TurboSyncManager {
                 }
             }
 
-            // Process balance consensus if needed
+            // v7.1.2: Process balance consensus - coinbase-only when skip_balances, full otherwise
             if let Some(engine) = balance_engine {
-                if !skip_balances {
-                    let tx = self.storage.begin_transaction().await?;
-                    for block in &blocks {
-                        match engine.process_block_mining_rewards_tx(&tx, block).await {
-                            Ok(_) => {}
-                            Err(BalanceConsensusError::AlreadyProcessed(_)) => {}
-                            Err(e) => {
-                                error!("❌ [DIRECT] Balance processing failed for block {}: {:?}",
-                                    block.header.height, e);
-                            }
+                let tx = self.storage.begin_transaction().await?;
+                for block in &blocks {
+                    let result = if skip_balances {
+                        engine.process_block_coinbase_only_tx(&tx, block).await
+                    } else {
+                        engine.process_block_mining_rewards_tx(&tx, block).await
+                    };
+                    match result {
+                        Ok(_) => {}
+                        Err(BalanceConsensusError::AlreadyProcessed(_)) => {}
+                        Err(e) => {
+                            error!("❌ [DIRECT] Balance processing failed for block {}: {:?}",
+                                block.header.height, e);
                         }
                     }
-                    tx.commit().await?;
                 }
+                tx.commit().await?;
             }
 
             // Batch save blocks
@@ -3568,8 +3623,9 @@ impl TurboSyncManager {
 
             if !use_extreme {
                 let chunks_processed = self.chunks_since_wal_sync.fetch_add(1, Ordering::Relaxed) + 1;
+                // v7.2.7: Reduced to 5 chunks (was 50) to minimize data loss on crash
                 let wal_sync_batch_size = std::env::var("Q_WAL_SYNC_BATCH_SIZE")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(50u64);
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(5u64);
                 if chunks_processed >= wal_sync_batch_size {
                     self.storage.sync_wal().await?;
                     self.chunks_since_wal_sync.store(0, Ordering::Relaxed);
@@ -3651,10 +3707,12 @@ impl TurboSyncManager {
                 let total_mb = sys.total_memory() / (1024 * 1024);
 
                 let effective_mb = cgroup_limit_mb.unwrap_or(total_mb);
-                // Use 55% of effective limit (leave 45% for RocksDB, OS, page cache)
-                let limit = (effective_mb as f64 * 0.55) as u64;
-                info!("🧠 [RSS BACKPRESSURE v6.1.0] RSS limit: {}MB (55% of {}MB effective, cgroup: {:?}, system: {}MB)",
-                    limit, effective_mb, cgroup_limit_mb, total_mb);
+                // v7.1.4: Higher RSS allowance for 32GB+ servers (65% vs 55%)
+                // 32GB+ servers have plenty of headroom for RocksDB + page cache
+                let ratio = if effective_mb >= 32000 { 0.65 } else { 0.55 };
+                let limit = (effective_mb as f64 * ratio) as u64;
+                info!("🧠 [RSS BACKPRESSURE v7.1.4] RSS limit: {}MB ({:.0}% of {}MB effective, cgroup: {:?}, system: {}MB)",
+                    limit, ratio * 100.0, effective_mb, cgroup_limit_mb, total_mb);
                 limit
             })
         };
@@ -4149,6 +4207,7 @@ impl TurboSyncManager {
             decompression_semaphore: Arc::clone(&self.decompression_semaphore),
             chunks_since_wal_sync: AtomicU64::new(self.chunks_since_wal_sync.load(Ordering::Relaxed)),
             last_wal_sync_time: AtomicU64::new(self.last_wal_sync_time.load(Ordering::Relaxed)),
+            last_flush_time: AtomicU64::new(self.last_flush_time.load(Ordering::Relaxed)),
             metrics: Arc::clone(&self.metrics),
             peer_registry: Arc::clone(&self.peer_registry),
             network_tx: self.network_tx.clone(), // Clone the network channel

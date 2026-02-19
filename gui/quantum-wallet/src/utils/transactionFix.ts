@@ -54,14 +54,16 @@ export function validateBalance(
     return { valid: true, fixedRequired, fixedAvailable };
   }
   
-  // TEMPORARY: Allow testing with zero balance for demo purposes
+  // Check if balance is sufficient (zero balance = insufficient)
   if (fixedAvailable === 0) {
-    console.warn('⚠️ Zero balance detected - allowing transaction for testing');
-    console.warn('⚠️ In production, this would require faucet tokens first');
-    return { valid: true, fixedRequired, fixedAvailable };
+    return {
+      valid: false,
+      error: 'No balance. Earn QUG through mining.',
+      fixedRequired,
+      fixedAvailable,
+    };
   }
-  
-  // Check if balance is sufficient
+
   if (fixedAvailable < fixedRequired) {
     return {
       valid: false,

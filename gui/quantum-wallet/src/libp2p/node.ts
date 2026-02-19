@@ -315,11 +315,16 @@ export async function createBrowserNode(): Promise<Libp2p> {
         pubsub: gossipsub({
           emitSelf: false, // Don't receive our own messages
           floodPublish: GOSSIPSUB_CONFIG.FLOOD_PUBLISH,
-          // Mesh parameters
+          fallbackToFloodsub: true, // Ensure messages reach all subscribers even without mesh
+          allowPublishToZeroTopicPeers: true, // Don't error when no mesh peers
+          // Mesh parameters - tuned for browser with 1 bootstrap peer
           D: GOSSIPSUB_CONFIG.D,
-          Dlo: GOSSIPSUB_CONFIG.D_LOW,
+          Dlo: 1, // Allow mesh with just 1 peer (bootstrap server)
           Dhi: GOSSIPSUB_CONFIG.D_HIGH,
           heartbeatInterval: GOSSIPSUB_CONFIG.HEARTBEAT_INTERVAL,
+          seenTTL: GOSSIPSUB_CONFIG.SEEN_TTL,
+          // Ensure we accept messages from the server (strict signing)
+          globalSignaturePolicy: 'StrictSign' as any,
         }),
 
         // DHT: Kademlia for peer/content discovery (light mode)
@@ -396,15 +401,17 @@ export async function createBrowserNode(): Promise<Libp2p> {
     p2pDataService.initialize(node)
     console.log('🌐 [LIBP2P] P2P data service started')
 
-    // Subscribe to additional network contribution topics
+    // Subscribe to ALL network topics during node initialization
+    // CRITICAL: Topics MUST be subscribed here (not deferred to React hooks)
+    // to ensure gossipsub mesh forms immediately after connection
     const pubsub = getPubSub(node)
+    pubsub.subscribe(TOPICS.BLOCKS)
+    pubsub.subscribe(TOPICS.PEER_HEIGHTS)
     pubsub.subscribe(TOPICS.VERIFICATION_REPORTS)
     pubsub.subscribe(TOPICS.TELEMETRY)
-    // v3.5.23: Pre-subscribe to TRANSACTIONS topic for faster P2P transaction submission
-    // This warms the gossipsub mesh so transactions can be published immediately
     pubsub.subscribe(TOPICS.TRANSACTIONS)
-    console.log('📡 [LIBP2P] Subscribed to verification-reports, telemetry, and transactions topics')
-    console.log('⚡ [LIBP2P] Transactions mesh pre-warmed for fast P2P submission')
+    console.log('📡 [LIBP2P] Subscribed to blocks, peer-heights, verification-reports, telemetry, and transactions topics')
+    console.log('⚡ [LIBP2P] All gossipsub meshes pre-warmed for instant P2P delivery')
 
     // v3.5.8: Initialize browser peer discovery
     browserPeerDiscovery.initialize(node)
@@ -456,8 +463,8 @@ function setupEventListeners(node: Libp2p) {
       if (remoteAddr.includes('/p2p-circuit/')) {
         isRelayConnection = true
       }
-      // Check if this is the Tor bridge connection (port 9444)
-      if (remoteAddr.includes('/tcp/9444/') || remoteAddr.includes('quillon.xyz')) {
+      // Check if this is a bootstrap connection (port 9443 or 9444)
+      if (remoteAddr.includes('/tcp/9443/') || remoteAddr.includes('/tcp/9444/') || remoteAddr.includes('quillon.xyz')) {
         isTorBridge = true
       }
     }
@@ -508,12 +515,34 @@ function setupEventListeners(node: Libp2p) {
     console.log('✂️ [LIBP2P] Gossipsub PRUNE:', event.detail)
   })
 
-  // Log initial state
+  // Global message listener to verify gossipsub delivery
+  pubsub.addEventListener('message', (event: any) => {
+    const topic = event.detail?.topic || 'unknown'
+    const dataSize = event.detail?.data?.length || 0
+    const from = event.detail?.from?.toString()?.substring(0, 16) || 'unknown'
+    console.log(`📬 [LIBP2P] Gossipsub message received: topic=${topic}, size=${dataSize}B, from=${from}`)
+  })
+
+  // Log initial state + gossipsub mesh status
   setTimeout(() => {
     const connections = node.getConnections()
+    const topics = pubsub.getTopics()
+    const peers = pubsub.getPeers()
     console.log(`📊 [LIBP2P] Current state:`)
     console.log(`   Connections: ${connections.length}`)
     console.log(`   Peer Store Size: ${node.getPeers().length}`)
+    console.log(`   Gossipsub topics: ${topics.join(', ')}`)
+    console.log(`   Gossipsub peers: ${peers.length} [${peers.map((p: any) => p.toString().substring(0, 12)).join(', ')}]`)
+
+    // Check mesh status for each topic
+    for (const topic of topics) {
+      try {
+        const meshPeers = (pubsub as any).getMeshPeers?.(topic) || []
+        console.log(`   Mesh[${topic.split('/').pop()}]: ${meshPeers.length} peers`)
+      } catch (e) {
+        // getMeshPeers might not be available
+      }
+    }
   }, 5000) // Give time for initial connections
 }
 

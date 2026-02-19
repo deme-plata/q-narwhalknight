@@ -92,6 +92,7 @@ use thiserror::Error;
 /// Errors that can occur during IPFS storage operations
 #[derive(Error, Debug)]
 pub enum IpfsStorageError {
+    #[cfg(not(target_os = "windows"))]
     #[error("RocksDB error: {0}")]
     RocksDb(#[from] rocksdb::Error),
 

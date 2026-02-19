@@ -1,0 +1,747 @@
+\documentclass[11pt,a4paper]{article}
+
+% ──────────────────────────────────────────────────────────────
+% Packages
+% ──────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage{multicol}
+\usepackage{caption}
+
+% ──────────────────────────────────────────────────────────────
+% Colors
+% ──────────────────────────────────────────────────────────────
+\definecolor{qcopper}{RGB}{184,135,100}
+\definecolor{qdark}{RGB}{30,28,26}
+\definecolor{qgold}{RGB}{207,181,141}
+\definecolor{qsec}{RGB}{120,90,65}
+\definecolor{linkblue}{RGB}{40,80,140}
+
+% ──────────────────────────────────────────────────────────────
+% Hyperlinks
+% ──────────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=qsec,
+  citecolor=qsec,
+  urlcolor=linkblue,
+  pdftitle={QUILLON VAULT: A Post-Quantum Hardware Wallet with Physical Air-Gap Security},
+  pdfauthor={Q-NarwhalKnight / Quillon},
+}
+
+% ──────────────────────────────────────────────────────────────
+% Section styling
+% ──────────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{qdark}}{\thesection.}{0.5em}{}[\vspace{-0.3em}\textcolor{qcopper}{\rule{\linewidth}{0.5pt}}]
+\titleformat{\subsection}{\normalsize\bfseries\color{qsec}}{\thesubsection}{0.5em}{}
+
+% ──────────────────────────────────────────────────────────────
+% Header / Footer
+% ──────────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{qsec}{QUILLON VAULT}}
+\fancyhead[R]{\small\textcolor{qsec}{Q-NarwhalKnight}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{qcopper}\leaders\hrule height \headrulewidth\hfill}}
+
+% ══════════════════════════════════════════════════════════════
+\begin{document}
+% ══════════════════════════════════════════════════════════════
+
+% ── Title Page (single column) ──
+\begin{center}
+  {\Huge\bfseries\textcolor{qdark}{QUILLON VAULT}}\\[0.4em]
+  {\Large\textcolor{qsec}{A Post-Quantum Hardware Wallet\\[0.15em]with Physical Air-Gap Security}}\\[0.6em]
+  {\textcolor{qcopper}{\rule{0.5\textwidth}{0.8pt}}}\\[1em]
+  {\large\textbf{Q-NarwhalKnight Project}}\\[0.3em]
+  {\texttt{https://quillon.xyz}}\\[0.3em]
+  {\small Version 1.0 --- February 2026}\\[1.2em]
+  \textit{\large ``As thin as a credit card. As secure as a vault. As elegant as jewelry.''}
+\end{center}
+
+\vspace{0.8em}
+
+% ── Full-width product image ──
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{vault.png}
+  \caption{QUILLON VAULT --- exploded component view (left), assembled device with
+  OLED display and confirm/reject buttons (right), and USB-C slide mechanism
+  in locked and exposed states (bottom insets).}
+  \label{fig:vault}
+\end{figure}
+
+\vspace{0.5em}
+
+% ── Abstract ──
+\noindent\textcolor{qcopper}{\rule{\textwidth}{0.5pt}}
+\vspace{0.3em}
+
+\noindent\textbf{Abstract.}
+We present \textbf{QUILLON VAULT}, a credit-card-form-factor hardware wallet
+designed for the Q-NarwhalKnight post-quantum blockchain. At 85.6\,mm $\times$
+54\,mm $\times$ 3.8\,mm and 28\,g, it is among the thinnest hardware signing
+devices ever proposed. The defining innovation is a \emph{machined titanium
+sliding frame} that physically disconnects the USB-C data lines when locked ---
+creating a true hardware air gap that no software exploit can bridge. Internally,
+a dedicated Quantum Random Number Generator (QRNG) chip provides
+information-theoretically unpredictable entropy for key generation, while
+NIST FIPS~204 Dilithium5 (ML-DSA, Level~5) signatures execute entirely
+within a tamper-resistant secure element. Every transaction is dual-signed
+with both Ed25519 and Dilithium5, providing security against both classical
+and quantum adversaries. The USB channel is encrypted via Kyber-1024 (ML-KEM)
+key encapsulation combined with AES-256-GCM. This paper details the
+mechanical design, security architecture, cryptographic protocols, and
+manufacturing considerations for the QUILLON VAULT.
+
+\vspace{0.3em}
+\noindent\textcolor{qcopper}{\rule{\textwidth}{0.5pt}}
+
+\vspace{1em}
+
+% ── Switch to two-column for the body ──
+\begin{multicols}{2}
+
+% ══════════════════════════════════════════════════════════════
+\section{Introduction}
+% ══════════════════════════════════════════════════════════════
+
+The security of cryptocurrency hardware wallets rests on a simple principle:
+\emph{private keys must never leave the device}. Yet existing wallets remain
+vulnerable along two axes that current designs inadequately address.
+
+\textbf{First}, the USB interface is a permanent attack surface. When a hardware
+wallet is plugged in, the host computer can enumerate it, probe its descriptors,
+and --- in the presence of firmware vulnerabilities --- extract secrets or inject
+malicious payloads. Every minute a wallet remains connected is a minute of
+exposure.
+
+\textbf{Second}, all production hardware wallets today generate their keys
+using deterministic pseudo-random number generators (PRNGs) seeded by
+classical entropy sources. These are computationally secure under current
+assumptions, but offer no information-theoretic guarantees. A sufficiently
+powerful adversary --- including a future cryptanalytically relevant quantum
+computer (CRQC) --- could potentially reconstruct the PRNG state.
+
+The QUILLON VAULT addresses both problems with two hardware-level innovations:
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=2pt]
+  \item A \textbf{physical air-gap mechanism}: a precision-machined titanium
+    frame that slides along ceramic ball-bearing rails, actuating a hardware
+    switch that electrically disconnects the USB-C D+/D$-$ data lines.
+    When the frame is in the LOCKED position, the wallet is electrically
+    unreachable --- not merely software-isolated, but circuit-broken.
+
+  \item A \textbf{Quantum Random Number Generator} (QRNG) chip that derives
+    entropy from quantum shot noise, providing keys whose randomness is
+    guaranteed by the laws of quantum mechanics rather than computational
+    hardness assumptions.
+\end{enumerate}
+
+These are complemented by a fully post-quantum cryptographic stack: Dilithium5
+signatures, Kyber-1024 encrypted USB communication, and SHA-3-256 hashing.
+
+% ══════════════════════════════════════════════════════════════
+\section{Design Philosophy}
+% ══════════════════════════════════════════════════════════════
+
+The QUILLON VAULT was designed under three constraints:
+
+\begin{description}[leftmargin=0.5em,itemsep=2pt]
+  \item[Thinness.] The device must fit in a standard card slot. We target the
+    ISO/IEC~7810 ID-1 footprint (85.6\,mm $\times$ 54\,mm) at a thickness of
+    3.8\,mm --- thinner than two stacked credit cards.
+
+  \item[Security by physics.] Every critical security property must have a
+    physical enforcement mechanism, not merely a software one. Air gaps
+    should be air gaps. Randomness should be quantum.
+
+  \item[Elegance.] A security device that users find beautiful will be
+    carried; one they find ugly will be left in a drawer. The titanium
+    frame, sapphire glass, and precision slide mechanism are not cosmetic
+    additions --- they are adoption enablers.
+\end{description}
+
+% ══════════════════════════════════════════════════════════════
+\section{Mechanical Architecture}
+% ══════════════════════════════════════════════════════════════
+
+\subsection{Form Factor}
+
+The device dimensions are summarized in Table~\ref{tab:dimensions}.
+The thickness budget is tightly constrained:
+
+\begin{center}
+\small
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Layer} & \textbf{Thickness} \\
+  \midrule
+  Titanium top shell (Gr.~5) & 0.6\,mm \\
+  Sapphire glass OLED window   & 0.3\,mm \\
+  PCB + components (4-layer)   & 2.0\,mm \\
+  Titanium bottom shell        & 0.6\,mm \\
+  Magnetic slide rail           & 0.3\,mm \\
+  \midrule
+  \textbf{Total}               & \textbf{3.8\,mm} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Physical specifications.}
+  \label{tab:dimensions}
+  \begin{tabular}{ll}
+    \toprule
+    \textbf{Parameter} & \textbf{Value} \\
+    \midrule
+    Length  & 85.6\,mm \\
+    Width   & 54\,mm \\
+    Thickness & 3.8\,mm \\
+    Weight (Ti) & 28\,g \\
+    Weight (Al) & 22\,g \\
+    Shell & Grade~5 titanium \\
+    Display & Sapphire crystal \\
+    PCB & 4-layer, 0.8\,mm \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The Slide Mechanism}
+
+The central mechanical innovation is the sliding titanium frame. An 8\,mm
+linear translation exposes the USB-C port. The mechanism consists of:
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item \textbf{Precision slide rails} machined into both top and bottom
+    shells, with ceramic ball bearings (Si$_3$N$_4$) for zero-wobble
+    linear travel.
+  \item \textbf{N52 neodymium magnet detents} at both the LOCKED and
+    UNLOCKED positions, providing a satisfying tactile ``click'' and
+    holding the frame securely in either state.
+  \item \textbf{A hardware disconnect switch}: a spring-loaded contact
+    embedded in the slide rail that is physically depressed only when the
+    frame reaches the UNLOCKED position. This switch completes the
+    USB-C D+/D$-$ circuit. In the LOCKED position, the circuit is
+    \emph{broken} --- an air gap enforced by mechanics, not software.
+\end{itemize}
+
+The electrical implication is critical: when the frame is closed, the
+USB-C data lines are physically interrupted. No amount of software
+exploitation on the host computer can establish communication with the
+wallet. The power lines (VBUS/GND) are also disconnected, preventing
+even side-channel power analysis via the USB connector.
+
+\subsection{Exterior Finish}
+
+All edges feature a 45$^\circ$ chamfer with mirror polish, contrasting
+against the brushed face. Six material variants are planned:
+
+\begin{enumerate}[leftmargin=1.2em,itemsep=1pt]
+  \item \textbf{Obsidian} --- PVD black titanium, gold logo
+  \item \textbf{Titanium} --- Natural Grade~5, silver logo
+  \item \textbf{Rose} --- Rose gold PVD, white logo
+  \item \textbf{Stealth} --- Matte black ceramic, no logo
+  \item \textbf{Arctic} --- White zirconia ceramic, Ti frame
+  \item \textbf{Carbon} --- Carbon fiber inlay, Ti frame
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════
+\section{Electronic Architecture}
+% ══════════════════════════════════════════════════════════════
+
+\subsection{Component Selection}
+
+Table~\ref{tab:components} lists the key electronic components. Every part
+was selected for the intersection of security properties, physical size,
+and power characteristics compatible with a bus-powered, battery-less
+design.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Key electronic components.}
+  \label{tab:components}
+  \begin{tabularx}{\columnwidth}{lX}
+    \toprule
+    \textbf{Part} & \textbf{Specification} \\
+    \midrule
+    SE & ATECC608B (2$\times$3\,mm) \\
+    MCU & STM32L4S5, Cortex-M4, 120\,MHz, TrustZone \\
+    Display & SSD1306 0.42'' OLED, 72$\times$40\,px \\
+    USB & USB-C mid-mount (8.9$\times$2.5\,mm) \\
+    QRNG & IDQ Quantis (3$\times$3\,mm) \\
+    Flash & W25Q16JV, 2\,MB SPI NOR \\
+    Haptics & LRA $\times$2 (4$\times$4$\times$1.5\,mm) \\
+    Buttons & Capacitive touch (flush) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Secure Element: ATECC608B}
+
+The ATECC608B is a dedicated cryptographic coprocessor with
+hardware-protected key storage (keys never leave the die),
+side-channel resistance (DPA, SPA, fault injection),
+a monotonic counter for replay attack prevention,
+secure boot attestation, and a hardware TRNG
+(supplemented by the external QRNG).
+
+Private keys are generated \emph{inside} the secure element using entropy
+from the QRNG chip and are used for signing without ever being exposed
+to the MCU, the host computer, or firmware update processes.
+
+\subsection{Quantum Random Number Generator}
+
+The IDQ Quantis QRNG chip generates random bits from quantum vacuum
+fluctuations (shot noise on a photodetector). Unlike PRNGs, the output
+is \emph{information-theoretically random} --- its unpredictability is
+guaranteed by quantum mechanics, not computational hardness. This
+provides:
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item Key generation entropy that cannot be predicted even by a
+    quantum computer
+  \item Nonce generation that eliminates the risk of
+    nonce reuse via PRNG state compromise
+  \item Seed material for the BIP-39 mnemonic that is physically
+    unpredictable
+\end{itemize}
+
+\subsection{MCU: STM32L4S5 with TrustZone}
+
+The STM32L4S5 provides ARM TrustZone hardware isolation, partitioning
+the processor into a \textbf{Secure world} (cryptographic operations,
+SE communication, signature construction) and a \textbf{Non-secure world}
+(USB protocol, display rendering, user interaction).
+
+A compromised non-secure world cannot access secure-world memory,
+registers, or peripherals. Additional protections include stack canaries,
+ASLR, and a hardware watchdog timer for fault injection resistance.
+
+\subsection{Display and User Interaction}
+
+The 0.42'' SSD1306 OLED display, protected by a 0.3\,mm sapphire
+crystal window, shows transaction details (recipient, amount, token),
+wallet addresses, firmware version, and PIN entry prompts.
+
+Two flush-mount capacitive touch buttons (\textsc{Confirm} and
+\textsc{Reject}) with LRA haptic feedback provide physical transaction
+authorization. The haptic pattern differs between confirm
+(single pulse) and reject (double pulse) for accessibility.
+
+% ══════════════════════════════════════════════════════════════
+\section{Security Architecture}
+% ══════════════════════════════════════════════════════════════
+
+The QUILLON VAULT implements defense-in-depth across five layers.
+
+\subsection{Layer 1: Physical Security}
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item \textbf{Titanium enclosure}: Grade~5 Ti-6Al-4V
+    provides drill and cut resistance
+  \item \textbf{Epoxy-potted PCB}: Optically opaque, thermally resistant
+    encapsulation prevents physical probe access
+  \item \textbf{Tamper mesh}: Fine copper mesh on the PCB
+    detects intrusion and triggers key wipe
+  \item \textbf{Holographic seal}: Tamper-evident seal
+    over the shell seam
+\end{itemize}
+
+\subsection{Layer 2: Secure Element Isolation}
+
+The ATECC608B enforces that key material never crosses the die boundary,
+all signing operations execute within the SE, side-channel countermeasures
+operate at the silicon level, and a monotonic counter prevents replay.
+
+\subsection{Layer 3: Firmware Integrity}
+
+Secure boot chain requires firmware signed by Quillon's release key
+(stored in SE). TrustZone memory isolation prevents cross-world leakage.
+Stack canaries and ASLR harden against memory corruption. A hardware
+watchdog detects voltage glitching and clock manipulation.
+
+\subsection{Layer 4: Post-Quantum Cryptography}
+\label{sec:crypto}
+
+\begin{description}[leftmargin=0.5em,itemsep=3pt]
+  \item[Transaction signatures:] \textbf{Dual-signature mode.} Every
+    transaction is signed with both Ed25519 (classical, 64-byte)
+    and Dilithium5 / ML-DSA (post-quantum, NIST Level~5,
+    4,627-byte). If a CRQC breaks Ed25519, Dilithium5
+    remains valid. If lattice cryptanalysis advances, Ed25519 remains
+    secure. Both must verify.
+
+  \item[Key generation:] QRNG-derived entropy, processed through
+    SHA-3-256, provides seed material for both key pairs.
+    QRNG output is XORed with the SE's internal TRNG
+    as a defense-in-depth entropy source.
+
+  \item[USB encryption:] Host-to-wallet communication uses
+    \textbf{Kyber-1024} (ML-KEM, FIPS~203) for
+    key encapsulation, establishing a shared secret for
+    \textbf{AES-256-GCM} authenticated encryption. Even a
+    compromised USB stack cannot extract signing keys.
+
+  \item[Hashing:] \textbf{SHA-3-256} (FIPS~202) for all internal
+    hashing. SHA-3-256 provides $\sim$128-bit security against
+    Grover's quantum search.
+\end{description}
+
+\subsection{Layer 5: User Verification}
+
+The OLED displays \emph{exact} transaction details --- what the
+user sees is what the SE signs. A physical button press is required;
+remote signing is impossible. PIN policy: 3 wrong attempts triggers
+a 24-hour lockout; 10 wrong attempts triggers permanent key wipe.
+Recovery via BIP-39 mnemonic on titanium seed card.
+
+% ══════════════════════════════════════════════════════════════
+\section{The Physical Air Gap}
+% ══════════════════════════════════════════════════════════════
+
+The slide mechanism's security properties deserve emphasis.
+In the \textbf{LOCKED} state:
+
+\begin{equation}
+  \text{USB D+/D}^{-} \;\longrightarrow\; \underbrace{[\;\text{GAP}\;]}_{\text{switch open}} \;\longrightarrow\; \text{MCU}
+\end{equation}
+
+The spring-loaded contact in the slide rail is mechanically retracted,
+creating a physical break in the D+ and D$-$ traces. No electrical
+signal can traverse this gap. The VBUS power line is similarly
+disconnected, preventing USB enumeration, firmware exploitation,
+side-channel power analysis, and EM emanation analysis via the USB
+cable as antenna.
+
+In the \textbf{UNLOCKED} state (frame slid 8\,mm), the spring contact
+is depressed, completing the circuit:
+
+\begin{equation}
+  \text{USB D+/D}^{-} \;\xrightarrow{\;\text{contact}\;}\; \text{MCU}
+\end{equation}
+
+This is, to our knowledge, the first hardware wallet where the
+USB data connection has a \emph{user-controlled physical disconnect}
+as an integral part of the device form factor --- not an afterthought
+(USB cap) or an accessory (Faraday bag), but a machined precision
+mechanism built into the device's primary interaction paradigm.
+
+% ══════════════════════════════════════════════════════════════
+\section{Cryptographic Protocol}
+% ══════════════════════════════════════════════════════════════
+
+\subsection{Key Generation}
+
+\begin{enumerate}[leftmargin=1.2em,itemsep=2pt]
+  \item QRNG chip generates 512 bits of quantum-random entropy
+  \item SE internal TRNG generates 512 bits of classical entropy
+  \item Both sources are XORed, then processed through SHA-3-512
+  \item Output seeds both Ed25519 and Dilithium5 key pairs
+  \item BIP-39 mnemonic derived from the combined 512-bit seed
+  \item Key pairs generated \emph{inside the SE}, never exported
+\end{enumerate}
+
+\subsection{Transaction Signing}
+
+\begin{enumerate}[leftmargin=1.2em,itemsep=2pt]
+  \item Host sends transaction over Kyber-1024 encrypted channel
+  \item MCU renders transaction details on OLED display
+  \item User taps \textsc{Confirm} or \textsc{Reject}
+  \item If confirmed: MCU passes transaction hash to SE
+  \item SE signs with Ed25519, then with Dilithium5
+  \item Both signatures returned over encrypted channel
+  \item SE increments monotonic counter (prevents replay)
+\end{enumerate}
+
+\subsection{Firmware Updates}
+
+New firmware images must be signed with Quillon's Dilithium5 release key.
+The SE verifies the signature before allowing flash writes. The OLED
+displays the version change for user confirmation, and a physical button
+press is required to authorize. The previous firmware is retained in a
+backup partition for rollback, and the update process is atomic
+(power-loss-safe).
+
+% ══════════════════════════════════════════════════════════════
+\section{Threat Model}
+% ══════════════════════════════════════════════════════════════
+
+The following threats are addressed:
+
+\smallskip
+\noindent\textbf{Malware on host.} USB exploitation, firmware injection.
+\textit{Mitigated by:} Physical air gap; Kyber-1024 encrypted channel;
+signed firmware updates.
+
+\smallskip
+\noindent\textbf{Physical theft.} Device stolen, keys extracted.
+\textit{Mitigated by:} PIN lockout; titanium shell; epoxy-potted PCB;
+tamper mesh triggers key wipe.
+
+\smallskip
+\noindent\textbf{Side-channel.} Power analysis, EM emanation, timing.
+\textit{Mitigated by:} SE with DPA/SPA resistance; air gap disconnects
+power; constant-time crypto.
+
+\smallskip
+\noindent\textbf{Supply chain.} Tampered device before delivery.
+\textit{Mitigated by:} Holographic seal; secure boot attestation;
+device certificate chain.
+
+\smallskip
+\noindent\textbf{Quantum adversary.} Shor's algorithm on ECDSA/EdDSA.
+\textit{Mitigated by:} Dual-sign Dilithium5 + Ed25519; QRNG keys;
+Kyber-1024 USB encryption.
+
+\smallskip
+\noindent\textbf{PRNG weakness.} Predictable key generation.
+\textit{Mitigated by:} QRNG chip (quantum shot noise); XOR with SE TRNG;
+information-theoretic randomness.
+
+\smallskip
+\noindent\textbf{Evil maid.} Device tampered while unattended.
+\textit{Mitigated by:} Tamper mesh; holographic seal; secure boot detects
+firmware modification.
+
+% ══════════════════════════════════════════════════════════════
+\section{Comparison with Existing Wallets}
+% ══════════════════════════════════════════════════════════════
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Feature comparison.}
+  \label{tab:comparison}
+  \begin{tabularx}{\columnwidth}{lX}
+    \toprule
+    \textbf{Feature} & \textbf{Status vs.\ Competitors} \\
+    \midrule
+    Thickness & \textbf{3.8\,mm} (vs.\ 8--15\,mm) \\
+    Physical air gap & \textbf{USB slide disconnect} (unique) \\
+    PQ signatures & \textbf{Dilithium5 Level~5} (none offer PQ) \\
+    QRNG & \textbf{IDQ Quantis} (none offer QRNG) \\
+    Dual-sign & \textbf{Ed25519 + Dilithium5} (unique) \\
+    Encrypted USB & \textbf{Kyber-1024 + AES-256} (unique) \\
+    Secure Element & ATECC608B (comparable) \\
+    Shell material & \textbf{Grade~5 Titanium} (vs.\ plastic) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+No existing production hardware wallet offers post-quantum signatures,
+quantum random number generation, or a physical USB disconnect mechanism.
+The QUILLON VAULT is, to our knowledge, the first design to combine all
+three in a credit-card form factor.
+
+% ══════════════════════════════════════════════════════════════
+\section{User Experience Flow}
+% ══════════════════════════════════════════════════════════════
+
+The interaction model prioritizes simplicity:
+
+\begin{enumerate}[leftmargin=1.2em,itemsep=3pt]
+  \item \textbf{Slide frame open} --- magnetic click at UNLOCKED
+  \item \textbf{Insert USB-C} --- OLED wakes, shows wallet address
+  \item \textbf{Authorize transaction} --- OLED shows amount,
+    recipient, token; user taps \textsc{Confirm} or \textsc{Reject}
+  \item \textbf{Unplug USB-C} --- OLED enters sleep
+  \item \textbf{Slide frame closed} --- magnetic click at LOCKED;
+    USB-C electrically disconnected and physically concealed
+\end{enumerate}
+
+The entire signing interaction takes approximately 5 seconds.
+The device requires no battery --- it is entirely bus-powered via USB.
+
+% ══════════════════════════════════════════════════════════════
+\section{Manufacturing and Cost}
+% ══════════════════════════════════════════════════════════════
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Bill of materials (10K volume).}
+  \label{tab:bom}
+  \begin{tabular}{lr}
+    \toprule
+    \textbf{Component} & \textbf{Cost} \\
+    \midrule
+    Titanium shells (CNC + PVD)   & \$18.00 \\
+    PCB + assembly (4-layer)       & \$8.00 \\
+    ATECC608B Secure Element       & \$1.20 \\
+    STM32L4S5 MCU                  & \$6.00 \\
+    0.42'' OLED + sapphire         & \$4.00 \\
+    USB-C mid-mount connector      & \$0.80 \\
+    IDQ Quantis QRNG               & \$12.00 \\
+    Slide mechanism                & \$5.00 \\
+    LRA haptic motors ($\times$2)   & \$1.50 \\
+    Flash + passives + assembly    & \$3.00 \\
+    \midrule
+    \textbf{Total BOM}             & \textbf{\$59.50} \\
+    \midrule
+    Retail (Titanium)              & \$149.00 \\
+    Retail (Ceramic)               & \$199.00 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The titanium shells are 5-axis CNC machined with PVD coating.
+The slide mechanism uses injection-molded rail channels
+with press-fit ceramic ball bearings and N52 neodymium magnets epoxied
+into machined pockets.
+
+% ══════════════════════════════════════════════════════════════
+\section{Packaging}
+% ══════════════════════════════════════════════════════════════
+
+The QUILLON VAULT ships in a magnetic-close presentation box with
+soft-touch matte finish and foil-stamped Q logo:
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item Device in molded microfiber tray
+  \item Braided USB-C cable (30\,cm)
+  \item \textbf{Titanium recovery seed card} --- fireproof, waterproof,
+    for metal-stamping the 24-word BIP-39 mnemonic
+  \item Quick-start guide with QR code
+\end{itemize}
+
+The titanium seed card ensures the backup survives conditions that would
+destroy paper or plastic.
+
+% ══════════════════════════════════════════════════════════════
+\section{Integration with Q-NarwhalKnight}
+% ══════════════════════════════════════════════════════════════
+
+The QUILLON VAULT is the native hardware signing device
+for the Q-NarwhalKnight post-quantum blockchain~\cite{qnk2026}. The
+integration is natural because Q-NarwhalKnight already
+requires dual Ed25519 + Dilithium5 signatures, SHA-3-256 transaction
+hashing, and Kyber-1024 for P2P encryption.
+
+Supported operations include native QUG transfers, QUGUSD stablecoin
+transactions, custom token (QRC-20) transfers, DEX swap authorization,
+smart contract interaction, and RWA token management.
+
+% ══════════════════════════════════════════════════════════════
+\section{Future Work}
+% ══════════════════════════════════════════════════════════════
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item \textbf{Bluetooth Low Energy}: Wireless signing with
+    Kyber-1024 encrypted channel
+  \item \textbf{NFC tap-to-sign}: Contactless transaction
+    authorization at point-of-sale
+  \item \textbf{Multi-signature}: $m$-of-$n$ threshold
+    signing across multiple devices
+  \item \textbf{Biometric auth}: Fingerprint sensor
+    with SE-backed template storage
+  \item \textbf{SQIsign migration}: When isogeny-based signatures
+    mature, the crypto-agile firmware allows switching
+    from Dilithium5 to SQIsign for 204-byte PQ signatures
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{Conclusion}
+% ══════════════════════════════════════════════════════════════
+
+The QUILLON VAULT demonstrates that post-quantum hardware security,
+physical air-gap isolation, and elegant industrial design are not
+mutually exclusive. By building the security architecture
+around physical enforcement mechanisms --- a machined titanium slide
+that breaks USB circuits, a QRNG chip that derives entropy from
+quantum mechanics, and a secure element that performs Dilithium5
+signing without ever exposing key material --- we achieve security
+properties independent of software correctness assumptions.
+
+The device fits in a card slot at 3.8\,mm, weighs 28\,g,
+and requires no battery. It is the first hardware wallet designed from
+the ground up for the post-quantum era, and the first where the USB
+connection has a user-controlled physical disconnect built into the
+device's primary form factor.
+
+\vspace{1em}
+\noindent\textcolor{qcopper}{\rule{\columnwidth}{0.8pt}}
+
+\vspace{0.5em}
+\noindent\small\textit{The QUILLON VAULT is designed for Q-NarwhalKnight.
+Visit} \texttt{https://quillon.xyz}.
+
+% ══════════════════════════════════════════════════════════════
+% References
+% ══════════════════════════════════════════════════════════════
+
+\begin{thebibliography}{99}
+
+\bibitem{qnk2026}
+  Q-NarwhalKnight Project,
+  ``Q-NarwhalKnight: A Post-Quantum DAG Consensus System,''
+  Technical whitepaper, 2026.
+
+\bibitem{fips204}
+  NIST,
+  ``FIPS 204: Module-Lattice-Based Digital Signature Standard (ML-DSA),''
+  2024.
+
+\bibitem{fips203}
+  NIST,
+  ``FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism Standard (ML-KEM),''
+  2024.
+
+\bibitem{fips202}
+  NIST,
+  ``FIPS 202: SHA-3 Standard,''
+  2015.
+
+\bibitem{dilithium}
+  L. Ducas et al.,
+  ``CRYSTALS-Dilithium: A Lattice-Based Digital Signature Scheme,''
+  TCHES, 2018.
+
+\bibitem{kyber}
+  R. Avanzi et al.,
+  ``CRYSTALS-Kyber: A CCA-Secure Module-Lattice-Based KEM,''
+  IEEE Euro S\&P, 2018.
+
+\bibitem{ed25519}
+  D.J. Bernstein et al.,
+  ``High-Speed High-Security Signatures,''
+  J. Cryptographic Engineering, 2012.
+
+\bibitem{atecc608b}
+  Microchip Technology,
+  ``ATECC608B CryptoAuthentication Device Datasheet,''
+  2020.
+
+\bibitem{qrng}
+  ID Quantique,
+  ``Quantis QRNG Chip: True Random Number Generation,''
+  2023.
+
+\bibitem{bip39}
+  M. Palatinus and P. Rusnak,
+  ``BIP-39: Mnemonic Code for Generating Deterministic Keys,''
+  2013.
+
+\end{thebibliography}
+
+\end{multicols}
+
+\end{document}

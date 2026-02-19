@@ -40,8 +40,13 @@ import {
   Loader2,
   ArrowUpDown,
   Wallet,
-  BarChart3
+  BarChart3,
+  Mail,
+  Coins,
+  PieChart,
+  Trophy
 } from 'lucide-react';
+import { qnkAPI } from '../services/api';
 import TransactionPreviewModal from './TransactionPreviewModal';
 import VerificationMonitor from './VerificationMonitor';
 
@@ -58,6 +63,26 @@ interface FunctionCall {
   status: 'pending' | 'executing' | 'completed' | 'failed';
 }
 
+// ✅ v7.3.3 - Financial crypto action types for AI-driven commands
+type CryptoActionType = 'send' | 'swap' | 'balance' | 'price' | 'history' | 'stake' | 'deploy' | 'pool_info' | 'mail' | 'mint' | 'portfolio' | 'top_tokens';
+interface CryptoAction {
+  id: string;
+  type: CryptoActionType;
+  params: Record<string, string>;
+  displayText: string;
+  status: 'pending' | 'confirming' | 'executing' | 'completed' | 'failed' | 'cancelled';
+  result?: { success: boolean; data?: any; error?: string; txHash?: string };
+}
+
+// Address book contact for name resolution
+interface AddressBookEntry {
+  id: string;
+  address: string;
+  label: string;
+  tags?: string[];
+  notes?: string;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -65,6 +90,7 @@ interface Message {
   timestamp: number;
   reasoning?: string; // Kimi K2 thinking process (v1.0.5)
   functionCalls?: FunctionCall[]; // Ministral-3B native function calls
+  cryptoActions?: CryptoAction[]; // v7.3.3 - AI-detected financial actions
   stats?: {
     tokens: number;
     latency_ms: number;
@@ -126,6 +152,10 @@ export default function AIChatScreen() {
   const [transactionPreview, setTransactionPreview] = useState<any>(null);
   const [showTransactionPreview, setShowTransactionPreview] = useState(false);
   const [pendingTransactionMessage, setPendingTransactionMessage] = useState<string>('');
+
+  // ✅ v7.3.3 - Financial Crypto Actions State
+  const [addressBook, setAddressBook] = useState<AddressBookEntry[]>([]);
+  const [pendingActions, setPendingActions] = useState<Record<string, CryptoAction>>({});
 
   // ✅ v1.4.2 - Enhanced Chat UX Features
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -1045,7 +1075,529 @@ export default function AIChatScreen() {
     backgroundGenerationRef.current = false;
   };
 
-  // BitNet b1.58-2B-4T streaming via OpenAI-compatible API (temporary)
+  // ✅ v7.3.3 - Load address book for name resolution
+  useEffect(() => {
+    const loadAddressBook = async () => {
+      try {
+        const walletAddress = localStorage.getItem('walletAddress') || '';
+        if (!walletAddress) return;
+        const resp = await fetch('/api/v1/addressbook', {
+          headers: {
+            'X-Wallet-Address': walletAddress,
+            'X-Auth-Signature': localStorage.getItem('authSignature') || '',
+            'X-Auth-Timestamp': localStorage.getItem('authTimestamp') || '',
+            'X-Auth-Public-Key': localStorage.getItem('authPublicKey') || '',
+          }
+        });
+        const data = await resp.json();
+        if (data.success && Array.isArray(data.data)) {
+          setAddressBook(data.data);
+        }
+      } catch (err) {
+        console.log('📒 Address book not loaded (non-critical):', err);
+      }
+    };
+    loadAddressBook();
+  }, []);
+
+  // ✅ v7.3.3 - Resolve name to address from address book
+  const resolveNameToAddress = (name: string): { address: string; label: string } | null => {
+    const lower = name.toLowerCase().trim();
+    // Exact match first
+    const exact = addressBook.find(e => e.label.toLowerCase() === lower);
+    if (exact) return { address: exact.address, label: exact.label };
+    // Partial match
+    const partial = addressBook.find(e => e.label.toLowerCase().includes(lower));
+    if (partial) return { address: partial.address, label: partial.label };
+    // Tag match
+    const tagged = addressBook.find(e => e.tags?.some(t => t.toLowerCase() === lower));
+    if (tagged) return { address: tagged.address, label: tagged.label };
+    return null;
+  };
+
+  // ✅ v7.4.1 - Build a CryptoAction from type + params
+  const buildAction = (type: CryptoActionType, params: Record<string, string>, index: number): CryptoAction => {
+    let displayText = '';
+    switch (type) {
+      case 'send':
+        displayText = `Send ${params.amount || '?'} ${(params.token || 'QUG').toUpperCase()} to ${params.to_name || params.to || '?'}`;
+        break;
+      case 'swap':
+        displayText = `Swap ${params.amount || '?'} ${(params.from || 'QUG').toUpperCase()} for ${(params.to || '?').toUpperCase()}`;
+        break;
+      case 'balance':
+        displayText = `Check ${(params.token || 'all').toUpperCase()} balance`;
+        break;
+      case 'price':
+        displayText = `Get ${(params.token || 'QUG').toUpperCase()} price`;
+        break;
+      case 'history':
+        displayText = `Show transaction history${params.limit ? ` (last ${params.limit})` : ''}`;
+        break;
+      case 'pool_info':
+        displayText = `Show ${(params.pair || 'all').toUpperCase()} pool info`;
+        break;
+      case 'mail':
+        displayText = `Send mail to ${params.to_name || params.to || '?'}: "${(params.subject || 'No subject').slice(0, 40)}"`;
+        break;
+      case 'mint':
+        displayText = `Mint ${params.amount || '?'} QUGUSD (collateral: ${params.collateral || '?'} QUG)`;
+        break;
+      case 'portfolio':
+        displayText = `Show full portfolio summary`;
+        break;
+      case 'top_tokens':
+        displayText = `Show top ${params.limit || '10'} tokens by ${params.sort || 'volume'}`;
+        break;
+      default:
+        displayText = `${type}: ${JSON.stringify(params)}`;
+    }
+    return {
+      id: `action-${Date.now()}-${index}`,
+      type,
+      params,
+      displayText,
+      status: 'pending',
+    };
+  };
+
+  // ✅ v7.3.3 - Parse crypto actions from AI response text
+  const parseCryptoActions = (text: string): CryptoAction[] => {
+    const actions: CryptoAction[] = [];
+
+    // Pattern 1: [ACTION:type key=val ...] (standard format, closing ] optional)
+    const actionRegex = /\[ACTION:(\w+)(?:\s+([^\]\n]+))?\]?/g;
+    let match;
+    while ((match = actionRegex.exec(text)) !== null) {
+      const type = match[1].toLowerCase() as CryptoActionType;
+      const paramsStr = match[2] || '';
+      const params: Record<string, string> = {};
+      const paramRegex = /(\w+)=(?:"([^"]+)"|(\S+))/g;
+      let pm;
+      while ((pm = paramRegex.exec(paramsStr)) !== null) {
+        params[pm[1]] = pm[2] || pm[3];
+      }
+      actions.push(buildAction(type, params, actions.length));
+    }
+
+    // Pattern 2: [type] without ACTION: prefix (BitNet 2B sometimes does this)
+    if (actions.length === 0) {
+      const simpleTypes = ['portfolio', 'balance', 'price', 'history', 'top_tokens', 'pool_info', 'send', 'swap', 'mail', 'mint'];
+      for (const t of simpleTypes) {
+        const simpleRegex = new RegExp(`\\[${t}(?:[:\\s]([^\\]\\n]*))?\\]?`, 'gi');
+        let sm;
+        while ((sm = simpleRegex.exec(text)) !== null) {
+          const params: Record<string, string> = {};
+          if (sm[1]) {
+            const paramRegex = /(\w+)=(?:"([^"]+)"|(\S+))/g;
+            let pm;
+            while ((pm = paramRegex.exec(sm[1])) !== null) {
+              params[pm[1]] = pm[2] || pm[3];
+            }
+          }
+          actions.push(buildAction(t as CryptoActionType, params, actions.length));
+        }
+      }
+    }
+
+    return actions;
+  };
+
+  // ✅ v7.4.1 - Pre-process user input to detect financial commands directly
+  // This bypasses the AI when the intent is clear, giving instant results
+  const parseUserIntent = (userText: string): CryptoAction | null => {
+    const text = userText.toLowerCase().trim();
+
+    // Portfolio / balance checks
+    if (/^(show\s+)?my\s+portfolio$/i.test(text) || /^portfolio$/i.test(text)) {
+      return buildAction('portfolio', {}, 0);
+    }
+    if (/^(what'?s?\s+)?my\s+balance\??$/i.test(text) || /^(check\s+)?balance$/i.test(text)) {
+      return buildAction('balance', { token: 'all' }, 0);
+    }
+
+    // Price check: "price of QUG", "how much is BORK", "QUG price"
+    const priceMatch = text.match(/(?:price\s+(?:of\s+)?|how\s+much\s+is\s+)(\w+)/i) || text.match(/^(\w+)\s+price\??$/i);
+    if (priceMatch) {
+      return buildAction('price', { token: priceMatch[1].toUpperCase() }, 0);
+    }
+
+    // Top tokens
+    if (/^(show\s+)?top\s+tokens/i.test(text) || /^trending\s+tokens/i.test(text)) {
+      const limitMatch = text.match(/top\s+(\d+)/i);
+      return buildAction('top_tokens', { limit: limitMatch?.[1] || '10', sort: 'volume' }, 0);
+    }
+
+    // Transaction history
+    if (/^(show\s+)?(my\s+)?(last\s+\d+\s+)?transactions?\s*(history)?/i.test(text) || /^(tx\s+)?history/i.test(text)) {
+      const limitMatch = text.match(/last\s+(\d+)/i);
+      return buildAction('history', { limit: limitMatch?.[1] || '10' }, 0);
+    }
+
+    // Send: "send 50 QUG to alice", "send 10 to bob"
+    const sendMatch = text.match(/^send\s+([\d.]+)\s*(\w+)?\s+to\s+(\w+)/i);
+    if (sendMatch) {
+      return buildAction('send', {
+        amount: sendMatch[1],
+        token: (sendMatch[2] || 'QUG').toUpperCase(),
+        to_name: sendMatch[3],
+      }, 0);
+    }
+
+    // Swap/buy: "buy 100 BORK with QUG", "swap 50 QUG for BORK"
+    const buyMatch = text.match(/^buy\s+([\d.]+)\s+(\w+)\s+(?:with|using)\s+(\w+)/i);
+    if (buyMatch) {
+      return buildAction('swap', { amount: buyMatch[1], from: buyMatch[3].toUpperCase(), to: buyMatch[2].toUpperCase() }, 0);
+    }
+    const swapMatch = text.match(/^swap\s+([\d.]+)\s+(\w+)\s+(?:for|to)\s+(\w+)/i);
+    if (swapMatch) {
+      return buildAction('swap', { amount: swapMatch[1], from: swapMatch[2].toUpperCase(), to: swapMatch[3].toUpperCase() }, 0);
+    }
+
+    // Pool info: "show QUG/QUGUSD pool"
+    const poolMatch = text.match(/(?:show\s+)?(\w+)\s*\/\s*(\w+)\s+pool/i);
+    if (poolMatch) {
+      return buildAction('pool_info', { pair: `${poolMatch[1]}/${poolMatch[2]}` }, 0);
+    }
+
+    // Mint: "mint 100 QUGUSD", "mint stablecoin with 100 QUG"
+    const mintMatch = text.match(/^mint\s+([\d.]+)\s*(?:qugusd|stablecoin)/i) || text.match(/^mint\s+(?:qugusd|stablecoin)\s+(?:with\s+)?([\d.]+)/i);
+    if (mintMatch) {
+      return buildAction('mint', { collateral: mintMatch[1] }, 0);
+    }
+
+    return null; // No direct intent detected, let AI handle it
+  };
+
+  // ✅ v7.3.3 - Strip action tags from display text
+  const stripActionTags = (text: string): string => {
+    // v7.4.1: Match both complete and incomplete ACTION tags (missing closing ])
+    return text.replace(/\[ACTION:\w+(?:\s+[^\]\n]+)?\]?/g, '').trim();
+  };
+
+  // ✅ v7.3.3 - Execute a crypto action
+  const executeCryptoAction = async (action: CryptoAction) => {
+    const walletAddress = localStorage.getItem('walletAddress') || '';
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      'X-Wallet-Address': walletAddress,
+      'X-Auth-Signature': localStorage.getItem('authSignature') || '',
+      'X-Auth-Timestamp': localStorage.getItem('authTimestamp') || '',
+      'X-Auth-Public-Key': localStorage.getItem('authPublicKey') || '',
+    };
+
+    // Update action status to executing
+    setPendingActions(prev => ({
+      ...prev,
+      [action.id]: { ...action, status: 'executing' }
+    }));
+    setMessages(prev => prev.map(m => ({
+      ...m,
+      cryptoActions: m.cryptoActions?.map(a =>
+        a.id === action.id ? { ...a, status: 'executing' as const } : a
+      )
+    })));
+
+    try {
+      let result: CryptoAction['result'];
+
+      switch (action.type) {
+        case 'send': {
+          // Resolve recipient name to address
+          let toAddress = action.params.to || '';
+          if (action.params.to_name) {
+            const resolved = resolveNameToAddress(action.params.to_name);
+            if (resolved) {
+              toAddress = resolved.address;
+            } else {
+              throw new Error(`Contact "${action.params.to_name}" not found in address book`);
+            }
+          }
+          const amount = parseFloat(action.params.amount || '0');
+          if (!toAddress || amount <= 0) throw new Error('Invalid send parameters');
+
+          const sendResp = await qnkAPI.sendTransaction(
+            walletAddress,
+            toAddress,
+            amount,
+            action.params.memo || 'Sent via AI Chat',
+            (action.params.token || 'QUG').toUpperCase()
+          );
+          result = sendResp.success
+            ? { success: true, data: sendResp.data, txHash: sendResp.data?.transaction_hash || sendResp.data?.tx_hash }
+            : { success: false, error: sendResp.error || 'Transaction failed' };
+          break;
+        }
+        case 'swap': {
+          const fromToken = (action.params.from || 'QUG').toUpperCase();
+          const toToken = (action.params.to || '').toUpperCase();
+          const amountInStr = action.params.amount || '0';
+          if (!toToken) throw new Error('Missing target token for swap');
+
+          // Convert to 24-decimal BigInt string for the API
+          const amountFloat = parseFloat(amountInStr);
+          const amountIn24 = (BigInt(Math.floor(amountFloat * 1e6)) * BigInt(1e18)).toString();
+          const minOut24 = (BigInt(Math.floor(amountFloat * 0.95 * 1e6)) * BigInt(1e18)).toString();
+
+          const swapResp = await qnkAPI.executeSwap({
+            from_token: fromToken,
+            to_token: toToken,
+            amount_in: amountIn24,
+            min_amount_out: minOut24,
+            wallet_address: walletAddress,
+          });
+          result = swapResp.success
+            ? { success: true, data: swapResp.data }
+            : { success: false, error: swapResp.error || 'Swap failed' };
+          break;
+        }
+        case 'balance': {
+          const token = (action.params.token || '').toUpperCase();
+          if (!token || token === 'ALL' || token === 'QUG') {
+            // Use authenticated API service for proper wallet auth
+            const balResp = await qnkAPI.getWalletBalance(walletAddress);
+            const tokResp = await qnkAPI.getMultiTokenBalance();
+            const qugBal = balResp.data?.balance ?? balResp.data?.confirmed ?? 0;
+            // v7.4.1: tokResp.data = { tokens: { QUG: {...}, QUGUSD: {...} }, total_usd_value }
+            // tokens is a HashMap/Object, NOT an array - must use Object.entries
+            const tokensMap = tokResp.data?.tokens || {};
+            const tokensList = Object.entries(tokensMap).map(([symbol, t]: [string, any]) => ({
+              symbol,
+              balance: t.balance,
+              value_usd: t.usd_value?.toFixed?.(2) || String(t.usd_value || '0'),
+            }));
+            result = {
+              success: true,
+              data: {
+                qug_balance: typeof qugBal === 'number' ? qugBal.toFixed(4) : qugBal,
+                tokens: tokensList,
+                total_usd_value: tokResp.data?.total_usd_value?.toFixed?.(2) || '0',
+              }
+            };
+          } else {
+            const tokResp = await qnkAPI.getMultiTokenBalance();
+            // tokens is a HashMap keyed by symbol
+            const tokensMap = tokResp.data?.tokens || {};
+            const tokenBal = tokensMap[token] || tokensMap[token.toLowerCase()];
+            result = { success: true, data: tokenBal ? { symbol: token, ...tokenBal } : { token, balance: 'Token not found' } };
+          }
+          break;
+        }
+        case 'price': {
+          const token = (action.params.token || 'QUG').toUpperCase();
+          const priceResp = await qnkAPI.getOraclePrice(`${token}/USD`);
+          result = { success: true, data: priceResp.data || priceResp };
+          break;
+        }
+        case 'history': {
+          const limit = parseInt(action.params.limit || '10');
+          try {
+            const txResp = await qnkAPI.getRecentTransactions(limit);
+            result = { success: true, data: txResp.data || [] };
+          } catch {
+            result = { success: true, data: { message: 'No recent transactions found' } };
+          }
+          break;
+        }
+        case 'pool_info': {
+          const poolsResp = await qnkAPI.getLiquidityPools();
+          const pools = poolsResp.data || [];
+          if (action.params.pair) {
+            const pair = action.params.pair.toUpperCase().replace(/\s+/g, '');
+            const pool = pools.find?.((p: any) => {
+              const t0 = (p.token0 || p.token_a || '').toUpperCase();
+              const t1 = (p.token1 || p.token_b || '').toUpperCase();
+              return pair.includes(t0) && pair.includes(t1) ||
+                `${t0}/${t1}`.includes(pair) || `${t1}/${t0}`.includes(pair);
+            });
+            result = { success: true, data: pool || { pair, info: 'Pool not found', available_pools: pools.length } };
+          } else {
+            result = { success: true, data: { pools_count: pools.length, pools: pools.slice(0, 10) } };
+          }
+          break;
+        }
+        case 'mail': {
+          // Send in-node wallet mail
+          let toAddress = action.params.to || '';
+          if (action.params.to_name) {
+            const resolved = resolveNameToAddress(action.params.to_name);
+            if (resolved) {
+              toAddress = resolved.address;
+            } else {
+              throw new Error(`Contact "${action.params.to_name}" not found in address book`);
+            }
+          }
+          if (!toAddress) throw new Error('No recipient specified');
+          const mailResp = await fetch('/api/v1/mail/send', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({
+              to: toAddress,
+              subject: action.params.subject || 'Message from AI Chat',
+              body: action.params.body || action.params.message || '',
+            }),
+          });
+          const mailData = await mailResp.json();
+          result = mailData.success
+            ? { success: true, data: { message: 'Mail sent successfully', ...mailData.data } }
+            : { success: false, error: mailData.error || 'Failed to send mail' };
+          break;
+        }
+        case 'mint': {
+          // Mint QUGUSD stablecoin with QUG collateral
+          const collateralAmount = parseFloat(action.params.collateral || action.params.amount || '0');
+          if (collateralAmount <= 0) throw new Error('Invalid collateral amount');
+          const mintResp = await fetch('/api/v1/stablecoin/mint', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({
+              collateral_amount: collateralAmount,
+              wallet_address: walletAddress,
+            }),
+          });
+          const mintData = await mintResp.json();
+          result = mintData.success
+            ? { success: true, data: mintData.data }
+            : { success: false, error: mintData.error || 'Minting failed' };
+          break;
+        }
+        case 'portfolio': {
+          // v7.4.1: Use authenticated qnkAPI service (not raw fetch)
+          const [balResp2, tokResp2, priceResp2] = await Promise.all([
+            qnkAPI.getWalletBalance(walletAddress),
+            qnkAPI.getMultiTokenBalance(),
+            qnkAPI.getOraclePrice('QUG/USD'),
+          ]);
+          const qugBalance = parseFloat(balResp2.data?.balance || balResp2.data?.confirmed || '0');
+          const qugPrice = parseFloat(priceResp2.data?.price || (priceResp2 as any)?.price || '42.50');
+          // v7.4.1: tokens is a HashMap/Object, NOT an array
+          const tokensMap2 = tokResp2.data?.tokens || {};
+          let totalValueUsd = qugBalance * qugPrice;
+          const tokenSummary = Object.entries(tokensMap2).map(([symbol, t]: [string, any]) => {
+            const val = parseFloat(t.usd_value || '0');
+            totalValueUsd += val;
+            return { symbol, balance: t.balance, value_usd: val.toFixed(2) };
+          });
+          result = {
+            success: true,
+            data: {
+              qug_balance: qugBalance.toFixed(4),
+              qug_price_usd: qugPrice.toFixed(2),
+              qug_value_usd: (qugBalance * qugPrice).toFixed(2),
+              tokens: tokenSummary,
+              total_portfolio_usd: totalValueUsd.toFixed(2),
+            }
+          };
+          break;
+        }
+        case 'top_tokens': {
+          const resp = await fetch('/api/v1/dex/supported-tokens', { headers: authHeaders });
+          const data = await resp.json();
+          const tokens = data.data || [];
+          const sortBy = (action.params.sort || 'volume').toLowerCase();
+          const limit = parseInt(action.params.limit || '10');
+          const sorted = [...tokens].sort((a: any, b: any) => {
+            if (sortBy === 'price') return parseFloat(b.price_usd || '0') - parseFloat(a.price_usd || '0');
+            if (sortBy === 'mcap' || sortBy === 'market_cap') return parseFloat(b.market_cap || '0') - parseFloat(a.market_cap || '0');
+            return parseFloat(b.volume_24h || '0') - parseFloat(a.volume_24h || '0');
+          }).slice(0, limit);
+          result = { success: true, data: { tokens: sorted, sort_by: sortBy, count: sorted.length } };
+          break;
+        }
+        default:
+          result = { success: false, error: `Unknown action type: ${action.type}` };
+      }
+
+      // Update action with result
+      const completedAction = { ...action, status: 'completed' as const, result };
+      setPendingActions(prev => ({ ...prev, [action.id]: completedAction }));
+      setMessages(prev => prev.map(m => ({
+        ...m,
+        cryptoActions: m.cryptoActions?.map(a =>
+          a.id === action.id ? completedAction : a
+        )
+      })));
+    } catch (error: any) {
+      const failedAction = { ...action, status: 'failed' as const, result: { success: false, error: error.message || String(error) } };
+      setPendingActions(prev => ({ ...prev, [action.id]: failedAction }));
+      setMessages(prev => prev.map(m => ({
+        ...m,
+        cryptoActions: m.cryptoActions?.map(a =>
+          a.id === action.id ? failedAction : a
+        )
+      })));
+    }
+  };
+
+  // ✅ v7.3.3 - Cancel a crypto action
+  const cancelCryptoAction = (actionId: string) => {
+    setPendingActions(prev => ({ ...prev, [actionId]: { ...prev[actionId], status: 'cancelled' } }));
+    setMessages(prev => prev.map(m => ({
+      ...m,
+      cryptoActions: m.cryptoActions?.map(a =>
+        a.id === actionId ? { ...a, status: 'cancelled' as const } : a
+      )
+    })));
+  };
+
+  // ✅ v7.3.3 - Build BitNet system prompt with financial commands
+  const buildCryptoSystemPrompt = (): string => {
+    const contacts = addressBook.slice(0, 20).map(c => c.label).join(', ');
+    return `You are QNK Assistant, an AI financial assistant for the Q-NarwhalKnight blockchain. You are powered by BitNet b1.58 (1-bit quantized 2B parameter model).
+
+CAPABILITIES:
+You can help users with blockchain transactions, token swaps, balance checks, and price queries. When the user requests a financial action, output an ACTION tag that the system will parse and execute.
+
+ACTION FORMAT (output these EXACTLY when the user requests an action):
+[ACTION:send amount=<number> token=<symbol> to=<address> to_name=<name> memo=<optional>]
+[ACTION:swap amount=<number> from=<symbol> to=<symbol>]
+[ACTION:balance token=<symbol_or_all>]
+[ACTION:price token=<symbol>]
+[ACTION:history limit=<number>]
+[ACTION:pool_info pair=<TOKEN_A/TOKEN_B>]
+[ACTION:mail to_name=<name> subject=<subject> body=<message>]
+[ACTION:mint collateral=<qug_amount>]
+[ACTION:portfolio]
+[ACTION:top_tokens limit=<number> sort=<volume|price|mcap>]
+
+RULES:
+- Native coin is QUG. Stablecoin is QUGUSD (USD-pegged, minted with QUG collateral).
+- For "send to <name>", use to_name=<name> (system resolves from address book).${contacts ? `\n- Known contacts: ${contacts}` : ''}
+- For swaps, "buy X with Y" means from=Y to=X. "sell X for Y" means from=X to=Y.
+- "mint stablecoin" / "mint QUGUSD" uses QUG as collateral. Ask how much QUG to lock.
+- "mail" or "message" sends in-node encrypted P2P mail to a contact or address.
+- Always confirm the action details in your text response BEFORE the ACTION tag.
+- If the user's intent is ambiguous, ask for clarification instead of guessing.
+- For non-financial questions, respond normally without ACTION tags.
+- Keep responses concise and helpful. Use markdown formatting.
+
+EXAMPLES:
+User: "send 50 QUG to alice"
+Response: "I'll send **50 QUG** to **Alice** from your wallet.\n\n[ACTION:send amount=50 token=QUG to_name=alice]"
+
+User: "buy 100 BORK with QUG"
+Response: "Swapping **100 QUG** for **BORK** tokens on the DEX.\n\n[ACTION:swap amount=100 from=QUG to=BORK]"
+
+User: "what's my balance?"
+Response: "Let me check your wallet balance.\n\n[ACTION:balance token=all]"
+
+User: "how much is QUG worth?"
+Response: "Checking the current QUG price.\n\n[ACTION:price token=QUG]"
+
+User: "show my portfolio"
+Response: "Here's your full portfolio breakdown.\n\n[ACTION:portfolio]"
+
+User: "what are the top tokens?"
+Response: "Let me fetch the top tokens by trading volume.\n\n[ACTION:top_tokens limit=10 sort=volume]"
+
+User: "mint 100 QUGUSD"
+Response: "Minting **QUGUSD** stablecoins with **100 QUG** as collateral.\n\n[ACTION:mint collateral=100]"
+
+User: "send a message to bob saying meeting at 3pm"
+Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACTION:mail to_name=bob subject=Meeting body=Meeting at 3pm]"`;
+  };
+
+  // BitNet b1.58-2B-4T streaming via OpenAI-compatible API
   const sendBitNetMessage = async (userMessage: string) => {
     setIsGenerating(true);
     setStreamingMessage('');
@@ -1055,7 +1607,7 @@ export default function AIChatScreen() {
     const conversationMessages: { role: string; content: string }[] = [
       {
         role: 'system',
-        content: 'You are an advanced AI assistant powered by BitNet b1.58 (1-bit quantized 2B parameter model by Microsoft). You help users with blockchain, cryptocurrency, and general questions. Be concise and helpful.'
+        content: buildCryptoSystemPrompt()
       },
       ...messages.map(m => ({
         role: m.role,
@@ -1119,11 +1671,28 @@ export default function AIChatScreen() {
             const tokensEstimate = cumulativeText.split(/\s+/).length;
             console.log(`✅ BitNet complete: ~${tokensEstimate} tokens in ${elapsed}ms`);
 
+            // ✅ v7.3.3 - Parse crypto actions from response
+            const detectedActions = parseCryptoActions(cumulativeText);
+            const cleanContent = stripActionTags(cumulativeText);
+
+            // Auto-execute read-only actions (balance, price, history, pool_info)
+            const readOnlyTypes: CryptoActionType[] = ['balance', 'price', 'history', 'pool_info', 'portfolio', 'top_tokens'];
+            for (const action of detectedActions) {
+              if (readOnlyTypes.includes(action.type)) {
+                action.status = 'executing';
+                // Execute immediately without confirmation
+                executeCryptoAction(action);
+              } else {
+                action.status = 'confirming';
+              }
+            }
+
             const assistantMessage: Message = {
               id: `bitnet-${Date.now()}`,
               role: 'assistant',
-              content: cumulativeText,
+              content: cleanContent,
               timestamp: Date.now() / 1000,
+              cryptoActions: detectedActions.length > 0 ? detectedActions : undefined,
               stats: {
                 tokens: tokensEstimate,
                 latency_ms: elapsed,
@@ -1148,7 +1717,8 @@ export default function AIChatScreen() {
               content = content.replace(/<\|endoftext\|>/g, '');
               if (content) {
                 cumulativeText += content;
-                setStreamingMessage(cumulativeText);
+                // Strip [ACTION:...] tags from live streaming display
+                setStreamingMessage(stripActionTags(cumulativeText));
               }
             }
           } catch {
@@ -1157,13 +1727,24 @@ export default function AIChatScreen() {
         }
       }
 
-      // Stream ended without [DONE] - save what we have
+      // Stream ended without [DONE] - save what we have (with action parsing)
       if (cumulativeText) {
+        const detectedActions = parseCryptoActions(cumulativeText);
+        const cleanContent = stripActionTags(cumulativeText);
+        const readOnlyTypes: CryptoActionType[] = ['balance', 'price', 'history', 'pool_info', 'portfolio', 'top_tokens'];
+        for (const action of detectedActions) {
+          if (readOnlyTypes.includes(action.type)) {
+            executeCryptoAction(action);
+          } else {
+            action.status = 'confirming';
+          }
+        }
         const assistantMessage: Message = {
           id: `bitnet-${Date.now()}`,
           role: 'assistant',
-          content: cumulativeText,
+          content: cleanContent,
           timestamp: Date.now() / 1000,
+          cryptoActions: detectedActions.length > 0 ? detectedActions : undefined,
         };
         setMessages(prev => [...prev, assistantMessage]);
       }
@@ -1179,6 +1760,74 @@ export default function AIChatScreen() {
 
   const sendMessage = async () => {
     if (!input.trim() || isGenerating) return;
+
+    // Auto-create chat if none exists (for ALL models including BitNet)
+    if (!currentChatId) {
+      console.log('📝 No current chat, auto-creating before send...');
+      try {
+        const userId = localStorage.getItem('walletAddress') || 'default';
+        const response = await fetch('/api/chat/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            title: 'New Chat',
+            encryption_enabled: true,
+            distributed_enabled: true,
+            enable_kv_cache: true
+          })
+        });
+        const data = await response.json();
+        if (data.success && data.data) {
+          const newChatId = data.data.chat_id;
+          currentChatIdRef.current = newChatId;
+          setCurrentChatId(newChatId);
+          setMessages([]);
+          loadChats(false);
+          console.log(`✅ Auto-created chat: ${newChatId}`);
+        }
+      } catch (error) {
+        console.error('❌ Failed to auto-create chat:', error);
+      }
+    }
+
+    // ✅ v7.4.1: Pre-process clear financial intents BEFORE calling any AI model
+    // This bypasses the AI entirely for unambiguous commands like "balance", "portfolio", "price of QUG"
+    const directIntent = parseUserIntent(input);
+    if (directIntent) {
+      const userMessage = input;
+      setInput('');
+      // Add user message to chat
+      const userMsg: Message = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: userMessage,
+        timestamp: Date.now() / 1000,
+      };
+      setMessages(prev => [...prev, userMsg]);
+
+      // Determine if action should auto-execute or need confirmation
+      const readOnlyTypes: CryptoActionType[] = ['balance', 'price', 'history', 'pool_info', 'portfolio', 'top_tokens'];
+      if (readOnlyTypes.includes(directIntent.type)) {
+        directIntent.status = 'executing';
+        executeCryptoAction(directIntent);
+      } else {
+        directIntent.status = 'confirming';
+      }
+
+      // Add assistant message with the action card
+      const assistantMsg: Message = {
+        id: `intent-${Date.now()}`,
+        role: 'assistant',
+        content: readOnlyTypes.includes(directIntent.type)
+          ? `Executing ${directIntent.type.replace('_', ' ')}...`
+          : `Ready to ${directIntent.type}. Please confirm:`,
+        timestamp: Date.now() / 1000,
+        cryptoActions: [directIntent],
+      };
+      setMessages(prev => [...prev, assistantMsg]);
+      return; // Skip AI model entirely
+    }
 
     // BitNet uses its own streaming path (OpenAI-compatible API)
     if (selectedModel === 'BitNet-b1.58-2B-4T') {
@@ -1672,13 +2321,78 @@ export default function AIChatScreen() {
         >
           {!currentChatId ? (
             <div className="h-full flex items-center justify-center">
-              <div className="text-center">
-                <Bot className="w-16 h-16 mx-auto mb-4 text-amber-400/50" />
-                <h3 className="text-xl font-bold text-amber-200 mb-2">
-                  Start a New Chat
+              <div className="text-center max-w-xl">
+                <div className="relative inline-block mb-6">
+                  <div className="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto" style={{
+                    background: 'linear-gradient(135deg, rgba(212,175,55,0.2), rgba(0,229,255,0.15))',
+                    border: '2px solid rgba(212,175,55,0.3)',
+                    boxShadow: '0 0 40px rgba(212,175,55,0.15)',
+                  }}>
+                    <Bot className="w-10 h-10 text-amber-400" />
+                  </div>
+                  <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center" style={{
+                    background: 'linear-gradient(135deg, #22C55E, #16A34A)',
+                    boxShadow: '0 0 8px rgba(34,197,94,0.5)',
+                  }}>
+                    <Zap className="w-3 h-3 text-white" />
+                  </div>
+                </div>
+                <h3 className="text-2xl font-bold mb-2 bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-500 bg-clip-text text-transparent">
+                  QNK Financial Assistant
                 </h3>
-                <p className="text-amber-200/60">
-                  Create a new chat to begin conversing with the AI
+                <p className="text-amber-200/50 text-sm mb-8">
+                  Powered by BitNet b1.58 — ask questions, execute transactions, swap tokens, check balances
+                </p>
+
+                {/* Command Suggestion Chips */}
+                <div className="grid grid-cols-2 gap-3 mb-6">
+                  {[
+                    { icon: <Send className="w-4 h-4" />, label: 'Send QUG', example: 'Send 50 QUG to alice', color: '#22C55E' },
+                    { icon: <ArrowUpDown className="w-4 h-4" />, label: 'Swap Tokens', example: 'Buy 100 BORK with QUG', color: '#3B82F6' },
+                    { icon: <PieChart className="w-4 h-4" />, label: 'My Portfolio', example: 'Show my portfolio', color: '#FFD700' },
+                    { icon: <TrendingUp className="w-4 h-4" />, label: 'Token Price', example: 'How much is QUG worth?', color: '#00E5FF' },
+                    { icon: <Coins className="w-4 h-4" />, label: 'Mint QUGUSD', example: 'Mint stablecoin with 100 QUG', color: '#10B981' },
+                    { icon: <Trophy className="w-4 h-4" />, label: 'Top Tokens', example: 'Show top tokens by volume', color: '#F59E0B' },
+                    { icon: <Mail className="w-4 h-4" />, label: 'Send Mail', example: 'Send message to alice about meeting', color: '#EC4899' },
+                    { icon: <Wallet className="w-4 h-4" />, label: 'Check Balance', example: "What's my balance?", color: '#8B5CF6' },
+                    { icon: <Clock className="w-4 h-4" />, label: 'TX History', example: 'Show my last 5 transactions', color: '#A855F7' },
+                    { icon: <Layers className="w-4 h-4" />, label: 'Pool Info', example: 'Show QUG/QUGUSD pool', color: '#E040FB' },
+                  ].map((cmd) => (
+                    <motion.button
+                      key={cmd.label}
+                      whileHover={{ scale: 1.03, y: -2 }}
+                      whileTap={{ scale: 0.97 }}
+                      onClick={() => {
+                        // Auto-send: set input and trigger sendMessage
+                        setInput(cmd.example);
+                        // Use a small delay to ensure state updates, then auto-send
+                        setTimeout(() => {
+                          const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
+                          if (sendBtn) sendBtn.click();
+                        }, 100);
+                      }}
+                      className="flex items-center gap-3 p-3.5 rounded-xl text-left transition-all group"
+                      style={{
+                        background: `linear-gradient(135deg, ${cmd.color}10 0%, ${cmd.color}08 100%)`,
+                        border: `1px solid ${cmd.color}30`,
+                      }}
+                    >
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all group-hover:scale-110" style={{
+                        background: `${cmd.color}20`,
+                        color: cmd.color,
+                      }}>
+                        {cmd.icon}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-amber-100">{cmd.label}</p>
+                        <p className="text-xs text-amber-200/40 truncate">{cmd.example}</p>
+                      </div>
+                    </motion.button>
+                  ))}
+                </div>
+
+                <p className="text-xs text-amber-200/30">
+                  Type naturally — the AI understands your intent and executes blockchain actions
                 </p>
               </div>
             </div>
@@ -1922,6 +2636,117 @@ export default function AIChatScreen() {
                                     ) : (
                                       <span className="text-red-300">{fc.result.error}</span>
                                     )}
+                                  </div>
+                                )}
+                              </motion.div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* ✅ v7.3.3 - Crypto Action Cards */}
+                        {message.cryptoActions && message.cryptoActions.length > 0 && (
+                          <div className="mt-4 space-y-2">
+                            {message.cryptoActions.map((action) => (
+                              <motion.div
+                                key={action.id}
+                                initial={{ opacity: 0, y: 8 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="rounded-xl overflow-hidden"
+                                style={{
+                                  background: action.type === 'send' || action.type === 'swap'
+                                    ? 'linear-gradient(135deg, rgba(212,175,55,0.12) 0%, rgba(255,215,0,0.08) 100%)'
+                                    : 'linear-gradient(135deg, rgba(0,229,255,0.08) 0%, rgba(124,77,255,0.08) 100%)',
+                                  border: `1px solid ${
+                                    action.status === 'completed' ? 'rgba(34,197,94,0.4)' :
+                                    action.status === 'failed' ? 'rgba(239,68,68,0.4)' :
+                                    action.status === 'cancelled' ? 'rgba(100,116,139,0.3)' :
+                                    action.status === 'executing' ? 'rgba(59,130,246,0.4)' :
+                                    'rgba(212,175,55,0.3)'
+                                  }`,
+                                }}
+                              >
+                                <div className="px-4 py-3 flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                                    <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{
+                                      background: action.type === 'send' ? 'rgba(34,197,94,0.2)' :
+                                        action.type === 'swap' ? 'rgba(59,130,246,0.2)' :
+                                        action.type === 'balance' ? 'rgba(255,215,0,0.2)' :
+                                        action.type === 'price' ? 'rgba(0,229,255,0.2)' :
+                                        'rgba(168,85,247,0.2)',
+                                    }}>
+                                      {action.type === 'send' && <Send className="w-4 h-4 text-green-400" />}
+                                      {action.type === 'swap' && <ArrowUpDown className="w-4 h-4 text-blue-400" />}
+                                      {action.type === 'balance' && <Wallet className="w-4 h-4 text-amber-400" />}
+                                      {action.type === 'price' && <TrendingUp className="w-4 h-4 text-cyan-400" />}
+                                      {action.type === 'history' && <Clock className="w-4 h-4 text-purple-400" />}
+                                      {action.type === 'pool_info' && <Layers className="w-4 h-4 text-fuchsia-400" />}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium text-amber-50 truncate">{action.displayText}</p>
+                                      <p className="text-xs text-amber-200/50 mt-0.5">
+                                        {action.status === 'confirming' && 'Awaiting your confirmation'}
+                                        {action.status === 'executing' && 'Executing...'}
+                                        {action.status === 'completed' && 'Completed'}
+                                        {action.status === 'failed' && (action.result?.error || 'Failed')}
+                                        {action.status === 'cancelled' && 'Cancelled'}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    {action.status === 'confirming' && (
+                                      <>
+                                        <button
+                                          onClick={() => executeCryptoAction(action)}
+                                          className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all hover:scale-105"
+                                          style={{
+                                            background: 'linear-gradient(135deg, #22C55E, #16A34A)',
+                                            color: '#fff',
+                                            boxShadow: '0 0 12px rgba(34,197,94,0.3)',
+                                          }}
+                                        >
+                                          Confirm
+                                        </button>
+                                        <button
+                                          onClick={() => cancelCryptoAction(action.id)}
+                                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-red-400 hover:bg-red-500/20 transition-all"
+                                          style={{ border: '1px solid rgba(239,68,68,0.3)' }}
+                                        >
+                                          Cancel
+                                        </button>
+                                      </>
+                                    )}
+                                    {action.status === 'executing' && (
+                                      <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
+                                    )}
+                                    {action.status === 'completed' && (
+                                      <CheckCircle2 className="w-5 h-5 text-green-400" />
+                                    )}
+                                    {action.status === 'failed' && (
+                                      <AlertCircle className="w-5 h-5 text-red-400" />
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Result display for completed actions */}
+                                {action.status === 'completed' && action.result?.data && (
+                                  <div className="px-4 pb-3 border-t" style={{ borderColor: 'rgba(34,197,94,0.15)' }}>
+                                    <pre className="text-xs text-green-200/80 font-mono mt-2 whitespace-pre-wrap overflow-x-auto max-h-32 overflow-y-auto" style={{
+                                      background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '8px',
+                                    }}>
+                                      {typeof action.result.data === 'object'
+                                        ? JSON.stringify(action.result.data, null, 2)
+                                        : String(action.result.data)}
+                                    </pre>
+                                    {action.result.txHash && (
+                                      <p className="text-xs text-green-400 mt-1 font-mono">
+                                        TX: {action.result.txHash.substring(0, 24)}...
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                                {action.status === 'failed' && action.result?.error && (
+                                  <div className="px-4 pb-3 border-t" style={{ borderColor: 'rgba(239,68,68,0.15)' }}>
+                                    <p className="text-xs text-red-300 mt-2">{action.result.error}</p>
                                   </div>
                                 )}
                               </motion.div>

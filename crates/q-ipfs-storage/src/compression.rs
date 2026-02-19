@@ -80,6 +80,17 @@ impl Compressor {
                 Ok(Bytes::from(decompressed))
             }
             CompressionType::Lz4 => {
+                // 🛡️ v5.1.1: Validate prepended size to prevent DoS/OOM
+                const MAX_DECOMPRESSED: u32 = 200_000_000;
+                if data.len() >= 4 {
+                    let prepended_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                    if prepended_size > MAX_DECOMPRESSED {
+                        return Err(IpfsStorageError::Compression(format!(
+                            "LZ4 prepended size {} exceeds safety limit of {} bytes",
+                            prepended_size, MAX_DECOMPRESSED
+                        )));
+                    }
+                }
                 let decompressed = lz4::block::decompress(data, None)
                     .map_err(|e| {
                         IpfsStorageError::Compression(format!("LZ4 decompression failed: {}", e))

@@ -78,6 +78,23 @@ impl HeightState {
         // If h <= current, silently ignore (not an error, just out-of-order)
     }
 
+    /// 🛡️ v7.2.3: Force-set the height cache during startup recovery.
+    /// Unlike update(), this allows DOWNWARD correction when the database scan
+    /// finds that actual contiguous height < cached height (e.g., after crash
+    /// where turbo_sync blocks were lost from OS page cache).
+    pub async fn force_set(&self, h: u64) {
+        let current = self.cached.load(Ordering::Relaxed);
+        if h != current {
+            tracing::warn!(
+                "🛡️ [HEIGHT CACHE v7.2.3] Force-setting height cache: {} → {} (delta: {})",
+                current, h, h as i64 - current as i64
+            );
+            self.cached.store(h, Ordering::Relaxed);
+            *self.last_refresh.write().await = Instant::now();
+            let _ = self.tx.send(h);
+        }
+    }
+
     /// Check if the cache is fresh (within max_age)
     pub async fn is_cache_fresh(&self, max_age: Duration) -> bool {
         self.last_refresh.read().await.elapsed() < max_age

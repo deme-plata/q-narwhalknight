@@ -64,7 +64,7 @@ impl VertexStore {
             index: RwLock::new(VertexIndex::default()),
             cache_enabled: true,
             vertex_cache: RwLock::new(HashMap::new()),
-            max_cache_size: 10000, // Keep 10k vertices in cache
+            max_cache_size: 1000, // v6.1.1: Reduced 10k→1k to save ~300MB on 8GB nodes
         }
     }
 
@@ -374,6 +374,18 @@ impl VertexStore {
             earliest_round,
             vertices_per_round,
         }
+    }
+
+    /// Get current vertex cache size
+    pub async fn cache_size(&self) -> usize {
+        let cache = self.vertex_cache.read().await;
+        cache.len()
+    }
+
+    /// Get index sizes for diagnostics: (children_entries, causal_history_entries)
+    pub async fn get_index_sizes(&self) -> (usize, usize) {
+        let index = self.index.read().await;
+        (index.children.len(), index.causal_history.len())
     }
 
     /// Clean up old vertices beyond retention policy

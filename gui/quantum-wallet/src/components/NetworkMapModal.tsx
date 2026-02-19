@@ -814,7 +814,7 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
-          className="relative bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl w-full max-w-[1400px] h-[80vh] max-h-[750px] overflow-hidden flex flex-col"
+          className="network-map-modal relative bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl w-full max-w-[1400px] h-[80vh] max-h-[750px] overflow-hidden flex flex-col"
           onClick={(e) => e.stopPropagation()}
           style={{ boxShadow: '0 0 80px rgba(212, 175, 55, 0.15)' }}
           ref={containerRef}

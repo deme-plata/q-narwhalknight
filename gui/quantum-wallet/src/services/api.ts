@@ -69,6 +69,77 @@ const tryFailover = async (): Promise<string | null> => {
   return null;
 };
 
+// v5.1.1: Return-to-primary logic
+// After failover to a backup server, periodically check if primary (quillon.xyz) is back
+// When it recovers, automatically switch back
+let returnToPrimaryInterval: ReturnType<typeof setInterval> | null = null;
+const PRIMARY_SERVER = API_SERVERS[0]; // https://quillon.xyz
+const RETURN_CHECK_INTERVAL_MS = 60000; // Check every 60s
+
+const startReturnToPrimaryCheck = () => {
+  if (returnToPrimaryInterval) return; // Already running
+  if (activeServerIndex === 0) return; // Already on primary
+
+  console.log('🔄 [FAILOVER] Starting return-to-primary monitoring (every 60s)...');
+  returnToPrimaryInterval = setInterval(async () => {
+    if (activeServerIndex === 0) {
+      // Already back on primary
+      if (returnToPrimaryInterval) {
+        clearInterval(returnToPrimaryInterval);
+        returnToPrimaryInterval = null;
+      }
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(`${PRIMARY_SERVER}/api/v1/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        console.log(`🏠 [FAILOVER] Primary server recovered! Switching back to ${PRIMARY_SERVER}`);
+        activeServerIndex = 0;
+        API_BASE_URL = `${PRIMARY_SERVER}/api`;
+        localStorage.removeItem('apiBaseURL');
+        localStorage.removeItem('failoverServer');
+        window.dispatchEvent(new CustomEvent('api-failover', {
+          detail: { server: PRIMARY_SERVER, index: 0, returnedToPrimary: true }
+        }));
+
+        if (returnToPrimaryInterval) {
+          clearInterval(returnToPrimaryInterval);
+          returnToPrimaryInterval = null;
+        }
+      }
+    } catch {
+      // Primary still down, keep checking
+    }
+  }, RETURN_CHECK_INTERVAL_MS);
+};
+
+// v5.1.2: Expose connection info for admin panel
+export function getConnectionInfo() {
+  return {
+    activeServer: API_SERVERS[activeServerIndex],
+    activeServerIndex,
+    isPrimary: activeServerIndex === 0,
+    serverName: activeServerIndex === 0 ? 'Beta (Primary)' : `Gamma (Backup)`,
+    apiBaseUrl: API_BASE_URL,
+    allServers: API_SERVERS,
+    failoverServer: localStorage.getItem('failoverServer'),
+  };
+}
+
+// Listen for failover events to start return-to-primary monitoring
+window.addEventListener('api-failover', ((e: CustomEvent) => {
+  if (e.detail?.index !== 0) {
+    startReturnToPrimaryCheck();
+  }
+}) as EventListener);
+
 // v1.0.53: Initialize node discovery on module load
 // This runs once when the API module is first imported
 (async () => {
@@ -304,6 +375,11 @@ export interface NodeStatus {
     simd_crypto_enabled: boolean;
     kernel_io_enabled: boolean;
   };
+  system_metrics?: {
+    memory_usage_percent: number;
+    data_storage_gb: number;
+    avg_block_time_seconds: number;
+  };
 }
 
 export interface NetworkSupply {
@@ -327,7 +403,74 @@ export interface NetworkSupply {
   timestamp: string;
 }
 
+// v6.2.5: Emission analytics from /api/v1/emission/stats
+export interface EmissionDailyRecord {
+  date: string;
+  emitted_qug: number;
+  emitted_raw: string;
+  blocks: number;
+  avg_reward_qug: number;
+  min_reward_qug: number;
+  max_reward_qug: number;
+  avg_block_rate: number;
+  era: number;
+  target_daily_qug: number;
+  deviation_pct: number;
+  cumulative_supply_qug: number;
+}
+
+export interface EmissionStats {
+  summary: {
+    total_supply_qug: number;
+    total_supply_raw: string;
+    max_supply_qug: number;
+    pct_mined: number;
+    current_era: number;
+    annual_target_qug: number;
+    daily_target_qug: number;
+    today_emitted_qug: number;
+    today_blocks: number;
+    today_deviation_pct: number;
+    block_rate_bps: number;
+    days_tracked: number;
+    // v7.0.0: Scientific precision fields
+    stock_to_flow?: number;
+    inflation_rate_pct?: number;
+    cumulative_target_qug?: number;
+    budget_deviation_pct?: number;
+    remaining_supply_qug?: number;
+    correction_factor?: number;
+    reward_per_block_qug?: number;
+    secs_to_halving?: number;
+    era_progress_pct?: number;
+    genesis_timestamp?: number;
+    elapsed_secs?: number;
+  };
+  daily_history: EmissionDailyRecord[];
+  schedule: {
+    era_0_annual: number;
+    era_0_daily: number;
+    era_1_annual: number;
+    era_1_daily: number;
+    halving_interval_years: number;
+    total_eras: number;
+    total_emission_years: number;
+  };
+}
+
 // v3.5.0-beta: Wallet-specific mining statistics (survives page refresh)
+export interface WorkerMiningStats {
+  worker_id: string;
+  worker_name?: string;    // v7.4.2: Human-readable miner name
+  hash_rate: number;       // H/s
+  blocks_found: number;
+  rewards_earned: string;  // Formatted string like "0.1234 QUG"
+  rewards_earned_raw: string;
+  solutions_submitted: number;
+  last_activity_secs: number;
+  is_active: boolean;
+}
+
 export interface WalletMiningStats {
   wallet: string;
   blocks_found: number;    // Total blocks mined by this wallet
@@ -335,6 +478,8 @@ export interface WalletMiningStats {
   total_workers: number;   // Number of workers mining to this wallet
   last_activity_secs: number; // Seconds since last mining activity
   is_active: boolean;      // True if mined in last 5 minutes
+  // v7.4.2: Per-worker breakdown for comparing mining rigs
+  workers?: WorkerMiningStats[];
 }
 
 // v2.3.8-beta: QUGUSD Stablecoin Vault Stats (real CDP data)
@@ -874,6 +1019,11 @@ class QNarwhalKnightAPI {
     return this.request<NetworkSupply>('/v1/network/supply');
   }
 
+  // v6.2.5: Get emission analytics (daily history, target vs actual, deviation)
+  async getEmissionStats(days: number = 30): Promise<ApiResponse<EmissionStats>> {
+    return this.request<EmissionStats>(`/v1/emission/stats?days=${days}`);
+  }
+
   // v3.5.0-beta: Get wallet-specific mining statistics (blocks found, hash rate)
   // This allows mining stats to survive page refresh
   async getMiningStats(walletAddress: string): Promise<ApiResponse<WalletMiningStats>> {
@@ -888,6 +1038,12 @@ class QNarwhalKnightAPI {
   // Get hashpower-weighted security metrics (v1.3.0-beta)
   async getHashpowerSecurity(): Promise<ApiResponse<HashpowerSecurityData>> {
     return this.request<HashpowerSecurityData>('/v1/security/hashpower');
+  }
+
+  // v7.0.0: Live theoretical physics metrics from the whitepaper
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getPhysicsMetrics(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/physics/metrics');
   }
 
   // v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
@@ -964,16 +1120,6 @@ class QNarwhalKnightAPI {
   // Get specific wallet by ID (PUBLIC - no auth required)
   async getWallet(id: string): Promise<ApiResponse<WalletData>> {
     return this.request<WalletData>(`/v1/wallets/${id}`);
-  }
-
-  // Request test tokens from faucet
-  async requestFaucet(walletAddress?: string): Promise<ApiResponse<any>> {
-    const body = walletAddress ? { wallet_address: walletAddress } : {};
-    console.log('🚰 Faucet request body:', body);
-    return this.request<any>('/v1/faucet', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
   }
 
   // Get wallet balance by address (AUTHENTICATED - requires signature)
@@ -1928,17 +2074,21 @@ class QNarwhalKnightAPI {
         console.log('🔍 [DEBUG] Balance values:', { old: data.old_balance, new: data.new_balance, diff: data.new_balance - data.old_balance });
 
         // Backend now sends addresses WITH "qnk" prefix - compare directly
-        // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, pending_mining_reward, and development_fee reasons
+        // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, pending_mining_reward, development_fee,
+        // and transaction_sent/transaction_received reasons (v6.0.9: fix balance not updating after send)
         const isMiningReward = data.change_reason === 'mining_reward' ||
                                data.change_reason === 'mining_reward_instant' ||
                                data.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
                                data.change_reason === 'pending_mining_reward' ||  // v2.7.6-beta: Pending rewards via P2P gossipsub
                                (data.change_reason && data.change_reason.startsWith('mining_reward_batch_'));
         const isDevFee = data.change_reason === 'development_fee';
+        // v6.0.9: Accept transaction balance updates so sender/receiver balances update via SSE
+        const isTransaction = data.change_reason === 'transaction_sent' ||
+                              data.change_reason === 'transaction_received';
 
-        console.log('🔍 [DEBUG] Filter results:', { isMiningReward, isDevFee, addressMatch: data.wallet_address === walletAddress });
+        console.log('🔍 [DEBUG] Filter results:', { isMiningReward, isDevFee, isTransaction, addressMatch: data.wallet_address === walletAddress });
 
-        if (data.wallet_address === walletAddress && (isMiningReward || isDevFee)) {
+        if (data.wallet_address === walletAddress && (isMiningReward || isDevFee || isTransaction)) {
           console.log('✅ SSE: Address matches and reason is mining-related! Calling onBalanceUpdate callback');
           console.log('✅ [DEBUG] CALLING onBalanceUpdate with:', data);
           onBalanceUpdate(data);
@@ -2241,6 +2391,605 @@ class QNarwhalKnightAPI {
       body: JSON.stringify(data),
     });
   }
+
+  // ============================================================================
+  // v5.1.0: FORGE RWA Token — Mining Machine Redemption API
+  // ============================================================================
+
+  /** Get FORGE token supply stats (public, no auth needed) */
+  async getForgeStats(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/contracts/forge/stats');
+  }
+
+  /** Get FORGE redemption orders (authenticated — admin sees all, users see their own) */
+  async getForgeRedemptions(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/forge/redemptions');
+  }
+
+  /** Redeem a FORGE token — burn 1 token and create mining machine order */
+  async redeemForge(data: {
+    shipping_name: string;
+    shipping_address: string;
+    city: string;
+    state_province: string;
+    zip: string;
+    country: string;
+    phone: string;
+    email: string;
+    cpu_config: string;
+    gpu_config: string;
+    cooling_type: string;
+    ram_gb: number;
+    chassis_color: string;
+    quantity?: number;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/forge/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Admin: update FORGE redemption status/tracking/serial/machine_id */
+  async fulfillForgeRedemption(data: {
+    redemption_id: string;
+    tracking_number?: string;
+    serial_number?: string;
+    machine_id?: string;
+    status: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/contracts/forge/fulfill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ========== v7.2.0: Bitcoin Atomic Swap Bridge ==========
+
+  async getBitcoinBridgeStatus(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/bitcoin/bridge/status');
+  }
+
+  async getBitcoinBalance(): Promise<ApiResponse<{ balance_sats: number; balance_btc: number; watched_addresses: string[] }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/balance');
+  }
+
+  async createAtomicSwap(params: {
+    direction: string;
+    btc_amount: number;
+    qnk_amount: string;
+    user_btc_pubkey: string;
+    btc_destination?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/swap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getSwapStatus(swapId: string): Promise<ApiResponse<any>> {
+    return this.request<any>(`/v1/bitcoin/swap/${swapId}`);
+  }
+
+  async claimSwap(swapId: string, secret: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/bitcoin/swap/${swapId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  async refundSwap(swapId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/bitcoin/swap/${swapId}/refund`, {
+      method: 'POST',
+    });
+  }
+
+  async listSwaps(): Promise<ApiResponse<{ swaps: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/swaps');
+  }
+
+  // ═══ Zcash Shielded Bridge API (v7.2.2) ═══
+
+  async getZcashBridgeStatus(): Promise<ApiResponse<{
+    bridge_enabled: boolean;
+    zebra_rpc_url: string;
+    zebra_height: number;
+    zebra_syncing: boolean;
+    network: string;
+    features: string[];
+  }>> {
+    return this.request<any>('/v1/zcash/bridge/status');
+  }
+
+  async getZcashBalance(): Promise<ApiResponse<{
+    balance_zat: number;
+    balance_zec: number;
+    z_address: string;
+    pending_zat: number;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/zcash/bridge/balance');
+  }
+
+  async getZcashAddress(): Promise<ApiResponse<{
+    z_address: string;
+    address_type: string;
+    shielded_only: boolean;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/zcash/bridge/address');
+  }
+
+  async createZcashSwap(params: {
+    direction: string;
+    zec_amount: number;
+    qnk_amount: string;
+    z_address?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/zcash/swap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getZcashSwapStatus(swapId: string): Promise<ApiResponse<any>> {
+    return this.request<any>(`/v1/zcash/swap/${swapId}`);
+  }
+
+  async claimZcashSwap(swapId: string, secret: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/zcash/swap/${swapId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  async refundZcashSwap(swapId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/zcash/swap/${swapId}/refund`, {
+      method: 'POST',
+    });
+  }
+
+  async listZcashSwaps(): Promise<ApiResponse<{ swaps: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/zcash/swaps');
+  }
+
+  async sendShieldedZec(params: {
+    to_z_address: string;
+    amount_zat: number;
+    memo?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/zcash/bridge/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  // ═══ Iron Fish Privacy Bridge API (v7.2.4) ═══
+
+  async getIronFishBridgeStatus(): Promise<ApiResponse<{
+    bridge_enabled: boolean;
+    node_rpc_url: string;
+    node_version: string;
+    node_height: number;
+    node_syncing: boolean;
+    network: string;
+    peers: number;
+    features: string[];
+  }>> {
+    return this.request<any>('/v1/ironfish/bridge/status');
+  }
+
+  async getIronFishBalance(): Promise<ApiResponse<{
+    balance_ore: number;
+    balance_iron: number;
+    iron_address: string;
+    pending_ore: number;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/ironfish/bridge/balance');
+  }
+
+  async getIronFishAddress(): Promise<ApiResponse<{
+    iron_address: string;
+    address_type: string;
+    privacy: string;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/ironfish/bridge/address');
+  }
+
+  async createIronFishSwap(params: {
+    direction: string;
+    iron_amount: number;
+    qnk_amount: string;
+    iron_address?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/ironfish/swap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getIronFishSwapStatus(swapId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/ironfish/swap/${swapId}`);
+  }
+
+  async claimIronFishSwap(swapId: string, secret: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/ironfish/swap/${swapId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  async listIronFishSwaps(): Promise<ApiResponse<{ swaps: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/ironfish/swaps');
+  }
+
+  async sendIronFish(params: {
+    to_address: string;
+    amount_ore: number;
+    memo?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/ironfish/bridge/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  // ═══ Ethereum Bridge API (v7.3.0) ═══
+
+  async getEthBridgeStatus(): Promise<ApiResponse<{
+    bridge_enabled: boolean;
+    reth_rpc_url: string;
+    reth_height: number;
+    reth_synced: boolean;
+    network: string;
+    features: string[];
+  }>> {
+    return this.request<any>('/v1/ethereum/bridge/status');
+  }
+
+  async getEthBalance(): Promise<ApiResponse<{ balance_wei: string; balance_eth: number }>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/bridge/balance');
+  }
+
+  async getEthAddress(): Promise<ApiResponse<{ eth_address: string }>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/bridge/address');
+  }
+
+  async createEthSwap(params: {
+    direction: string;
+    eth_amount: string;
+    qnk_amount: string;
+    eth_destination?: string;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/swap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getEthSwapStatus(swapId: string): Promise<ApiResponse<any>> {
+    return this.request<any>(`/v1/ethereum/swap/${swapId}`);
+  }
+
+  async claimEthSwap(swapId: string, secret: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/ethereum/swap/${swapId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  async refundEthSwap(swapId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/ethereum/swap/${swapId}/refund`, {
+      method: 'POST',
+    });
+  }
+
+  async listEthSwaps(): Promise<ApiResponse<{ swaps: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/swaps');
+  }
+
+  async sendEth(params: { to_address: string; amount_wei: string }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/bridge/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  // ═══ Cross-Chain Bridge Aggregate API (v7.2.5) ═══
+
+  async getBridgeStatus(): Promise<ApiResponse<{
+    bitcoin: { chain: string; symbol: string; wrapped_symbol: string; node_connected: boolean; node_synced: boolean; total_locked: number; total_minted: number; active_bridges: number; decimals: number };
+    zcash: { chain: string; symbol: string; wrapped_symbol: string; node_connected: boolean; node_synced: boolean; total_locked: number; total_minted: number; active_bridges: number; decimals: number };
+    ironfish: { chain: string; symbol: string; wrapped_symbol: string; node_connected: boolean; node_synced: boolean; total_locked: number; total_minted: number; active_bridges: number; decimals: number };
+  }>> {
+    return this.request<any>('/v1/bridge/status');
+  }
+
+  async getBridgeOperations(wallet: string): Promise<ApiResponse<Array<{
+    op_id: string;
+    chain: string;
+    op_type: string;
+    amount: string;
+    native_txid: string | null;
+    swap_id: string | null;
+    timestamp: string;
+    status: string;
+  }>>> {
+    return this.request<any>(`/v1/bridge/operations/${wallet}`);
+  }
+
+  // ═══ v7.3.1: Node Admin & Operator Fee API ═══
+
+  /** Check if current wallet is the node admin */
+  async isAdmin(): Promise<{ is_admin: boolean }> {
+    const resp = await this.authenticatedRequest<{ is_admin: boolean }>('/v1/admin/is-admin');
+    return resp.data || { is_admin: false };
+  }
+
+  /** Get node info (admin only) */
+  async getNodeInfo(): Promise<ApiResponse<{
+    version: string;
+    uptime_secs: number;
+    height: number;
+    network_height: number;
+    peers: number;
+    network_id: string;
+    mining_healthy: boolean;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/admin/node/info');
+  }
+
+  /** Get operator fee settings (master wallet only) */
+  async getOperatorFees(): Promise<ApiResponse<{
+    node_operator_fee_promille: number;
+    node_operator_fee_percent: string;
+    dex_protocol_fee_bps: number;
+    dex_protocol_fee_percent: string;
+    admin_wallet: string;
+    admin_wallet_balance_qug: number;
+    founder_wallet_balance_qug: number;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/admin/operator-fees');
+  }
+
+  /** Update operator fee settings (master wallet only) */
+  async updateOperatorFees(params: {
+    node_operator_fee_promille?: number;
+    dex_protocol_fee_bps?: number;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/admin/operator-fees', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  /** Check for node binary updates (admin only) */
+  async checkNodeUpdate(): Promise<ApiResponse<{
+    current_version: string;
+    latest_version: string | null;
+    update_available: boolean;
+    download_url: string | null;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/admin/node/update-check');
+  }
+
+  /** Get admin settings overview (admin only) */
+  async getAdminSettings(): Promise<ApiResponse<{
+    admin_wallet: string;
+    version: string;
+    uptime_secs: number;
+    height: number;
+    network_height: number;
+    peers: number;
+    network_id: string;
+    oauth2_clients: number;
+    oauth2_active_tokens: number;
+    oauth2_consents: number;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/admin/settings');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Quillon Mail API (v7.3.2)
+  // ═══════════════════════════════════════════════════════════════════
+
+  /** Send an email (wallet-to-wallet P2P or external SMTP) */
+  async sendEmail(data: {
+    to: string;
+    subject: string;
+    body: string;
+    body_html?: string;
+    crypto_amount?: string;
+    crypto_token?: string;
+    reply_to?: string;
+  }): Promise<ApiResponse<{ email_id: string; delivery_method: string }>> {
+    return this.authenticatedRequest<any>('/v1/email/send', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Get inbox emails (paginated) */
+  async getEmailInbox(limit = 50, offset = 0): Promise<ApiResponse<any[]>> {
+    return this.authenticatedRequest<any[]>(`/v1/email/inbox?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Get sent emails (paginated) */
+  async getSentEmails(limit = 50, offset = 0): Promise<ApiResponse<any[]>> {
+    return this.authenticatedRequest<any[]>(`/v1/email/sent?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Get a specific email by ID */
+  async getEmail(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/email/message/${id}`);
+  }
+
+  /** Delete an email */
+  async deleteEmail(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/email/message/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Mark an email as read */
+  async markEmailRead(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/email/message/${id}/read`, {
+      method: 'PUT',
+    });
+  }
+
+  /** Get unread email count */
+  async getEmailUnreadCount(): Promise<ApiResponse<{ count: number }>> {
+    return this.authenticatedRequest<any>('/v1/email/unread-count');
+  }
+
+  /** Search emails */
+  async searchEmails(query: string): Promise<ApiResponse<any[]>> {
+    return this.authenticatedRequest<any[]>(`/v1/email/search?q=${encodeURIComponent(query)}`);
+  }
+
+  /** Get emails in a specific folder */
+  async getEmailFolder(folder: string, limit = 50, offset = 0): Promise<ApiResponse<any[]>> {
+    return this.authenticatedRequest<any[]>(`/v1/email/folder/${folder}?limit=${limit}&offset=${offset}`);
+  }
+
+  /** Get email settings (alias, display name, signature) */
+  async getEmailSettings(): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/email/settings');
+  }
+
+  /** Update email settings */
+  async updateEmailSettings(data: {
+    alias?: string;
+    display_name?: string;
+    signature?: string;
+    auto_reply?: string;
+    notifications_enabled?: boolean;
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/email/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Send welcome email to the user */
+  async sendWelcomeEmail(): Promise<ApiResponse<boolean>> {
+    return this.authenticatedRequest<boolean>('/v1/email/welcome', {
+      method: 'POST',
+    });
+  }
+
+  // ========================================================================
+  // Calendar API (v7.3.3)
+  // ========================================================================
+
+  /** Create a calendar event */
+  async createCalendarEvent(data: {
+    title: string;
+    description?: string;
+    event_type?: string;
+    start_time: number;
+    end_time?: number;
+    all_day?: boolean;
+    recurring?: { frequency: string; interval: number; until?: number; count?: number };
+    color?: string;
+    reminder_minutes?: number[];
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/calendar/events', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Get calendar events in date range */
+  async getCalendarEvents(startDate?: string, endDate?: string, eventType?: string): Promise<ApiResponse<any[]>> {
+    const params = new URLSearchParams();
+    if (startDate) params.set('start_date', startDate);
+    if (endDate) params.set('end_date', endDate);
+    if (eventType) params.set('event_type', eventType);
+    return this.authenticatedRequest<any[]>(`/v1/calendar/events?${params.toString()}`);
+  }
+
+  /** Get a single calendar event */
+  async getCalendarEvent(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/calendar/events/${id}`);
+  }
+
+  /** Update a calendar event */
+  async updateCalendarEvent(id: string, data: {
+    title: string;
+    description?: string;
+    event_type?: string;
+    start_time: number;
+    end_time?: number;
+    all_day?: boolean;
+    recurring?: { frequency: string; interval: number; until?: number; count?: number };
+    color?: string;
+    reminder_minutes?: number[];
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/calendar/events/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Delete a calendar event */
+  async deleteCalendarEvent(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/calendar/events/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Share a calendar event to P2P network */
+  async shareCalendarEvent(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/calendar/events/${id}/share`, {
+      method: 'POST',
+    });
+  }
+
+  /** Create a scheduled transaction */
+  async createScheduledTransaction(data: {
+    title: string;
+    description?: string;
+    start_time: number;
+    to_wallet: string;
+    token: string;
+    amount: string;
+    reminder_minutes?: number[];
+  }): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>('/v1/calendar/scheduled-tx', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Get scheduled transactions */
+  async getScheduledTransactions(): Promise<ApiResponse<any[]>> {
+    return this.authenticatedRequest<any[]>('/v1/calendar/scheduled-tx');
+  }
+
+  /** Cancel a scheduled transaction */
+  async cancelScheduledTransaction(id: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/calendar/scheduled-tx/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Get network milestone events (no auth required) */
+  async getNetworkEvents(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/v1/calendar/network-events');
+  }
 }
 
 // QNO Staking interfaces
@@ -2362,6 +3111,8 @@ export interface MiningStatsEvent {
   // v3.2.25-beta: Added for multi-miner tracking
   miner_id?: string;
   worker_id?: string;
+  // v7.4.2: Human-readable miner name from --miner-name CLI arg
+  worker_name?: string;
   timestamp: string;
 }
 

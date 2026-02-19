@@ -37,6 +37,10 @@ pub mod zcash; // Zcash shielded stealth relayer // Axum API endpoints for atomi
 
 // Production implementations
 pub mod real_bitcoin_client;
+pub mod atomic_swap;
+
+// Re-export bitcoin types needed by consumers
+pub use bitcoin;
 
 /// Bitcoin-Tor bridge configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,7 +384,7 @@ impl BitcoinBridge {
             .push_slice(&push_bytes)
             .into_script();
         let output = TxOut {
-            value: bitcoin::Amount::from_sat(0),
+            value: 0,
             script_pubkey: script,
         };
 

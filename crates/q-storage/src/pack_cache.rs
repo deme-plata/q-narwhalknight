@@ -115,9 +115,24 @@ pub struct PackCacheConfig {
 
 impl Default for PackCacheConfig {
     fn default() -> Self {
+        // v6.0.4: RAM-aware pack cache sizing to prevent OOM on small nodes
+        let total_ram_mb = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize
+        };
+
+        let (cache_mb, max_entries) = match total_ram_mb {
+            0..=3999     => (64, 200),     // micro: 64MB, 200 entries
+            4000..=7999  => (128, 500),    // small (Gamma): 128MB, 500 entries
+            8000..=15999 => (256, 1000),   // medium: 256MB
+            _            => (500, 1000),   // large+: 500MB (original default)
+        };
+
         Self {
-            max_size_bytes: 500 * 1024 * 1024,  // 500 MB
-            max_entries: 1000,
+            max_size_bytes: cache_mb * 1024 * 1024,
+            max_entries,
             entry_ttl: Duration::from_secs(3600),  // 1 hour
             enabled: true,
             reorg_detection_window: 10,  // Invalidate if tip changes by >10 blocks

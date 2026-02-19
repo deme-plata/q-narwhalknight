@@ -117,7 +117,7 @@ impl Default for Config {
             allow_manual_trigger: false,  // v0.0.22-beta: default secure
             block_interval_secs: 2, // Phase 2: Fast block production for exciting visualization
             min_solutions_per_block: 1, // v0.0.22-beta: default 1
-            max_solutions_per_block: 100, // v0.0.22-beta: default 100
+            max_solutions_per_block: 10_000, // v7.1.4: Increased from 100 - queue backlog fix
             validator_index: 0,     // v0.0.22-beta: default primary
             total_validators: 1,    // v0.0.22-beta: default single validator
         }
@@ -161,9 +161,9 @@ impl Config {
             );
         }
 
-        if self.max_solutions_per_block > 1000 {
+        if self.max_solutions_per_block > 50_000 {
             anyhow::bail!(
-                "INVALID CONFIG: max_solutions_per_block ({}) must be <= 1000 (prevent DoS)",
+                "INVALID CONFIG: max_solutions_per_block ({}) must be <= 50000 (prevent DoS)",
                 self.max_solutions_per_block
             );
         }
@@ -358,7 +358,7 @@ impl Config {
         }
 
         if let Ok(max_solutions) = env::var("Q_MAX_SOLUTIONS_PER_BLOCK") {
-            config.max_solutions_per_block = max_solutions.parse().unwrap_or(100);
+            config.max_solutions_per_block = max_solutions.parse().unwrap_or(10_000);
         }
 
         if let Ok(validator_index) = env::var("Q_VALIDATOR_INDEX") {

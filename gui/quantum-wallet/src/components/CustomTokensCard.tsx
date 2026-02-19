@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Coins, Send, ChevronDown, ChevronUp, Loader2, AlertCircle, TrendingUp, DollarSign, PieChart, Lock, Unlock, Gift, Timer, Award, Search, ArrowUpDown, ArrowUp, ArrowDown, SlidersHorizontal } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import VaultModal from './VaultModal';
+import ForgeModal from './ForgeModal';
 
 // v3.7.1: Sort options for the token list
 type SortField = 'symbol' | 'balance' | 'valueUsd' | 'change24h' | 'volume24h' | 'liquidity';
@@ -71,6 +72,8 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
 
   // v4.2.0: VAULT RWA modal state
   const [showVaultModal, setShowVaultModal] = useState(false);
+  // v5.1.0: FORGE RWA modal state
+  const [showForgeModal, setShowForgeModal] = useState(false);
 
   // Staking modal state
   const [stakingToken, setStakingToken] = useState<CustomToken | null>(null);
@@ -1004,18 +1007,24 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.95 }}
                       transition={{ duration: 0.2, layout: { duration: 0.3, type: 'spring', stiffness: 300, damping: 30 } }}
-                      className={`p-4 rounded-xl border ${token.symbol?.toUpperCase() === 'VAULT' ? 'cursor-pointer hover:border-purple-400/50' : ''}`}
+                      className={`p-4 rounded-xl border ${token.symbol?.toUpperCase() === 'VAULT' ? 'cursor-pointer hover:border-purple-400/50' : ''} ${token.symbol?.toUpperCase() === 'FORGE' ? 'cursor-pointer hover:border-orange-400/50' : ''}`}
                       style={{
                         background: token.symbol?.toUpperCase() === 'VAULT'
                           ? 'linear-gradient(135deg, rgba(168, 130, 255, 0.1), rgba(108, 92, 231, 0.08))'
+                          : token.symbol?.toUpperCase() === 'FORGE'
+                          ? 'linear-gradient(135deg, rgba(184, 115, 51, 0.12), rgba(212, 175, 55, 0.08))'
                           : 'rgba(139, 92, 246, 0.05)',
                         borderColor: token.symbol?.toUpperCase() === 'VAULT'
                           ? 'rgba(168, 130, 255, 0.35)'
+                          : token.symbol?.toUpperCase() === 'FORGE'
+                          ? 'rgba(184, 115, 51, 0.35)'
                           : 'rgba(139, 92, 246, 0.2)',
                       }}
                       onClick={() => {
                         if (token.symbol?.toUpperCase() === 'VAULT') {
                           setShowVaultModal(true);
+                        } else if (token.symbol?.toUpperCase() === 'FORGE') {
+                          setShowForgeModal(true);
                         }
                       }}
                     >
@@ -1025,6 +1034,9 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                             <h4 className="font-semibold text-white">{token.symbol}</h4>
                             {token.symbol?.toUpperCase() === 'VAULT' && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: 'linear-gradient(135deg, #6c5ce7, #a882ff)', color: 'white' }}>RWA</span>
+                            )}
+                            {token.symbol?.toUpperCase() === 'FORGE' && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: 'linear-gradient(135deg, #B87333, #D4AF37)', color: 'white' }}>RWA</span>
                             )}
                             <span className="text-xs text-gray-500">•</span>
                             <span className="text-xs text-gray-400">{token.name}</span>
@@ -1376,6 +1388,20 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
           return cleanAddr === bankMaster || cleanAddr === operatorWallet;
         })()}
         vaultBalance={customTokens.find(t => t.symbol?.toUpperCase() === 'VAULT')?.balance ?? 0}
+      />
+
+      {/* v5.1.0: FORGE RWA Token Modal — Mining Machine Redemption */}
+      <ForgeModal
+        isOpen={showForgeModal}
+        onClose={() => setShowForgeModal(false)}
+        isAdmin={(() => {
+          const walletAddr = localStorage.getItem('walletAddress') || '';
+          const cleanAddr = walletAddr.replace(/^qnk/, '').toLowerCase();
+          const bankMaster = '424e4b0000000000000000000000000000000000000000000000000000000000';
+          const operatorWallet = '4fff16bc7d825a3d2e3ae0b15c6e70e91dc18dce1c55ec22543a8e4ae9e6c7b2';
+          return cleanAddr === bankMaster || cleanAddr === operatorWallet;
+        })()}
+        forgeBalance={customTokens.find(t => t.symbol?.toUpperCase() === 'FORGE')?.balance ?? 0}
       />
     </>
   );

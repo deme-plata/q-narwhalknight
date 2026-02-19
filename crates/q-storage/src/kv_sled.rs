@@ -37,16 +37,19 @@ impl RocksDBKV {
         let path = path.as_ref();
         info!("💾 Opening sled database (Windows) at {:?} for {:?}", path, phase);
 
-        // Limit Sled's page cache to 256MB to prevent OOM on long-running nodes
-        // Without this, Sled's cache grows unbounded and eventually tries a 2GB+ allocation
+        // Limit Sled's memory usage to prevent OOM on Windows:
+        // - cache_capacity: page cache limit (default 256MB, configurable via SLED_CACHE_MB)
+        // - mode(LowSpace): prioritize disk usage over memory
+        // NOTE: segment_size CANNOT be changed on existing databases (Sled rejects it)
         let cache_mb: u64 = std::env::var("SLED_CACHE_MB")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(256);
-        info!("💾 Sled page cache limit: {} MB", cache_mb);
+        info!("💾 Sled page cache limit: {} MB (mode: LowSpace)", cache_mb);
         let db = sled::Config::new()
             .path(path)
             .cache_capacity(cache_mb * 1024 * 1024)
+            .mode(sled::Mode::LowSpace)
             .flush_every_ms(Some(1000))
             .open()
             .context("Failed to open sled database")?;
@@ -90,6 +93,7 @@ impl RocksDBKV {
         let db = sled::Config::new()
             .path(path)
             .cache_capacity(64u64 * 1024 * 1024)
+            .mode(sled::Mode::LowSpace)
             .flush_every_ms(Some(5000))
             .open()
             .context("Failed to open sled cold database")?;
@@ -111,6 +115,11 @@ impl RocksDBKV {
     /// Get a raw database handle (returns Arc<()> on Windows since there's no RocksDB)
     pub fn get_raw_db(&self) -> Arc<()> {
         Arc::new(())
+    }
+
+    /// v6.1.1: Stub for RocksDB memory usage reporting (not applicable to Sled)
+    pub fn get_memory_usage_mb(&self) -> (f64, f64, f64) {
+        (0.0, 0.0, 0.0)
     }
 
     pub async fn get_stats(&self) -> Result<SledStats> {
@@ -200,11 +209,17 @@ impl KVStore for RocksDBKV {
 
     async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let tree = self.get_tree(cf)?;
-        let mut results = Vec::new();
+        // Cap at 100K entries to prevent OOM from unbounded scans
+        const MAX_SCAN_RESULTS: usize = 100_000;
+        let mut results = Vec::with_capacity(1024.min(MAX_SCAN_RESULTS));
 
         for item in tree.scan_prefix(prefix) {
             let (key, value) = item.context("Iterator error")?;
             results.push((key.to_vec(), value.to_vec()));
+            if results.len() >= MAX_SCAN_RESULTS {
+                warn!("⚠️ scan_prefix('{}') hit {} entry limit - truncating", cf, MAX_SCAN_RESULTS);
+                break;
+            }
         }
 
         Ok(results)
@@ -212,11 +227,17 @@ impl KVStore for RocksDBKV {
 
     async fn scan_all(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let tree = self.get_tree(cf)?;
-        let mut results = Vec::new();
+        // Cap at 100K entries to prevent OOM from unbounded scans
+        const MAX_SCAN_RESULTS: usize = 100_000;
+        let mut results = Vec::with_capacity(1024.min(MAX_SCAN_RESULTS));
 
         for item in tree.iter() {
             let (key, value) = item.context("Iterator error")?;
             results.push((key.to_vec(), value.to_vec()));
+            if results.len() >= MAX_SCAN_RESULTS {
+                warn!("⚠️ scan_all('{}') hit {} entry limit - truncating", cf, MAX_SCAN_RESULTS);
+                break;
+            }
         }
 
         Ok(results)

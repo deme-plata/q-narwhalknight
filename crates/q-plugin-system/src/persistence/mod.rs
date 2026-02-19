@@ -40,8 +40,10 @@
 //! }
 //! ```
 
+#[cfg(not(target_os = "windows"))]
 mod rocksdb_storage;
 
+#[cfg(not(target_os = "windows"))]
 pub use rocksdb_storage::{
     PluginConsensusProof,
     PluginPersistenceError,

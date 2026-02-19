@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket } from 'lucide-react';
+import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket, Cpu, Pickaxe } from 'lucide-react';
 
 export default function DownloadNodeScreen() {
   return (
@@ -13,12 +13,12 @@ export default function DownloadNodeScreen() {
         <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
           Download Q-NarwhalKnight Node
         </h1>
-        <p className="text-xl text-gray-300 max-w-3xl mx-auto">
+        <p className="text-xl text-gray-100 max-w-3xl mx-auto">
           Join the quantum consensus network. Run your own validator node with Phase 1 post-quantum cryptography.
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v3.5.14-beta • WarpSync + ZK Privacy + Real Cryptography</span>
+          <span className="text-sm font-bold text-quantum-cyan">v7.3.0 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -37,9 +37,9 @@ export default function DownloadNodeScreen() {
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-2">
               <h2 className="text-2xl font-bold text-white">WarpSync Technology</h2>
-              <span className="px-3 py-1 bg-quantum-green/30 text-quantum-green text-xs font-bold rounded-full uppercase">New in v2.3</span>
+              <span className="px-3 py-1 bg-quantum-green/30 text-quantum-green text-xs font-bold rounded-full uppercase">Mainnet 2026.1</span>
             </div>
-            <p className="text-gray-300 mb-3">
+            <p className="text-gray-100 mb-3">
               Sync 900,000+ blocks in under 5 minutes. New nodes join the network instantly with parallel block downloads,
               adaptive timeouts, and scan-forward gap closure.
             </p>
@@ -82,7 +82,7 @@ export default function DownloadNodeScreen() {
           >
             <feature.icon className={`w-8 h-8 mb-2 ${feature.highlight ? 'text-quantum-green' : 'text-quantum-cyan'}`} />
             <h3 className="font-bold text-white">{feature.title}</h3>
-            <p className="text-sm text-gray-400">{feature.desc}</p>
+            <p className="text-sm text-gray-200">{feature.desc}</p>
             {feature.highlight && (
               <span className="inline-block mt-2 px-2 py-0.5 bg-quantum-green/20 text-quantum-green text-xs font-bold rounded">NEW</span>
             )}
@@ -105,7 +105,7 @@ export default function DownloadNodeScreen() {
             </div>
             <div>
               <h2 className="text-2xl font-bold text-white">Linux x86_64</h2>
-              <p className="text-gray-400">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</p>
+              <p className="text-gray-200">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</p>
             </div>
           </div>
 
@@ -114,46 +114,46 @@ export default function DownloadNodeScreen() {
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Ring-LWE VRF Mining</p>
-                <p className="text-sm text-gray-400">Post-quantum secure mining leader election with lattice-based VRF</p>
+                <p className="text-sm text-gray-200">Post-quantum secure mining leader election with lattice-based VRF</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-cyan flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Genus-2 VDF Consensus</p>
-                <p className="text-sm text-gray-400">Hyperelliptic curve VDF for quantum-resistant time proofs</p>
+                <p className="text-sm text-gray-200">Hyperelliptic curve VDF for quantum-resistant time proofs</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-purple flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">DAG-Knight + Slashing</p>
-                <p className="text-sm text-gray-400">Byzantine fault tolerant consensus with economic penalties</p>
+                <p className="text-sm text-gray-200">Byzantine fault tolerant consensus with economic penalties</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v4.1.2-beta"
+              href="/downloads/q-api-server-v7.3.0"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v4.1.2-beta)
+              Download Linux Binary (v7.3.0)
             </a>
-            <p className="text-center text-sm text-gray-400">
-              Size: 162 MB | WarpSync + ZK Privacy + Ring-LWE VRF + Genus-2 VDF
+            <p className="text-center text-sm text-gray-200">
+              Size: ~140 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
             </p>
           </div>
 
           {/* Quick Start */}
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
-            <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
+            <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v4.1.2-beta
-chmod +x q-api-server-v4.1.2-beta
-./q-api-server-v4.1.2-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v7.3.0
+chmod +x q-api-server-v7.3.0
+./q-api-server-v7.3.0 --port 8080`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -174,7 +174,7 @@ chmod +x q-api-server-v4.1.2-beta
             </div>
             <div>
               <h2 className="text-2xl font-bold text-white">Windows x64</h2>
-              <p className="text-gray-400">Windows 10+ / Windows Server 2019+</p>
+              <p className="text-gray-200">Windows 10+ / Windows Server 2019+</p>
             </div>
           </div>
 
@@ -183,21 +183,21 @@ chmod +x q-api-server-v4.1.2-beta
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Complete Windows Package</p>
-                <p className="text-sm text-gray-400">All-in-one ZIP with node binary + required DLLs</p>
+                <p className="text-sm text-gray-200">All-in-one ZIP with node binary + required DLLs</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Full Node + P2P Sync</p>
-                <p className="text-sm text-gray-400">Block validation, wallet, DEX, mining - all included</p>
+                <p className="text-sm text-gray-200">Block validation, wallet, DEX, mining - all included</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-cyan flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-white font-medium">Post-Quantum Cryptography</p>
-                <p className="text-sm text-gray-400">Dilithium5 + Kyber1024 signatures built-in</p>
+                <p className="text-sm text-gray-200">Dilithium5 + Kyber1024 signatures built-in</p>
               </div>
             </div>
           </div>
@@ -211,30 +211,123 @@ chmod +x q-api-server-v4.1.2-beta
               <Download className="w-5 h-5" />
               Download Windows Package (ZIP)
             </a>
-            <p className="text-center text-sm text-gray-400">
+            <p className="text-center text-sm text-gray-200">
               Size: 77 MB (compressed) | Node + DLLs included
             </p>
           </div>
 
           {/* Quick Start */}
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
-            <p className="text-sm font-mono text-gray-300 mb-2">Quick Start:</p>
+            <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
 {`# 1. Extract the ZIP to a folder
 # 2. Open PowerShell in that folder
 # 3. Run:
 .\\q-api-server-windows-x64.exe --port 9090 --p2p-port 9001`}
             </pre>
-            <p className="text-xs text-gray-500 mt-2">
+            <p className="text-xs text-gray-100 mt-2">
               Tip: Use port 9090 to avoid permission issues, or run as Administrator for port 8080
             </p>
           </div>
         </motion.div>
       </div>
 
+      {/* Miner Download Section */}
+      <motion.div
+        className="p-8 bg-gradient-to-br from-amber-500/30 via-orange-500/20 to-quantum-pink/20 backdrop-blur-xl border border-amber-500/40 rounded-2xl relative overflow-hidden"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.35 }}
+      >
+        <div className="absolute top-0 right-0 w-48 h-48 bg-amber-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+        <div className="absolute bottom-0 left-0 w-32 h-32 bg-orange-500/10 rounded-full blur-2xl translate-y-1/2 -translate-x-1/2"></div>
+
+        <div className="relative">
+          <div className="flex items-center gap-4 mb-6">
+            <div className="w-16 h-16 bg-gradient-to-br from-orange-400/40 to-rose-500/40 rounded-xl flex items-center justify-center">
+              <Pickaxe className="w-8 h-8 text-orange-300" />
+            </div>
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-2xl font-bold text-white">Q-Miner</h2>
+                <span className="px-3 py-1 bg-orange-500/40 text-white text-xs font-bold rounded-full uppercase animate-pulse">Solo Mining</span>
+              </div>
+              <p className="text-white">Standalone mining client for Q-NarwhalKnight network</p>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <div className="flex items-start gap-3">
+                <Cpu className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-cyan-200 font-semibold">Multi-threaded CPU Mining</p>
+                  <p className="text-sm text-white">Scales across all available cores with adaptive difficulty</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <Shield className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-emerald-200 font-semibold">Post-Quantum VRF Election</p>
+                  <p className="text-sm text-white">Ring-LWE based mining leader election for quantum resistance</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <Zap className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-yellow-200 font-semibold">100+ KH/s Per Thread</p>
+                  <p className="text-sm text-white">Optimized SIMD hashing with adaptive nonce ranges</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <a
+                href="/downloads/q-miner-linux-x64"
+                download="q-miner-linux-x64"
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-orange-500 to-rose-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-orange-500/50 transition-all"
+              >
+                <Download className="w-5 h-5" />
+                Download Miner — Linux x64
+              </a>
+              <a
+                href="/downloads/q-miner-windows-x64.exe"
+                download="q-miner-windows-x64.exe"
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-purple-500/50 transition-all"
+              >
+                <Download className="w-5 h-5" />
+                Download Miner — Windows x64
+              </a>
+              <p className="text-center text-xs text-white/70">v7.3.3 — std::thread mining, jemalloc/mimalloc, batched atomics</p>
+
+              <div className="p-4 bg-black/30 rounded-xl border border-orange-400/30">
+                <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
+                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
+{`wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 \\
+  --mode solo \\
+  --wallet YOUR_WALLET_ADDRESS \\
+  --threads 4 \\
+  --server https://quillon.xyz`}
+                </pre>
+              </div>
+              <div className="p-4 bg-black/30 rounded-xl border border-purple-400/30">
+                <p className="text-sm font-mono text-white mb-2">Windows Quick Start (PowerShell):</p>
+                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
+{`# Download from browser or:
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
+.\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+
       {/* macOS Build from Source */}
       <motion.div
-        className="p-6 bg-gradient-to-br from-quantum-green/20 to-quantum-cyan/10 backdrop-blur-xl border border-quantum-green/30 rounded-2xl"
+        className="p-6 bg-gradient-to-br from-quantum-green/30 to-quantum-cyan/20 backdrop-blur-xl border border-quantum-green/40 rounded-2xl"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.4 }}
@@ -245,11 +338,11 @@ chmod +x q-api-server-v4.1.2-beta
           </div>
           <div>
             <h2 className="text-xl font-bold text-white">macOS (Build from Source)</h2>
-            <p className="text-gray-400 text-sm">Intel & Apple Silicon</p>
+            <p className="text-gray-200 text-sm">Intel & Apple Silicon</p>
           </div>
         </div>
 
-        <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-green/20">
+        <div className="p-4 bg-white/10 rounded-xl border border-quantum-green/20">
           <pre className="text-xs text-quantum-green overflow-x-auto">
 {`# Install Rust if needed: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://code.quillon.xyz/repo.git q-narwhalknight && cd q-narwhalknight
@@ -257,6 +350,68 @@ cargo build --release --package q-api-server
 ./target/release/q-api-server --port 8080`}
           </pre>
         </div>
+      </motion.div>
+
+      {/* HiveOS One-Line Install */}
+      <motion.div
+        className="p-6 bg-gradient-to-br from-yellow-500/30 to-amber-600/20 backdrop-blur-xl border border-yellow-500/40 rounded-2xl"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.45 }}
+      >
+        <div className="flex items-center gap-4 mb-4">
+          <div className="w-12 h-12 bg-yellow-500/20 rounded-xl flex items-center justify-center">
+            <Cpu className="w-6 h-6 text-yellow-400" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-white">HiveOS</h2>
+            <p className="text-gray-200 text-sm">One-line install for mining rigs</p>
+          </div>
+        </div>
+
+        <p className="text-gray-200 text-sm mb-4">
+          Install and start mining on HiveOS rigs. Choose either the one-line installer or set up directly via Flight Sheet.
+        </p>
+
+        <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20 mb-4">
+          <p className="text-sm font-bold text-yellow-300 mb-2">Option 1: One-Line Install (SSH)</p>
+          <p className="text-xs text-gray-100 mb-2">SSH into your rig and run:</p>
+          <pre className="text-xs text-yellow-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer bg-black/30 p-2 rounded">{`curl -sL https://quillon.xyz/downloads/install-hiveos.sh | bash`}</pre>
+        </div>
+
+        <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20">
+          <p className="text-sm font-bold text-yellow-300 mb-3">Option 2: Flight Sheet Setup</p>
+
+          <div className="mb-3 p-3 bg-red-500/20 border border-red-400/40 rounded-lg">
+            <p className="text-xs text-red-200 font-bold">IMPORTANT: Use the .tar.gz URL below, NOT the raw binary URL. HiveOS requires a .tar.gz archive.</p>
+          </div>
+
+          <div className="mb-3 p-3 bg-black/40 border border-yellow-400/50 rounded-lg">
+            <p className="text-xs text-white mb-1 font-semibold">Installation URL (copy this exactly):</p>
+            <pre className="text-sm text-yellow-300 font-mono select-all cursor-pointer break-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</pre>
+          </div>
+
+          <ol className="space-y-2 text-sm text-gray-200">
+            <li><span className="text-yellow-400 font-mono mr-2">1.</span>Go to HiveOS Dashboard &rarr; <span className="text-white font-medium">Flight Sheets</span> &rarr; Add New</li>
+            <li><span className="text-yellow-400 font-mono mr-2">2.</span>Coin: <span className="text-white font-medium">Custom</span></li>
+            <li><span className="text-yellow-400 font-mono mr-2">3.</span>Wallet: <span className="text-white font-medium">Your QNK wallet address</span> (qnk...)</li>
+            <li><span className="text-yellow-400 font-mono mr-2">4.</span>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>
+            <li><span className="text-yellow-400 font-mono mr-2">5.</span>Miner: <span className="text-white font-medium">Custom</span>
+              <ul className="ml-6 mt-1 space-y-1 text-gray-100 text-xs">
+                <li>Installation URL: <span className="font-mono text-yellow-300 font-bold select-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</span></li>
+                <li>Hash algorithm: <span className="font-mono text-yellow-300">qnk-dagknight</span></li>
+                <li>Wallet template: <span className="font-mono text-yellow-300">%WAL%</span></li>
+                <li>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>
+              </ul>
+            </li>
+            <li><span className="text-yellow-400 font-mono mr-2">6.</span>Apply flight sheet to your rig</li>
+          </ol>
+          <p className="text-xs text-gray-100 mt-3">Optional extra config JSON: <code className="text-yellow-300 bg-black/30 px-2 py-0.5 rounded">{`{"threads": 8}`}</code></p>
+        </div>
+
+        <p className="text-gray-100 text-xs mt-3">
+          Supports HiveOS 0.6+. Auto-detects CPU threads and configures optimal mining settings. Package includes h-run.sh and h-stats.sh for HiveOS dashboard integration.
+        </p>
       </motion.div>
 
       {/* System Requirements */}
@@ -274,7 +429,7 @@ cargo build --release --package q-api-server
         <div className="grid md:grid-cols-2 gap-6">
           <div>
             <h3 className="text-sm font-bold text-quantum-cyan mb-3">Minimum</h3>
-            <ul className="space-y-1 text-gray-300 text-sm">
+            <ul className="space-y-1 text-gray-100 text-sm">
               <li>CPU: 4 cores @ 2.5GHz</li>
               <li>RAM: 8 GB</li>
               <li>Storage: 50 GB SSD</li>
@@ -283,7 +438,7 @@ cargo build --release --package q-api-server
           </div>
           <div>
             <h3 className="text-sm font-bold text-quantum-purple mb-3">Recommended</h3>
-            <ul className="space-y-1 text-gray-300 text-sm">
+            <ul className="space-y-1 text-gray-100 text-sm">
               <li>CPU: 8+ cores @ 3.0GHz+</li>
               <li>RAM: 32 GB+</li>
               <li>Storage: 500 GB NVMe SSD</li>
@@ -308,7 +463,7 @@ cargo build --release --package q-api-server
         >
           <Code className="w-6 h-6 text-quantum-cyan mb-2" />
           <h3 className="font-bold text-white mb-1">Source Code</h3>
-          <p className="text-sm text-gray-400">View & contribute</p>
+          <p className="text-sm text-gray-200">View & contribute</p>
         </a>
 
         <a
@@ -319,13 +474,13 @@ cargo build --release --package q-api-server
         >
           <BookOpen className="w-6 h-6 text-quantum-purple mb-2" />
           <h3 className="font-bold text-white mb-1">API Docs</h3>
-          <p className="text-sm text-gray-400">REST & WebSocket</p>
+          <p className="text-sm text-gray-200">REST & WebSocket</p>
         </a>
 
-        <div className="p-4 bg-quantum-dark/50 rounded-xl border border-quantum-green/20">
+        <div className="p-4 bg-white/10 rounded-xl border border-quantum-green/20">
           <Shield className="w-6 h-6 text-quantum-green mb-2" />
           <h3 className="font-bold text-white mb-1">PQC Security</h3>
-          <p className="text-sm text-gray-400">Dilithium5 + Kyber1024</p>
+          <p className="text-sm text-gray-200">Dilithium5 + Kyber1024</p>
         </div>
       </motion.div>
     </div>

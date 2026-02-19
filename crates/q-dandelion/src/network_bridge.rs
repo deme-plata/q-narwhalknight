@@ -50,9 +50,9 @@ pub struct NetworkBridgeConfig {
 impl Default for NetworkBridgeConfig {
     fn default() -> Self {
         Self {
-            network_id: "testnet-phase19".to_string(),
-            fluff_topic: "/qnk/testnet-phase19/mempool-txs".to_string(),
-            stem_topic: "/qnk/testnet-phase19/dandelion-stem".to_string(),
+            network_id: "mainnet2026.2".to_string(),
+            fluff_topic: "/qnk/mainnet2026/mempool-txs".to_string(),
+            stem_topic: "/qnk/mainnet2026/dandelion-stem".to_string(),
             fluff_rate_limit: 100,
             tor_enabled: true,
             peer_refresh_interval: Duration::from_secs(30),
@@ -396,7 +396,7 @@ pub enum BridgeResult {
 /// # Arguments
 /// * `dandelion_rx` - Receiver for Dandelion NetworkCommand messages
 /// * `libp2p_tx` - Sender for q_network::NetworkCommand messages
-/// * `network_id` - Network ID for topic construction (e.g., "testnet-phase19")
+/// * `network_id` - Network ID for topic construction (e.g., "mainnet")
 ///
 /// # Returns
 /// A JoinHandle for the bridge task

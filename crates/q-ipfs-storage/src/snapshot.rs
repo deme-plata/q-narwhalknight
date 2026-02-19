@@ -1,4 +1,5 @@
 use crate::{IpfsStorageError, Result};
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{checkpoint::Checkpoint, DB};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,7 @@ impl SnapshotManager {
     }
 
     /// Create a snapshot of the given RocksDB database
+    #[cfg(not(target_os = "windows"))]
     pub async fn create_snapshot<P: AsRef<Path>>(
         &mut self,
         db_path: P,
@@ -117,6 +119,16 @@ impl SnapshotManager {
         );
 
         Ok(metadata)
+    }
+
+    /// Stub for Windows (RocksDB not available)
+    #[cfg(target_os = "windows")]
+    pub async fn create_snapshot<P: AsRef<Path>>(
+        &mut self,
+        _db_path: P,
+        _snapshot_type: SnapshotType,
+    ) -> Result<SnapshotMetadata> {
+        Err(IpfsStorageError::Ipfs("Snapshots not supported on Windows (no RocksDB)".into()))
     }
 
     /// Calculate total size and file count of a snapshot

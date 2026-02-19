@@ -274,18 +274,23 @@ impl BitNetChatEngine {
         let prompt_tokens = tokens.len();
         callback(BitNetStreamEvent::Progress(format!("📊 {} prompt tokens", prompt_tokens))).await?;
 
-        // Create batch
-        let mut batch = LlamaBatch::new(512, 1);
+        // Process prompt in chunks of 512 tokens (handles prompts > batch size)
+        let batch_size = 512;
+        let total_tokens = tokens.len();
 
-        // Add prompt tokens to batch
-        for (i, &token) in tokens.iter().enumerate() {
-            batch.add(token, i as i32, &[0], i == tokens.len() - 1)
-                .map_err(|e| anyhow!("Batch add failed: {:?}", e))?;
+        for chunk_start in (0..total_tokens).step_by(batch_size) {
+            let chunk_end = (chunk_start + batch_size).min(total_tokens);
+            let mut batch = LlamaBatch::new(batch_size, 1);
+
+            for i in chunk_start..chunk_end {
+                let is_last = i == total_tokens - 1;
+                batch.add(tokens[i], i as i32, &[0], is_last)
+                    .map_err(|e| anyhow!("Batch add failed: {:?}", e))?;
+            }
+
+            ctx.decode(&mut batch)
+                .map_err(|e| anyhow!("Decode failed: {:?}", e))?;
         }
-
-        // Decode prompt (uses ternary LUT operations!)
-        ctx.decode(&mut batch)
-            .map_err(|e| anyhow!("Decode failed: {:?}", e))?;
 
         let mut first_token_time: Option<std::time::Duration> = None;
         let mut generated_text = String::new();

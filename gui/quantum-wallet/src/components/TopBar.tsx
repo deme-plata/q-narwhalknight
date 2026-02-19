@@ -1,12 +1,15 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen } from 'lucide-react';
+import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 import type { MiningStatsEvent } from '../services/api';
 import SmartContractModal from './SmartContractModal';
 import NetworkMapModal from './NetworkMapModal';
+import ThemeChooserModal from './ThemeChooserModal';
+import MinerLinkModal from './MinerLinkModal';
+import { useMinerLink } from '../hooks/useMinerLink';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
 // Any balance exceeding this is corrupted data and must be rejected
@@ -100,6 +103,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [selectedDetail, setSelectedDetail] = useState<SearchResult | null>(null); // v3.4.2: Detail modal
   const [selectedContract, setSelectedContract] = useState<any | null>(null); // v3.4.20: Enhanced contract modal
   const [showNetworkMap, setShowNetworkMap] = useState(false); // v3.4.21: Network map modal
+  const [showThemeChooser, setShowThemeChooser] = useState(false); // v5.7.0: Theme chooser modal
 
   // v3.9.1-beta: Profile & Banking Messaging System
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -114,18 +118,123 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [copiedWallet, setCopiedWallet] = useState(false);
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
+  const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  const minerLink = useMinerLink(walletAddr || null);
+
+  // MetaMask linked account data
+  const [metamaskAddress, setMetamaskAddress] = useState<string | null>(null);
+  const [metamaskBalance, setMetamaskBalance] = useState<string | null>(null);
+  const [metamaskChainId, setMetamaskChainId] = useState<string | null>(null);
+  const [metamaskChainName, setMetamaskChainName] = useState<string>('');
+
+  // v7.3.0: Node admin check via API (--admin-wallet)
+  const [isNodeAdmin, setIsNodeAdmin] = useState(false);
 
   // v3.4.16-beta: SSE-updated live metrics
   const [liveBlockHeight, setLiveBlockHeight] = useState(blockHeight);
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
   const [isTorConnected, setIsTorConnected] = useState(false);
+  const [minerLinkCount, setMinerLinkCount] = useState(0);
   const sseRef = useRef<EventSource | null>(null);
 
   // v3.6.1-beta: Clear corrupted balance caches on mount
   useEffect(() => {
     clearCorruptedBalanceCache();
   }, []);
+
+  // v7.3.0: Check if current wallet is the node's admin wallet
+  useEffect(() => {
+    if (!walletAddr) return;
+    fetch('/api/v1/admin/is-admin', {
+      headers: { 'X-Wallet-Auth': walletAddr, 'Authorization': `Bearer ${walletAddr}` },
+    })
+      .then(r => r.json())
+      .then(data => setIsNodeAdmin(data.is_admin === true))
+      .catch(() => setIsNodeAdmin(false));
+  }, [walletAddr]);
+
+  // MetaMask: Fetch linked account data on mount
+  useEffect(() => {
+    const linked = localStorage.getItem('metamaskLinked');
+    if (!linked) return;
+    setMetamaskAddress(linked);
+
+    const fetchMetamaskData = async () => {
+      try {
+        const ethereum = (window as any).ethereum;
+        // Find MetaMask provider (handles multiple wallet extensions)
+        const provider = ethereum?.providers?.length
+          ? ethereum.providers.find((p: any) => p.isMetaMask)
+          : ethereum?.isMetaMask ? ethereum : null;
+        if (!provider) return;
+
+        // Get chain info
+        const chainId: string = await provider.request({ method: 'eth_chainId' });
+        setMetamaskChainId(chainId);
+        const chainNames: Record<string, string> = {
+          '0x1': 'Ethereum', '0x89': 'Polygon', '0xa86a': 'Avalanche',
+          '0xa4b1': 'Arbitrum', '0xa': 'Optimism', '0x38': 'BSC',
+          '0x2105': 'Base', '0xaa36a7': 'Sepolia',
+        };
+        setMetamaskChainName(chainNames[chainId] || `Chain ${parseInt(chainId, 16)}`);
+
+        // Get balance
+        const balHex: string = await provider.request({
+          method: 'eth_getBalance',
+          params: [linked, 'latest'],
+        });
+        const balWei = BigInt(balHex);
+        const ethBal = Number(balWei) / 1e18;
+        setMetamaskBalance(ethBal.toFixed(4));
+      } catch (err) {
+        console.warn('MetaMask data fetch failed:', err);
+      }
+    };
+
+    fetchMetamaskData();
+    // Refresh every 30s
+    const interval = setInterval(fetchMetamaskData, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Link MetaMask from profile dropdown (for users who logged in with seed phrase)
+  const handleLinkMetaMask = async () => {
+    try {
+      const ethereum = (window as any).ethereum;
+      const provider = ethereum?.providers?.length
+        ? ethereum.providers.find((p: any) => p.isMetaMask)
+        : ethereum?.isMetaMask ? ethereum : null;
+      if (!provider) {
+        alert('MetaMask not detected. Please install the MetaMask browser extension.');
+        return;
+      }
+      const accounts: string[] = await provider.request({ method: 'eth_requestAccounts' });
+      if (!accounts || accounts.length === 0) return;
+      const ethAddress = accounts[0].toLowerCase();
+      localStorage.setItem('metamaskLinked', ethAddress);
+      setMetamaskAddress(ethAddress);
+
+      // Fetch chain + balance immediately
+      try {
+        const chainId: string = await provider.request({ method: 'eth_chainId' });
+        setMetamaskChainId(chainId);
+        const chainNames: Record<string, string> = {
+          '0x1': 'Ethereum', '0x89': 'Polygon', '0xa86a': 'Avalanche',
+          '0xa4b1': 'Arbitrum', '0xa': 'Optimism', '0x38': 'BSC',
+          '0x2105': 'Base', '0xaa36a7': 'Sepolia',
+        };
+        setMetamaskChainName(chainNames[chainId] || `Chain ${parseInt(chainId, 16)}`);
+        const balHex: string = await provider.request({
+          method: 'eth_getBalance', params: [ethAddress, 'latest'],
+        });
+        setMetamaskBalance((Number(BigInt(balHex)) / 1e18).toFixed(4));
+      } catch { /* chain/balance fetch is best-effort */ }
+    } catch (err: any) {
+      if (err?.code === 4001) return; // user rejected
+      console.warn('MetaMask link failed:', err);
+    }
+  };
 
   // v2.9.0-beta: STABLE balance display - prevent bouncing between multiple sources
   // v3.6.1-beta: Add sanity check to reject corrupted values
@@ -177,6 +286,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
   // v2.9.0-beta: Update stable balance with debouncing to prevent flickering
   // v3.6.1-beta: Added sanity checks to reject corrupted values
+  // v6.0.3: Removed stableBalance from deps to prevent potential infinite re-render loop (React Error #185)
+  const stableBalanceRef = useRef(stableBalance);
+  stableBalanceRef.current = stableBalance;
+
   useEffect(() => {
     const cached = localStorage.getItem('cachedBalance');
     const cachedValue = cached ? parseFloat(cached) : currentBalance;
@@ -184,7 +297,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     // v3.6.1-beta: Only use values that pass sanity check
     const validCached = isValidBalance(cachedValue) ? cachedValue : 0;
     const validCurrent = isValidBalance(currentBalance) ? currentBalance : 0;
-    const validStable = isValidBalance(stableBalance) ? stableBalance : 0;
+    const currentStable = stableBalanceRef.current;
+    const validStable = isValidBalance(currentStable) ? currentStable : 0;
 
     const newBalance = validCached || validCurrent;
 
@@ -199,13 +313,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       const candidates = [newBalance, validStable, validCurrent].filter(v => isValidBalance(v));
       const bestBalance = candidates.length > 0 ? Math.max(...candidates) : 0;
 
-      if (Math.abs(bestBalance - stableBalance) > 0.0001) {
-        console.log('💰 TopBar: Stable balance update:', stableBalance.toFixed(4), '→', bestBalance.toFixed(4));
+      if (Math.abs(bestBalance - currentStable) > 0.0001) {
+        console.log('💰 TopBar: Stable balance update:', currentStable.toFixed(4), '→', bestBalance.toFixed(4));
         setStableBalance(bestBalance);
         lastBalanceUpdateRef.current = Date.now();
       }
     }
-  }, [currentBalance, stableBalance]);
+  }, [currentBalance]);
 
   // v2.9.0-beta: Listen for balance change events and update stable balance
   // v3.6.1-beta: Added sanity checks to reject corrupted values
@@ -271,10 +385,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         reason === 'DexScreen.swap.deduct'
       );
 
-      if (isMiningUpdate || isDexSwapDeduct) {
-        // Mining updates and DEX swap deductions: use value directly
-        // DEX swaps are authoritative - the user just spent QUG, balance MUST decrease
-        console.log(isDexSwapDeduct ? '💸 TopBar: DEX deduct - setting balance to:' : '⛏️ TopBar: Mining update - setting balance to:', balance);
+      // v6.0.1: Check if this is a transaction send (balance should decrease)
+      const isTransactionSent = reason && (
+        reason === 'transaction_sent' ||
+        reason === 'transaction_received'
+      );
+
+      if (isMiningUpdate || isDexSwapDeduct || isTransactionSent) {
+        // Mining updates, DEX swaps, and transaction sends: use value directly
+        // These are authoritative - balance MUST update (including decreases)
+        console.log(isDexSwapDeduct ? '💸 TopBar: DEX deduct - setting balance to:' : isTransactionSent ? '📤 TopBar: Transaction sent - setting balance to:' : '⛏️ TopBar: Mining update - setting balance to:', balance);
         setStableBalance(balance);
       } else {
         // v3.6.1-beta: Use Math.max only if BOTH values are valid
@@ -399,6 +519,28 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       }
     });
 
+    // v6.0.2: Listen for balance-updated SSE events (mixer completions, consensus confirmations)
+    eventSource.addEventListener('balance-updated', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const eventAddr = (data.wallet_address || '').toLowerCase();
+        const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
+        if (eventAddr === normalizedWallet && data.new_balance !== undefined) {
+          console.log('📡 [TopBar] SSE balance-updated:', data.new_balance, 'reason:', data.change_reason);
+          // Dispatch as wallet-balance-updated so the existing handler picks it up
+          window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+            detail: {
+              symbol: 'QUG',
+              balance: data.new_balance,
+              reason: data.change_reason || 'sse_balance_update'
+            }
+          }));
+        }
+      } catch (err) {
+        console.error('❌ [TopBar] Failed to parse balance-updated:', err);
+      }
+    });
+
     eventSource.onerror = () => {
       console.warn('⚠️ [TopBar] SSE connection error, will retry...');
     };
@@ -419,6 +561,28 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       setLivePeers(peers);
     }
   }, [blockHeight, peers]);
+
+  // v7.2.0: Poll miner-link status (lightweight REST check every 10s)
+  useEffect(() => {
+    const walletAddr = localStorage.getItem('walletAddress') || '';
+    if (!walletAddr) return;
+
+    const fetchMinerLinkStatus = async () => {
+      try {
+        const res = await fetch(`/api/v1/miner-link/status/${walletAddr}`);
+        if (res.ok) {
+          const data = await res.json();
+          setMinerLinkCount(data?.data?.connected_miners ?? 0);
+        }
+      } catch {
+        // Silently ignore — miner link is optional
+      }
+    };
+
+    fetchMinerLinkStatus();
+    const interval = setInterval(fetchMinerLinkStatus, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   // v3.9.1-beta: Fetch loan status and bank messages
   useEffect(() => {
@@ -569,7 +733,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     try {
       // Determine search type based on query format
       let searchType = '';
-      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{64}$/i)) searchType = 'transaction';
+      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{32}$/i) || query.match(/^[a-f0-9]{64}$/i)) searchType = 'transaction';
       else if (query.match(/^vtx_[a-f0-9]+/i)) searchType = 'vertex';
       else if (query.match(/^0x[a-f0-9]{40}$/i)) searchType = 'contract';
       else if (query.match(/^qnk[a-z0-9]{39}$/i)) searchType = 'address';
@@ -788,16 +952,17 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   return (
     <>
     <div
-      className="backdrop-blur-xl border-b px-6 py-4 relative z-50"
+      className="topbar-main backdrop-blur-xl border-b px-6 pb-4 relative z-50"
       style={{
-        background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.95) 0%, rgba(50, 30, 80, 0.95) 100%)',
+        background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.95) 0%, rgba(25, 25, 40, 0.95) 100%)',
         borderColor: 'rgba(212, 175, 55, 0.2)',
-        boxShadow: '0 4px 20px rgba(212, 175, 55, 0.15)'
+        boxShadow: '0 4px 20px rgba(212, 175, 55, 0.15)',
+        paddingTop: '20px'
       }}
     >
       <div className="flex items-center justify-between">
         {/* Left: Search */}
-        <div className="flex-1 max-w-md relative">
+        <div className="flex-1 max-w-xs relative ml-4">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-amber-400" />
             <input
@@ -832,7 +997,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 exit={{ opacity: 0, y: -10 }}
                 className="absolute top-full mt-2 w-full backdrop-blur-xl rounded-lg shadow-2xl max-h-96 overflow-y-auto z-50"
                 style={{
-                  background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.98) 0%, rgba(50, 30, 80, 0.98) 100%)',
+                  background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.98) 0%, rgba(25, 25, 40, 0.98) 100%)',
                   border: '2px solid rgba(212, 175, 55, 0.3)',
                   boxShadow: '0 10px 40px rgba(212, 175, 55, 0.2)'
                 }}
@@ -912,10 +1077,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         </div>
 
         {/* Center: Network Status */}
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4 shrink-0 px-6">
           <div className="text-center relative group">
             <motion.div
-              className="font-bold text-lg bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent cursor-help font-mono"
+              className="font-bold text-2xl bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent cursor-help font-mono whitespace-nowrap"
               key="stable-balance-display"
               animate={{ scale: 1, opacity: 1 }}
               transition={{ duration: 0.3, ease: "easeOut" }}
@@ -951,6 +1116,25 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               </motion.div>
             )}
 
+            {/* v7.2.0: Miner Link indicator */}
+            {minerLinkCount > 0 && (
+              <motion.div
+                className="flex items-center gap-1.5 px-2 py-1 bg-green-500/15 border border-green-500/30 rounded-lg cursor-pointer"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title={`${minerLinkCount} personal miner${minerLinkCount > 1 ? 's' : ''} connected — Click to manage`}
+                onClick={() => setShowMinerLinkModal(true)}
+              >
+                <div className="relative">
+                  <Pickaxe className="w-3.5 h-3.5 text-green-400" />
+                  <div className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                </div>
+                <span className="text-green-300 text-xs font-medium">{minerLinkCount}</span>
+              </motion.div>
+            )}
+
             <motion.div
               className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-500'}`}
               animate={isOnline ? { scale: [1, 1.2, 1], opacity: [0.7, 1, 0.7] } : {}}
@@ -970,13 +1154,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               </motion.button>
             </div>
 
-            {/* v3.4.16-beta: Personal hashrate display */}
+            {/* v3.4.16-beta: Personal hashrate display — click opens miner modal */}
             {personalHashrate > 0 && (
               <motion.div
-                className="flex items-center gap-1.5 px-2 py-1 bg-cyan-500/20 border border-cyan-500/40 rounded-lg"
+                className="flex items-center gap-1.5 px-2 py-1 bg-cyan-500/20 border border-cyan-500/40 rounded-lg cursor-pointer"
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                title="Your Personal Mining Hashrate"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title="Your Personal Mining Hashrate — Click to manage miners"
+                onClick={() => setShowMinerLinkModal(true)}
               >
                 <Zap className="w-3.5 h-3.5 text-cyan-400" />
                 <span className="text-cyan-300 text-xs font-medium">{formatHashrate(personalHashrate)}</span>
@@ -1078,6 +1265,44 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             </motion.div>
           </div>
 
+          {/* v5.1.1: Deploy Panel - Visible for master wallet OR node admin */}
+          {(() => {
+            const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
+            const isMaster = walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            if (!isMaster && !isNodeAdmin) return null;
+            return (
+              <>
+                <div className="w-px h-8 bg-amber-500/30 mx-2" />
+                <motion.button
+                  onClick={() => {
+                    const event = new CustomEvent('open-deploy-panel');
+                    window.dispatchEvent(event);
+                  }}
+                  className="p-2 rounded-lg bg-gradient-to-br from-emerald-500/20 to-green-500/20 border border-emerald-500/40 hover:border-emerald-400/60 transition-all"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  title="Node Deploy Panel"
+                >
+                  <Shield className="w-5 h-5 text-emerald-400" />
+                </motion.button>
+              </>
+            );
+          })()}
+          {/* v7.3.0: Node Settings - Only visible when API confirms --admin-wallet match */}
+          {isNodeAdmin && (
+            <motion.button
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('open-node-settings'));
+              }}
+              className="p-2 rounded-lg bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/40 hover:border-blue-400/60 transition-all"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title="Node Settings"
+            >
+              <Settings className="w-5 h-5 text-blue-400" />
+            </motion.button>
+          )}
+
           {/* v3.9.2-beta: Profile Icon - Always visible for all users */}
           <div className="w-px h-8 bg-amber-500/30 mx-2" />
           <div className="relative">
@@ -1089,6 +1314,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               title="Profile"
             >
               <UserCircle className="w-5 h-5 text-amber-400" />
+              {metamaskAddress && (
+                <div className="absolute -bottom-1 -left-1 w-3.5 h-3.5 rounded-full bg-[#E2761B] border border-slate-800 flex items-center justify-center" title="MetaMask linked">
+                  <svg width="8" height="8" viewBox="0 0 318.6 318.6" fill="none">
+                    <path d="M274.1 35.5l-99.5 73.9L193 65.8z" fill="#fff"/>
+                    <path d="M44.4 35.5l98.7 74.6-17.5-44.3z" fill="#fff"/>
+                  </svg>
+                </div>
+              )}
               {unreadMessages > 0 && (
                 <motion.div
                   className="absolute -top-1 -right-1 bg-red-500 text-white text-xs font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1"
@@ -1151,6 +1384,38 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 </span>
               </div>
             </div>
+
+            {/* MetaMask Linked Account */}
+            {metamaskAddress && (
+              <div className="px-4 py-3 border-b border-amber-500/20">
+                <div className="flex items-center gap-2 mb-2">
+                  <svg width="16" height="16" viewBox="0 0 318.6 318.6" fill="none" className="flex-shrink-0">
+                    <path d="M274.1 35.5l-99.5 73.9L193 65.8z" fill="#E2761B" stroke="#E2761B" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M44.4 35.5l98.7 74.6-17.5-44.3z" fill="#E4761B" stroke="#E4761B" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  <span className="text-[#E2761B] font-medium text-sm">MetaMask</span>
+                  <span className="ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-[#E2761B]/20 text-[#E2761B]">LINKED</span>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">
+                    <span className="text-slate-400 text-xs">Address</span>
+                    <span className="text-orange-200 text-xs font-mono">{metamaskAddress.slice(0, 6)}...{metamaskAddress.slice(-4)}</span>
+                  </div>
+                  {metamaskBalance !== null && (
+                    <div className="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">
+                      <span className="text-slate-400 text-xs">Balance</span>
+                      <span className="text-orange-200 text-xs font-mono">{metamaskBalance} ETH</span>
+                    </div>
+                  )}
+                  {metamaskChainName && (
+                    <div className="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">
+                      <span className="text-slate-400 text-xs">Network</span>
+                      <span className="text-orange-200 text-xs font-mono">{metamaskChainName}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Network Status */}
             <div className="px-4 py-3 border-b border-amber-500/20">
@@ -1279,6 +1544,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 <span>Mining</span>
               </button>
               <button
+                onClick={() => { setShowThemeChooser(true); setShowProfileModal(false); }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
+              >
+                <Palette className="w-4 h-4 text-purple-400/70" />
+                <span>Theme</span>
+              </button>
+              <button
                 onClick={() => { onNavigate?.('settings'); setShowProfileModal(false); }}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
               >
@@ -1286,11 +1558,41 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 <span>Settings</span>
               </button>
               <div className="border-t border-slate-700/50 mt-1 pt-1">
+                {metamaskAddress ? (
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem('metamaskLinked');
+                      setMetamaskAddress(null);
+                      setMetamaskBalance(null);
+                      setMetamaskChainId(null);
+                      setMetamaskChainName('');
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-orange-500/10 text-slate-400 hover:text-orange-400 transition-colors text-sm"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 318.6 318.6" fill="none" className="opacity-60">
+                      <path d="M274.1 35.5l-99.5 73.9L193 65.8z" fill="currentColor"/>
+                      <path d="M44.4 35.5l98.7 74.6-17.5-44.3z" fill="currentColor"/>
+                    </svg>
+                    <span>Unlink MetaMask</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleLinkMetaMask}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-[#E2761B]/10 text-slate-400 hover:text-[#E2761B] transition-colors text-sm"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 318.6 318.6" fill="none" className="opacity-60">
+                      <path d="M274.1 35.5l-99.5 73.9L193 65.8z" fill="currentColor"/>
+                      <path d="M44.4 35.5l98.7 74.6-17.5-44.3z" fill="currentColor"/>
+                    </svg>
+                    <span>Link MetaMask</span>
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     localStorage.removeItem('walletAddress');
                     localStorage.removeItem('cachedBalance');
                     localStorage.removeItem('authToken');
+                    localStorage.removeItem('metamaskLinked');
                     window.location.reload();
                   }}
                   className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-red-500/10 text-slate-400 hover:text-red-400 transition-colors text-sm"
@@ -1630,6 +1932,19 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         onClose={() => setShowNetworkMap(false)}
         peers={livePeers}
         blockHeight={liveBlockHeight}
+      />
+
+      {/* v5.7.0: Theme Chooser Modal */}
+      <ThemeChooserModal
+        isOpen={showThemeChooser}
+        onClose={() => setShowThemeChooser(false)}
+      />
+
+      {/* Miner Link Modal — opened from hashrate/miner badges */}
+      <MinerLinkModal
+        isOpen={showMinerLinkModal}
+        onClose={() => setShowMinerLinkModal(false)}
+        minerLink={minerLink}
       />
     </>
   );

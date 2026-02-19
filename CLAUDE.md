@@ -29,6 +29,112 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Frontend**: Nginx serving from `gui/quantum-wallet/dist-final/`
 - **Domain**: `quillon.xyz`
 
+#### **Server Gamma (Backup/Failover Node)**
+- **IP Address**: `109.205.176.60`
+- **Role**: Backup node for HA failover, rolling upgrade target
+- **API Port**: `8080` (HTTP REST API)
+- **P2P Port**: `9001` (libp2p gossipsub + Kademlia DHT)
+- **SSH**: `root@109.205.176.60` (SSH key auth from Beta, no password needed)
+- **Service**: `systemd` service at `/etc/systemd/system/q-api-server.service`
+- **Binary**: `/opt/orobit/shared/q-narwhalknight/q-api-server` (SCP'd from Beta)
+- **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
+- **Peer ID**: `12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv`
+- **RAM**: 7.8GB + 4GB swap (swap required to prevent OOM during sync)
+- **Note**: Has Claude Code installed for remote administration
+
+### **🔄 HA Rolling Deployment Pipeline (v5.5.4+ / 3-Server)**
+
+**This is the ONLY way to deploy code changes. No cowboy coding.**
+
+**Architecture:**
+```
+          ┌──────────────────┐
+          │  Server Alpha    │  (Canary / Docker)
+          │  161.35.219.10   │  First to receive new binary
+          │  Docker Debian12 │  Non-blocking verification
+          └────────┬─────────┘
+                   │ SCP binary
+                   ▼
+                    ┌──────────────────────┐
+                    │  quillon.xyz (Nginx)  │
+                    │  Load Balancer + SSL  │
+                    │  ip_hash sticky       │
+                    └─────────┬────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+          ┌─────────────────┐  ┌─────────────────┐
+          │  Server Beta    │  │  Server Gamma   │
+          │ 185.182.185.227 │  │ 109.205.176.60  │
+          │  Primary w=10   │  │  Backup w=1     │
+          │  Port 8080      │  │  Port 8080      │
+          └────────┬────────┘  └────────┬────────┘
+                   │     P2P Gossipsub   │
+                   └─────────────────────┘
+```
+
+**Pipeline: Alpha (canary) → Gamma (verify) → Promote Gamma → Deploy Beta → Restore**
+
+**How the rolling upgrade works (zero downtime):**
+
+| Step | What happens | Users affected? |
+|------|-------------|-----------------|
+| 1. `verify-alpha` | SCP binary to Alpha Docker canary, start, wait | No - canary node |
+| 2. `verify-gamma` | SCP binary to Gamma, restart, wait for health | No - Gamma is backup |
+| 3. `promote` | Nginx: Gamma weight=10, Beta weight=1 | No - traffic shifts to Gamma |
+| 4. Soak test | 30s wait, verify Gamma handles real traffic | No - Gamma is serving |
+| 5. `deploy-beta` | Stop Beta, replace binary, restart, verify | No - Gamma is still primary |
+| 6. `restore` | Nginx: Beta weight=10, Gamma weight=1 | No - traffic shifts back |
+
+**Deployment Commands:**
+```bash
+# ═══════════════════════════════════════════════════════════════════
+# STANDARD DEPLOYMENT PROCEDURE (always use this)
+# ═══════════════════════════════════════════════════════════════════
+
+# 1. Build the release binary
+cargo build --release --package q-api-server
+
+# 2. Check all 3 servers' health BEFORE deploying
+./scripts/ha-deploy.sh status
+
+# 3. Run the full 3-server rolling upgrade (auto-confirms with echo y)
+echo "y" | ./scripts/ha-deploy.sh full
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP-BY-STEP (if you need more control)
+# ═══════════════════════════════════════════════════════════════════
+./scripts/ha-deploy.sh verify-alpha   # Deploy to Alpha Docker canary (non-blocking)
+./scripts/ha-deploy.sh verify-gamma   # SCP to Gamma, restart, verify health
+./scripts/ha-deploy.sh promote        # Gamma becomes primary in Nginx
+# ... wait, check Gamma is handling traffic ...
+./scripts/ha-deploy.sh deploy-beta    # Upgrade Beta while Gamma serves
+./scripts/ha-deploy.sh restore        # Beta becomes primary again
+
+# ═══════════════════════════════════════════════════════════════════
+# EMERGENCY
+# ═══════════════════════════════════════════════════════════════════
+./scripts/ha-deploy.sh rollback       # Restore previous binary from backup
+./scripts/ha-deploy.sh status         # Check all 3 servers' health
+```
+
+**Admin Deploy Panel (GUI):**
+- Master wallet sees a shield icon in the top bar → opens Deploy Control Panel
+- Shows real-time status of all 3 servers: version, height, peers, uptime
+- Shows pipeline flow: Alpha → Gamma → Beta with role badges (CANARY/PRIMARY/BACKUP)
+- Shows frontend connection info: which server is active, SSE status
+- "Deploy All" button triggers the full rolling upgrade via API
+- "Rollback" button restores previous binary
+
+**Key rules:**
+1. **NEVER restart Beta directly** (`kill`, `systemctl restart`) - always use `ha-deploy.sh`
+2. **Nginx `ip_hash`** ensures same user always hits same server (prevents balance flickering)
+3. **Miners must use `https://quillon.xyz`** (through Nginx), NOT `http://quillon.xyz:8080`
+4. **Gamma needs 4GB swap** - without it, OOM kills the process during heavy sync
+5. **Binary on Gamma is at `/opt/orobit/shared/q-narwhalknight/q-api-server`** (not in target/release/)
+6. **Alpha runs in Docker** (Debian 12 container on Debian 11 host) - canary is non-blocking
+7. **After deploy, binary is auto-copied to downloads/** as `q-api-server-v{VERSION}`
+
 #### **⚠️ PROCESS MANAGEMENT - USE kill -9 NOT killall**
 - **IMPORTANT**: `killall` does NOT work reliably on this system
 - **To kill processes, ALWAYS use**:
@@ -79,15 +185,162 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 - To compare rewards between nodes, check the server logs, NOT the API endpoints
 - If mining to a non-bootstrap node, check for "DAG-KNIGHT" and "DAG→SSE" log messages on bootstrap
 
-### **P2P Network Bootstrap:**
-- **Bootstrap Peer ID**: `12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx` (Server Beta actual PeerID as of 2026-01-19, from ./data-mine19/libp2p_identity.key)
-- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx`
-- **Network ID**: `testnet-phase19`
+### **P2P Network Bootstrap (Mainnet 2026.1 — ACTIVE until Feb 22):**
+- **Bootstrap Peer ID (Beta)**: `12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc` (Server Beta Mainnet 2026.1 PeerID, from ./data-mainnet2026.1/libp2p_identity.key)
+- **Bootstrap Peer ID (Gamma)**: `12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv` (Server Gamma Mainnet 2026.1 PeerID)
+- **Bootstrap Peer ID (Delta)**: `12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ` (Server Delta Mainnet 2026.1 PeerID)
+- **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (Server Alpha Mainnet 2026.1 PeerID)
+- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc`
+- **Network ID**: `mainnet2026.1`
 - **Gossipsub Topics**:
-  - `/qnk/testnet-phase19/blocks` - Block propagation
-  - `/qnk/testnet-phase19/peer-heights` - Network height announcements
-  - `/qnk/testnet-phase19/turbo-sync-request` - Batch sync requests
-  - `/qnk/testnet-phase19/turbo-sync-response` - Batch sync responses
+  - `/qnk/mainnet2026.1/blocks` - Block propagation
+  - `/qnk/mainnet2026.1/peer-heights` - Network height announcements
+  - `/qnk/mainnet2026.1/turbo-sync-request` - Batch sync requests
+  - `/qnk/mainnet2026.1/turbo-sync-response` - Batch sync responses
+
+### **🚀 MAINNET 2026.2 LAUNCH PROCEDURE (Feb 22, 2026 12:00 UTC)**
+
+**Genesis timestamp**: `1771761600` (Feb 22, 2026 12:00 UTC)
+**Chain ID**: `1000` (was 999)
+**Network ID**: `mainnet2026.2`
+**Version**: `v7.3.0`
+**Emission**: 2,625,000 QUG/year (Era 0), 21M max supply, 4-year halving
+
+#### **Pre-Launch (Feb 18-21): Canary + Feature Development**
+
+Two parallel tracks run simultaneously:
+
+| Track | Servers | What | Version |
+|-------|---------|------|---------|
+| **Canary soak** | Delta | v7.3.0 binary with `Q_NETWORK_ID=mainnet2026.2` — isolated, no users | v7.3.0 |
+| **Feature dev** | Alpha → Beta → Gamma (`ha-deploy.sh`) | Continue shipping features to live users | v7.2.x |
+
+**Delta canary setup:**
+```bash
+# SCP v7.3.0 binary to Delta
+scp target/release/q-api-server root@5.79.79.158:/opt/orobit/shared/q-narwhalknight/q-api-server-v7.3.0
+
+# Start canary (isolated — no other mainnet2026.2 nodes exist)
+Q_NETWORK_ID=mainnet2026.2 Q_DB_PATH=./data-mainnet2026.2 ./q-api-server-v7.3.0 --port 8080
+
+# Monitor for panics, OOM, emission correctness
+journalctl -u q-api-server -f | grep -E "panic|OOM|emission|CRITICAL"
+```
+
+**Feature development continues normally:**
+```bash
+# Normal ha-deploy.sh pipeline for v7.2.x features
+cargo build --release --package q-api-server
+echo "y" | ./scripts/ha-deploy.sh full
+```
+
+**v7.3.0 binary stays OFF the public downloads folder until Feb 22.**
+Users download v7.2.x until launch day.
+
+#### **Launch Day (Feb 22, 2026)**
+
+**T-30min: Stop ALL old servers simultaneously**
+```bash
+# CRITICAL: Both must be down before either new one starts
+# This prevents HTTP state sync contamination from old → new
+systemctl stop q-api-server                                          # Beta
+ssh root@109.205.176.60 "systemctl stop q-api-server"                # Gamma
+```
+
+**T-25min: Verify old processes are dead**
+```bash
+pgrep -f q-api-server                                                # Beta (should return nothing)
+ssh root@109.205.176.60 "pgrep -f q-api-server"                     # Gamma (should return nothing)
+```
+
+**T-20min: Update service files on BOTH servers**
+```bash
+# Edit /etc/systemd/system/q-api-server.service on Beta AND Gamma:
+# Change these environment variables:
+Environment="Q_DB_PATH=./data-mainnet2026.2"
+Environment="Q_NETWORK_ID=mainnet2026.2"
+Environment="Q_ENCRYPTION_KEYS_FILE=/opt/encryption-mainnet2026.2.keys"
+Environment="Q_ENCRYPTION_PASSPHRASE=Qnk-Mainnet2026.2-ServerBeta-Production-Key"
+# (Gamma gets its own passphrase)
+```
+
+**T-15min: Generate fresh encryption keys**
+```bash
+dd if=/dev/urandom bs=64 count=1 > /opt/encryption-mainnet2026.2.keys                           # Beta
+ssh root@109.205.176.60 "dd if=/dev/urandom bs=64 count=1 > /opt/encryption-mainnet2026.2.keys"  # Gamma
+```
+
+**T-10min: Start Beta first (bootstrap node)**
+```bash
+systemctl daemon-reload
+systemctl start q-api-server
+# New libp2p identity auto-generated in data-mainnet2026.2/
+```
+
+**T-8min: Capture Beta's new peer ID**
+```bash
+journalctl -u q-api-server --since "2 minutes ago" | grep "Local peer id"
+# Save this — needed for bootstrap config update
+```
+
+**T-5min: Start Gamma**
+```bash
+ssh root@109.205.176.60 "systemctl daemon-reload && systemctl start q-api-server"
+# Capture Gamma peer ID from logs
+```
+
+**T-0 (12:00 UTC): Genesis timestamp reached — mining begins automatically**
+
+**T+5min: Verify launch**
+```bash
+# Blocks producing?
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "Block.*produced|NEW BLOCK"
+# Correct network?
+journalctl -u q-api-server --since "5 minutes ago" | grep "mainnet2026.2"
+# Emission rate correct? (~0.083 QUG/block at 1 bps → 2,625,000/year)
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "emission|reward"
+# P2P connected?
+journalctl -u q-api-server --since "5 minutes ago" | grep -E "peer.*connected|Gossipsub"
+```
+
+**T+30min: Copy v7.3.0 to public downloads**
+```bash
+cp target/release/q-api-server gui/quantum-wallet/dist-final/downloads/q-api-server-v7.3.0
+cp target/release/q-api-server gui/quantum-wallet/dist-final/downloads/q-api-server-linux-x86_64
+```
+
+**T+1hr: Hardcode new peer IDs**
+- Update `gui/quantum-wallet/src/libp2p/config.ts` with new Beta peer ID
+- Update `gui/quantum-wallet/src/libp2p/torConfig.ts` with new peer IDs
+- Update this CLAUDE.md bootstrap section with new peer IDs
+- Rebuild frontend: `cd gui/quantum-wallet && npm run build`
+- Redeploy via `ha-deploy.sh`
+
+#### **End User Upgrade (Announce on Discord + BitcoinTalk)**
+```bash
+# Stop old node
+pkill -f q-api-server
+
+# Download v7.3.0
+wget https://quillon.xyz/downloads/q-api-server-v7.3.0
+chmod +x q-api-server-v7.3.0
+
+# Start (auto-creates fresh data-mainnet2026.2/)
+./q-api-server-v7.3.0 --port 8080
+```
+- Old binary CANNOT connect (protocol handshake rejects mismatched network_id)
+- Old data stays untouched in data-mainnet2026.1/
+- No manual migration — everyone starts fresh
+
+#### **Post-Launch: Back to Normal**
+After launch, all future deploys use `ha-deploy.sh` as normal.
+Delta becomes the 3rd bootstrap node for mainnet2026.2.
+
+#### **P2P Isolation (Why This Is Safe)**
+v7.3.0 has 3 isolation mechanisms preventing old node contamination:
+1. **Gossipsub topic isolation**: `/qnk/mainnet2026.2/*` vs `/qnk/mainnet2026.1/*`
+2. **Protocol handshake**: Validates `network_id` — rejects mismatches before data exchange
+3. **HTTP state sync**: `FullStateSnapshot` has `network_id` field — rejects old/missing network_id
 
 ---
 
@@ -351,29 +604,33 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
 # 4. Only after successful soak: Deploy to production
 ```
 
-### **🚀 DEPLOYMENT - ALWAYS USE THE SAFE DEPLOY SCRIPT**
+### **🚀 DEPLOYMENT - ALWAYS USE HA ROLLING DEPLOY**
 
-   **⚠️ CRITICAL: NEVER use raw `cargo build` for deployments!**
-
-   Always use the safe deploy script which runs ALL 4000+ tests before building:
+   **⚠️ CRITICAL: NEVER do cowboy coding! Always use `ha-deploy.sh` for deployments.**
 
    ```bash
    # ═══════════════════════════════════════════════════════════════════
-   # SAFE DEPLOYMENT - Use the deploy script, NOT manual cargo build!
+   # THE ONLY WAY TO DEPLOY (v5.5.3+)
    # ═══════════════════════════════════════════════════════════════════
 
-   # Option 1: Full pipeline (recommended) - tests → build → docker test → deploy
-   ./scripts/safe-deploy.sh full
+   # Step 1: Build
+   cargo build --release --package q-api-server
 
-   # Option 2: Step by step
-   ./scripts/safe-deploy.sh test-all     # Run all 4000+ tests first
-   ./scripts/safe-deploy.sh build        # Build (includes tests again)
-   ./scripts/safe-deploy.sh test-docker  # Canary test in Docker
-   ./scripts/safe-deploy.sh deploy-beta  # Deploy to production
+   # Step 2: Verify both servers healthy
+   ./scripts/ha-deploy.sh status
 
-   # If something goes wrong:
-   ./scripts/safe-deploy.sh rollback     # Rollback to previous binary
-   ./scripts/safe-deploy.sh status       # Check current status
+   # Step 3: Rolling deploy (zero-downtime)
+   echo "y" | ./scripts/ha-deploy.sh full
+
+   # Step 4: Verify deployment
+   ./scripts/ha-deploy.sh status
+   # Both servers should show same version, both "ready"
+   ```
+
+   **If Gamma is unavailable (emergency single-server deploy):**
+   ```bash
+   ./scripts/safe-deploy.sh full        # Tests → build → deploy Beta only
+   ./scripts/safe-deploy.sh rollback    # Rollback Beta
    ```
 
    **Test Categories Run by safe-deploy.sh:**
@@ -396,14 +653,23 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
 
    **📥 LATEST WGET DOWNLOAD LINK (Update after each deploy):**
    ```
-   Current Version: v3.4.6-beta
-   wget https://quillon.xyz/downloads/q-api-server-v3.4.6-beta
-   chmod +x q-api-server-v3.4.6-beta
+   # BEFORE Feb 22, 2026: v7.2.x (mainnet2026.1)
+   Current Version: v7.2.12 (or latest v7.2.x)
+   wget https://quillon.xyz/downloads/q-api-server-v7.2.12
+   chmod +x q-api-server-v7.2.12
+
+   # AFTER Feb 22, 2026: v7.3.0 (mainnet2026.2)
+   wget https://quillon.xyz/downloads/q-api-server-v7.3.0
+   chmod +x q-api-server-v7.3.0
    ```
 
-   **IMPORTANT**: After EVERY deployment, tell the user the wget link:
+   **IMPORTANT**: After EVERY deployment, tell the user the wget link.
+   **DO NOT put v7.3.0 in downloads/ until Feb 22 launch day.**
    ```
-   wget https://quillon.xyz/downloads/q-api-server-v3.4.6-beta && chmod +x q-api-server-v3.4.6-beta
+   # Pre-launch (v7.2.x):
+   wget https://quillon.xyz/downloads/q-api-server-v7.2.12 && chmod +x q-api-server-v7.2.12
+   # Post-launch (v7.3.0):
+   wget https://quillon.xyz/downloads/q-api-server-v7.3.0 && chmod +x q-api-server-v7.3.0
    ```
 
    **🚨 MANDATORY: TEST BEFORE DEPLOYMENT**
@@ -693,7 +959,8 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
    ./scripts/safe-deploy.sh rollback
 
    # After deployment, tell user the download link:
-   echo "Download: wget https://quillon.xyz/downloads/q-api-server-v3.4.2-beta"
+   # Pre-launch: echo "Download: wget https://quillon.xyz/downloads/q-api-server-v7.2.12"
+   # Post-launch: echo "Download: wget https://quillon.xyz/downloads/q-api-server-v7.3.0"
    ```
 
    **⚠️ NEVER use raw `cargo build --release` for deployments!**
@@ -728,15 +995,17 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
    - After building, always copy to the CORRECT location:
      ```bash
      # CORRECT path - use FULL PATH starting with /opt/orobit/
-     cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v0.1.1-beta
+     cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v{VERSION}
      cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-linux-x86_64
+     cp target/release/q-miner /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-miner-v{VERSION}
      cp target/release/q-miner /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-miner-linux-x64
 
      # Verify the file exists at the nginx-served location:
-     ls -lh /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v0.1.1-beta
+     ls -lh /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v{VERSION}
 
      # Check DownloadNodeScreen.tsx for the exact filename expected by the download link
-     # The href="/downloads/q-api-server-v0.1.1-beta" must match the actual filename
+     # The href="/downloads/q-api-server-v{VERSION}" must match the actual filename
+     # IMPORTANT: Do NOT append "-beta" to download filenames
      ```
 
 #### **Testing Requirements:**
@@ -815,6 +1084,24 @@ Never deploy if any of the 125+ critical tests fail. These tests exist because e
 scenario has caused or could cause real money loss on mainnet.
 
 #### **⏱️ COMPILATION & BUILD REQUIREMENTS:**
+
+**🚨 MANDATORY: BUMP VERSION BEFORE EVERY BUILD!**
+
+The `ha-deploy.sh` script will **abort** if the binary version matches the currently running version. You MUST bump the version in `Cargo.toml` before compiling:
+
+```bash
+# Location: Cargo.toml line ~67 (workspace.package section)
+# BEFORE building, update:
+version = "7.1.6"  # ← increment this to 7.1.7, 7.2.0, etc.
+
+# The deploy script checks: Cargo.toml version != running Beta version
+# If they match → deploy is REJECTED with "Version NOT bumped!" error
+```
+
+**Version bump workflow:**
+1. Edit `Cargo.toml` → bump `[workspace.package] version`
+2. `cargo build --release --package q-api-server`
+3. `echo "y" | ./scripts/ha-deploy.sh full`
 
 **🚨 FOR DEPLOYMENTS: Always use the safe-deploy.sh script (NOT raw cargo build)!**
 

@@ -225,6 +225,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   const [showMixingDetails, setShowMixingDetails] = useState(false);
   const [mixerAvailable, setMixerAvailable] = useState<boolean | null>(null); // null = unknown, true = available, false = unavailable
   const [mixingSessionId, setMixingSessionId] = useState<string>('');
+  const [mixerTxHash, setMixerTxHash] = useState<string>(''); // Actual blockchain tx hash (64 hex chars)
   const [showMixerVisualization, setShowMixerVisualization] = useState(false);
 
   // QR Code states
@@ -945,9 +946,35 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               starkProof: result.data.stark_proof
             }));
 
-            // v3.6.6-beta: CRITICAL FIX - Dispatch balance-update event for HTTP fallback
-            // Without this, balance doesn't update when P2P gossipsub isn't ready
-            console.log('📤 [HTTP Fallback] Dispatching balance-update event after successful fallback transaction');
+            // v6.0.1: Optimistically update balance for fallback path too
+            const fallbackSentAmount = parseFloat(amount);
+            const fallbackFee = selectedCoin === 'QUG' ? 0.000021 : 0;
+            const fallbackCurrentBalance = walletBalances.find(c => c.symbol === selectedCoin)?.balance || 0;
+            const fallbackOptimisticBalance = Math.max(0, fallbackCurrentBalance - fallbackSentAmount - fallbackFee);
+
+            setWalletBalances(prev => prev.map(w =>
+              w.symbol === selectedCoin ? { ...w, balance: fallbackOptimisticBalance } : w
+            ));
+
+            // v6.0.9: Also update stableBalance and highestKnownBalancesRef (same as main path)
+            if (selectedCoin === 'QUG') {
+              setStableBalance(fallbackOptimisticBalance);
+              lastBalanceUpdateRef.current = Date.now();
+              highestKnownBalancesRef.current['QUG'] = fallbackOptimisticBalance;
+              localStorage.setItem('cachedBalance', fallbackOptimisticBalance.toString());
+            }
+            highestKnownBalancesRef.current[selectedCoin] = fallbackOptimisticBalance;
+
+            if (selectedCoin === 'QUG') {
+              window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                detail: {
+                  symbol: 'QUG',
+                  balance: fallbackOptimisticBalance,
+                  reason: 'transaction_sent'
+                }
+              }));
+            }
+
             window.dispatchEvent(new CustomEvent('balance-update', {
               detail: { refresh: true }
             }));
@@ -962,6 +989,9 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         if (result.success && result.data?.mixing_session_id) {
           const sessionId = result.data.mixing_session_id;
           setMixingSessionId(sessionId);
+          // Store actual blockchain tx hash for explorer lookup (64 hex chars)
+          const actualTxHash = result.data.transaction_hash || sessionId;
+          setMixerTxHash(actualTxHash);
 
           // Show the 3D visualization
           setShowMixerVisualization(true);
@@ -1142,7 +1172,41 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
           });
         }
 
-        // Dispatch custom event to update balance
+        // v6.0.1: Optimistically update balance in UI after successful send
+        const sentAmount = parseFloat(amount);
+        const fee = selectedCoin === 'QUG' ? 0.000021 : 0;
+        const currentCoinBalance = walletBalances.find(c => c.symbol === selectedCoin)?.balance || 0;
+        const optimisticBalance = Math.max(0, currentCoinBalance - sentAmount - fee);
+
+        // Update local wallet balances state
+        setWalletBalances(prev => prev.map(w =>
+          w.symbol === selectedCoin ? { ...w, balance: optimisticBalance } : w
+        ));
+
+        // v6.0.9: CRITICAL - Also update stableBalance and highestKnownBalancesRef
+        // Without this, Math.max() in the stability logic blocks the decrease
+        // and the displayed balance never drops after sending.
+        if (selectedCoin === 'QUG') {
+          setStableBalance(optimisticBalance);
+          lastBalanceUpdateRef.current = Date.now();
+          highestKnownBalancesRef.current['QUG'] = optimisticBalance;
+          // Also update localStorage cache so page refreshes show the new balance
+          localStorage.setItem('cachedBalance', optimisticBalance.toString());
+        }
+        highestKnownBalancesRef.current[selectedCoin] = optimisticBalance;
+
+        // Notify TopBar of balance change (TopBar listens for wallet-balance-updated)
+        if (selectedCoin === 'QUG') {
+          window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+            detail: {
+              symbol: 'QUG',
+              balance: optimisticBalance,
+              reason: 'transaction_sent'
+            }
+          }));
+        }
+
+        // Dispatch generic balance-update for other listeners
         window.dispatchEvent(new CustomEvent('balance-update', {
           detail: { refresh: true }
         }));
@@ -1833,10 +1897,36 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 setTransaction(prev => ({
                   ...prev,
                   success: true,
-                  txHash: mixingSessionId
+                  txHash: mixerTxHash || mixingSessionId
                 }));
 
-                // Trigger balance refresh
+                // v6.0.2: Optimistic balance update after mixer completes
+                const sentAmount = parseFloat(transaction.amount);
+                const mixerFee = sentAmount * 0.001; // 0.1% mixer fee
+                const currentQugBalance = walletBalances.find(c => c.symbol === 'QUG')?.balance || 0;
+                const optimisticBalance = Math.max(0, currentQugBalance - sentAmount - mixerFee);
+
+                // Update local wallet balances
+                setWalletBalances(prev => prev.map(w =>
+                  w.symbol === 'QUG' ? { ...w, balance: optimisticBalance } : w
+                ));
+
+                // v6.0.9: Also update stableBalance and highestKnownBalancesRef
+                setStableBalance(optimisticBalance);
+                lastBalanceUpdateRef.current = Date.now();
+                highestKnownBalancesRef.current['QUG'] = optimisticBalance;
+                localStorage.setItem('cachedBalance', optimisticBalance.toString());
+
+                // Notify TopBar of balance change
+                window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+                  detail: {
+                    symbol: 'QUG',
+                    balance: optimisticBalance,
+                    reason: 'transaction_sent'
+                  }
+                }));
+
+                // Trigger generic balance refresh for other listeners
                 window.dispatchEvent(new CustomEvent('balance-update', {
                   detail: { refresh: true }
                 }));

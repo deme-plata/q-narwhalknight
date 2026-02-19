@@ -52,7 +52,7 @@ pub struct ProtocolHandshake {
     pub build_date: String,
 
     /// Network ID (must match for communication)
-    /// e.g., "testnet-phase5", "mainnet"
+    /// e.g., "mainnet", "mainnet"
     pub network_id: String,
 
     /// Feature flags for capability negotiation
@@ -97,7 +97,7 @@ impl ProtocolHandshake {
             build_timestamp,
             build_date,
             network_id: std::env::var("Q_NETWORK_ID")
-                .unwrap_or_else(|_| "testnet-phase5".to_string()),
+                .unwrap_or_else(|_| "mainnet2026.2".to_string()),
             features: vec![
                 "turbo-sync".to_string(),
                 "balance-consensus".to_string(),
@@ -251,7 +251,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0, 1],
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "testnet-phase5".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -263,7 +263,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0], // Only supports OLD format
             build_timestamp: 1234567000,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "testnet-phase5".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -275,7 +275,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0, 1], // Supports both
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "testnet-phase5".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -302,7 +302,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0, 1],
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet".to_string(), // Different network!
+            network_id: "mainnet2026.1".to_string(), // Different network!
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -320,7 +320,7 @@ mod tests {
             supported_turbo_sync_versions: vec![1], // Only NEW format
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "testnet-phase5".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -332,7 +332,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0], // Only OLD format
             build_timestamp: 1234567000,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "testnet-phase5".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,

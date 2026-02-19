@@ -231,11 +231,12 @@ impl BlockRequestAuthenticator {
         }
 
         // Verify network ID matches (prevent cross-network attacks)
-        const EXPECTED_NETWORK_ID: &str = "testnet-phase2"; // TODO: Make configurable
+        // v7.3.0: Accept mainnet2026, mainnet2026.1 and mainnet2026.2
+        let expected_network_ids = ["mainnet2026.2", "mainnet2026.1", "mainnet2026"];
 
-        if proof.network_id != EXPECTED_NETWORK_ID {
+        if !expected_network_ids.contains(&proof.network_id.as_str()) {
             error!("🚨 [ZK BLOCK AUTH] Network ID mismatch! Cross-network attack detected.");
-            error!("   Expected: {}, Got: {}", EXPECTED_NETWORK_ID, proof.network_id);
+            error!("   Expected one of: {:?}, Got: {}", expected_network_ids, proof.network_id);
             error!("   This proof is from a different network (mainnet/testnet/devnet)!");
             return Ok(false);
         }

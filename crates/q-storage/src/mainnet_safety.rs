@@ -420,7 +420,9 @@ impl BackgroundIntegrityMonitor {
         }
 
         // Check 2: No gaps in block chain (sample check for performance)
-        let check_range = actual_height.saturating_sub(1000); // Last 1000 blocks
+        // v7.3.7: Start from max(1, height-1000) — height 0 never exists (genesis is at height 1+)
+        // Scanning from 0 when height < 1000 causes permanent false "gap at 0" → spurious P2P syncs
+        let check_range = actual_height.saturating_sub(1000).max(1);
         let gaps = self
             .storage
             .find_block_gaps(check_range, actual_height)

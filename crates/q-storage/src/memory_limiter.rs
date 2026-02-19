@@ -64,13 +64,33 @@ pub struct MemoryLimiterConfig {
 
 impl Default for MemoryLimiterConfig {
     fn default() -> Self {
+        // v6.0.5: RAM-aware batch sizes to prevent OOM on small nodes
+        let ram_mb = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize
+        };
+        let (min_batch, max_batch) = match ram_mb {
+            0..=3999     => (100, 500),     // micro: very conservative
+            4000..=7999  => (200, 1000),    // small (Gamma 7.8GB): reduced from 5000
+            8000..=15999 => (500, 3000),    // medium
+            _            => (500, 5000),    // large: original defaults
+        };
+        // v6.0.6: RAM-aware thresholds — lower for small nodes to trigger backpressure
+        // before cgroup MemoryMax (6G) kills the process
+        let (low_t, med_t, high_t) = match ram_mb {
+            0..=3999     => (0.40, 0.55, 0.70),  // micro: aggressive backpressure
+            4000..=7999  => (0.45, 0.60, 0.72),  // small (Gamma): trigger well before 6G cgroup limit
+            8000..=15999 => (0.55, 0.72, 0.85),  // medium: moderate
+            _            => (0.60, 0.80, 0.90),  // large: original thresholds
+        };
         Self {
-            low_threshold: 0.60,
-            medium_threshold: 0.80,
-            high_threshold: 0.90,
-            // 🚀 v1.4.7-beta: Increased batch sizes for faster sync throughput
-            min_batch_size: 500,   // ⬆️ was 10 - too small caused 6-block chunks
-            max_batch_size: 5000,  // ⬆️ was 1000 - was bottlenecking ML predictions
+            low_threshold: low_t,
+            medium_threshold: med_t,
+            high_threshold: high_t,
+            min_batch_size: min_batch,
+            max_batch_size: max_batch,
             check_interval: Duration::from_secs(5),
         }
     }
@@ -109,7 +129,7 @@ impl MemoryLimiter {
 
     /// Create a new memory limiter with custom config
     pub fn with_config(config: MemoryLimiterConfig) -> Self {
-        let mut system = System::new_all();
+        let mut system = System::new();
         system.refresh_memory();
 
         let total_memory = system.total_memory();

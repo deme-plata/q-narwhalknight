@@ -23,18 +23,18 @@ export const TOR_CONFIG = {
   // Tor is ALWAYS enabled - no opt-out
   enabled: true,
 
-  // Tor bridge WebSocket endpoint (server-side Tor proxy)
-  // Browser connects here, server routes through Tor SOCKS5
-  bridgeEndpoint: 'wss://quillon.xyz:9444/tor-bridge',
+  // WebSocket endpoint for libp2p bootstrap
+  // Port 9443: nginx WSS proxy → libp2p:9001/ws
+  bridgeEndpoint: 'wss://quillon.xyz:9443',
 
-  // Tor bridge multiaddr for libp2p
-  // Port 9444 = dedicated Tor bridge WebSocket server
-  bridgeMultiaddr: '/dns4/quillon.xyz/tcp/9444/wss',
+  // Bootstrap multiaddr for libp2p
+  // Port 9443 = WebSocket Secure proxy to libp2p
+  bridgeMultiaddr: '/dns4/quillon.xyz/tcp/9443/wss',
 
   // Onion address of bootstrap node
   // Format: /onion3/<56-char-address>:<port>/p2p/<peer-id>
   // This allows Tor Browser users to connect directly via .onion
-  onionBootstrap: '/onion3/vyjmkppguki7xpqcfzxqqapgphejhhybx3hm3ljzcgszdin5cypghjad:9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx',
+  onionBootstrap: '/onion3/vyjmkppguki7xpqcfzxqqapgphejhhybx3hm3ljzcgszdin5cypghjad:9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
 
   // Connection timeout for Tor (longer due to circuit establishment)
   dialTimeout: 45000, // 45 seconds - Tor circuits take time
@@ -76,8 +76,8 @@ export const TOR_SECURITY = {
  * Bootstrap configuration - Tor bridge is the ONLY option
  */
 export const TOR_BOOTSTRAP = {
-  // Primary Tor bridge endpoint
-  primary: '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx',
+  // Primary bootstrap endpoint (WSS proxy to libp2p)
+  primary: '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
 
   // Fallback Tor bridges (TODO: add community bridges)
   fallbacks: [] as string[],

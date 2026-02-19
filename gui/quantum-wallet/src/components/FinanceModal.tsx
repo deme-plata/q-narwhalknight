@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle, LineChart } from 'lucide-react';
+import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle, LineChart, Coins, Flame, Clock, Shield } from 'lucide-react';
 
 // Big, user-friendly tooltip component - FIXED: stays open when hovering tooltip
 const BigTooltip: React.FC<{
@@ -246,7 +246,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
   const [stablecoinError, setStablecoinError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin' | 'graphs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin' | 'graphs' | 'emission'>('overview');
 
   useEffect(() => {
     if (isOpen) {
@@ -315,6 +315,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: Activity },
+    { id: 'emission', label: 'Emission', icon: Flame },
     { id: 'graphs', label: 'Graphs', icon: LineChart },
     { id: 'adoption', label: 'Adoption', icon: TrendingUp },
     { id: 'holders', label: 'Holders', icon: Users },
@@ -574,6 +575,394 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                   )}
 
                   {/* Adoption Tab */}
+                  {/* ═══════ EMISSION ECONOMICS TAB ═══════ */}
+                  {activeTab === 'emission' && (
+                    <>
+                      {/* Live Emission State */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-amber-500/10 to-orange-500/10 border border-amber-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Flame className="w-5 h-5 text-amber-400" />
+                          Live Emission State
+                        </h3>
+                        {(() => {
+                          const GENESIS_TS = 1771761600;
+                          const SECS_PER_ERA = 126_230_400;
+                          const nowSec = Math.floor(Date.now() / 1000);
+                          const elapsed = Math.max(0, nowSec - GENESIS_TS);
+                          const era = Math.floor(elapsed / SECS_PER_ERA);
+                          const eraProgress = ((elapsed % SECS_PER_ERA) / SECS_PER_ERA) * 100;
+                          const eraAnnual = 2_625_000 / Math.pow(2, era);
+                          const eraDaily = eraAnnual / 365.25;
+                          const totalTarget = 21_000_000 * (1 - Math.pow(2, -elapsed / SECS_PER_ERA));
+                          const pctMined = (totalTarget / 21_000_000) * 100;
+                          const inflationRate = (eraAnnual / Math.max(totalTarget, 1)) * 100;
+                          const s2f = totalTarget / eraAnnual;
+                          const daysToHalving = Math.floor(((era + 1) * SECS_PER_ERA - elapsed) / 86400);
+                          const yrsElapsed = elapsed / (365.25 * 86400);
+                          return (
+                            <div className="space-y-4">
+                              <div className="grid grid-cols-4 gap-3">
+                                <div className="bg-black/20 rounded-lg p-3 text-center">
+                                  <div className="text-2xl font-bold text-amber-300">{era}</div>
+                                  <div className="text-xs text-gray-400">Current Era</div>
+                                  <div className="text-[10px] text-gray-500">{eraProgress.toFixed(2)}% complete</div>
+                                </div>
+                                <div className="bg-black/20 rounded-lg p-3 text-center">
+                                  <div className="text-2xl font-bold text-white">{eraDaily.toFixed(1)}</div>
+                                  <div className="text-xs text-gray-400">QUG/day target</div>
+                                  <div className="text-[10px] text-gray-500">{eraAnnual.toLocaleString()} /yr</div>
+                                </div>
+                                <div className="bg-black/20 rounded-lg p-3 text-center">
+                                  <div className="text-2xl font-bold text-purple-400">{s2f.toFixed(1)}</div>
+                                  <div className="text-xs text-gray-400">Stock-to-Flow</div>
+                                  <div className="text-[10px] text-gray-500">{inflationRate.toFixed(2)}% inflation</div>
+                                </div>
+                                <div className="bg-black/20 rounded-lg p-3 text-center">
+                                  <div className="text-2xl font-bold text-cyan-300">{daysToHalving.toLocaleString()}</div>
+                                  <div className="text-xs text-gray-400">Days to Halving</div>
+                                  <div className="text-[10px] text-gray-500">Reward halves to {(eraDaily / 2).toFixed(1)}/day</div>
+                                </div>
+                              </div>
+
+                              {/* Supply Progress */}
+                              <div className="bg-black/20 rounded-lg p-3">
+                                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                                  <span>Estimated Mined: {totalTarget.toLocaleString('en-US', { maximumFractionDigits: 0 })} QUG</span>
+                                  <span>{pctMined.toFixed(4)}% of 21M</span>
+                                </div>
+                                <div className="h-3 bg-gray-700/50 rounded-full overflow-hidden">
+                                  <motion.div
+                                    className="h-full bg-gradient-to-r from-amber-500 to-orange-400 rounded-full"
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${Math.max(pctMined, 0.5)}%` }}
+                                    transition={{ duration: 1.5 }}
+                                  />
+                                </div>
+                                <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                                  <span>0</span>
+                                  <span>21,000,000 QUG</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      {/* 256-Year Supply Curve (animated) */}
+                      <div className="p-5 rounded-xl bg-white/5 border border-white/10">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Coins className="w-5 h-5 text-amber-400" />
+                          256-Year Supply Curve
+                        </h3>
+                        <div className="relative h-64 bg-black/30 rounded-xl p-4 overflow-hidden">
+                          <svg viewBox="0 0 500 220" className="w-full h-full">
+                            {/* Grid */}
+                            {[0, 5.25, 10.5, 15.75, 21].map((val, i) => (
+                              <g key={`g-${i}`}>
+                                <line x1="45" y1={200 - i * 45} x2="480" y2={200 - i * 45} stroke="rgba(255,255,255,0.07)" />
+                                <text x="40" y={204 - i * 45} fill="#6B7280" fontSize="8" textAnchor="end">{val}M</text>
+                              </g>
+                            ))}
+                            {[0, 32, 64, 96, 128, 160, 192, 224, 256].map(yr => (
+                              <g key={`x-${yr}`}>
+                                <line x1={45 + yr * 1.7} y1="20" x2={45 + yr * 1.7} y2="205" stroke="rgba(255,255,255,0.05)" />
+                                <text x={45 + yr * 1.7} y="215" fill="#6B7280" fontSize="7" textAnchor="middle">{yr}yr</text>
+                              </g>
+                            ))}
+
+                            {/* Area fill */}
+                            <motion.path
+                              d={(() => {
+                                let path = 'M 45,200 ';
+                                for (let yr = 0; yr <= 256; yr += 1) {
+                                  const supply = 21 * (1 - Math.pow(2, -yr / 4));
+                                  path += `L ${(45 + yr * 1.7).toFixed(1)},${(200 - (supply / 21) * 180).toFixed(1)} `;
+                                }
+                                path += `L ${(45 + 256 * 1.7).toFixed(1)},200 Z`;
+                                return path;
+                              })()}
+                              fill="url(#supplyAreaGrad)"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 0.3 }}
+                              transition={{ duration: 1 }}
+                            />
+
+                            {/* Supply curve line */}
+                            <motion.path
+                              d={(() => {
+                                const pts: string[] = [];
+                                for (let yr = 0; yr <= 256; yr += 1) {
+                                  const supply = 21 * (1 - Math.pow(2, -yr / 4));
+                                  pts.push(`${yr === 0 ? 'M' : 'L'}${(45 + yr * 1.7).toFixed(1)},${(200 - (supply / 21) * 180).toFixed(1)}`);
+                                }
+                                return pts.join(' ');
+                              })()}
+                              fill="none"
+                              stroke="#F59E0B"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              initial={{ pathLength: 0 }}
+                              animate={{ pathLength: 1 }}
+                              transition={{ duration: 3, ease: 'easeOut' }}
+                            />
+
+                            {/* 21M asymptote */}
+                            <line x1="45" y1="20" x2="480" y2="20" stroke="#EF4444" strokeWidth="0.8" strokeDasharray="4,3" />
+                            <text x="482" y="23" fill="#EF4444" fontSize="8">21M cap</text>
+
+                            {/* Era lines */}
+                            {[4, 8, 12, 16].map(yr => (
+                              <g key={`era-${yr}`}>
+                                <line x1={45 + yr * 1.7} y1="20" x2={45 + yr * 1.7} y2="200" stroke="rgba(139,92,246,0.3)" strokeDasharray="2,3" />
+                                <text x={45 + yr * 1.7 + 2} y="30" fill="#A78BFA" fontSize="6">Era {yr / 4}</text>
+                              </g>
+                            ))}
+
+                            {/* Current position */}
+                            {(() => {
+                              const elapsed = Math.max(0, Date.now() / 1000 - 1771761600);
+                              const yrs = elapsed / (365.25 * 86400);
+                              const supply = 21 * (1 - Math.pow(2, -yrs / 4));
+                              const cx = 45 + Math.min(yrs, 256) * 1.7;
+                              const cy = 200 - (supply / 21) * 180;
+                              return (
+                                <motion.circle
+                                  cx={Math.min(cx, 480)} cy={Math.max(cy, 20)} r="5"
+                                  fill="#3B82F6" stroke="#fff" strokeWidth="1"
+                                  initial={{ scale: 0 }}
+                                  animate={{ scale: [1, 1.4, 1] }}
+                                  transition={{ duration: 2, repeat: Infinity }}
+                                />
+                              );
+                            })()}
+
+                            <defs>
+                              <linearGradient id="supplyAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#F59E0B" stopOpacity="0.4" />
+                                <stop offset="100%" stopColor="#F59E0B" stopOpacity="0" />
+                              </linearGradient>
+                            </defs>
+                          </svg>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2 text-center">C(t) = 21,000,000 × (1 - 2^(-t/4)) | 64 halvings over 256 years</p>
+                      </div>
+
+                      {/* Stock-to-Flow & Scarcity */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-purple-500/10 to-blue-500/10 border border-purple-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Shield className="w-5 h-5 text-purple-400" />
+                          Stock-to-Flow: Scarcity Timeline
+                        </h3>
+                        <div className="relative h-56 bg-black/30 rounded-xl p-4 overflow-hidden">
+                          <svg viewBox="0 0 500 200" className="w-full h-full">
+                            {/* Grid */}
+                            {[0, 50, 100, 200, 500].map((val, i) => {
+                              const y = 180 - Math.min(val / 500, 1) * 160;
+                              return (
+                                <g key={`sf-${i}`}>
+                                  <line x1="45" y1={y} x2="480" y2={y} stroke="rgba(255,255,255,0.06)" />
+                                  <text x="40" y={y + 3} fill="#6B7280" fontSize="7" textAnchor="end">{val}</text>
+                                </g>
+                              );
+                            })}
+                            {[0, 10, 20, 30, 40, 50, 60].map(yr => (
+                              <text key={`sfx-${yr}`} x={45 + yr * 7.25} y="195" fill="#6B7280" fontSize="7" textAnchor="middle">{yr}yr</text>
+                            ))}
+
+                            {/* S2F Curve */}
+                            <motion.path
+                              d={(() => {
+                                const pts: string[] = [];
+                                for (let yr = 0.5; yr <= 60; yr += 0.5) {
+                                  const supply = 21e6 * (1 - Math.pow(2, -yr / 4));
+                                  const era = Math.floor(yr / 4);
+                                  const annual = 2625000 / Math.pow(2, era);
+                                  const s2f = supply / annual;
+                                  const y = 180 - Math.min(s2f / 500, 1) * 160;
+                                  const x = 45 + yr * 7.25;
+                                  pts.push(`${pts.length === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
+                                }
+                                return pts.join(' ');
+                              })()}
+                              fill="none" stroke="#8B5CF6" strokeWidth="2.5" strokeLinecap="round"
+                              initial={{ pathLength: 0 }}
+                              animate={{ pathLength: 1 }}
+                              transition={{ duration: 2.5, ease: 'easeOut' }}
+                            />
+
+                            {/* Bitcoin S2F reference */}
+                            {(() => {
+                              const btcY = 180 - Math.min(121 / 500, 1) * 160;
+                              return (
+                                <>
+                                  <line x1="45" y1={btcY} x2="480" y2={btcY} stroke="#F7931A" strokeWidth="1" strokeDasharray="6,3" />
+                                  <text x="482" y={btcY + 3} fill="#F7931A" fontSize="7">BTC S2F (121)</text>
+                                </>
+                              );
+                            })()}
+
+                            {/* Gold S2F reference */}
+                            {(() => {
+                              const goldY = 180 - Math.min(59 / 500, 1) * 160;
+                              return (
+                                <>
+                                  <line x1="45" y1={goldY} x2="480" y2={goldY} stroke="#FFD700" strokeWidth="0.8" strokeDasharray="4,4" />
+                                  <text x="482" y={goldY + 3} fill="#FFD700" fontSize="7">Gold (59)</text>
+                                </>
+                              );
+                            })()}
+
+                            {/* Current position */}
+                            {(() => {
+                              const elapsed = Math.max(0, Date.now() / 1000 - 1771761600);
+                              const yrs = elapsed / (365.25 * 86400);
+                              const supply = 21e6 * (1 - Math.pow(2, -yrs / 4));
+                              const era = Math.floor(yrs / 4);
+                              const annual = 2625000 / Math.pow(2, era);
+                              const s2f = supply / annual;
+                              const x = 45 + Math.min(yrs, 60) * 7.25;
+                              const y = 180 - Math.min(s2f / 500, 1) * 160;
+                              return (
+                                <motion.circle
+                                  cx={x} cy={y} r="5" fill="#22D3EE" stroke="#fff" strokeWidth="1"
+                                  initial={{ scale: 0 }} animate={{ scale: [1, 1.3, 1] }}
+                                  transition={{ duration: 2, repeat: Infinity }}
+                                />
+                              );
+                            })()}
+                          </svg>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                          <div className="bg-purple-500/10 rounded-lg p-2 text-center">
+                            <div className="text-purple-300 font-bold">Year 12</div>
+                            <div className="text-gray-400">S2F passes Gold (59)</div>
+                          </div>
+                          <div className="bg-orange-500/10 rounded-lg p-2 text-center">
+                            <div className="text-orange-300 font-bold">Year 16</div>
+                            <div className="text-gray-400">S2F passes Bitcoin (121)</div>
+                          </div>
+                          <div className="bg-cyan-500/10 rounded-lg p-2 text-center">
+                            <div className="text-cyan-300 font-bold">Year 20</div>
+                            <div className="text-gray-400">S2F = 248 (2x BTC)</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Halving Schedule Table */}
+                      <div className="p-5 rounded-xl bg-white/5 border border-white/10">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                          <Clock className="w-5 h-5 text-cyan-400" />
+                          Halving Schedule (First 10 Eras)
+                        </h3>
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-gray-500 border-b border-gray-700/50">
+                              <th className="text-left py-2">Era</th>
+                              <th className="text-left py-2">Period</th>
+                              <th className="text-right py-2">Annual QUG</th>
+                              <th className="text-right py-2">Daily QUG</th>
+                              <th className="text-right py-2">Era Total</th>
+                              <th className="text-right py-2">Cumulative %</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Array.from({ length: 10 }, (_, k) => {
+                              const startYr = 2026 + k * 4;
+                              const annual = 2625000 / Math.pow(2, k);
+                              const daily = annual / 365.25;
+                              const eraTotal = annual * 4;
+                              const cumPct = (1 - Math.pow(2, -(k + 1))) * 100;
+                              const nowEra = Math.floor(Math.max(0, Date.now() / 1000 - 1771761600) / 126230400);
+                              return (
+                                <tr key={k} className={`border-b border-gray-800/30 ${k === nowEra ? 'bg-amber-500/10 text-amber-200' : 'text-gray-300'}`}>
+                                  <td className="py-2 font-mono">{k}{k === nowEra ? ' ◀' : ''}</td>
+                                  <td className="py-2">{startYr}–{startYr + 4}</td>
+                                  <td className="py-2 text-right font-mono">{annual >= 1000 ? annual.toLocaleString() : annual.toFixed(2)}</td>
+                                  <td className="py-2 text-right font-mono">{daily >= 1 ? daily.toFixed(1) : daily.toFixed(4)}</td>
+                                  <td className="py-2 text-right font-mono">{eraTotal >= 1000 ? eraTotal.toLocaleString() : eraTotal.toFixed(2)}</td>
+                                  <td className="py-2 text-right font-mono">{cumPct.toFixed(3)}%</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        <div className="mt-3 text-xs text-gray-500 text-center">
+                          64 eras × 4 years = 256 years total emission | Sum → 21,000,000 QUG (geometric series proof)
+                        </div>
+                      </div>
+
+                      {/* Adaptive Reward Invariance */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-cyan-500/10 to-green-500/10 border border-cyan-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                          <Activity className="w-5 h-5 text-cyan-400" />
+                          Adaptive Reward: Rate-Independent Emission
+                        </h3>
+                        <p className="text-sm text-gray-400 mb-3">
+                          Unlike Bitcoin (fixed 10-min blocks), QUG rewards adapt inversely to throughput.
+                          Whether the network produces 1 or 10,000 blocks/sec, annual emission stays constant.
+                        </p>
+                        <div className="bg-black/20 rounded-lg p-3">
+                          <div className="text-xs text-gray-500 mb-2 text-center font-mono">
+                            R(λ) = Annual_Target / (λ × 31,557,600) | R × λ × T_year = Annual_Target ∀ λ
+                          </div>
+                          <div className="grid grid-cols-6 gap-2">
+                            {[0.1, 1, 5, 10, 100, 1000].map(rate => {
+                              const reward = 2625000 / (rate * 31557600);
+                              return (
+                                <div key={rate} className="text-center bg-black/20 rounded p-2">
+                                  <div className="text-[10px] text-gray-500">{rate >= 1000 ? '1K' : rate} bps</div>
+                                  <div className="text-xs font-mono text-amber-300 font-bold">{reward >= 0.001 ? reward.toFixed(4) : reward.toExponential(1)}</div>
+                                  <div className="text-[9px] text-green-500/80 font-mono">2.625M/yr</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Decentralized Verification */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                          <Shield className="w-5 h-5 text-green-400" />
+                          Decentralized Verification
+                        </h3>
+                        <div className="space-y-2 text-sm text-gray-300">
+                          <div className="flex items-start gap-2">
+                            <span className="text-green-400 mt-0.5">1.</span>
+                            <span><strong className="text-white">Block Producer</strong> computes reward from measured block rate + era schedule using pure u128 integer arithmetic</span>
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <span className="text-green-400 mt-0.5">2.</span>
+                            <span><strong className="text-white">Every Node</strong> independently verifies coinbase amount against the same formula — rejects invalid rewards</span>
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <span className="text-green-400 mt-0.5">3.</span>
+                            <span><strong className="text-white">Error Correction</strong> compares cumulative emission to target C*(t), applies smoothed correction factor (α = 0.15)</span>
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <span className="text-green-400 mt-0.5">4.</span>
+                            <span><strong className="text-white">Hard Supply Cap</strong>: u128 check ensures total emission never exceeds 21,000,000.000000 QUG</span>
+                          </div>
+                        </div>
+                        <div className="mt-3 bg-black/20 rounded-lg p-2 text-xs text-gray-500 font-mono text-center">
+                          No trusted oracle. No coordinator. Pure math from genesis timestamp (1771761600).
+                        </div>
+                      </div>
+
+                      {/* Whitepaper Link */}
+                      <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 text-center">
+                        <a
+                          href="/downloads/qug-emission-economics-whitepaper.pdf"
+                          target="_blank"
+                          className="text-amber-400 hover:text-amber-300 underline font-semibold"
+                        >
+                          Read the Full Emission Economics Whitepaper (PDF, 16 pages)
+                        </a>
+                        <p className="text-xs text-gray-500 mt-1">Mathematical proofs, 256-year simulations, security analysis, and comparison with Bitcoin</p>
+                      </div>
+                    </>
+                  )}
+
                   {activeTab === 'adoption' && (
                     <div className="p-5 rounded-xl bg-white/5 border border-white/10">
                       <h3 className="text-lg font-semibold text-white mb-5 flex items-center gap-2">

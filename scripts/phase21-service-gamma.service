@@ -1,0 +1,60 @@
+[Unit]
+Description=Q-NarwhalKnight API Server - Phase 21 Phase Data Purge & Clean Transition
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight
+
+# ✅ v6.4.0-beta Phase 21 Configuration - Fresh database, genesis Feb 15, 2026
+Environment="Q_DB_PATH=./data-mine21"
+Environment="Q_NETWORK_ID=testnet-phase21"
+Environment="Q_IS_VALIDATOR=true"
+Environment="Q_P2P_PORT=9001"
+Environment="Q_ENABLE_AI=0"
+Environment="RUST_LOG=info"
+Environment="Q_ALLOW_SOLO_MINING=true"
+
+# 🚀 v1.3.1-beta: TURBO SYNC with WAL DURABILITY GUARANTEES
+Environment="Q_TURBO_SYNC=1"
+Environment="Q_BATCHED_WRITES=1"
+Environment="Q_STATE_SYNC=1"
+
+# 🛡️ v5.5.4: Pre-flight DB integrity check on every restart (mainnet safety)
+Environment="Q_PREFLIGHT_CHECK=1"
+
+# 🔐 v6.4.0-beta: RocksDB Encryption with Phase 21 keys
+Environment="Q_ENCRYPTION_KEYS_FILE=/opt/encryption-phase21.keys"
+Environment="Q_ENCRYPTION_PASSPHRASE=Qnk-Phase21-CleanTransition-2026-ServerGamma-Prod-Key"
+
+# 🐳 Announce ONLY public IP
+Environment="Q_EXTERNAL_ADDRESS=/ip4/109.205.176.60/tcp/9001"
+Environment="Q_FILTER_DOCKER_ADDRESSES=true"
+
+# ⚡ v2.8.0: Ultra-low-latency gossipsub
+Environment="Q_GOSSIPSUB_HEARTBEAT_MS=50"
+Environment="Q_GOSSIPSUB_FLOOD_PUBLISH=true"
+
+ExecStart=/opt/orobit/shared/q-narwhalknight/q-api-server --port 8080
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=q-api-server
+
+# ✅ v0.9.76-beta: Graceful shutdown timeout
+TimeoutStopSec=300
+KillMode=mixed
+SendSIGKILL=yes
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

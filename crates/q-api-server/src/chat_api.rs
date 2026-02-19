@@ -60,8 +60,63 @@ fn current_timestamp() -> u64 {
 }
 
 /// Static storage for the AI engine (persists across calls for metrics tracking)
-static AI_ENGINE: std::sync::OnceLock<Arc<q_ai_inference::MistralRsEngine>> = std::sync::OnceLock::new();
+/// v5.1.0: Changed from MistralRsEngine to dyn InferenceEngine to support llama-cpp-2 backend
+static AI_ENGINE: std::sync::OnceLock<Arc<dyn q_ai_inference::InferenceEngine>> = std::sync::OnceLock::new();
 static AI_ENGINE_LOADING: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// Helper: Bridge the channel-based InferenceEngine trait to callback-based streaming.
+///
+/// This allows existing code that uses `engine.generate_stream(prompt, max_tokens, |event| { ... })`
+/// to work with any `dyn InferenceEngine` without modification.
+pub async fn generate_stream_with_callback<F, Fut>(
+    engine: &dyn q_ai_inference::InferenceEngine,
+    prompt: &str,
+    max_tokens: usize,
+    mut callback: F,
+) -> anyhow::Result<String>
+where
+    F: FnMut(q_ai_inference::StreamEvent) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<q_ai_inference::StreamEvent>();
+
+    // Spawn generation task using raw pointer cast to usize (Send + 'static safe)
+    // SAFETY: engine lives behind Arc<dyn InferenceEngine> in AppState which outlives this call.
+    // The spawned task is awaited before this function returns.
+    let prompt_owned = prompt.to_string();
+    let engine_ptr = engine as *const dyn q_ai_inference::InferenceEngine;
+    let engine_addr = engine_ptr as *const () as usize;
+    let engine_vtable = unsafe {
+        std::mem::transmute::<_, [usize; 2]>(engine_ptr)[1]
+    };
+    let gen_handle = tokio::spawn(async move {
+        let reconstructed: *const dyn q_ai_inference::InferenceEngine = unsafe {
+            std::mem::transmute::<[usize; 2], *const dyn q_ai_inference::InferenceEngine>(
+                [engine_addr, engine_vtable]
+            )
+        };
+        let engine = unsafe { &*reconstructed };
+        engine.generate_stream(&prompt_owned, max_tokens, tx).await
+    });
+
+    // Forward events from channel to callback
+    let mut full_text = String::new();
+    while let Some(event) = rx.recv().await {
+        if let q_ai_inference::StreamEvent::Token(ref t) = event {
+            full_text.push_str(t);
+        }
+        callback(event).await?;
+    }
+
+    // Wait for generation to complete and propagate errors
+    match gen_handle.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(anyhow::anyhow!("Generation task panicked: {}", e)),
+    }
+
+    Ok(full_text)
+}
 
 /// On-demand AI engine loading helper
 ///
@@ -69,7 +124,8 @@ static AI_ENGINE_LOADING: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::syn
 /// Uses a static OnceLock to ensure the engine persists and accumulates stats.
 ///
 /// Made public so it can be called from the gossip handler for distributed inference.
-pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<Arc<q_ai_inference::MistralRsEngine>> {
+/// v5.1.0: Returns dyn InferenceEngine (supports both llama-cpp-2 and mistral.rs backends)
+pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<Arc<dyn q_ai_inference::InferenceEngine>> {
     // v1.4.12-beta: Removed excessive error!() logging for performance
 
     // Check if engine is already loaded in static storage
@@ -201,31 +257,61 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
     let model_path = ensure_model_available().await?;
     debug!("🔍 Model path obtained: {:?}", model_path);
 
-    // Initialize the AI engine
-    // v1.4.12-beta: Fixed unsafe unwrap() - use proper error handling
-    info!("🤖 Initializing MistralRs engine...");
     let model_path_str = model_path.to_str()
         .ok_or_else(|| anyhow::anyhow!("Model path contains invalid UTF-8 characters"))?;
-    let engine = q_ai_inference::MistralRsEngine::new(model_path_str).await?;
-    let engine_arc = Arc::new(engine);
+
+    // v5.1.0: Try LlamaCppEngine first (10-50x faster), fall back to MistralRsEngine
+    let engine_arc: Arc<dyn q_ai_inference::InferenceEngine> = {
+        // Check Q_AI_ENGINE env var for explicit backend selection
+        let preferred = std::env::var("Q_AI_ENGINE").unwrap_or_else(|_| "auto".to_string());
+
+        if preferred == "mistralrs" {
+            // MistralRs engine requires legacy-mistralrs feature
+            #[cfg(feature = "llama-cpp")]
+            {
+                warn!("⚠️ Q_AI_ENGINE=mistralrs but legacy-mistralrs not available, using llama.cpp");
+                let engine = q_ai_inference::LlamaCppEngine::new(model_path_str).await?;
+                Arc::new(engine) as Arc<dyn q_ai_inference::InferenceEngine>
+            }
+            #[cfg(not(feature = "llama-cpp"))]
+            {
+                return Err(anyhow::anyhow!("No AI engine available: llama-cpp feature disabled and legacy-mistralrs not available"));
+            }
+        } else {
+            // Try llama-cpp-2 first (preferred for performance)
+            #[cfg(feature = "llama-cpp")]
+            {
+                info!("🦙 Initializing llama.cpp engine (v5.1.0)...");
+                match q_ai_inference::LlamaCppEngine::new(model_path_str).await {
+                    Ok(engine) => {
+                        info!("✅ llama.cpp engine loaded (10-50x faster than mistral.rs)");
+                        Arc::new(engine) as Arc<dyn q_ai_inference::InferenceEngine>
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("llama.cpp engine failed: {}. No fallback available.", e));
+                    }
+                }
+            }
+            #[cfg(not(feature = "llama-cpp"))]
+            {
+                return Err(anyhow::anyhow!("No AI engine available: llama-cpp feature disabled"));
+            }
+        }
+    };
+
+    info!("✅ AI engine loaded: {} - ready for inference!", engine_arc.engine_name());
 
     // Store in static for persistence (metrics tracking, etc.)
     let _ = AI_ENGINE.set(engine_arc.clone());
 
-    info!("✅ AI engine loaded successfully and ready for inference!");
-
-    // 🚀 v2.3.16-beta: GOLDEN STANDARD - Wire engine to distributed AI coordinator
-    // This is the CRITICAL connection that enables real distributed inference!
+    // v5.1.0: Wire engine to distributed AI coordinator
     if let Some(ref coordinator) = _state.distributed_ai_coordinator {
-        info!("🔌 [GOLDEN STANDARD] Wiring MistralRsEngine to distributed AI coordinator...");
-
-        // Share the Arc with coordinator (Arc clone is cheap, same underlying engine)
-        coordinator.set_mistralrs_engine(engine_arc.clone()).await;
-
-        info!("✅ [GOLDEN STANDARD] MistralRsEngine connected to coordinator!");
+        info!("🔌 Wiring {} to distributed AI coordinator...", engine_arc.engine_name());
+        coordinator.set_inference_engine(engine_arc.clone()).await;
+        info!("✅ Inference engine connected to coordinator!");
         info!("   - Local inference fallback: ENABLED");
         info!("   - Data parallelism support: ENABLED");
-        info!("   - Real text generation: READY");
+        info!("   - Engine: {}", engine_arc.engine_name());
     } else {
         warn!("⚠️ No distributed AI coordinator available - engine loaded for local use only");
     }
@@ -234,7 +320,8 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
 }
 
 /// Get the static AI engine reference (for metrics)
-pub fn get_static_ai_engine() -> Option<Arc<q_ai_inference::MistralRsEngine>> {
+/// v5.1.0: Returns dyn InferenceEngine (supports both llama-cpp-2 and mistral.rs)
+pub fn get_static_ai_engine() -> Option<Arc<dyn q_ai_inference::InferenceEngine>> {
     AI_ENGINE.get().cloned()
 }
 
@@ -441,8 +528,8 @@ pub async fn send_message(
     // Without this, the coordinator's mistralrs_engine is None and inference silently fails.
     if let Ok(engine) = ensure_ai_engine_loaded(&state).await {
         if let Some(coordinator) = state.distributed_ai_coordinator.as_ref() {
-            coordinator.set_mistralrs_engine(engine.clone()).await;
-            info!("✅ [send_message] Coordinator's mistralrs_engine set for inference");
+            coordinator.set_inference_engine(engine.clone()).await;
+            info!("✅ [send_message] Coordinator's inference engine set");
         }
     }
 
@@ -1338,7 +1425,8 @@ pub async fn stream_message(
             let storage_clone = state.storage_engine.clone();
             let chat_id_clone = chat_id.clone();
 
-            match engine.generate_stream(
+            match generate_stream_with_callback(
+                engine.as_ref(),
                 &query.content,
                 max_tokens,
                 |event| {
@@ -1372,7 +1460,7 @@ pub async fn stream_message(
                                 // and save the complete response when done
                             }
                             q_ai_inference::StreamEvent::Complete(stats) => {
-                                info!("✅ mistral.rs SSE stream complete - {} tokens in {:.2}s ({:.1} tok/s)",
+                                info!("✅ SSE stream complete - {} tokens in {:.2}s ({:.1} tok/s)",
                                       stats.tokens_generated,
                                       stats.total_time_ms / 1000.0,
                                       stats.tokens_per_second);
@@ -1707,7 +1795,8 @@ pub async fn stream_message_anonymous(
                 .data("🚀 Starting AI generation...");
             let _ = tx.send(Ok(progress_event)).await;
 
-            match engine.generate_stream(
+            match generate_stream_with_callback(
+                engine.as_ref(),
                 &query.content,
                 max_tokens,
                 |event| {
@@ -2129,18 +2218,19 @@ pub async fn stream_message_distributed(
             let storage_clone2 = storage_clone.clone();
             let chat_id_clone2 = chat_id_clone.clone();
 
-            match engine_clone.generate_stream(
+            match generate_stream_with_callback(
+                engine_clone.as_ref(),
                 &formatted_prompt,
                 max_tokens,
                 |event| {
                     let cumulative = cumulative_clone.clone();
                     async move {
                         match event {
-                            q_ai_inference::StreamEvent::Progress(msg) => {
+                            q_ai_inference::StreamEvent::Progress(_msg) => {
                                 // Ignore progress events for cleaner stream
                             }
                             q_ai_inference::StreamEvent::Token(token_text) => {
-                                let cum_text = {
+                                let _cum_text = {
                                     let mut cum = cumulative.write().await;
                                     cum.push_str(&token_text);
                                     cum.clone()
@@ -2365,11 +2455,10 @@ pub async fn chat_completions(
     };
     info!("✅ AI engine ready for inference");
 
-    // v2.8.4-beta FIX: Set the coordinator's mistralrs_engine for single-node fallback!
-    // Without this, the coordinator's mistralrs_engine is None and local inference silently fails.
+    // v5.1.0: Set the coordinator's inference engine for single-node fallback
     if let Some(coordinator) = state.distributed_ai_coordinator.as_ref() {
-        coordinator.set_mistralrs_engine(engine.clone()).await;
-        info!("✅ Coordinator's mistralrs_engine set for single-node fallback");
+        coordinator.set_inference_engine(engine.clone()).await;
+        info!("✅ Coordinator's inference engine set for single-node fallback");
     }
 
     // Build the prompt from messages

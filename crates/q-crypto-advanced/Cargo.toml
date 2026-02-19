@@ -15,7 +15,8 @@ lattice-aggregate = []
 genus2-vdf = []
 sqisign = []
 bulletproofs-v2 = []
-full = ["frost", "aegis", "circle-stark", "lattice-aggregate", "genus2-vdf", "sqisign", "bulletproofs-v2"]
+timelock = []
+full = ["frost", "aegis", "circle-stark", "lattice-aggregate", "genus2-vdf", "sqisign", "bulletproofs-v2", "timelock"]
 
 [dependencies]
 # FROST Threshold Signatures (IACR 2025/1024 - Memory-Optimal Two-Round Threshold Schnorr)
@@ -59,6 +60,9 @@ subtle = "2.5"
 # For key derivation
 hkdf.workspace = true
 argon2 = "0.5"
+
+# Blake3 hashing (used for time-lock key derivation and commitments)
+blake3 = { workspace = true }
 
 # Serialization
 bincode.workspace = true

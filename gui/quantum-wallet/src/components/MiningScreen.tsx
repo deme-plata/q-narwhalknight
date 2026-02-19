@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Pickaxe, Download, Cpu, Zap, Award, TrendingUp, AlertCircle, ExternalLink, Terminal, Users, User, Link as LinkIcon, RefreshCw, Clock, Activity, DollarSign, Copy, Check, Server } from 'lucide-react';
 import MiningDashboard from './MiningDashboard';
+import { useMinerLink } from '../hooks/useMinerLink';
+import MinerLinkModal from './MinerLinkModal';
 
 type MiningTab = 'pool' | 'solo' | 'downloads' | 'links';
 
@@ -49,6 +51,38 @@ interface PayoutEntry {
   timestamp: number;
 }
 
+interface RoundEntry {
+  round_id: number;
+  block_height: number;
+  block_hash: string;
+  block_reward: number;
+  pool_fee: number;
+  dev_fee: number;
+  miner_rewards: number;
+  payout_count: number;
+  found_by: string;
+  timestamp: number;
+  total_shares: number;
+  total_difficulty: number;
+}
+
+interface PoolNode {
+  peer_id: string;
+  stratum_port: number;
+  hashrate: number;
+  worker_count: number;
+  region: string;
+  version: string;
+  last_seen: number;
+  accepting_connections: boolean;
+}
+
+interface HashrateEntry {
+  hashrate: number;
+  workers: number;
+  timestamp: number;
+}
+
 export default function MiningScreen() {
   const [activeTab, setActiveTab] = useState<MiningTab>('solo');
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -62,41 +96,51 @@ export default function MiningScreen() {
   const [poolError, setPoolError] = useState<string | null>(null);
   const [copiedStratum, setCopiedStratum] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [roundHistory, setRoundHistory] = useState<RoundEntry[]>([]);
+  const [poolNodes, setPoolNodes] = useState<PoolNode[]>([]);
+  const [hashrateHistory, setHashrateHistory] = useState<HashrateEntry[]>([]);
 
-  // Fetch pool data
+  // Miner Link — real-time WebSocket connection to personal miner(s)
+  const minerLink = useMinerLink(walletAddress || null);
+  const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+
+  // Fetch pool data - all requests in parallel
   const fetchPoolData = useCallback(async () => {
     setPoolLoading(true);
     setPoolError(null);
 
     try {
-      // Fetch pool stats
-      const statsRes = await fetch('/api/v1/pool/stats');
-      if (statsRes.ok) {
-        const stats = await statsRes.json();
-        setPoolStats(stats);
+      const [statsRes, workersRes, balanceRes, payoutsRes, roundsRes, nodesRes, hashrateRes] =
+        await Promise.allSettled([
+          fetch('/api/v1/pool/stats'),
+          walletAddress ? fetch(`/api/v1/pool/workers?wallet=${walletAddress}`) : Promise.resolve(null),
+          walletAddress ? fetch(`/api/v1/pool/balance/${walletAddress}`) : Promise.resolve(null),
+          fetch('/api/v1/pool/payouts?limit=10'),
+          fetch('/api/v1/pool/rounds?limit=20'),
+          fetch('/api/v1/pool/nodes'),
+          fetch('/api/v1/pool/hashrate/history'),
+        ]);
+
+      if (statsRes.status === 'fulfilled' && statsRes.value?.ok) {
+        setPoolStats(await statsRes.value.json());
       }
-
-      // Fetch workers for current wallet
-      if (walletAddress) {
-        const workersRes = await fetch(`/api/v1/pool/workers?wallet=${walletAddress}`);
-        if (workersRes.ok) {
-          const workers = await workersRes.json();
-          setMyWorkers(workers);
-        }
-
-        // Fetch pending balance
-        const balanceRes = await fetch(`/api/v1/pool/balance/${walletAddress}`);
-        if (balanceRes.ok) {
-          const balance = await balanceRes.json();
-          setPendingBalance(balance);
-        }
+      if (workersRes.status === 'fulfilled' && workersRes.value?.ok) {
+        setMyWorkers(await workersRes.value.json());
       }
-
-      // Fetch recent payouts
-      const payoutsRes = await fetch('/api/v1/pool/payouts?limit=10');
-      if (payoutsRes.ok) {
-        const payouts = await payoutsRes.json();
-        setRecentPayouts(payouts);
+      if (balanceRes.status === 'fulfilled' && balanceRes.value?.ok) {
+        setPendingBalance(await balanceRes.value.json());
+      }
+      if (payoutsRes.status === 'fulfilled' && payoutsRes.value?.ok) {
+        setRecentPayouts(await payoutsRes.value.json());
+      }
+      if (roundsRes.status === 'fulfilled' && roundsRes.value?.ok) {
+        setRoundHistory(await roundsRes.value.json());
+      }
+      if (nodesRes.status === 'fulfilled' && nodesRes.value?.ok) {
+        setPoolNodes(await nodesRes.value.json());
+      }
+      if (hashrateRes.status === 'fulfilled' && hashrateRes.value?.ok) {
+        setHashrateHistory(await hashrateRes.value.json());
       }
 
       setLastRefresh(new Date());
@@ -107,14 +151,54 @@ export default function MiningScreen() {
     }
   }, [walletAddress]);
 
-  // Auto-refresh pool data every 30 seconds when on pool tab
+  // Auto-refresh pool data when on pool tab + SSE for real-time updates
   useEffect(() => {
-    if (activeTab === 'pool') {
-      fetchPoolData();
-      const interval = setInterval(fetchPoolData, 30000);
-      return () => clearInterval(interval);
-    }
-  }, [activeTab, fetchPoolData]);
+    if (activeTab !== 'pool') return;
+
+    let isMounted = true;
+    fetchPoolData();
+    const interval = setInterval(fetchPoolData, 30000);
+
+    // SSE listener for real-time pool updates
+    const eventSource = new EventSource(`/api/v1/stream/events?filter=${walletAddress || ''}`);
+
+    eventSource.addEventListener('pool-stats-updated', (e) => {
+      if (!isMounted) return;
+      try {
+        const data = JSON.parse(e.data);
+        if (data.data) {
+          setPoolStats(prev => prev ? {
+            ...prev,
+            hashrate: data.data.hashrate ?? prev.hashrate,
+            workers: data.data.workers ?? prev.workers,
+            blocks_found: data.data.blocks_found ?? prev.blocks_found,
+            current_round: data.data.current_round ?? prev.current_round,
+            difficulty: data.data.difficulty ?? prev.difficulty,
+            shares_this_round: data.data.total_shares ?? prev.shares_this_round,
+          } : prev);
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    eventSource.addEventListener('pool-block-found', (e) => {
+      if (!isMounted) return;
+      try {
+        const data = JSON.parse(e.data);
+        if (data.data) {
+          fetch('/api/v1/pool/rounds?limit=20')
+            .then(r => r.ok ? r.json() : [])
+            .then(rounds => { if (isMounted) setRoundHistory(rounds); })
+            .catch(() => {});
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      eventSource.close();
+    };
+  }, [activeTab, walletAddress]); // Removed fetchPoolData to prevent interval recreation
 
   // Format hashrate
   const formatHashrate = (h: number): string => {
@@ -190,7 +274,7 @@ export default function MiningScreen() {
         <div className="p-3 rainbow-box rounded-xl">
           <Pickaxe className="w-8 h-8 text-white" />
         </div>
-        <div>
+        <div className="flex-1">
           <h1 className="text-3xl font-bold bg-gradient-to-r from-quantum-cyan to-quantum-purple bg-clip-text text-transparent">
             Quantum Mining
           </h1>
@@ -198,7 +282,43 @@ export default function MiningScreen() {
             Mine QUG with Austrian Economics & DAG-Knight VDF
           </p>
         </div>
+        {/* Miner Link button */}
+        <button
+          onClick={() => setShowMinerLinkModal(true)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border ${
+            minerLink.miners.length > 0
+              ? 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20'
+              : 'bg-white/5 text-gray-400 border-white/10 hover:bg-white/10'
+          }`}
+        >
+          <div className="relative">
+            <Pickaxe className="w-4 h-4" />
+            {minerLink.miners.length > 0 && (
+              <div className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            )}
+          </div>
+          {minerLink.miners.length > 0
+            ? `${minerLink.miners.length} Miner${minerLink.miners.length > 1 ? 's' : ''}`
+            : 'My Miners'}
+        </button>
       </div>
+
+      {/* Inline miner status */}
+      {minerLink.miners.length > 0 && (
+        <div className="flex items-center gap-2 text-sm text-gray-400 -mt-2 mb-2">
+          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+          <span>
+            {minerLink.miners.length} miner{minerLink.miners.length > 1 ? 's' : ''} connected
+            {' — '}
+            {minerLink.totalHashrate >= 1e6
+              ? `${(minerLink.totalHashrate / 1e6).toFixed(2)} MH/s`
+              : minerLink.totalHashrate >= 1e3
+              ? `${(minerLink.totalHashrate / 1e3).toFixed(2)} KH/s`
+              : `${minerLink.totalHashrate.toFixed(0)} H/s`
+            }
+          </span>
+        </div>
+      )}
 
       {/* Tab Navigation */}
       <div className="flex flex-wrap gap-2 bg-quantum-dark/50 rounded-xl p-2 border border-quantum-purple/20">
@@ -499,6 +619,116 @@ export default function MiningScreen() {
                 </div>
               )}
 
+              {/* Hashrate History Sparkline */}
+              {hashrateHistory.length > 1 && (
+                <div className="bg-quantum-dark/30 rounded-xl p-5 border border-quantum-cyan/20 mb-6">
+                  <h4 className="font-bold text-white mb-3 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-quantum-cyan" />
+                    Pool Hashrate (24h)
+                  </h4>
+                  <div className="h-20 flex items-end gap-px">
+                    {(() => {
+                      const maxH = Math.max(...hashrateHistory.map(h => h.hashrate), 1);
+                      const display = hashrateHistory.slice(-60); // Last 60 entries
+                      return display.map((entry, i) => (
+                        <div
+                          key={i}
+                          className="flex-1 bg-quantum-cyan/60 hover:bg-quantum-cyan/90 rounded-t transition-colors"
+                          style={{ height: `${Math.max((entry.hashrate / maxH) * 100, 2)}%` }}
+                          title={`${formatHashrate(entry.hashrate)} - ${new Date(entry.timestamp * 1000).toLocaleTimeString()}`}
+                        />
+                      ));
+                    })()}
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-500 mt-1">
+                    <span>{new Date(hashrateHistory[Math.max(0, hashrateHistory.length - 60)].timestamp * 1000).toLocaleTimeString()}</span>
+                    <span>Now</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Round History */}
+              {roundHistory.length > 0 && (
+                <div className="mb-6">
+                  <h4 className="font-bold text-white mb-4 flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-quantum-purple" />
+                    Round History ({roundHistory.length})
+                  </h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-gray-400 border-b border-quantum-purple/20">
+                          <th className="text-left py-2 px-3">Round</th>
+                          <th className="text-right py-2 px-3">Block</th>
+                          <th className="text-right py-2 px-3">Reward</th>
+                          <th className="text-right py-2 px-3">Shares</th>
+                          <th className="text-right py-2 px-3">Payouts</th>
+                          <th className="text-right py-2 px-3">Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {roundHistory.slice(0, 10).map((round) => (
+                          <tr key={round.round_id} className="border-b border-quantum-dark/50 hover:bg-quantum-purple/5">
+                            <td className="py-3 px-3 font-mono text-quantum-cyan">#{round.round_id}</td>
+                            <td className="py-3 px-3 text-right text-white">{round.block_height.toLocaleString()}</td>
+                            <td className="py-3 px-3 text-right text-quantum-green">{formatQUG(round.block_reward)} QUG</td>
+                            <td className="py-3 px-3 text-right text-white">{round.total_shares.toLocaleString()}</td>
+                            <td className="py-3 px-3 text-right text-quantum-purple">{round.payout_count}</td>
+                            <td className="py-3 px-3 text-right text-gray-400 text-xs">
+                              {new Date(round.timestamp * 1000).toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Pool Nodes */}
+              {poolNodes.length > 0 && (
+                <div className="mb-6">
+                  <h4 className="font-bold text-white mb-4 flex items-center gap-2">
+                    <Server className="w-5 h-5 text-quantum-green" />
+                    Pool Nodes ({poolNodes.length})
+                  </h4>
+                  <div className="grid md:grid-cols-2 gap-3">
+                    {poolNodes.map((node) => (
+                      <div key={node.peer_id} className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-green/20">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-quantum-cyan font-mono text-sm">{node.peer_id.slice(0, 16)}...</span>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            node.accepting_connections
+                              ? 'bg-quantum-green/20 text-quantum-green'
+                              : 'bg-red-500/20 text-red-400'
+                          }`}>
+                            {node.accepting_connections ? 'Active' : 'Down'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div>
+                            <span className="text-gray-500">Hashrate</span>
+                            <p className="text-white">{formatHashrate(node.hashrate)}</p>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Workers</span>
+                            <p className="text-white">{node.worker_count}</p>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Port</span>
+                            <p className="text-white font-mono">{node.stratum_port}</p>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Region</span>
+                            <p className="text-white">{node.region || 'Global'}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* No Pool Data - Show Features */}
               {!poolStats && !poolError && !poolLoading && (
                 <div className="grid md:grid-cols-2 gap-4">
@@ -584,36 +814,76 @@ export default function MiningScreen() {
 
                 <div>
                   <p className="text-gray-300 mb-3">2. Setup by platform:</p>
-                  <div className="grid md:grid-cols-3 gap-3">
-                    <div className="bg-quantum-dark/50 rounded-lg p-3 border border-quantum-cyan/20">
-                      <p className="text-quantum-cyan text-sm font-bold mb-2">Linux x86_64</p>
-                      <div className="space-y-1 font-mono text-xs text-gray-300">
+                  <div className="grid md:grid-cols-2 gap-3">
+                    {/* Linux x86_64 */}
+                    <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-cyan/20 relative">
+                      <p className="text-quantum-cyan text-sm font-bold mb-3">Linux x86_64</p>
+                      <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
                         <code className="block">wget https://quillon.xyz/downloads/q-miner-linux-x64</code>
                         <code className="block">chmod +x q-miner-linux-x64</code>
-                        <code className="block text-quantum-green">./q-miner-linux-x64 --mode solo \</code>
+                        <code className="block text-quantum-green mt-2">./q-miner-linux-x64 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
+                      <button
+                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64 && ./q-miner-linux-x64 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        className="absolute top-3 right-3 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 text-quantum-cyan px-2 py-1 rounded text-xs transition-colors"
+                      >
+                        Copy
+                      </button>
                     </div>
-                    <div className="bg-quantum-dark/50 rounded-lg p-3 border border-quantum-green/20">
-                      <p className="text-quantum-green text-sm font-bold mb-2">Linux ARM64</p>
-                      <div className="space-y-1 font-mono text-xs text-gray-300">
+
+                    {/* Linux ARM64 */}
+                    <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-green/20 relative">
+                      <p className="text-quantum-green text-sm font-bold mb-3">Linux ARM64</p>
+                      <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
                         <code className="block">wget https://quillon.xyz/downloads/q-miner-linux-arm64</code>
                         <code className="block">chmod +x q-miner-linux-arm64</code>
-                        <code className="block text-quantum-green">./q-miner-linux-arm64 --mode solo \</code>
+                        <code className="block text-quantum-green mt-2">./q-miner-linux-arm64 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
+                      <button
+                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64 && ./q-miner-linux-arm64 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        className="absolute top-3 right-3 bg-quantum-green/20 hover:bg-quantum-green/30 text-quantum-green px-2 py-1 rounded text-xs transition-colors"
+                      >
+                        Copy
+                      </button>
                     </div>
-                    <div className="bg-quantum-dark/50 rounded-lg p-3 border border-quantum-purple/20">
-                      <p className="text-quantum-purple text-sm font-bold mb-2">Windows x64</p>
-                      <div className="space-y-1 font-mono text-xs text-gray-300">
-                        <code className="block">Download q-miner-windows-x64.exe</code>
-                        <code className="block">Open PowerShell / CMD</code>
+
+                    {/* Windows x64 */}
+                    <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-purple/20 relative">
+                      <p className="text-quantum-purple text-sm font-bold mb-3">Windows x64</p>
+                      <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
+                        <code className="block text-gray-400"># Download from Downloads tab or:</code>
+                        <code className="block">Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe</code>
+                        <code className="block text-quantum-green mt-2">.\\q-miner.exe --mode solo `</code>
+                        <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} `</code>
+                        <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
+                      </div>
+                      <button
+                        onClick={() => copyCommand(`.\\q-miner.exe --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        className="absolute top-3 right-3 bg-quantum-purple/20 hover:bg-quantum-purple/30 text-quantum-purple px-2 py-1 rounded text-xs transition-colors"
+                      >
+                        Copy
+                      </button>
+                    </div>
+
+                    {/* Windows CMD */}
+                    <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-pink/20 relative">
+                      <p className="text-quantum-pink text-sm font-bold mb-3">Windows CMD</p>
+                      <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
+                        <code className="block text-gray-400">REM Open CMD in the download folder</code>
                         <code className="block text-quantum-green">q-miner-windows-x64.exe --mode solo ^</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} ^</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
+                      <button
+                        onClick={() => copyCommand(`q-miner-windows-x64.exe --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        className="absolute top-3 right-3 bg-quantum-pink/20 hover:bg-quantum-pink/30 text-quantum-pink px-2 py-1 rounded text-xs transition-colors"
+                      >
+                        Copy
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -628,6 +898,16 @@ export default function MiningScreen() {
                     >
                       Copy
                     </button>
+                  </div>
+                  <div className="bg-quantum-dark/50 rounded-lg p-3 font-mono text-sm text-quantum-purple border border-quantum-purple/20 relative mt-2">
+                    <code className="block overflow-x-auto">{`.\\q-miner.exe --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`}</code>
+                    <button
+                      onClick={() => copyCommand(`.\\q-miner.exe --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`)}
+                      className="absolute top-2 right-2 bg-quantum-purple/20 hover:bg-quantum-purple/30 text-quantum-purple px-2 py-1 rounded text-xs transition-colors"
+                    >
+                      Copy
+                    </button>
+                    <span className="absolute bottom-2 right-2 text-[10px] text-quantum-purple/60">Windows</span>
                   </div>
                 </div>
 
@@ -661,10 +941,10 @@ export default function MiningScreen() {
               <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-green/30 rounded-xl p-6">
                 <div className="flex items-center justify-between mb-3">
                   <Award className="w-6 h-6 text-quantum-green" />
-                  <span className="text-2xl font-bold text-quantum-green">0.5 QUG</span>
+                  <span className="text-2xl font-bold text-quantum-green">~0.08 QUG</span>
                 </div>
-                <p className="text-gray-300 text-sm">Current Block Reward</p>
-                <p className="text-gray-500 text-xs mt-1">Halves every 210,000 blocks</p>
+                <p className="text-gray-300 text-sm">Block Reward (Era 0)</p>
+                <p className="text-gray-500 text-xs mt-1">2,625,000 QUG/year, halves every 4 years</p>
               </div>
 
               <div className="bg-quantum-indigo/30 backdrop-blur-xl border border-quantum-cyan/30 rounded-xl p-6">
@@ -682,7 +962,7 @@ export default function MiningScreen() {
                   <span className="text-2xl font-bold text-quantum-purple">1s</span>
                 </div>
                 <p className="text-gray-300 text-sm">Target Block Time</p>
-                <p className="text-gray-500 text-xs mt-1">After bootstrap phase</p>
+                <p className="text-gray-500 text-xs mt-1">Adaptive rate targeting</p>
               </div>
             </motion.div>
           </motion.div>
@@ -738,10 +1018,12 @@ export default function MiningScreen() {
               </div>
 
               {/* Miner Downloads */}
-              <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+              <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
                 <Download className="w-5 h-5 text-quantum-cyan" />
                 Miner Downloads
+                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v7.3.3</span>
               </h3>
+              <p className="text-sm text-gray-400 mb-4">Native threads, jemalloc/mimalloc allocator, batched atomic counters</p>
 
               <div className="grid md:grid-cols-3 gap-4 mb-6">
                 <motion.button
@@ -780,7 +1062,7 @@ export default function MiningScreen() {
                     <Download className="w-5 h-5" />
                     <span>Windows x64</span>
                   </div>
-                  <span className="text-xs text-quantum-purple/80">Windows 10/11</span>
+                  <span className="text-xs text-quantum-purple/80">Windows 10/11 — mimalloc optimized</span>
                 </motion.button>
               </div>
 
@@ -957,7 +1239,7 @@ export default function MiningScreen() {
                     </div>
                     <div className="p-2">
                       <p className="font-medium text-gray-300">Network ID</p>
-                      <code className="text-xs text-quantum-orange">testnet-phase16</code>
+                      <code className="text-xs text-quantum-orange">mainnet2026.2</code>
                     </div>
                   </div>
                 </div>
@@ -966,6 +1248,13 @@ export default function MiningScreen() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Miner Link Modal */}
+      <MinerLinkModal
+        isOpen={showMinerLinkModal}
+        onClose={() => setShowMinerLinkModal(false)}
+        minerLink={minerLink}
+      />
     </div>
   );
 }

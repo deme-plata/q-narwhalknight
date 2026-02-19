@@ -15,7 +15,7 @@ q-dag-knight = { path = "../q-dag-knight" }
 q-resonance = { path = "../q-resonance", optional = true }
 q-storage = { path = "../q-storage" }
 q-zk-stark = { path = "../q-zk-stark" }
-q-ai-inference = { path = "../q-ai-inference" }
+q-ai-inference = { path = "../q-ai-inference", default-features = false }
 q-quantum-crypto = { path = "../q-quantum-crypto" }
 
 # Networking - gossipsub included from workspace

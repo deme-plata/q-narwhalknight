@@ -158,7 +158,8 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
   const [oracleData, setOracleData] = useState<OracleDataPoint[]>([]);
   const [resolutions, setResolutions] = useState<ResolutionEvent[]>([]);
   const [stakes, setStakes] = useState<StakePosition[]>([]);
-  const [particles, setParticles] = useState<Particle[]>([]);
+  // v6.0.3: Use ref for particles to avoid infinite re-render loop in animation useEffect
+  const particlesRef = useRef<Particle[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<ResolutionEvent | OracleDataPoint | null>(null);
   const [visualMode, setVisualMode] = useState<'radar' | 'flow' | 'chart' | 'ring'>('radar');
   const [isConnected, setIsConnected] = useState(false);
@@ -214,7 +215,7 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
         type,
       });
     }
-    setParticles(prev => [...prev.slice(-80), ...newParticles]);
+    particlesRef.current = [...particlesRef.current.slice(-80), ...newParticles];
   }, []);
 
   // Add event to recent events feed
@@ -608,9 +609,8 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
       resolutions.forEach(r => { if (r.age !== undefined) r.age += deltaTime * 1000; });
       oracleData.forEach(o => { if (o.age !== undefined) o.age += deltaTime * 1000; });
 
-      // Update particles
-      setParticles(prev =>
-        prev
+      // Update particles (mutate ref directly, no setState to avoid re-render loop)
+      particlesRef.current = particlesRef.current
           .map(p => ({
             ...p,
             x: p.x + p.vx * deltaTime,
@@ -619,8 +619,7 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
             vx: p.vx * 0.95,
             vy: p.vy * 0.95,
           }))
-          .filter(p => p.life < p.maxLife)
-      );
+          .filter(p => p.life < p.maxLife);
 
       // Clear canvas with gradient background
       const bgGradient = ctx.createLinearGradient(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -968,7 +967,7 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
       });
 
       // ===== DRAW PARTICLES =====
-      particles.forEach(p => {
+      particlesRef.current.forEach(p => {
         const alpha = Math.max(0, 1 - p.life / p.maxLife);
         const size = p.size * (1 - p.life / p.maxLife * 0.5);
 
@@ -1015,7 +1014,7 @@ export default function QNOOracleVisualization({ className = '' }: QNOOracleVisu
         cancelAnimationFrame(animationFrameId.current);
       }
     };
-  }, [oracleData, resolutions, stakes, particles, visualMode]);
+  }, [oracleData, resolutions, stakes, visualMode]);
 
   const isResolutionEvent = (event: ResolutionEvent | OracleDataPoint): event is ResolutionEvent => {
     return 'stakeId' in event;

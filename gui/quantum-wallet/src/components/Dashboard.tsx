@@ -1,6 +1,6 @@
-import { useState, useEffect, memo, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Zap, AlertCircle, Copy, Check, Wallet, Coins, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio } from 'lucide-react';
+import { useState, useEffect, useCallback, memo, useRef } from 'react';
+import { motion, AnimatePresence, Reorder } from 'framer-motion';
+import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
 import TransactionDetailsModal from './TransactionDetailsModal';
 // 🌐 v3.4.3-browser: P2P real-time block streaming
@@ -15,9 +15,17 @@ import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
 import WalletCardWithGraph from './WalletCardWithGraph';
 import PhaseTransitionModal from './PhaseTransitionModal';
+import WelcomeMainnetModal from './WelcomeMainnetModal';
+import BountyModal from './BountyModal';
 import StakingModal from './StakingModal';
 import CustomTokensCard from './CustomTokensCard';
 import FinanceModal from './FinanceModal';
+import BitcoinSwapModal from './BitcoinSwapModal';
+import ZcashWalletModal from './ZcashWalletModal';
+import IronFishWalletModal from './IronFishWalletModal';
+import EthereumSwapModal from './EthereumSwapModal';
+import EmailScreen from './EmailScreen';
+import CalendarScreen from './CalendarScreen';
 import { TICKER_SYMBOL } from '../constants/ticker';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
@@ -91,24 +99,12 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   const { latestBlock: p2pLatestBlock, blockHistory: p2pBlockHistory, isSubscribed: p2pSubscribed } = useRealtimeBlocks();
 
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
-  const [recentTransactions, setRecentTransactions] = useState<Transaction[]>(() => {
-    // Load faucet transactions from localStorage on mount
-    try {
-      const stored = localStorage.getItem('faucetTransactions');
-      const loaded = stored ? JSON.parse(stored) : [];
-      console.log('💾 Loaded faucet transactions from localStorage:', loaded.length);
-      return loaded;
-    } catch (err) {
-      console.error('❌ Failed to load faucet transactions:', err);
-      return [];
-    }
-  });
+  const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState('');
   const [copiedAddress, setCopiedAddress] = useState(false);
-  const [faucetLoading, setFaucetLoading] = useState(false);
-  const [faucetMessage, setFaucetMessage] = useState('');
+  // v7.0.0: Faucet removed — all QUG earned through mining
   const [sseConnected, setSseConnected] = useState(false);
   const [showLoanModal, setShowLoanModal] = useState(false);
   const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
@@ -117,9 +113,44 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   const [selectedLoanId, setSelectedLoanId] = useState<string | null>(null);
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const [showFinanceModal, setShowFinanceModal] = useState(false);
+  const [showBitcoinSwapModal, setShowBitcoinSwapModal] = useState(false);
+  const [showZcashWalletModal, setShowZcashWalletModal] = useState(false);
+  const [showIronFishWalletModal, setShowIronFishWalletModal] = useState(false);
+  const [showEthereumSwapModal, setShowEthereumSwapModal] = useState(false);
+  const [activeDashboardTab, setActiveDashboardTab] = useState<'wallet' | 'mail' | 'calendar' | 'chat'>('wallet');
+  const [unreadEmailCount, setUnreadEmailCount] = useState(0);
+  const [tabOrder, setTabOrder] = useState<Array<'wallet' | 'mail' | 'calendar' | 'chat'>>(() => {
+    try {
+      const saved = localStorage.getItem('dashboardTabOrder');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return ['wallet', 'mail', 'calendar', 'chat'];
+  });
+  const [showTabSettings, setShowTabSettings] = useState(false);
+  const [btcBalance, setBtcBalance] = useState(0);
+  const [zecBalance, setZecBalance] = useState(0);
+  const [ethBalance, setEthBalance] = useState(0);
 
   // Multi-wallet state - 🚨 v2.3.7-beta: Initialize from cache to prevent zero balance on refresh
   const [walletBalances, setWalletBalances] = useState<WalletBalance[]>(() => {
+    // v6.5.0: Phase-aware cache clearing — purge stale balances on network phase change
+    try {
+      const lastPhase = localStorage.getItem('lastNetworkPhase');
+      const currentPhase = 'mainnet2026.2';
+      if (lastPhase && lastPhase !== currentPhase) {
+        console.log(`🔄 Phase transition detected: ${lastPhase} → ${currentPhase}. Clearing balance caches.`);
+        localStorage.removeItem('cachedBalance');
+        localStorage.removeItem('cachedQugusdBalance');
+        localStorage.removeItem('walletBalanceHistory');
+        localStorage.removeItem('highestKnownBalances');
+        localStorage.setItem('lastNetworkPhase', currentPhase);
+      } else if (!lastPhase) {
+        localStorage.setItem('lastNetworkPhase', currentPhase);
+      }
+    } catch (e) {
+      console.warn('Failed to check phase cache:', e);
+    }
+
     // Try to load cached balances immediately to avoid showing 0 on refresh
     const cachedQugBalance = localStorage.getItem('cachedBalance');
     const cachedQugValue = cachedQugBalance ? parseFloat(cachedQugBalance) : 0;
@@ -269,6 +300,93 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   // Phase transition modal state
   const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
   const [showStakingModal, setShowStakingModal] = useState(false);
+  const [showMainnetWelcome, setShowMainnetWelcome] = useState(false);
+  const [showBountyModal, setShowBountyModal] = useState(false);
+
+  // v7.1.4: Show welcome modal only ONCE. Versioned key + no polling interval.
+  useEffect(() => {
+    const key = 'mainnet2026.2_welcomed_v2';
+    if (localStorage.getItem(key) || localStorage.getItem('mainnetWelcomeSeen')) {
+      // Already seen — mark both keys (belt-and-suspenders) and bail
+      localStorage.setItem(key, 'true');
+      localStorage.setItem('mainnetWelcomeSeen', 'true');
+      return;
+    }
+    // Only show after Feb 22, 2026 11:00 UTC (12:00 GMT+1)
+    const launchDate = new Date('2026-02-22T11:00:00Z');
+    if (Date.now() < launchDate.getTime()) return;
+
+    // First time — show the modal
+    setShowMainnetWelcome(true);
+    // Pre-set both keys so even if user kills the tab, it won't show again
+    localStorage.setItem(key, 'true');
+    localStorage.setItem('mainnetWelcomeSeen', 'true');
+  }, []);
+
+  // v7.3.3: Show bounty modal once (3 seconds after load, only if welcome modal isn't showing)
+  useEffect(() => {
+    const bountyKey = 'bounty_modal_seen_v1';
+    if (localStorage.getItem(bountyKey)) return;
+    const timer = setTimeout(() => {
+      if (!showMainnetWelcome) {
+        setShowBountyModal(true);
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [showMainnetWelcome]);
+
+  // v7.3.4: Fetch unread email count on mount + listen for SSE events
+  useEffect(() => {
+    const fetchUnread = async () => {
+      try {
+        const res = await qnkAPI.getEmailUnreadCount();
+        if (res?.data?.count !== undefined) setUnreadEmailCount(res.data.count);
+      } catch {}
+    };
+    fetchUnread();
+    const interval = setInterval(fetchUnread, 60000); // refresh every 60s as fallback
+
+    const handleEmailReceived = () => {
+      setUnreadEmailCount(prev => prev + 1);
+    };
+    const handleUnreadCount = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.count !== undefined) setUnreadEmailCount(detail.count);
+    };
+    const handleEmailRead = () => {
+      // When user reads an email inside EmailScreen, decrement
+      setUnreadEmailCount(prev => Math.max(0, prev - 1));
+    };
+
+    window.addEventListener('email-received', handleEmailReceived);
+    window.addEventListener('email-unread-count', handleUnreadCount);
+    window.addEventListener('email-read', handleEmailRead);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('email-received', handleEmailReceived);
+      window.removeEventListener('email-unread-count', handleUnreadCount);
+      window.removeEventListener('email-read', handleEmailRead);
+    };
+  }, []);
+
+  // v7.3.4: Persist tab order changes
+  const handleTabOrderChange = useCallback((newOrder: Array<'wallet' | 'mail' | 'calendar' | 'chat'>) => {
+    setTabOrder(newOrder);
+    localStorage.setItem('dashboardTabOrder', JSON.stringify(newOrder));
+  }, []);
+
+  const moveTab = useCallback((tabId: string, direction: 'up' | 'down') => {
+    setTabOrder(prev => {
+      const idx = prev.indexOf(tabId as any);
+      if (idx < 0) return prev;
+      const newIdx = direction === 'up' ? Math.max(0, idx - 1) : Math.min(prev.length - 1, idx + 1);
+      if (newIdx === idx) return prev;
+      const newOrder = [...prev];
+      [newOrder[idx], newOrder[newIdx]] = [newOrder[newIdx], newOrder[idx]];
+      localStorage.setItem('dashboardTabOrder', JSON.stringify(newOrder));
+      return newOrder;
+    });
+  }, []);
 
   // Generate AI Report
   const generateAIReport = async () => {
@@ -340,18 +458,6 @@ Provide a brief analysis (under 250 tokens) covering:
       setAiReport('Failed to generate AI report. Please try again.');
     }
   };
-
-  // Save faucet transactions to localStorage whenever they change
-  useEffect(() => {
-    try {
-      // Only save faucet transactions (manually added)
-      const faucetTxs = recentTransactions.filter(tx => tx.id.startsWith('faucet-'));
-      console.log('💾 Saving faucet transactions to localStorage:', faucetTxs.length);
-      localStorage.setItem('faucetTransactions', JSON.stringify(faucetTxs));
-    } catch (err) {
-      console.error('❌ Failed to save faucet transactions:', err);
-    }
-  }, [recentTransactions]);
 
   // Detect balance changes and trigger animations
   // Use ref to track previous balances to avoid re-render loops
@@ -639,60 +745,44 @@ Provide a brief analysis (under 250 tokens) covering:
       const cachedQugusdValue = cachedQugusdStr ? parseFloat(cachedQugusdStr) : 0;
       const validCachedQugusd = !isNaN(cachedQugusdValue) && isFinite(cachedQugusdValue) ? cachedQugusdValue : 0;
 
-      let qugUsdBalance = validCachedQugusd; // Start with cached value, not 0
-      const previousHighestQugusd = highestKnownBalancesRef.current['QUGUSD'] || validCachedQugusd;
-
-      console.log('🔍 [fetchWalletBalances] QUGUSD starting with:', {
-        cachedBalance: validCachedQugusd,
-        previousHighest: previousHighestQugusd,
-        refValue: highestKnownBalancesRef.current['QUGUSD']
-      });
+      // v6.5.1: Trust backend for QUGUSD - no anti-zero or anti-drop overrides
+      let qugUsdBalance = 0;
 
       try {
         const response = await qnkAPI.getMultiTokenBalance();
         console.log('🔍 [Dashboard] Multi-token balance response:', JSON.stringify(response, null, 2));
         if (response.success && response.data && response.data.tokens) {
-          // API returns tokens as object with lowercase keys: { qug: {...}, qugusd: {...} }
           const tokensObj = response.data.tokens;
-          console.log('🔍 [Dashboard] Tokens object:', JSON.stringify(tokensObj, null, 2));
 
-          let fetchedQugusd = 0;
           if (tokensObj.qugusd && tokensObj.qugusd.balance !== undefined) {
-            fetchedQugusd = parseFloat(tokensObj.qugusd.balance) || 0;
-            console.log('💵 [Dashboard] QUGUSD balance fetched:', fetchedQugusd);
+            qugUsdBalance = parseFloat(tokensObj.qugusd.balance) || 0;
           } else if (tokensObj.QUGUSD && tokensObj.QUGUSD.balance !== undefined) {
-            // Try uppercase key as fallback
-            fetchedQugusd = parseFloat(tokensObj.QUGUSD.balance) || 0;
-            console.log('💵 [Dashboard] QUGUSD balance fetched (uppercase):', fetchedQugusd);
-          } else {
-            console.warn('⚠️ [Dashboard] QUGUSD not found in tokens object');
+            qugUsdBalance = parseFloat(tokensObj.QUGUSD.balance) || 0;
           }
+          console.log('💵 [Dashboard] QUGUSD balance fetched:', qugUsdBalance);
 
-          // Validate fetched balance (same logic as QUG)
-          const referenceQugusd = Math.max(previousHighestQugusd, validCachedQugusd);
-          const minAcceptableQugusd = Math.max(0, referenceQugusd * 0.9 - 1);
-          if (fetchedQugusd >= minAcceptableQugusd || referenceQugusd === 0) {
-            qugUsdBalance = fetchedQugusd;
-            if (fetchedQugusd > (highestKnownBalancesRef.current['QUGUSD'] || 0)) {
-              highestKnownBalancesRef.current['QUGUSD'] = fetchedQugusd;
+          if (qugUsdBalance > 0) {
+            localStorage.setItem('cachedQugusdBalance', qugUsdBalance.toString());
+            if (qugUsdBalance > (highestKnownBalancesRef.current['QUGUSD'] || 0)) {
+              highestKnownBalancesRef.current['QUGUSD'] = qugUsdBalance;
             }
-            // Cache the new value
-            localStorage.setItem('cachedQugusdBalance', fetchedQugusd.toString());
           } else {
-            console.warn(`⚠️ Ignoring suspiciously low QUGUSD balance: ${fetchedQugusd} (expected ~${referenceQugusd})`);
-            qugUsdBalance = referenceQugusd;
+            localStorage.removeItem('cachedQugusdBalance');
+            highestKnownBalancesRef.current['QUGUSD'] = 0;
           }
-        } else {
-          console.warn('⚠️ [Dashboard] Response not successful or missing data, using cached QUGUSD:', qugUsdBalance);
         }
       } catch (error) {
+        // On fetch failure only, fall back to cache
+        const cachedQugusd = localStorage.getItem('cachedQugusdBalance');
+        qugUsdBalance = cachedQugusd ? parseFloat(cachedQugusd) || 0 : 0;
         console.warn('⚠️ Failed to fetch QUGUSD balance, using cached:', qugUsdBalance, error);
       }
 
-      // 🚨 NEVER allow 0 QUGUSD balance if we have cached value
+      // v6.5.1: Allow QUGUSD to be 0 if backend genuinely returns 0
+      // The anti-zero logic was preventing balance resets on network/phase transitions
       if (qugUsdBalance === 0 && validCachedQugusd > 0) {
-        console.warn('⚠️ [fetchWalletBalances] QUGUSD was 0 but cache has value, using cache:', validCachedQugusd);
-        qugUsdBalance = validCachedQugusd;
+        console.log('ℹ️ [fetchWalletBalances] QUGUSD is 0 (backend confirmed). Clearing stale cache.');
+        localStorage.removeItem('cachedQugusdBalance');
       }
 
       // Add QUGUSD to balances
@@ -759,50 +849,42 @@ Provide a brief analysis (under 250 tokens) covering:
       // Note: Custom tokens would be fetched here if the API supported them
       // Currently, only QUG and QUGUSD are supported in the multi-token balance endpoint
 
-      // Add placeholder for future cryptos
+      // Bridge wallets (with empty history to prevent "Loading..." display)
       balances.push(
         {
           symbol: 'ZEC',
           name: 'Zcash (Shielded)',
-          balance: 0,
+          balance: zecBalance,
           icon: 'zec',
-          color: 'from-yellow-400 to-amber-600',
-          comingSoon: true,
+          color: 'from-purple-400 to-indigo-600',
           shieldedOnly: true,
+          history: [],
         },
         {
           symbol: 'IRON',
           name: 'Iron Fish',
           balance: 0,
           icon: 'iron',
-          color: 'from-slate-400 to-zinc-600',
-          comingSoon: true,
+          color: 'from-cyan-400 to-slate-500',
           shieldedOnly: true,
+          history: [],
         },
         {
           symbol: 'BTC',
           name: 'Bitcoin',
-          balance: 0,
+          balance: btcBalance,
           icon: 'btc',
           color: 'from-orange-400 to-amber-500',
-          comingSoon: true,
+          history: [],
         },
         {
           symbol: 'ETH',
           name: 'Ethereum',
-          balance: 0,
+          balance: ethBalance,
           icon: 'eth',
           color: 'from-blue-400 to-indigo-500',
-          comingSoon: true,
+          history: [],
         },
-        {
-          symbol: 'SOL',
-          name: 'Solana',
-          balance: 0,
-          icon: 'sol',
-          color: 'from-violet-400 to-purple-500',
-          comingSoon: true,
-        }
       );
 
       // v2.3.31-beta: Check BOTH local ref AND global localStorage cooldown
@@ -849,15 +931,12 @@ Provide a brief analysis (under 250 tokens) covering:
         console.log('📋 Wallet history API response:', response);
         if (!mounted) return;
 
-        // Always merge with existing faucet transactions, even if API fails
+        // Merge with existing client-side mining transactions
         setRecentTransactions(prev => {
-          console.log('📋 Current transactions before merge:', prev.length);
-
-          // Preserve both faucet and mining transactions (client-side added)
+          // Preserve mining transactions (client-side added)
           const preservedTxs = prev.filter(tx =>
-            tx.id.startsWith('faucet-') || tx.id.startsWith('mining-')
+            tx.id.startsWith('mining-')
           );
-          console.log('📋 Transactions to preserve (faucet + mining):', preservedTxs.length);
 
           // If API call failed or returned no data, keep preserved transactions
           if (!response.success || !response.data) {
@@ -955,9 +1034,9 @@ Provide a brief analysis (under 250 tokens) covering:
         });
       } catch (err) {
         console.error('❌ Error fetching wallet history:', err);
-        // On error, preserve faucet and mining transactions
+        // On error, preserve mining transactions
         setRecentTransactions(prev => prev.filter(tx =>
-          tx.id.startsWith('faucet-') || tx.id.startsWith('mining-')
+          tx.id.startsWith('mining-')
         ));
       }
     };
@@ -1049,11 +1128,8 @@ Provide a brief analysis (under 250 tokens) covering:
         await generateWalletAddress();
         console.log('🚀 [loadData] Step 2: Calling fetchNodeStatus and fetchRecentTransactions (DIRECT - bypass debounce)...');
         // For initial load, call core functions directly to bypass debounce
-        await Promise.all([fetchNodeStatusCore(), fetchRecentTransactionsCore()]);
-        console.log('🚀 [loadData] Step 3: Both API calls completed');
-        console.log('🚀 [loadData] Step 4: Fetching wallet balances...');
-        await fetchWalletBalances();
-        console.log('🚀 [loadData] Step 5: Wallet balances fetched');
+        await Promise.all([fetchNodeStatusCore(), fetchRecentTransactionsCore(), fetchWalletBalances()]);
+        console.log('🚀 [loadData] Step 3: All API calls completed');
         loadSuccess = true;
       } catch (error) {
         console.error('❌ [loadData] Error loading data:', error);
@@ -1237,11 +1313,6 @@ Provide a brief analysis (under 250 tokens) covering:
                 eventHex
               });
             }
-          } else if (eventType === 'faucet-dispensed') {
-            console.log('🚰 FAUCET EVENT:', data);
-            console.log('🔄 Refreshing balance via fetchNodeStatus...');
-            fetchNodeStatus();
-            fetchRecentTransactions();
           } else if (eventType === 'mining_reward') {
             console.log('💎 MINING REWARD EVENT:', data);
             const currentWalletAddress = localStorage.getItem('walletAddress');
@@ -1341,14 +1412,13 @@ Provide a brief analysis (under 250 tokens) covering:
 
       // Add listeners for specific event types
       eventSource.addEventListener('balance-updated', handleSpecificEvent('balance-updated'));
-      eventSource.addEventListener('faucet-dispensed', handleSpecificEvent('faucet-dispensed'));
       eventSource.addEventListener('transaction-confirmed', handleSpecificEvent('transaction-confirmed'));
       eventSource.addEventListener('transaction-submitted', handleSpecificEvent('transaction-submitted'));
       eventSource.addEventListener('transaction-status', handleSpecificEvent('transaction-status'));
       eventSource.addEventListener('mining_reward', handleSpecificEvent('mining_reward'));
       eventSource.addEventListener('mining_stats', handleSpecificEvent('mining_stats'));
 
-      console.log('✅ SSE event listeners registered for: balance-updated, faucet-dispensed, transaction-confirmed, transaction-submitted, transaction-status, mining_reward, mining_stats');
+      console.log('✅ SSE event listeners registered for: balance-updated, transaction-confirmed, transaction-submitted, transaction-status, mining_reward, mining_stats');
 
       eventSource.onmessage = (event) => {
         console.log('📨 SSE DEFAULT MESSAGE (onmessage):', event);
@@ -1422,10 +1492,6 @@ Provide a brief analysis (under 250 tokens) covering:
             }
           } else if (data.type === 'transaction-confirmed' || data.type === 'transaction-submitted') {
             console.log('🔄 Transaction event - refreshing data');
-            fetchNodeStatus();
-            fetchRecentTransactions();
-          } else if (data.type === 'faucet-dispensed') {
-            console.log('🚰 Faucet dispensed event (onmessage) - refreshing balance');
             fetchNodeStatus();
             fetchRecentTransactions();
           } else if (data.type === 'Custom' && data.data?.event_type === 'mining_reward') {
@@ -1637,22 +1703,25 @@ Provide a brief analysis (under 250 tokens) covering:
     return () => window.removeEventListener('dex-cooldown-expired', handleDexCooldownExpired);
   }, []);
 
-  // v2.3.26-beta: Force locked balance on every render during cooldown
+  // v2.3.26-beta: Force locked balance during cooldown (check only when cooldown state changes)
+  const prevCooldownRef = useRef(false);
   useEffect(() => {
-    if (dexSwapCooldownRef.current && lockedQugBalanceRef.current !== null) {
+    if (dexSwapCooldownRef.current && lockedQugBalanceRef.current !== null && !prevCooldownRef.current) {
+      prevCooldownRef.current = true;
       const lockedBalance = lockedQugBalanceRef.current;
       setWalletBalances(wallets => {
         const qugWallet = wallets.find(w => w.symbol === 'QUG');
         if (qugWallet && qugWallet.balance !== lockedBalance) {
-          console.log('🔒 Dashboard: FORCING locked QUG balance:', lockedBalance, '(tried to show:', qugWallet.balance, ')');
           return wallets.map(wallet =>
             wallet.symbol === 'QUG' ? { ...wallet, balance: lockedBalance } : wallet
           );
         }
         return wallets;
       });
+    } else if (!dexSwapCooldownRef.current) {
+      prevCooldownRef.current = false;
     }
-  });
+  }); // Intentionally no deps - but now guarded by ref to prevent infinite loop
 
   // Listen for real-time balance updates from SSE (via App.tsx custom event)
   useEffect(() => {
@@ -1697,7 +1766,15 @@ Provide a brief analysis (under 250 tokens) covering:
               return {
                 ...wallet,
                 balance: incomingBalance,
-                history: [...(wallet.history || []), { timestamp: Date.now(), balance: incomingBalance }].slice(-20)
+                history: (() => {
+                  const prev = wallet.history || [];
+                  const last = prev[prev.length - 1];
+                  // Deduplicate: skip if same balance or within 500ms
+                  if (last && (last.balance === incomingBalance || Date.now() - last.timestamp < 500)) {
+                    return prev;
+                  }
+                  return [...prev, { timestamp: Date.now(), balance: incomingBalance }].slice(-20);
+                })()
               };
             }
             return wallet;
@@ -1707,6 +1784,11 @@ Provide a brief analysis (under 250 tokens) covering:
         // Also update balance history state
         setBalanceHistory(prev => {
           const history = prev[symbol] || [];
+          const last = history[history.length - 1];
+          // Deduplicate: skip if same balance or within 500ms
+          if (last && (last.balance === incomingBalance || Date.now() - last.timestamp < 500)) {
+            return prev;
+          }
           const newPoint: BalanceHistoryPoint = { timestamp: Date.now(), balance: incomingBalance };
           const updatedHistory = [...history, newPoint].slice(-20);
           try {
@@ -1745,6 +1827,11 @@ Provide a brief analysis (under 250 tokens) covering:
       // Update balance history and wallet balance atomically
       setBalanceHistory(prev => {
         const history = prev[symbol] || [];
+        const last = history[history.length - 1];
+        // Deduplicate: skip if same balance or within 500ms
+        if (last && (last.balance === validatedBalance || Date.now() - last.timestamp < 500)) {
+          return prev;
+        }
         const newPoint: BalanceHistoryPoint = {
           timestamp: Date.now(),
           balance: validatedBalance
@@ -1786,6 +1873,112 @@ Provide a brief analysis (under 250 tokens) covering:
     return () => {
       window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
       console.log('🔇 Dashboard: Stopped listening for wallet-balance-updated events');
+    };
+  }, []);
+
+  // v7.1.0: Instant SSE-driven transaction updates — mining rewards & transfers appear immediately
+  useEffect(() => {
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleInstantTransaction = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { symbol, balance, oldBalance, reason, rewardAmount, blockHeight, blockHash, walletAddress: eventWallet, timestamp } = customEvent.detail;
+
+      // Only handle QUG events with transaction-like reasons
+      if (symbol !== 'QUG') return;
+      const isMining = reason === 'p2p_mining_reward' || reason === 'pending_mining_reward' || reason === 'coinbase_reward';
+      const isTransfer = reason === 'transaction_received' || reason === 'transaction_sent';
+      if (!isMining && !isTransfer) return;
+
+      // Calculate amount from reward or balance diff
+      const amount = rewardAmount || (balance && oldBalance ? Math.abs(balance - oldBalance) : 0);
+      if (amount <= 0) return;
+
+      // Create an instant transaction entry
+      const txId = `sse-${reason}-${blockHeight || Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const newTx: Transaction = {
+        id: txId,
+        type: isMining ? 'mining' : (reason === 'transaction_sent' ? 'send' : 'receive'),
+        amount,
+        from: isMining ? 'Mining Reward' : (reason === 'transaction_sent' ? (eventWallet || '') : ''),
+        to: isMining ? (eventWallet || '') : (reason === 'transaction_received' ? (eventWallet || '') : ''),
+        timestamp: timestamp || new Date().toISOString(),
+        txHash: blockHash || txId,
+      };
+
+      console.log('⚡ Dashboard: Instant SSE transaction:', newTx.type, amount.toFixed(6), 'QUG');
+
+      setRecentTransactions(prev => {
+        // Deduplicate: skip if same blockHeight+reason already exists
+        if (blockHeight && prev.some(tx => tx.txHash === blockHash)) return prev;
+        // Add at top and keep max 100
+        const updated = [newTx, ...prev].slice(0, 100);
+        return updated;
+      });
+
+      // Debounced background refetch to reconcile with full API history (replaces instant entries)
+      if (refetchTimer) clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(async () => {
+        const currentWalletAddress = localStorage.getItem('walletAddress') || '';
+        if (!currentWalletAddress) return;
+        try {
+          const response = await qnkAPI.getWalletHistory(currentWalletAddress, 100);
+          if (response.success && response.data) {
+            const burnAddress = '0000000000000000000000000000000000000000000000000000000000000000';
+            const transformedTransactions: Transaction[] = response.data
+              .filter((tx: any) => {
+                if (tx.tx_type !== 'swap' && (!tx.from || !tx.to)) return false;
+                if (tx.from === burnAddress) return false;
+                return true;
+              })
+              .map((tx: any) => {
+                let type: 'receive' | 'send' | 'mining' | 'swap';
+                if (tx.tx_type === 'swap') type = 'swap';
+                else if (tx.tx_type === 'mining_reward') type = 'mining';
+                else if (tx.direction === 'received') type = 'receive';
+                else type = 'send';
+                const ts = typeof tx.timestamp === 'number' ? new Date(tx.timestamp * 1000).toISOString() : tx.timestamp;
+                const rawAmt = typeof tx.amount === 'string' ? parseFloat(tx.amount) : (tx.amount || 0);
+                const toHex = tx.to?.startsWith('qnk') ? tx.to.substring(3) : (tx.to || '');
+                const fromHex = tx.from?.startsWith('qnk') ? tx.from.substring(3) : (tx.from || '');
+                return {
+                  id: tx.id,
+                  type,
+                  amount: rawAmt / 1e24,
+                  from: fromHex === burnAddress ? 'Burn Address' : tx.from,
+                  to: toHex === burnAddress ? 'Nitro Points Purchase ⚡' : tx.to,
+                  timestamp: ts,
+                  txHash: tx.id,
+                  tokenSymbol: tx.token_symbol,
+                  tokenAddress: tx.token_address,
+                  amountOut: tx.amount_out,
+                  tokenIn: tx.token_in,
+                  tokenOut: tx.token_out,
+                };
+              });
+
+            setRecentTransactions(prev => {
+              const preserved = prev.filter(tx => tx.id.startsWith('mining-'));
+              const all = [...preserved, ...transformedTransactions];
+              const unique = all.filter((tx, i, s) => i === s.findIndex(t => t.id === tx.id));
+              return unique.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+            });
+            setTransactionError(null);
+            console.log('📋 Dashboard: Background refetch complete -', transformedTransactions.length, 'transactions');
+          }
+        } catch (err) {
+          console.warn('Background transaction refetch failed:', err);
+        }
+      }, 3000); // 3s debounce to batch rapid mining rewards
+    };
+
+    window.addEventListener('wallet-balance-updated', handleInstantTransaction);
+    console.log('⚡ Dashboard: Listening for instant SSE transaction updates');
+
+    return () => {
+      window.removeEventListener('wallet-balance-updated', handleInstantTransaction);
+      if (refetchTimer) clearTimeout(refetchTimer);
+      console.log('🔇 Dashboard: Stopped listening for instant SSE transactions');
     };
   }, []);
 
@@ -1883,37 +2076,34 @@ Provide a brief analysis (under 250 tokens) covering:
           console.warn('⚠️ Payment API not available - USD wallet features disabled');
         }
 
-        // 🚨 v2.3.7-beta: Fetch QUGUSD balance with cache fallback
-        const cachedQugusd = localStorage.getItem('cachedQugusdBalance');
-        const cachedQugusdVal = cachedQugusd ? parseFloat(cachedQugusd) : 0;
-        const previousHighestQugusd = highestKnownBalancesRef.current['QUGUSD'] || 0;
-        let qugusdBalance = Math.max(previousHighestQugusd, cachedQugusdVal);
+        // v6.5.1: Fetch QUGUSD balance - trust backend, no anti-zero override
+        let qugusdBalance = 0;
 
         try {
           const response = await qnkAPI.getMultiTokenBalance();
           if (response.success && response.data && response.data.tokens) {
-            // API returns tokens as object with uppercase keys: { QUG: {...}, QUGUSD: {...} }
             const tokensObj = response.data.tokens;
 
-            // Try to get QUGUSD balance
-            let fetchedQugusd = 0;
             if (tokensObj.QUGUSD && tokensObj.QUGUSD.balance_base_units > 0) {
-              fetchedQugusd = tokensObj.QUGUSD.balance_base_units / 1e24;
+              qugusdBalance = tokensObj.QUGUSD.balance_base_units / 1e24;
             } else if (tokensObj.qugusd && tokensObj.qugusd.balance !== undefined) {
-              fetchedQugusd = parseFloat(tokensObj.qugusd.balance) || 0;
+              qugusdBalance = parseFloat(tokensObj.qugusd.balance) || 0;
             }
 
-            // Only use fetched if it's valid
-            const referenceQugusd = Math.max(previousHighestQugusd, cachedQugusdVal);
-            const minAcceptable = Math.max(0, referenceQugusd * 0.9 - 1);
-            if (fetchedQugusd >= minAcceptable || referenceQugusd === 0) {
-              qugusdBalance = fetchedQugusd;
-              if (fetchedQugusd > 0) {
-                localStorage.setItem('cachedQugusdBalance', fetchedQugusd.toString());
+            if (qugusdBalance > 0) {
+              localStorage.setItem('cachedQugusdBalance', qugusdBalance.toString());
+              if (qugusdBalance > (highestKnownBalancesRef.current['QUGUSD'] || 0)) {
+                highestKnownBalancesRef.current['QUGUSD'] = qugusdBalance;
               }
+            } else {
+              localStorage.removeItem('cachedQugusdBalance');
+              highestKnownBalancesRef.current['QUGUSD'] = 0;
             }
           }
         } catch (error) {
+          // On fetch failure, fall back to cache
+          const cachedQugusd = localStorage.getItem('cachedQugusdBalance');
+          qugusdBalance = cachedQugusd ? parseFloat(cachedQugusd) || 0 : 0;
           console.warn('⚠️ Failed to fetch QUGUSD in refresh, using cached:', qugusdBalance);
         }
 
@@ -1936,50 +2126,42 @@ Provide a brief analysis (under 250 tokens) covering:
           console.log('📊 Initialized QUGUSD with balance:', qugusdBalance, 'history:', qugusdHistory.length, 'points');
         }
 
-        // Add placeholders
+        // Bridge wallets (with empty history to prevent "Loading..." display)
         balances.push(
           {
             symbol: 'ZEC',
             name: 'Zcash (Shielded)',
-            balance: 0,
+            balance: zecBalance,
             icon: 'zec',
-            color: 'from-yellow-400 to-amber-600',
-            comingSoon: true,
+            color: 'from-purple-400 to-indigo-600',
             shieldedOnly: true,
+            history: [],
           },
           {
             symbol: 'IRON',
             name: 'Iron Fish',
             balance: 0,
             icon: 'iron',
-            color: 'from-slate-400 to-zinc-600',
-            comingSoon: true,
+            color: 'from-cyan-400 to-slate-500',
             shieldedOnly: true,
+            history: [],
           },
           {
             symbol: 'BTC',
             name: 'Bitcoin',
-            balance: 0,
+            balance: btcBalance,
             icon: 'btc',
             color: 'from-orange-400 to-amber-500',
-            comingSoon: true,
+            history: [],
           },
           {
             symbol: 'ETH',
             name: 'Ethereum',
-            balance: 0,
+            balance: ethBalance,
             icon: 'eth',
             color: 'from-blue-400 to-indigo-500',
-            comingSoon: true,
+            history: [],
           },
-          {
-            symbol: 'SOL',
-            name: 'Solana',
-            balance: 0,
-            icon: 'sol',
-            color: 'from-violet-400 to-purple-500',
-            comingSoon: true,
-          }
         );
 
         // v2.3.31-beta: Check BOTH local ref AND global localStorage cooldown
@@ -2004,7 +2186,7 @@ Provide a brief analysis (under 250 tokens) covering:
 
       refresh();
     }
-  }, [refreshTrigger, nodeStatus?.balance]);
+  }, [refreshTrigger]); // Removed nodeStatus?.balance - SSE handles balance updates
 
   // v3.0.6-beta: Updated to show more decimals for small amounts
   const formatBalance = (amount: number, hidden = false) => {
@@ -2060,50 +2242,7 @@ Provide a brief analysis (under 250 tokens) covering:
     setTimeout(() => setCopiedAddress(false), 2000);
   };
 
-  const requestFaucetTokens = async () => {
-    setFaucetLoading(true);
-    setFaucetMessage('');
-
-    try {
-      const currentWalletAddress = localStorage.getItem('walletAddress');
-      if (!currentWalletAddress) {
-        setFaucetMessage('Error: No wallet address found');
-        setFaucetLoading(false);
-        return;
-      }
-
-      const result = await qnkAPI.requestFaucet(currentWalletAddress);
-
-      if (result.success) {
-        const receivedAmount = result.data?.amount_qnk || result.data?.new_balance_qnk || 10;
-
-        if (result.data?.new_balance_qnk) {
-          setNodeStatus(prev => prev ? {...prev, balance: result.data.new_balance_qnk} : prev);
-        }
-
-        // NOTE: No need to dispatch to App.tsx - it has its own SSE connection
-
-        // Add faucet transaction to recent activity
-        const faucetTransaction: Transaction = {
-          id: `faucet-${Date.now()}`,
-          type: 'receive',
-          amount: receivedAmount,
-          from: 'Faucet',
-          to: currentWalletAddress,
-          timestamp: new Date().toISOString(),
-          txHash: result.data?.tx_hash || `faucet-${Date.now()}`
-        };
-        setRecentTransactions(prev => [faucetTransaction, ...prev]);
-      } else {
-        setFaucetMessage(result.error || 'Faucet request failed');
-      }
-    } catch (error) {
-      setFaucetMessage('Network error: Could not connect to faucet');
-      console.error('Faucet error:', error);
-    } finally {
-      setFaucetLoading(false);
-    }
-  };
+  // v7.0.0: Faucet removed — all QUG earned through mining
 
   // Handle Loan Payback
   const handleLoanPayback = (loanId: string) => {
@@ -2227,7 +2366,15 @@ Provide a brief analysis (under 250 tokens) covering:
 
   return (
     <div className="space-y-8">
-      {/* Phase 8 Transition Modal */}
+      {/* Welcome to Mainnet Modal */}
+      {showMainnetWelcome && (
+        <WelcomeMainnetModal onClose={() => setShowMainnetWelcome(false)} />
+      )}
+      {/* Bounty Campaign Modal */}
+      {showBountyModal && (
+        <BountyModal onClose={() => setShowBountyModal(false)} />
+      )}
+      {/* Phase Transition Modal (legacy) */}
       {showPhaseModal && (
         <PhaseTransitionModal
           onClose={() => {
@@ -2274,11 +2421,246 @@ Provide a brief analysis (under 250 tokens) covering:
         </div>
       </div>
 
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* CYBERPUNK TAB NAVIGATION                                       */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      <div className="mt-6 mb-4">
+        <div
+          className="relative rounded-2xl p-1 backdrop-blur-xl overflow-hidden"
+          style={{
+            background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.8), rgba(20, 15, 40, 0.8))',
+            border: '1px solid rgba(34, 211, 238, 0.2)',
+            boxShadow: '0 0 20px rgba(34, 211, 238, 0.08), inset 0 0 15px rgba(34, 211, 238, 0.03)'
+          }}
+        >
+          {/* Tab bar with reorder gear */}
+          <div className="relative flex gap-1 z-10">
+            {(() => {
+              const tabDefs: Record<string, { label: string; Icon: any; comingSoon?: boolean }> = {
+                wallet: { label: 'WALLET', Icon: Wallet },
+                mail: { label: 'MAIL', Icon: Mail },
+                calendar: { label: 'CALENDAR', Icon: Calendar },
+                chat: { label: 'CHAT', Icon: MessageCircle, comingSoon: true },
+              };
+              return tabOrder.map((tabId) => {
+                const tab = tabDefs[tabId];
+                if (!tab) return null;
+                const isActive = activeDashboardTab === tabId;
+                const isMail = tabId === 'mail';
+                return (
+                  <motion.button
+                    key={tabId}
+                    onClick={() => !tab.comingSoon && setActiveDashboardTab(tabId)}
+                    disabled={tab.comingSoon}
+                    className={`
+                      flex-1 py-3.5 px-4 rounded-xl font-semibold uppercase tracking-widest
+                      transition-all duration-300 relative overflow-hidden
+                      text-xs lg:text-sm flex items-center justify-center gap-2
+                      ${isActive
+                        ? 'text-white'
+                        : tab.comingSoon
+                        ? 'text-gray-600 cursor-not-allowed'
+                        : 'text-cyan-400/70 hover:text-cyan-200 cursor-pointer'
+                      }
+                    `}
+                    whileHover={!tab.comingSoon ? { scale: 1.02 } : {}}
+                    whileTap={!tab.comingSoon ? { scale: 0.97 } : {}}
+                    style={{
+                      background: isActive
+                        ? 'linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(147, 51, 234, 0.12))'
+                        : 'transparent',
+                      borderBottom: isActive
+                        ? '2px solid rgba(34, 211, 238, 0.7)'
+                        : '2px solid transparent',
+                    }}
+                  >
+                    {isActive && (
+                      <motion.div
+                        className="absolute inset-0 -z-10"
+                        style={{ background: 'radial-gradient(circle, rgba(34, 211, 238, 0.15), transparent 70%)' }}
+                        animate={{ opacity: [0.3, 0.5, 0.3] }}
+                        transition={{ duration: 3, repeat: Infinity }}
+                      />
+                    )}
+                    <div className="relative">
+                      <tab.Icon className="w-4 h-4" />
+                      {/* Unread email notification badge */}
+                      {isMail && unreadEmailCount > 0 && (
+                        <div className="absolute -top-2.5 -right-3 pointer-events-none">
+                          {/* Outer pulsing ring */}
+                          <motion.div
+                            className="absolute inset-0 rounded-full"
+                            style={{
+                              width: 20, height: 20,
+                              background: 'radial-gradient(circle, rgba(255, 60, 120, 0.5), transparent 70%)',
+                              filter: 'blur(3px)',
+                              transform: 'translate(-3px, -3px)',
+                            }}
+                            animate={{ scale: [1, 1.8, 1], opacity: [0.7, 0, 0.7] }}
+                            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+                          />
+                          {/* Second pulse ring offset */}
+                          <motion.div
+                            className="absolute inset-0 rounded-full"
+                            style={{
+                              width: 18, height: 18,
+                              border: '1px solid rgba(255, 100, 150, 0.6)',
+                              transform: 'translate(-2px, -2px)',
+                            }}
+                            animate={{ scale: [1, 2.2, 1], opacity: [0.5, 0, 0.5] }}
+                            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut', delay: 0.5 }}
+                          />
+                          {/* Badge core */}
+                          <motion.div
+                            className="relative flex items-center justify-center rounded-full"
+                            style={{
+                              minWidth: 16, height: 16,
+                              padding: '0 4px',
+                              background: 'linear-gradient(135deg, #FF3C78, #FF6B9D, #E91E8C)',
+                              boxShadow: '0 0 8px rgba(255, 60, 120, 0.8), 0 0 16px rgba(255, 60, 120, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.3)',
+                              border: '1.5px solid rgba(255, 150, 200, 0.5)',
+                            }}
+                            animate={{ scale: [1, 1.12, 1] }}
+                            transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                          >
+                            <span className="text-[9px] font-black text-white leading-none" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}>
+                              {unreadEmailCount > 99 ? '99+' : unreadEmailCount}
+                            </span>
+                          </motion.div>
+                        </div>
+                      )}
+                    </div>
+                    <span>{tab.label}</span>
+                    {tab.comingSoon && (
+                      <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded-full border border-amber-500/30 ml-1">
+                        SOON
+                      </span>
+                    )}
+                  </motion.button>
+                );
+              });
+            })()}
+
+            {/* Tab order settings gear */}
+            <motion.button
+              onClick={() => setShowTabSettings(!showTabSettings)}
+              className="flex items-center justify-center px-2 rounded-xl transition-all"
+              whileHover={{ scale: 1.1, rotate: 30 }}
+              whileTap={{ scale: 0.9 }}
+              style={{ color: showTabSettings ? '#22D3EE' : 'rgba(34, 211, 238, 0.35)' }}
+              title="Reorder tabs"
+            >
+              <Settings2 className="w-3.5 h-3.5" />
+            </motion.button>
+          </div>
+
+          {/* Tab reorder dropdown */}
+          <AnimatePresence>
+            {showTabSettings && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="overflow-hidden"
+              >
+                <div
+                  className="mx-2 mb-2 mt-1 rounded-xl p-3"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(10, 5, 30, 0.9), rgba(15, 10, 35, 0.9))',
+                    border: '1px solid rgba(34, 211, 238, 0.15)',
+                  }}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <GripVertical className="w-3 h-3 text-cyan-400/50" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400/60">Tab Order</span>
+                  </div>
+                  <div className="space-y-1">
+                    {tabOrder.map((tabId, idx) => {
+                      const labels: Record<string, string> = { wallet: 'Wallet', mail: 'Mail', calendar: 'Calendar', chat: 'Chat' };
+                      const Icons: Record<string, any> = { wallet: Wallet, mail: Mail, calendar: Calendar, chat: MessageCircle };
+                      const TabIcon = Icons[tabId];
+                      return (
+                        <div
+                          key={tabId}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg"
+                          style={{
+                            background: activeDashboardTab === tabId
+                              ? 'rgba(34, 211, 238, 0.08)'
+                              : 'transparent',
+                          }}
+                        >
+                          <span className="text-[10px] font-mono text-cyan-400/40 w-3">{idx + 1}</span>
+                          <TabIcon className="w-3.5 h-3.5 text-cyan-300/60" />
+                          <span className="text-xs text-gray-300 flex-1">{labels[tabId]}</span>
+                          <motion.button
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.8 }}
+                            onClick={() => moveTab(tabId, 'up')}
+                            disabled={idx === 0}
+                            className="p-0.5 rounded disabled:opacity-20"
+                            style={{ color: 'rgba(34, 211, 238, 0.6)' }}
+                          >
+                            <ArrowUp className="w-3 h-3" />
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.8 }}
+                            onClick={() => moveTab(tabId, 'down')}
+                            disabled={idx === tabOrder.length - 1}
+                            className="p-0.5 rounded disabled:opacity-20"
+                            style={{ color: 'rgba(34, 211, 238, 0.6)' }}
+                          >
+                            <ArrowDown className="w-3 h-3" />
+                          </motion.button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+        {/* Decorative scan line */}
+        <div className="h-px mt-2 opacity-20" style={{ background: 'linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.5), transparent)' }} />
+      </div>
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB CONTENT                                                    */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      <AnimatePresence mode="wait">
+        {activeDashboardTab === 'mail' && (
+          <motion.div key="mail-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}>
+            <EmailScreen />
+          </motion.div>
+        )}
+        {activeDashboardTab === 'calendar' && (
+          <motion.div key="calendar-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}
+            style={{ position: 'relative', minHeight: 600 }}>
+            <CalendarScreen />
+          </motion.div>
+        )}
+        {activeDashboardTab === 'chat' && (
+          <motion.div key="chat-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}>
+            <div
+              className="rounded-2xl p-12 text-center backdrop-blur-xl"
+              style={{ background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.8), rgba(20, 15, 40, 0.8))', border: '1px solid rgba(34, 211, 238, 0.15)' }}
+            >
+              <MessageCircle className="w-16 h-16 mx-auto mb-4 text-cyan-400/30" />
+              <h3 className="text-xl font-bold text-white mb-2">P2P Chat</h3>
+              <p className="text-gray-500 text-sm">Decentralized peer-to-peer chat over libp2p with Tor routing. Coming soon.</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {activeDashboardTab === 'wallet' && <>
       {/* Multi-Wallet Card */}
       <motion.div
         className="backdrop-blur-xl rounded-3xl p-6 relative overflow-hidden"
         style={{
-          background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+          background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.9) 0%, rgba(25, 25, 40, 0.9) 100%)',
           border: '2px solid rgba(212, 175, 55, 0.3)',
           boxShadow: '0 0 30px rgba(212, 175, 55, 0.2), inset 0 0 20px rgba(212, 175, 55, 0.1)'
         }}
@@ -2410,38 +2792,15 @@ Provide a brief analysis (under 250 tokens) covering:
                   }}
                   className="px-4 py-2 rounded-xl transition-colors text-sm font-medium flex items-center gap-2"
                   style={{
-                    background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(147, 51, 234, 0.15))',
-                    border: '2px solid rgba(168, 85, 247, 0.3)',
-                    color: 'rgb(192, 132, 252)'
+                    background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.2), rgba(255, 215, 0, 0.15))',
+                    border: '2px solid rgba(212, 175, 55, 0.3)',
+                    color: 'rgb(251, 191, 36)'
                   }}
                 >
                   <DollarSign className="w-4 h-4" />
                   Apply for Loan
                 </motion.button>
 
-                {nodeStatus && nodeStatus.balance === 0 && (
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={requestFaucetTokens}
-                    disabled={faucetLoading}
-                    className="px-4 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
-                    style={{
-                      background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))',
-                      border: '2px solid rgba(34, 197, 94, 0.3)',
-                      color: 'rgb(74, 222, 128)'
-                    }}
-                  >
-                    {faucetLoading ? (
-                      <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
-                        <Coins className="w-4 h-4" />
-                      </motion.div>
-                    ) : (
-                      <Coins className="w-4 h-4" />
-                    )}
-                    Get Test Tokens
-                  </motion.button>
-                )}
               </div>
             </div>
 
@@ -2466,7 +2825,13 @@ Provide a brief analysis (under 250 tokens) covering:
                     wallet={displayWallet}
                     index={index}
                     isAnimating={balanceAnimations[wallet.symbol] || false}
-                    onCardClick={!wallet.comingSoon && wallet.symbol !== 'USD' && onNavigateToSend ? () => onNavigateToSend(wallet.symbol) : undefined}
+                    onCardClick={
+                      wallet.symbol === 'BTC' ? () => setShowBitcoinSwapModal(true) :
+                      wallet.symbol === 'ZEC' ? () => setShowZcashWalletModal(true) :
+                      wallet.symbol === 'IRON' ? () => setShowIronFishWalletModal(true) :
+                      wallet.symbol === 'ETH' ? () => setShowEthereumSwapModal(true) :
+                      !wallet.comingSoon && wallet.symbol !== 'USD' && onNavigateToSend ? () => onNavigateToSend(wallet.symbol) : undefined
+                    }
                   >
                     {/* USD Action Buttons */}
                     {!wallet.comingSoon && wallet.symbol === 'USD' && (
@@ -2563,21 +2928,6 @@ Provide a brief analysis (under 250 tokens) covering:
             </div>
           </div>
 
-          {/* Messages */}
-          {faucetMessage && (
-            <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={`p-3 rounded-xl text-sm ${
-                faucetMessage.startsWith('Success')
-                  ? 'bg-quantum-green/20 text-quantum-green border border-quantum-green/30'
-                  : 'bg-quantum-pink/20 text-quantum-pink border border-quantum-pink/30'
-              }`}
-            >
-              {faucetMessage}
-            </motion.div>
-          )}
-
           {transactionError && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
@@ -2639,7 +2989,7 @@ Provide a brief analysis (under 250 tokens) covering:
       >
         <div className="backdrop-blur-xl rounded-3xl overflow-hidden"
           style={{
-            background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+            background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.9) 0%, rgba(25, 25, 40, 0.9) 100%)',
             border: '2px solid rgba(139, 92, 246, 0.3)',
             boxShadow: '0 0 30px rgba(139, 92, 246, 0.1)'
           }}
@@ -2662,7 +3012,7 @@ Provide a brief analysis (under 250 tokens) covering:
         <motion.div
           className="backdrop-blur-xl rounded-3xl p-8"
           style={{
-            background: 'linear-gradient(135deg, rgba(30, 20, 60, 0.9) 0%, rgba(50, 30, 80, 0.9) 100%)',
+            background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.9) 0%, rgba(25, 25, 40, 0.9) 100%)',
             border: '2px solid rgba(212, 175, 55, 0.2)',
             boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)'
           }}
@@ -2685,7 +3035,7 @@ Provide a brief analysis (under 250 tokens) covering:
               {/* Type Filter */}
               <div className="flex items-center gap-2 p-1 rounded-lg"
                 style={{
-                  background: 'rgba(30, 20, 60, 0.7)',
+                  background: 'rgba(15, 15, 25, 0.7)',
                   border: '1px solid rgba(212, 175, 55, 0.2)'
                 }}
               >
@@ -3507,6 +3857,8 @@ Provide a brief analysis (under 250 tokens) covering:
         )}
       </AnimatePresence>
 
+      </>}
+
       {/* Loan Application Modal */}
       {showLoanModal && (
         <LoanApplicationModal
@@ -3550,6 +3902,42 @@ Provide a brief analysis (under 250 tokens) covering:
         isOpen={showFinanceModal}
         onClose={() => setShowFinanceModal(false)}
       />
+
+      {/* Bitcoin Atomic Swap Modal */}
+      {showBitcoinSwapModal && (
+        <BitcoinSwapModal
+          isOpen={showBitcoinSwapModal}
+          onClose={() => setShowBitcoinSwapModal(false)}
+          walletAddress={walletAddress}
+        />
+      )}
+
+      {/* Zcash Shielded Wallet Modal */}
+      {showZcashWalletModal && (
+        <ZcashWalletModal
+          isOpen={showZcashWalletModal}
+          onClose={() => setShowZcashWalletModal(false)}
+          walletAddress={walletAddress}
+        />
+      )}
+
+      {/* Iron Fish Privacy Wallet Modal */}
+      {showIronFishWalletModal && (
+        <IronFishWalletModal
+          isOpen={showIronFishWalletModal}
+          onClose={() => setShowIronFishWalletModal(false)}
+          walletAddress={walletAddress}
+        />
+      )}
+
+      {/* Ethereum Atomic Swap Modal */}
+      {showEthereumSwapModal && (
+        <EthereumSwapModal
+          isOpen={showEthereumSwapModal}
+          onClose={() => setShowEthereumSwapModal(false)}
+          walletAddress={walletAddress}
+        />
+      )}
 
     </div>
   );

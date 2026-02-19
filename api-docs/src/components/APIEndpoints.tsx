@@ -77,7 +77,7 @@ export default function APIEndpoints() {
       path: '/api/v1/status',
       description: 'Get node status, TPS metrics, and network health',
       response: '{ "success": true, "data": { "status": "running", "tps": 48000, "peers": 12 } }',
-      example: 'curl http://localhost:8080/api/v1/status'
+      example: 'curl https://quillon.xyz/api/v1/status'
     },
 
     // Wallet Management
@@ -86,14 +86,14 @@ export default function APIEndpoints() {
       path: '/api/v1/wallets/create',
       description: 'Create new quantum-resistant wallet with Dilithium5 keys',
       response: '{ "success": true, "data": { "address": "qnk470294cd0...", "private_key": "...", "mnemonic": "word1 word2..." } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/wallets/create'
+      example: 'curl -X POST https://quillon.xyz/api/v1/wallets/create'
     },
     {
       method: 'GET',
       path: '/api/v1/wallets/{address}/balance',
       description: 'Get wallet QUG balance (now requires authentication)',
       response: '{ "success": true, "data": { "balance": 1000000000, "balance_qug": "10.00000000" } }',
-      example: 'curl http://localhost:8080/api/v1/wallets/qnk470294cd0.../balance \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
+      example: 'curl https://quillon.xyz/api/v1/wallets/qnk470294cd0.../balance \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
       requiresAuth: true,
       authType: 'Wallet Signature'
     },
@@ -102,7 +102,7 @@ export default function APIEndpoints() {
       path: '/api/v1/wallets/{address}/token-balances',
       description: 'Get all token balances for a wallet (QUG, QUGUSD, custom tokens)',
       response: '{ "success": true, "data": { "QUG": 1000, "QUGUSD": 500, "MyToken": 250 } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/wallets/qnk470294cd0.../token-balances \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
+      example: 'curl -X POST https://quillon.xyz/api/v1/wallets/qnk470294cd0.../token-balances \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
       requiresAuth: true,
       authType: 'Wallet Signature'
     },
@@ -114,7 +114,7 @@ export default function APIEndpoints() {
       description: 'Request free QUG tokens (dev/testnet)',
       request: '{ "wallet_address": "qnk470294cd0..." }',
       response: '{ "success": true, "data": { "amount": 10000000000, "tx_hash": "0x..." } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/faucet \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk470294cd0..."}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/faucet \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk470294cd0..."}\''
     },
 
     // Transactions
@@ -124,21 +124,21 @@ export default function APIEndpoints() {
       description: 'Submit signed transaction to the network',
       request: '{ "from": "qnk...", "to": "qnk...", "amount": 1000000000, "signature": "0x..." }',
       response: '{ "success": true, "data": { "tx_hash": "0x...", "status": "pending" } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/transactions/submit \\\n  -H "Content-Type: application/json" \\\n  -d \'{"from":"qnk...","to":"qnk...","amount":1000000000,"signature":"0x..."}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/transactions/submit \\\n  -H "Content-Type: application/json" \\\n  -d \'{"from":"qnk...","to":"qnk...","amount":1000000000,"signature":"0x..."}\''
     },
     {
       method: 'GET',
       path: '/api/v1/transactions/{hash}',
       description: 'Get transaction details by hash',
       response: '{ "success": true, "data": { "hash": "0x...", "from": "qnk...", "to": "qnk...", "status": "confirmed" } }',
-      example: 'curl http://localhost:8080/api/v1/transactions/0x...'
+      example: 'curl https://quillon.xyz/api/v1/transactions/0x...'
     },
     {
       method: 'POST',
       path: '/api/v1/wallets/{address}/transactions/recent',
       description: 'Get recent transactions for a wallet (requires auth)',
       response: '{ "success": true, "data": [{ "hash": "0x...", "type": "send", "amount": 1000 }] }',
-      example: 'curl -X POST http://localhost:8080/api/v1/wallets/qnk.../transactions/recent \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
+      example: 'curl -X POST https://quillon.xyz/api/v1/wallets/qnk.../transactions/recent \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890"',
       requiresAuth: true,
       authType: 'Wallet Signature'
     },
@@ -150,7 +150,7 @@ export default function APIEndpoints() {
       description: 'Execute token swap through liquidity pools',
       request: '{ "from_token": "QUG", "to_token": "QUGUSD", "amount_in": 100000000, "min_amount_out": 99000000, "wallet_address": "qnk..." }',
       response: '{ "success": true, "data": { "amount_out": 99500000, "price_impact": 0.5, "tx_hash": "0x..." } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/dex/swap \\\n  -H "Content-Type: application/json" \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890" \\\n  -d \'{"from_token":"QUG","to_token":"QUGUSD","amount_in":100000000,"min_amount_out":99000000,"wallet_address":"qnk..."}\'',
+      example: 'curl -X POST https://quillon.xyz/api/v1/dex/swap \\\n  -H "Content-Type: application/json" \\\n  -H "X-Wallet-Auth: wallet=qnk...; signature=0x...; message=timestamp:1234567890" \\\n  -d \'{"from_token":"QUG","to_token":"QUGUSD","amount_in":100000000,"min_amount_out":99000000,"wallet_address":"qnk..."}\'',
       requiresAuth: true,
       authType: 'Wallet Signature'
     },
@@ -159,7 +159,7 @@ export default function APIEndpoints() {
       path: '/api/v1/dex/pools',
       description: 'Get all liquidity pools with TVL and APR',
       response: '{ "success": true, "data": [{ "pair": "QUG/QUGUSD", "tvl": 1000000, "apr": 15.5 }] }',
-      example: 'curl http://localhost:8080/api/v1/dex/pools'
+      example: 'curl https://quillon.xyz/api/v1/dex/pools'
     },
 
     // Stripe Payment Integration (NEW)
@@ -169,7 +169,7 @@ export default function APIEndpoints() {
       description: 'Create Stripe payment intent to top up USD wallet balance',
       request: '{ "wallet_address": "qnk...", "amount": "10.00" }',
       response: '{ "success": true, "data": { "payment_intent_id": "pi_...", "client_secret": "...", "amount": 1000 } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/payment/create-intent \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk...","amount":"10.00"}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/payment/create-intent \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk...","amount":"10.00"}\''
     },
     {
       method: 'POST',
@@ -177,7 +177,7 @@ export default function APIEndpoints() {
       description: 'Get USD balance from Stripe wallet',
       request: '{ "wallet_address": "qnk..." }',
       response: '{ "success": true, "data": { "wallet_address": "qnk...", "balance_usd": "10.00", "balance_cents": 1000 } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/payment/balance \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk..."}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/payment/balance \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk..."}\''
     },
     {
       method: 'POST',
@@ -185,7 +185,7 @@ export default function APIEndpoints() {
       description: 'Convert USD to QUGUSD stablecoin (1:1 with 0.1% fee)',
       request: '{ "wallet_address": "qnk...", "usd_amount": "10.00" }',
       response: '{ "success": true, "data": { "usd_deducted": "10.00", "qugusd_minted": "9.99", "conversion_fee": "0.01" } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/payment/convert-to-qugusd \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk...","usd_amount":"10.00"}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/payment/convert-to-qugusd \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wallet_address":"qnk...","usd_amount":"10.00"}\''
     },
     {
       method: 'POST',
@@ -193,7 +193,7 @@ export default function APIEndpoints() {
       description: 'Transfer USD from one wallet to another (wallet-to-wallet)',
       request: '{ "from_wallet": "qnk...", "to_wallet": "qnk...", "amount_usd": "5.00" }',
       response: '{ "success": true, "data": { "amount_transferred": "5.00", "transaction_id": "...", "from_new_balance": "5.00" } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/payment/transfer \\\n  -H "Content-Type: application/json" \\\n  -d \'{"from_wallet":"qnk...","to_wallet":"qnk...","amount_usd":"5.00"}\''
+      example: 'curl -X POST https://quillon.xyz/api/v1/payment/transfer \\\n  -H "Content-Type: application/json" \\\n  -d \'{"from_wallet":"qnk...","to_wallet":"qnk...","amount_usd":"5.00"}\''
     },
 
     // Smart Contracts
@@ -203,7 +203,7 @@ export default function APIEndpoints() {
       description: 'Deploy WASM smart contract to the network',
       request: '{ "wasm_code": "0x...", "constructor_args": [], "owner": "qnk..." }',
       response: '{ "success": true, "data": { "contract_address": "qnk...", "tx_hash": "0x..." } }',
-      example: 'curl -X POST http://localhost:8080/api/v1/contracts/deploy \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wasm_code":"0x...","owner":"qnk..."}\'',
+      example: 'curl -X POST https://quillon.xyz/api/v1/contracts/deploy \\\n  -H "Content-Type: application/json" \\\n  -d \'{"wasm_code":"0x...","owner":"qnk..."}\'',
       requiresAuth: true,
       authType: 'Wallet Signature'
     },
@@ -224,10 +224,10 @@ export default function APIEndpoints() {
           <h3 className="text-lg font-bold text-white">Base URL</h3>
         </div>
         <code className="block p-3 bg-quantum-dark/50 rounded-lg text-quantum-cyan border border-quantum-purple/20">
-          http://localhost:8080
+          https://quillon.xyz
         </code>
         <p className="text-gray-400 text-sm mt-2">
-          Production: <code className="text-quantum-cyan">https://api.quillon.xyz</code>
+          Production: <code className="text-quantum-cyan">https://quillon.xyz</code>
         </p>
       </div>
 

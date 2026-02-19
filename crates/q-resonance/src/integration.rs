@@ -928,6 +928,35 @@ impl ResonanceCoordinator {
             network_position,
         ).await
     }
+
+    /// v6.2.0: Get the number of rounds currently stored (for diagnostics)
+    pub fn round_count(&self) -> usize {
+        self.vertices_by_round.len()
+    }
+
+    /// v6.1.2: Clean up old round data to prevent unbounded memory growth
+    /// Called from periodic cleanup task in main.rs
+    pub fn cleanup_old_rounds(&self, keep_rounds: u64) -> usize {
+        let latest_round = self.vertices_by_round.iter()
+            .map(|entry| *entry.key())
+            .max()
+            .unwrap_or(0);
+        let cutoff = latest_round.saturating_sub(keep_rounds);
+        if cutoff == 0 {
+            return 0;
+        }
+
+        let rounds_to_remove: Vec<u64> = self.vertices_by_round.iter()
+            .filter(|entry| *entry.key() < cutoff)
+            .map(|entry| *entry.key())
+            .collect();
+
+        let removed = rounds_to_remove.len();
+        for round in rounds_to_remove {
+            self.vertices_by_round.remove(&round);
+        }
+        removed
+    }
 }
 
 #[cfg(test)]

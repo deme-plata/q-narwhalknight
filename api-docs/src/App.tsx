@@ -238,9 +238,9 @@ function OverviewSection({ setActiveTab }: { setActiveTab: (tab: Tab) => void })
         </h2>
         <div className="space-y-4">
           {[
-            { step: '1', text: 'Send a POST request to /api/v1/wallets/create', code: 'POST http://localhost:8080/api/v1/wallets/create' },
+            { step: '1', text: 'Send a POST request to /api/v1/wallets/create', code: 'POST https://quillon.xyz/api/v1/wallets/create' },
             { step: '2', text: 'Receive wallet address and private key', code: '{ "address": "qnk...", "private_key": "..." }' },
-            { step: '3', text: 'Check balance', code: 'GET /api/v1/wallets/qnk.../balance' },
+            { step: '3', text: 'Check balance', code: 'GET https://quillon.xyz/api/v1/wallets/qnk.../balance' },
           ].map((item) => (
             <div key={item.step} className="flex items-start gap-4">
               <div className="w-8 h-8 bg-quantum-cyan/20 rounded-full flex items-center justify-center flex-shrink-0 border border-quantum-cyan/30">

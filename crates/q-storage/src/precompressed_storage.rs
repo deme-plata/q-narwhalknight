@@ -91,7 +91,10 @@ impl PrecompressedBlock {
             CompressionAlgorithm::None => raw.to_vec(),
 
             CompressionAlgorithm::Lz4 => {
-                lz4::block::compress(raw, None, true)
+                // v7.3.4: prepend_size=false — we store original_size in our own header.
+                // Using true caused decompress (with explicit size) to read the 4-byte
+                // prefix as compressed data, corrupting every block after compaction.
+                lz4::block::compress(raw, None, false)
                     .context("LZ4 compression failed")?
             }
 
@@ -102,7 +105,7 @@ impl PrecompressedBlock {
 
             CompressionAlgorithm::Lz4Dict => {
                 // For now, same as LZ4 (dictionary support requires shared dict)
-                lz4::block::compress(raw, None, true)
+                lz4::block::compress(raw, None, false)
                     .context("LZ4 compression failed")?
             }
         };
@@ -134,12 +137,39 @@ impl PrecompressedBlock {
             CompressionAlgorithm::None => Ok(self.data.clone()),
 
             CompressionAlgorithm::Lz4 | CompressionAlgorithm::Lz4Dict => {
-                lz4::block::decompress(&self.data, Some(self.original_size as i32))
-                    .context("LZ4 decompression failed")
+                // 🛡️ v5.1.1: Cap original_size to prevent DoS/OOM from corrupted metadata
+                const MAX_DECOMPRESSED: usize = 200_000_000;
+                if self.original_size as usize > MAX_DECOMPRESSED {
+                    anyhow::bail!("LZ4 original_size {} exceeds safety limit of {} bytes",
+                                  self.original_size, MAX_DECOMPRESSED);
+                }
+                // v7.3.7: Two-format LZ4 decompression for backwards compatibility.
+                // Pre-fix binaries (before 2026-02-18 21:05) used compress(raw, None, true)
+                // which prepends a 4-byte size prefix to the LZ4 data. Post-fix uses false.
+                // New format: decompress(data, Some(original_size)) — data has NO size prefix
+                // Old format: decompress(data, None) — data HAS a 4-byte size prefix
+                // Try new format first; fall back to old format for database compatibility.
+                match lz4::block::decompress(&self.data, Some(self.original_size as i32)) {
+                    Ok(decompressed) => Ok(decompressed),
+                    Err(e1) => {
+                        if self.data.len() >= 4 {
+                            warn!("🔄 [LZ4-COMPAT] New-format decompress failed ({}), trying legacy prepend_size format", e1);
+                            lz4::block::decompress(&self.data, None)
+                                .map_err(|e2| anyhow::anyhow!(
+                                    "LZ4 decompression failed in both formats: new={}, legacy={}", e1, e2
+                                ))
+                        } else {
+                            Err(anyhow::anyhow!("LZ4 decompression failed: {}", e1))
+                        }
+                    }
+                }
             }
 
             CompressionAlgorithm::Zstd => {
-                zstd::bulk::decompress(&self.data, self.original_size as usize)
+                // 🛡️ v5.1.1: Cap decompression size
+                const MAX_DECOMPRESSED: usize = 200_000_000;
+                let capped_size = (self.original_size as usize).min(MAX_DECOMPRESSED);
+                zstd::bulk::decompress(&self.data, capped_size)
                     .context("Zstd decompression failed")
             }
         }

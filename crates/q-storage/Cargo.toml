@@ -53,6 +53,9 @@ winter-crypto = "0.9"
 # LRU cache for bounded memory (v0.8.0-beta security fix)
 lru = "0.12"
 
+# CPU detection for auto-scaling RocksDB threads (v5.1.0)
+num_cpus = "1.16"
+
 # DashMap for concurrent peer trust tracking (v0.9.15-beta)
 dashmap = "5.5"
 

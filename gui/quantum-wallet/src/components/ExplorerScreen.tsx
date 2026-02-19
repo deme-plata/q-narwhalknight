@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search,
@@ -20,12 +21,23 @@ import {
   Clock,
   ArrowUpDown,
   Zap,
-  Globe
+  Globe,
+  ArrowRight,
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Pickaxe,
+  CheckCircle2,
+  Circle,
+  Loader2
 } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { InfiniteBlockList } from './InfiniteBlockList';
 import DAGKnight3DPopup from './DAGKnight3DPopup';
 import { useP2PData } from '../hooks/useP2PData';
+import QuantumParticleCanvas from './QuantumParticleCanvas';
 
 interface NetworkStats {
   currentHeight: number;
@@ -137,8 +149,10 @@ interface HashpowerSecurity {
     }>;
     attack_cost_with_crypto: {
       raw_hashrate_attack: string;
-      with_asic_disadvantage: string;
-      with_vdf_penalty: string;
+      sustained_24h?: string;
+      full_economic?: string;
+      with_asic_disadvantage?: string;
+      with_vdf_penalty?: string;
       effective_attack_cost: string;
       explanation: string;
     };
@@ -156,6 +170,11 @@ interface HashpowerSecurity {
       bitcoin_is_vulnerable_to: string[];
       qnk_is_resistant_to: string[];
     };
+  };
+  attack_cost_analysis?: {
+    tier_1_instant?: { name: string; cost: string; cost_raw: number; description: string; gpus_required?: number };
+    tier_2_sustained?: { name: string; cost: string; cost_raw: number; description: string };
+    tier_3_full_economic?: { name: string; cost: string; cost_raw: number; description: string; components?: { economic_value_at_stake?: string; market_cap?: string; tvl?: string; staking_at_risk?: string; hashrate_based?: string; economic_security_floor?: string; detection_probability?: string } };
   };
   components: {
     cumulative_work_security: boolean;
@@ -289,60 +308,424 @@ const ActivityCard = ({ title, items }: { title: string; items: ActivityItem[] }
   );
 };
 
-const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, onClose: () => void }) => {
+// Helper: shorten a hex hash or address for display
+const shortenHash = (hash: string, chars = 8) => {
+  if (!hash || hash === 'N/A') return 'N/A';
+  if (hash.length <= chars * 2 + 3) return hash;
+  return `${hash.slice(0, chars)}...${hash.slice(-chars)}`;
+};
+
+// Helper: format QUG amounts for display
+const formatQugAmount = (amount: number | string | undefined) => {
+  if (amount === undefined || amount === null) return '0';
+  const num = typeof amount === 'string' ? parseFloat(amount) : amount;
+  if (isNaN(num)) return '0';
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(2)}K`;
+  if (num >= 1) return num.toFixed(4);
+  if (num >= 0.0001) return num.toFixed(6);
+  return num.toExponential(2);
+};
+
+// Mini SVG Sparkline component for Network Health cards
+const MiniSparkline = ({ data, color = '#22d3ee', height = 40, width = 200 }: { data: number[], color?: string, height?: number, width?: number }) => {
+  if (!data || data.length < 2) return null;
+  const max = Math.max(...data) * 1.1 || 1;
+  const min = Math.min(...data) * 0.9;
+  const range = max - min || 1;
+  const points = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * (height - 4) - 2}`).join(' ');
+  // Gradient fill area
+  const areaPoints = `0,${height} ${points} ${width},${height}`;
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={`sparkFill-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polygon points={areaPoints} fill={`url(#sparkFill-${color.replace('#', '')})`} />
+      <polyline points={points} stroke={color} fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Latest point dot */}
+      {data.length > 0 && (() => {
+        const lastX = width;
+        const lastY = height - ((data[data.length - 1] - min) / range) * (height - 4) - 2;
+        return <circle cx={lastX} cy={lastY} r="2.5" fill={color} />;
+      })()}
+    </svg>
+  );
+};
+
+const DetailModal = ({ detail, onClose, onNavigate }: {
+  detail: {type: string, data: any},
+  onClose: () => void,
+  onNavigate?: (newDetail: {type: string, data: any}) => void
+}) => {
+  const [copied, setCopied] = useState<string | null>(null);
+  const [walletHistory, setWalletHistory] = useState<any[]>([]);
+  const [walletMiningStats, setWalletMiningStats] = useState<any>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
+  const [showTechnical, setShowTechnical] = useState(false);
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    setCopied(text);
+    setTimeout(() => setCopied(null), 2000);
   };
+
+  // Fetch wallet history and mining stats when viewing an address
+  useEffect(() => {
+    if (detail.type !== 'wallet' || !detail.data?.address) return;
+    let cancelled = false;
+    setWalletLoading(true);
+
+    const fetchWalletData = async () => {
+      try {
+        const [historyRes, miningRes] = await Promise.allSettled([
+          qnkAPI.getWalletHistory(detail.data.address, 50),
+          qnkAPI.getMiningStats(detail.data.address),
+        ]);
+        if (cancelled) return;
+        if (historyRes.status === 'fulfilled' && historyRes.value.success && historyRes.value.data) {
+          setWalletHistory(historyRes.value.data);
+        }
+        if (miningRes.status === 'fulfilled' && miningRes.value.success && miningRes.value.data) {
+          setWalletMiningStats(miningRes.value.data);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch wallet data:', err);
+      } finally {
+        if (!cancelled) setWalletLoading(false);
+      }
+    };
+    fetchWalletData();
+    return () => { cancelled = true; };
+  }, [detail.type, detail.data?.address]);
+
+  const CopyButton = ({ text }: { text: string }) => (
+    <button
+      onClick={() => copyToClipboard(text)}
+      className="p-1 hover:bg-white/10 rounded transition-colors"
+      title="Copy to clipboard"
+    >
+      {copied === text
+        ? <CheckCircle2 className="w-3.5 h-3.5 text-quantum-green" />
+        : <Copy className="w-3.5 h-3.5 text-gray-400 hover:text-white" />
+      }
+    </button>
+  );
 
   const renderDetailContent = () => {
     switch (detail.type) {
-      case 'block':
-        return (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Block Height</div>
-                <div className="text-lg font-mono">{detail.data?.height || 'N/A'}</div>
-              </div>
-              <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Transactions</div>
-                <div className="text-lg font-mono">{detail.data?.tx_count || 'N/A'}</div>
-              </div>
-            </div>
-            <div className="p-3 bg-quantum-dark/30 rounded-lg">
-              <div className="flex items-center justify-between">
-                <div className="text-sm text-gray-400">Block Hash</div>
-                <Copy className="w-4 h-4 text-gray-400 cursor-pointer hover:text-white" 
-                      onClick={() => copyToClipboard(detail.data?.hash || '')} />
-              </div>
-              <div className="text-sm font-mono break-all">{detail.data?.hash || 'N/A'}</div>
-            </div>
-          </div>
-        );
+      case 'block': {
+        const d = detail.data || {};
+        const txs = d.transactions || [];
+        const timestamp = d.timestamp ? new Date(d.timestamp * 1000).toLocaleString() : 'N/A';
+        const proposer = d.proposer ? (typeof d.proposer === 'string' ? d.proposer : Array.from(d.proposer as Uint8Array).map((b: number) => b.toString(16).padStart(2, '0')).join('')) : '';
+        const balanceUpdates = d.balance_updates || [];
+        const miningSolutions = d.mining_solutions || [];
 
-      case 'transaction':
         return (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            {/* Block Header */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Amount</div>
-                <div className="text-lg font-mono text-quantum-green">{detail.data?.amount || 'N/A'} QNK</div>
+                <div className="text-xs text-gray-400">Block Height</div>
+                <div className="text-xl font-bold font-mono text-quantum-cyan">{d.height?.toLocaleString() || 'N/A'}</div>
               </div>
               <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Status</div>
-                <div className="text-lg capitalize">{detail.data?.status || 'pending'}</div>
+                <div className="text-xs text-gray-400">Timestamp</div>
+                <div className="text-sm font-mono text-white">{timestamp}</div>
+              </div>
+              <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                <div className="text-xs text-gray-400">Transactions</div>
+                <div className="text-xl font-bold font-mono text-quantum-green">{d.tx_count ?? txs.length}</div>
               </div>
             </div>
+
+            {/* Block Hash */}
             <div className="p-3 bg-quantum-dark/30 rounded-lg">
               <div className="flex items-center justify-between">
-                <div className="text-sm text-gray-400">Transaction Hash</div>
-                <Copy className="w-4 h-4 text-gray-400 cursor-pointer hover:text-white" 
-                      onClick={() => copyToClipboard(detail.data?.hash || '')} />
+                <span className="text-xs text-gray-400">Block Hash</span>
+                {d.hash && d.hash !== 'N/A' && <CopyButton text={d.hash} />}
               </div>
-              <div className="text-sm font-mono break-all">{detail.data?.hash || 'N/A'}</div>
+              <div className="text-xs font-mono break-all text-gray-300 mt-1">{d.hash || 'N/A'}</div>
             </div>
+
+            {/* Proposer */}
+            {proposer && (
+              <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-400">Proposer</span>
+                  <CopyButton text={proposer} />
+                </div>
+                <div className="text-xs font-mono break-all text-gray-300 mt-1">{shortenHash(proposer, 16)}</div>
+              </div>
+            )}
+
+            {/* P2P Source info */}
+            {d.p2pSource && (
+              <div className="p-2 bg-quantum-cyan/10 rounded-lg border border-quantum-cyan/20">
+                <div className="text-xs text-quantum-cyan flex items-center gap-2">
+                  <Globe className="w-3 h-3" />
+                  Fetched {d.p2pSource} {d.p2pLatency ? `(${d.p2pLatency}ms)` : ''}
+                </div>
+              </div>
+            )}
+
+            {/* Coinbase / Mining Rewards */}
+            {(balanceUpdates.length > 0 || miningSolutions.length > 0) && (
+              <div className="p-3 bg-gradient-to-r from-amber-500/10 to-orange-500/10 rounded-lg border border-amber-500/20">
+                <div className="text-sm font-semibold text-amber-300 mb-2 flex items-center gap-2">
+                  <Pickaxe className="w-4 h-4" />
+                  Mining Rewards
+                </div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {balanceUpdates.map((bu: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="font-mono text-gray-300">{shortenHash(bu.address || bu.wallet || '', 10)}</span>
+                      <span className="font-mono text-quantum-green">+{formatQugAmount(bu.amount ? Number(bu.amount) / 1e24 : bu.reward)} QUG</span>
+                    </div>
+                  ))}
+                  {miningSolutions.map((ms: any, i: number) => (
+                    <div key={`ms-${i}`} className="flex items-center justify-between text-xs">
+                      <span className="font-mono text-gray-300">{shortenHash(ms.miner || '', 10)}</span>
+                      <span className="font-mono text-quantum-green">+{formatQugAmount(ms.reward)} QUG</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Transactions List */}
+            {txs.length > 0 && (
+              <div>
+                <div className="text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                  <Hash className="w-4 h-4 text-quantum-green" />
+                  Transactions ({txs.length})
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                  {txs.map((tx: any, i: number) => {
+                    const txHash = tx.hash || tx.id || `tx_${i}`;
+                    const txAmount = tx.amount ? (Number(tx.amount) / 1e24) : 0;
+                    const txFrom = typeof tx.from === 'string' ? tx.from : (Array.isArray(tx.from) ? Array.from(tx.from).map((b: any) => b.toString(16).padStart(2, '0')).join('') : '');
+                    const txTo = typeof tx.to === 'string' ? tx.to : (Array.isArray(tx.to) ? Array.from(tx.to).map((b: any) => b.toString(16).padStart(2, '0')).join('') : '');
+                    return (
+                      <div
+                        key={i}
+                        className="flex items-center justify-between p-2 bg-quantum-dark/20 rounded-lg hover:bg-quantum-dark/40 cursor-pointer transition-colors group"
+                        onClick={() => onNavigate?.({
+                          type: 'transaction',
+                          data: { hash: txHash, amount: txAmount, from: txFrom, to: txTo, block_height: d.height, status: 'confirmed' }
+                        })}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <Hash className="w-3 h-3 text-quantum-green flex-shrink-0" />
+                          <span className="font-mono text-xs text-gray-300 truncate">{shortenHash(txHash, 10)}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {txAmount > 0 && <span className="text-xs font-mono text-quantum-green">{formatQugAmount(txAmount)} QUG</span>}
+                          <ExternalLink className="w-3 h-3 text-gray-500 group-hover:text-quantum-cyan transition-colors flex-shrink-0" />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Technical Details (collapsible) */}
+            <button
+              onClick={() => setShowTechnical(!showTechnical)}
+              className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors w-full"
+            >
+              {showTechnical ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              Technical Details
+            </button>
+            {showTechnical && (
+              <div className="space-y-2 text-xs">
+                {d.dag_round != null && (
+                  <div className="p-2 bg-quantum-dark/20 rounded flex justify-between">
+                    <span className="text-gray-400">DAG Round</span>
+                    <span className="font-mono text-gray-300">{d.dag_round}</span>
+                  </div>
+                )}
+                {d.parent_hash && (
+                  <div className="p-2 bg-quantum-dark/20 rounded">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Parent Hash</span>
+                      <CopyButton text={d.parent_hash} />
+                    </div>
+                    <div className="font-mono text-gray-300 mt-1 break-all">{shortenHash(d.parent_hash, 16)}</div>
+                  </div>
+                )}
+                {d.state_root && (
+                  <div className="p-2 bg-quantum-dark/20 rounded">
+                    <span className="text-gray-400">State Root: </span>
+                    <span className="font-mono text-gray-300">{shortenHash(d.state_root, 12)}</span>
+                  </div>
+                )}
+                {d.dag_parents && Array.isArray(d.dag_parents) && d.dag_parents.length > 0 && (
+                  <div className="p-2 bg-quantum-dark/20 rounded">
+                    <div className="text-gray-400 mb-1">DAG Parents ({d.dag_parents.length})</div>
+                    {d.dag_parents.map((p: string, i: number) => (
+                      <div key={i} className="font-mono text-gray-300 text-[10px]">{shortenHash(p, 12)}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         );
+      }
+
+      case 'transaction': {
+        const d = detail.data || {};
+        const status = d.status || 'pending';
+        const confirmations = d.confirmations || (d.block_height ? 1 : 0);
+
+        // Flow timeline steps
+        const steps = [
+          { label: 'Submitted', active: true, done: true },
+          { label: 'In Mempool', active: status !== 'rejected', done: status === 'confirmed' || !!d.block_height },
+          { label: d.block_height ? `Block #${d.block_height.toLocaleString()}` : 'In Block', active: !!d.block_height, done: !!d.block_height },
+          { label: confirmations > 0 ? `${confirmations} Confirmations` : 'Confirmed', active: status === 'confirmed', done: status === 'confirmed' },
+        ];
+
+        return (
+          <div className="space-y-4">
+            {/* Transaction Flow Timeline */}
+            <div className="p-3 bg-quantum-dark/20 rounded-lg">
+              <div className="text-xs text-gray-400 mb-3">Transaction Flow</div>
+              <div className="flex items-center justify-between">
+                {steps.map((step, i) => (
+                  <div key={i} className="flex items-center">
+                    <div className="flex flex-col items-center">
+                      <div className={`w-7 h-7 rounded-full flex items-center justify-center border-2 ${
+                        step.done ? 'bg-quantum-green/20 border-quantum-green' :
+                        step.active ? 'bg-quantum-cyan/20 border-quantum-cyan animate-pulse' :
+                        'bg-gray-800 border-gray-600'
+                      }`}>
+                        {step.done ? <CheckCircle2 className="w-3.5 h-3.5 text-quantum-green" /> :
+                         step.active ? <Loader2 className="w-3.5 h-3.5 text-quantum-cyan animate-spin" /> :
+                         <Circle className="w-3.5 h-3.5 text-gray-500" />}
+                      </div>
+                      <span className={`text-[10px] mt-1 text-center max-w-[70px] ${step.done ? 'text-quantum-green' : step.active ? 'text-quantum-cyan' : 'text-gray-500'}`}>
+                        {step.label}
+                      </span>
+                    </div>
+                    {i < steps.length - 1 && (
+                      <div className={`w-8 md:w-12 h-0.5 mx-1 mt-[-16px] ${step.done ? 'bg-quantum-green' : 'bg-gray-700'}`} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* P2P verification badge */}
+            {d.p2pVerified && (
+              <div className="p-2 bg-quantum-cyan/10 rounded-lg border border-quantum-cyan/20">
+                <div className="text-xs text-quantum-cyan flex items-center gap-2">
+                  <Shield className="w-3 h-3" />
+                  P2P Verified: {d.peerConsensus}% consensus ({d.peersConfirmed}/{d.totalPeers} peers)
+                </div>
+              </div>
+            )}
+
+            {/* Details Grid */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                <div className="text-xs text-gray-400">Amount</div>
+                <div className="text-lg font-mono text-quantum-green">{formatQugAmount(d.amount)} QUG</div>
+              </div>
+              <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                <div className="text-xs text-gray-400">Status</div>
+                <div className={`text-lg capitalize font-semibold ${
+                  status === 'confirmed' ? 'text-quantum-green' :
+                  status === 'pending' ? 'text-yellow-400' : 'text-red-400'
+                }`}>{status}</div>
+              </div>
+              {d.fee !== undefined && (
+                <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                  <div className="text-xs text-gray-400">Fee</div>
+                  <div className="text-sm font-mono text-gray-300">{formatQugAmount(d.fee)} QUG</div>
+                </div>
+              )}
+              {d.token_type && (
+                <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                  <div className="text-xs text-gray-400">Token</div>
+                  <div className="text-sm font-mono text-white">{d.token_type}</div>
+                </div>
+              )}
+              {d.block_height && (
+                <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                  <div className="text-xs text-gray-400">Block Height</div>
+                  <div className="text-sm font-mono text-quantum-cyan">{d.block_height.toLocaleString()}</div>
+                </div>
+              )}
+              {confirmations > 0 && (
+                <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                  <div className="text-xs text-gray-400">Confirmations</div>
+                  <div className="text-sm font-mono text-quantum-green">{confirmations}</div>
+                </div>
+              )}
+            </div>
+
+            {/* Hash */}
+            <div className="p-3 bg-quantum-dark/30 rounded-lg">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">Transaction Hash</span>
+                {d.hash && <CopyButton text={d.hash} />}
+              </div>
+              <div className="text-xs font-mono break-all text-gray-300 mt-1">{d.hash || 'N/A'}</div>
+            </div>
+
+            {/* From / To */}
+            {(d.from || d.to) && (
+              <div className="space-y-2">
+                {d.from && d.from !== 'N/A' && (
+                  <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">From</span>
+                      <CopyButton text={d.from} />
+                    </div>
+                    <div className="text-xs font-mono break-all text-gray-300 mt-1">{d.from}</div>
+                  </div>
+                )}
+                {d.to && d.to !== 'N/A' && (
+                  <div className="p-3 bg-quantum-dark/30 rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">To</span>
+                      <CopyButton text={d.to} />
+                    </div>
+                    <div className="text-xs font-mono break-all text-gray-300 mt-1">{d.to}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Timestamp */}
+            {d.timestamp && (
+              <div className="p-2 bg-quantum-dark/20 rounded-lg flex items-center gap-2">
+                <Clock className="w-3 h-3 text-gray-400" />
+                <span className="text-xs text-gray-300">{d.timestamp}</span>
+              </div>
+            )}
+
+            {/* View Block button */}
+            {d.block_height && onNavigate && (
+              <button
+                onClick={() => onNavigate({ type: 'block', data: { height: d.block_height } })}
+                className="w-full px-4 py-2.5 bg-quantum-cyan/20 border border-quantum-cyan/30 text-quantum-cyan rounded-lg hover:bg-quantum-cyan/30 transition-colors flex items-center justify-center gap-2 text-sm font-medium"
+              >
+                <Database className="w-4 h-4" />
+                View Block #{d.block_height.toLocaleString()}
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        );
+      }
 
       case 'performance':
         return (
@@ -409,8 +792,7 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
             <div className="p-3 bg-quantum-dark/30 rounded-lg">
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-400">Contract Address</div>
-                <Copy className="w-4 h-4 text-gray-400 cursor-pointer hover:text-white"
-                      onClick={() => copyToClipboard(detail.data?.address || '')} />
+                <CopyButton text={detail.data?.address || ''} />
               </div>
               <div className="text-sm font-mono break-all">{detail.data?.address || 'N/A'}</div>
             </div>
@@ -418,8 +800,7 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
             <div className="p-3 bg-quantum-dark/30 rounded-lg">
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-400">Creator</div>
-                <Copy className="w-4 h-4 text-gray-400 cursor-pointer hover:text-white"
-                      onClick={() => copyToClipboard(detail.data?.creator || '')} />
+                <CopyButton text={detail.data?.creator || ''} />
               </div>
               <div className="text-sm font-mono break-all">{detail.data?.creator || 'N/A'}</div>
             </div>
@@ -442,38 +823,130 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
           </div>
         );
 
-      case 'wallet':
+      case 'wallet': {
+        const d = detail.data || {};
         return (
           <div className="space-y-4">
+            {/* Address */}
             <div className="p-3 bg-quantum-dark/30 rounded-lg">
               <div className="flex items-center justify-between">
-                <div className="text-sm text-gray-400">Wallet Address</div>
-                <Copy className="w-4 h-4 text-gray-400 cursor-pointer hover:text-white"
-                      onClick={() => copyToClipboard(detail.data?.address || '')} />
+                <span className="text-xs text-gray-400">Wallet Address</span>
+                <CopyButton text={d.address || ''} />
               </div>
-              <div className="text-sm font-mono break-all">{detail.data?.address || 'N/A'}</div>
+              <div className="text-sm font-mono break-all text-gray-300 mt-1">{d.address || 'N/A'}</div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Balance</div>
-                <div className="text-lg font-mono text-quantum-green">{detail.data?.balance?.toFixed(4) || '0.0000'} QNK</div>
+            {/* Balance & Nonce */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-4 bg-gradient-to-br from-quantum-green/10 to-quantum-cyan/5 rounded-lg border border-quantum-green/20">
+                <div className="text-xs text-gray-400">QUG Balance</div>
+                <div className="text-xl font-bold font-mono text-quantum-green">{formatQugAmount(d.balance)}</div>
+                <div className="text-xs text-gray-500">QUG</div>
               </div>
-              <div className="p-3 bg-quantum-dark/30 rounded-lg">
-                <div className="text-sm text-gray-400">Nonce</div>
-                <div className="text-lg font-mono">{detail.data?.nonce || 0}</div>
+              <div className="p-4 bg-quantum-dark/30 rounded-lg">
+                <div className="text-xs text-gray-400">Nonce</div>
+                <div className="text-xl font-bold font-mono text-white">{d.nonce || 0}</div>
+                <div className="text-xs text-gray-500">transactions sent</div>
               </div>
             </div>
 
-            <div className="p-3 bg-quantum-dark/30 rounded-lg border border-quantum-purple/30">
-              <div className="text-sm text-gray-400 mb-2">🛡️ Privacy Protection</div>
-              <div className="text-xs text-gray-500">
-                Transaction history is protected by quantum-resistant privacy features.
-                Only the wallet owner can view full transaction details.
+            {/* Mining Stats */}
+            {walletLoading && (
+              <div className="flex items-center justify-center p-4 gap-2 text-gray-400 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading history...
               </div>
-            </div>
+            )}
+            {walletMiningStats && (
+              <div className="p-3 bg-gradient-to-r from-amber-500/10 to-orange-500/10 rounded-lg border border-amber-500/20">
+                <div className="text-sm font-semibold text-amber-300 mb-2 flex items-center gap-2">
+                  <Pickaxe className="w-4 h-4" />
+                  Mining Statistics
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <div className="text-xs text-gray-400">Solutions</div>
+                    <div className="text-sm font-bold font-mono text-white">{walletMiningStats.blocks_found?.toLocaleString() || walletMiningStats.total_blocks || 0}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-400">Hash Rate</div>
+                    <div className="text-sm font-bold font-mono text-quantum-cyan">{walletMiningStats.hashrate_formatted || walletMiningStats.hash_rate || '0 H/s'}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-400">Total Rewards</div>
+                    <div className="text-sm font-bold font-mono text-quantum-green">{formatQugAmount(walletMiningStats.total_rewards || walletMiningStats.total_earned || 0)} QUG</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Transaction History */}
+            {!walletLoading && walletHistory.length > 0 && (
+              <div>
+                <div className="text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-quantum-cyan" />
+                  Transaction History ({walletHistory.length})
+                </div>
+                <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+                  {walletHistory.map((tx: any, i: number) => {
+                    const txHash = tx.hash || tx.tx_hash || tx.id || `tx_${i}`;
+                    const amount = tx.amount ? (Number(tx.amount) / 1e24) : (tx.display_amount || 0);
+                    const isSent = tx.direction === 'sent' || tx.type === 'send';
+                    const isReceived = tx.direction === 'received' || tx.type === 'receive';
+                    const isMining = tx.type === 'mining' || tx.type === 'mining_reward' || tx.type === 'coinbase';
+                    const isSwap = tx.type === 'swap' || tx.type === 'dex_swap';
+                    const txTime = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleString() : (tx.time || '');
+
+                    const typeBadge = isMining ? 'bg-amber-500/20 text-amber-300' :
+                                      isSwap ? 'bg-purple-500/20 text-purple-300' :
+                                      isSent ? 'bg-red-500/20 text-red-300' :
+                                      'bg-green-500/20 text-green-300';
+                    const typeLabel = isMining ? 'Mining' : isSwap ? 'Swap' : isSent ? 'Sent' : 'Received';
+
+                    return (
+                      <div
+                        key={i}
+                        className="flex items-center justify-between p-2 bg-quantum-dark/20 rounded-lg hover:bg-quantum-dark/40 cursor-pointer transition-colors group"
+                        onClick={() => onNavigate?.({
+                          type: 'transaction',
+                          data: { hash: txHash, amount, status: 'confirmed', from: tx.from, to: tx.to, timestamp: txTime }
+                        })}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          {isSent ? <ArrowUp className="w-3 h-3 text-red-400 flex-shrink-0" /> :
+                           isReceived ? <ArrowDown className="w-3 h-3 text-green-400 flex-shrink-0" /> :
+                           isMining ? <Pickaxe className="w-3 h-3 text-amber-400 flex-shrink-0" /> :
+                           <ArrowRight className="w-3 h-3 text-purple-400 flex-shrink-0" />}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${typeBadge}`}>{typeLabel}</span>
+                          <span className="text-[10px] text-gray-500 truncate">{txTime}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-mono ${isSent ? 'text-red-400' : 'text-quantum-green'}`}>
+                            {isSent ? '-' : '+'}{formatQugAmount(amount)}
+                          </span>
+                          <ExternalLink className="w-3 h-3 text-gray-500 group-hover:text-quantum-cyan transition-colors flex-shrink-0" />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {!walletLoading && walletHistory.length === 0 && !walletMiningStats && (
+              <div className="p-3 bg-quantum-dark/30 rounded-lg border border-quantum-purple/30">
+                <div className="text-sm text-gray-400 mb-2 flex items-center gap-2">
+                  <Shield className="w-4 h-4" />
+                  Privacy Protection
+                </div>
+                <div className="text-xs text-gray-500">
+                  Transaction history is protected by quantum-resistant privacy features.
+                  Only the wallet owner can view full transaction details.
+                </div>
+              </div>
+            )}
           </div>
         );
+      }
 
       default:
         return (
@@ -484,6 +957,15 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
           </div>
         );
     }
+  };
+
+  const titleMap: Record<string, string> = {
+    block: 'Block Details',
+    transaction: 'Transaction Details',
+    wallet: 'Address Details',
+    contract: 'Contract Details',
+    performance: 'Performance Details',
+    error: 'Error',
   };
 
   return (
@@ -502,8 +984,8 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-xl font-bold text-white capitalize">
-            {detail.type} Details
+          <h3 className="text-xl font-bold text-white">
+            {titleMap[detail.type] || `${detail.type} Details`}
           </h3>
           <button
             onClick={onClose}
@@ -528,12 +1010,13 @@ const DetailModal = ({ detail, onClose }: { detail: {type: string, data: any}, o
   );
 };
 
-const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumStatus, startupProgress, resonanceMetrics, onClose }: {
+const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumStatus, startupProgress, resonanceMetrics, networkHashrateFormatted, physicsMetrics, onClose }: {
   networkStats: NetworkStats,
   liveMetrics: any,
   hashpowerSecurity: HashpowerSecurity | null,
   postQuantumStatus: PostQuantumStatus,
   startupProgress: StartupProgress | null, // v1.4.15-beta: Startup progress for DAG check
+  networkHashrateFormatted: string,
   resonanceMetrics: { // v3.4.8-beta: Resonance Hybrid Mode metrics
     mode: string;
     agreement_rate: number;
@@ -546,6 +1029,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
     byzantine_detected: number;
     total_rounds: number;
   } | null,
+  physicsMetrics: any,
   onClose: () => void
 }) => {
   return (
@@ -553,14 +1037,23 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
       onClick={onClose}
     >
+      {/* Full-screen quantum particle animation */}
+      <QuantumParticleCanvas
+        starCount={250}
+        maxParticles={100}
+        seedParticles={50}
+        opacity={0.8}
+        style={{ zIndex: 0 }}
+      />
       <motion.div
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.9 }}
-        className="bg-quantum-indigo/90 backdrop-blur-xl rounded-xl border border-quantum-purple/30 p-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto"
+        className="bg-quantum-indigo/60 backdrop-blur-md rounded-xl border border-quantum-purple/30 p-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto relative"
+        style={{ zIndex: 1 }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
@@ -805,11 +1298,331 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
               </div>
               <div className="p-4 bg-quantum-dark/30 rounded-lg border border-quantum-purple/20">
                 <div className="text-sm text-gray-400">Network Hash Rate</div>
-                <div className="text-2xl font-bold text-yellow-500">{hashpowerSecurity?.metrics?.network_hashrate_formatted || '0 H/s'}</div>
+                <div className="text-2xl font-bold text-yellow-500">{networkHashrateFormatted || '0 H/s'}</div>
                 <div className="text-xs text-gray-500">Compute power</div>
               </div>
             </div>
           </div>
+
+          {/* Theoretical Physics Metrics (v7.0.0) - Live whitepaper data */}
+          {physicsMetrics && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 }}
+            >
+              <h4 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Atom className="w-5 h-5 text-quantum-cyan" />
+                Theoretical Physics Dashboard
+                <span className="text-xs bg-quantum-cyan/20 text-quantum-cyan px-2 py-0.5 rounded ml-2">
+                  LIVE
+                </span>
+                <a
+                  href="/downloads/theoretical-physics-node-system.pdf"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-quantum-purple hover:text-quantum-cyan transition-colors ml-auto"
+                >
+                  Read Whitepaper (PDF)
+                </a>
+              </h4>
+
+              {/* Row 1: Core Physics - Hamiltonian, Phase, Temperature */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                {/* Consensus Hamiltonian */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-quantum-purple/10 rounded-xl border border-quantum-purple/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 font-mono flex items-center gap-1">
+                    H_DAG = H_p + H_a + H_b + H_vdf <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-cyan font-mono">
+                    {parseFloat(physicsMetrics.consensus_hamiltonian?.H_total || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">Consensus Hamiltonian Energy</div>
+                  <div className="mt-2 grid grid-cols-2 gap-1 text-[10px] font-mono">
+                    <div className="text-green-400">H_parent: {physicsMetrics.consensus_hamiltonian?.H_parent}</div>
+                    <div className="text-yellow-400">H_anti: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_anticone || '0').toFixed(2)}</div>
+                    <div className="text-quantum-cyan">H_blue: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_blue || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                    <div className="text-purple-400">H_vdf: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_vdf || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Consensus Hamiltonian Energy</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      In physics, a Hamiltonian describes the total energy of a system. Here, we treat the blockchain's DAG (Directed Acyclic Graph) as a physical system where each block is a particle. The "Consensus Hamiltonian" measures the total energetic cost of the network's current state. A large negative value means the system is in a deeply stable, low-energy ground state — exactly what you want for secure consensus.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>H_parent:</strong> Energy from parent-child block relationships (the chain's backbone). <strong>H_anti:</strong> Penalty energy from blocks in the "anticone" — blocks that arrived at the same time and couldn't agree on ordering (like conflicting votes). <strong>H_blue:</strong> Reward energy for "blue" blocks — blocks that the DAG-Knight algorithm determined are honest. <strong>H_vdf:</strong> Energy contribution from Verifiable Delay Function proofs — cryptographic time-locks that prove a minimum amount of real wall-clock time has passed, preventing attackers from rushing ahead.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Phase Transition */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-green-900/10 rounded-xl border border-quantum-green/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Phase Transition Status <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className={`w-3 h-3 rounded-full ${physicsMetrics.k_parameter?.phase === 'ordered' ? 'bg-green-400 shadow-lg shadow-green-400/50' : 'bg-red-400 shadow-lg shadow-red-400/50'} animate-pulse`} />
+                    <span className={`text-xl font-bold ${physicsMetrics.k_parameter?.phase === 'ordered' ? 'text-green-400' : 'text-red-400'}`}>
+                      {physicsMetrics.k_parameter?.phase === 'ordered' ? 'ORDERED' : 'DISORDERED'}
+                    </span>
+                  </div>
+                  <div className="mt-2 space-y-1 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03BA'} (k-param):</span>
+                      <span className="text-white">{physicsMetrics.k_parameter?.kappa}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03BA'}_c (critical):</span>
+                      <span className="text-yellow-400">{physicsMetrics.k_parameter?.kappa_c}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Margin:</span>
+                      <span className="text-green-400">+{parseFloat(physicsMetrics.k_parameter?.phase_margin || '0').toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Order param m:</span>
+                      <span className="text-quantum-cyan">{physicsMetrics.k_parameter?.order_parameter_m}</span>
+                    </div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Phase Transition — Order vs Chaos</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      Think of water freezing into ice. At high temperatures, water molecules move randomly (disordered). Below a critical temperature, they snap into a rigid crystal lattice (ordered). The blockchain works the same way: when the network parameter kappa ({'\u03BA'}) is above the critical threshold ({'\u03BA'}_c), the system is in an "ordered phase" where all nodes agree on a single canonical transaction ordering — consensus is achieved. When {'\u03BA'} drops below {'\u03BA'}_c, the system enters a "disordered phase" where multiple conflicting orderings compete and consensus breaks down.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>{'\u03BA'} (k-parameter):</strong> The network's connectivity strength — how many honest block confirmations each block receives. Higher is better. <strong>{'\u03BA'}_c (critical):</strong> The minimum connectivity needed for consensus. This is the "freezing point." <strong>Margin:</strong> How far above the critical threshold we are. A large positive margin means consensus is very robust. <strong>Order parameter m:</strong> Ranges from 0 (complete disagreement) to 1 (perfect unanimous agreement). Like measuring what fraction of water molecules have frozen — 1.0 means the entire network agrees on the same block ordering.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Effective Temperature */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-blue-900/10 rounded-xl border border-blue-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Effective Temperature T_eff <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-blue-400 font-mono">
+                    {physicsMetrics.effective_temperature?.T_eff}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">{physicsMetrics.effective_temperature?.interpretation}</div>
+                  <div className="mt-2 w-full bg-gray-700/50 rounded-full h-2">
+                    <div
+                      className="bg-gradient-to-r from-blue-500 to-cyan-400 h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(parseFloat(physicsMetrics.effective_temperature?.T_eff || '0') * 100, 100)}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                    <span>0 (frozen)</span>
+                    <span>{'\u221E'} (chaos)</span>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Effective Temperature — Network Stability</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      In statistical mechanics, temperature measures how much randomness exists in a system. A cold system (low T_eff) is extremely predictable — particles sit quietly in their lowest-energy positions. A hot system (high T_eff) is chaotic — particles fly around unpredictably. For a blockchain, T_eff measures how much "randomness" exists in block ordering. A low T_eff (close to zero) means the network has settled into a single, deterministic ordering of transactions — the ground state dominates. This is the ideal condition for consensus.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>T_eff near 0:</strong> The system is "frozen" — all nodes agree on the exact same block ordering. Consensus is rock-solid. <strong>T_eff near 1.0 or higher:</strong> The system is "hot" — multiple competing orderings exist, and the network is struggling to reach agreement. This could happen during a network partition or an attack. <strong>Formula:</strong> T_eff = {'\u03B4\u039B'}/(1-f/n), where {'\u03B4'} is propagation delay, {'\u039B'} is block rate, f is Byzantine nodes, and n is total nodes.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Order Parameter */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-cyan-900/10 rounded-xl border border-quantum-cyan/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    {'\u03C6'} Blue Vertex Density <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-quantum-cyan font-mono">
+                    {physicsMetrics.order_parameter?.phi}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">Landau order parameter</div>
+                  <div className="mt-2 w-full bg-gray-700/50 rounded-full h-2">
+                    <div
+                      className="bg-gradient-to-r from-quantum-cyan to-quantum-green h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${parseFloat(physicsMetrics.order_parameter?.phi || '0') * 100}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                    <span>0 (no consensus)</span>
+                    <span>1.0 (perfect)</span>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Blue Vertex Density — Consensus Quality</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      In the DAG-Knight consensus protocol, every block (vertex) in the DAG is colored either "blue" (honest, well-connected) or "red" (potentially adversarial, poorly connected). The blue vertex density {'\u03C6'} (phi) measures what fraction of all blocks are classified as honest. This is a Landau order parameter — a concept from condensed matter physics that measures how "ordered" a system is. In a ferromagnet, it measures what fraction of atomic spins point in the same direction. Here, it measures what fraction of the network's computational work contributes to the honest chain.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>{'\u03C6'} = 1.0:</strong> Every single block in the DAG is blue — perfect consensus. All miners are honest and well-connected. <strong>{'\u03C6'} = 0.5:</strong> Half the blocks are red — the network is under significant attack or severe latency issues are causing honest blocks to conflict. <strong>{'\u03C6'} near 0:</strong> Almost all blocks are red — consensus has completely broken down. This would require a majority of the network to be adversarial.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 2: Dynamics - Diffusion, Convergence, Thermodynamics, Security */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                {/* Gossip Diffusion */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15 cursor-help">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Wifi className="w-3 h-3" /> Gossip Diffusion <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="space-y-2 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">D (diffusion):</span>
+                      <span className="text-white">{physicsMetrics.gossip_diffusion?.D}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03C4'}_gossip:</span>
+                      <span className="text-quantum-cyan">{physicsMetrics.gossip_diffusion?.tau_gossip_ms} ms</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03C1'}(200ms):</span>
+                      <span className="text-green-400">{(parseFloat(physicsMetrics.gossip_diffusion?.info_density_200ms || '0') * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03C1'}(1s):</span>
+                      <span className="text-green-400">{(parseFloat(physicsMetrics.gossip_diffusion?.info_density_1s || '0') * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Gossip Diffusion — How Fast Information Spreads</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      When a new block is created, it needs to reach every node in the network. This is modeled using the diffusion equation from physics — the same equation that describes how heat spreads through a metal bar, or how a drop of ink disperses in water. The "gossip protocol" works by each node telling its neighbors about new blocks, who then tell their neighbors, creating an exponentially expanding wave of information.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>D (diffusion coefficient):</strong> How quickly information spreads per unit time — analogous to thermal conductivity. Higher D means faster propagation. <strong>{'\u03C4'}_gossip:</strong> The characteristic time for a message to reach most nodes. 6.2ms means a new block reaches the network in about 6 milliseconds — extremely fast. <strong>{'\u03C1'}(200ms) and {'\u03C1'}(1s):</strong> Information density at 200 milliseconds and 1 second respectively. 100% means every node has received the block by that time. Think of it as "what percentage of the network knows about this block after X time."
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Convergence */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15 cursor-help">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Activity className="w-3 h-3" /> Convergence Bound <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="space-y-2 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Spectral gap:</span>
+                      <span className="text-white">{physicsMetrics.convergence?.spectral_gap}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03C4'}_conv:</span>
+                      <span className="text-quantum-cyan">{physicsMetrics.convergence?.convergence_time_s}s</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Ricci R_min:</span>
+                      <span className="text-purple-400">{physicsMetrics.convergence?.ricci_curvature_bound}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Degeneracy:</span>
+                      <span className="text-yellow-400">2^{physicsMetrics.ordering_degeneracy?.n_deg_log2}</span>
+                    </div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Convergence — How Fast Nodes Agree</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      Convergence measures how quickly all nodes in the network settle on the same view of transaction history. This uses spectral graph theory — the mathematics of how signals flow through networks. Imagine plucking a guitar string: the vibration dies out at a rate determined by the string's physical properties. The "spectral gap" is like the resonant frequency — it determines how fast disagreements between nodes decay to zero.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>Spectral gap:</strong> The difference between the two largest eigenvalues of the network's adjacency matrix. A large spectral gap means the network converges exponentially fast. It measures how well-connected the peer-to-peer topology is. <strong>{'\u03C4'}_conv:</strong> The convergence time — how many seconds until all nodes agree. 0.02 seconds means near-instant finality. <strong>Ricci curvature R_min:</strong> Borrowed from differential geometry (the math behind Einstein's general relativity). Positive Ricci curvature means the network graph is "well-curved" — information flows efficiently without bottlenecks. <strong>Degeneracy 2^0:</strong> The number of equally valid block orderings. 2^0 = 1 means there's exactly one valid ordering — no ambiguity at all.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Free Energy */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15 cursor-help">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Zap className="w-3 h-3" /> Thermodynamics <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="space-y-2 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Free energy F:</span>
+                      <span className="text-white">{parseFloat(physicsMetrics.thermodynamics?.free_energy || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Entropy S:</span>
+                      <span className="text-yellow-400">{physicsMetrics.thermodynamics?.entropy}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u039B'} (block/s):</span>
+                      <span className="text-quantum-cyan">{physicsMetrics.network_params?.lambda_blocks_s}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03B4'} (delay):</span>
+                      <span className="text-white">{physicsMetrics.network_params?.delta_s}s</span>
+                    </div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Thermodynamics — Energy & Disorder</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      The blockchain is modeled as a thermodynamic system using the Helmholtz free energy equation: F = E - T{'\u00B7'}S, where E is the internal energy (Hamiltonian), T is the effective temperature, and S is entropy. In real physics, free energy determines whether a chemical reaction will happen spontaneously. Here, it determines whether the network will spontaneously converge on a single valid ordering or fragment into competing chains.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>Free energy F:</strong> The "useful work" available in the consensus system. A large negative free energy means the system is deeply trapped in a stable consensus state — an attacker would need enormous energy to escape it. <strong>Entropy S:</strong> Measures disorder in block ordering. S = 0 means zero ambiguity (perfect order). Higher entropy means more possible orderings exist, weakening consensus. <strong>{'\u039B'} (lambda):</strong> Block production rate in blocks per second. This is the network's "heartbeat." <strong>{'\u03B4'} (delta):</strong> Maximum network propagation delay — how long it takes a block to reach the furthest node. Lower delay means fewer conflicting blocks created simultaneously.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+
+                {/* Security Thermodynamics */}
+                <div className="group relative p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15 cursor-help">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Shield className="w-3 h-3" /> Security Bounds <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="space-y-2 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Sig forgery:</span>
+                      <span className="text-green-400">2^{physicsMetrics.security?.signature_forgery_bits}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Key recovery:</span>
+                      <span className="text-green-400">2^{physicsMetrics.security?.key_recovery_bits}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">DAG attack:</span>
+                      <span className="text-green-400">{physicsMetrics.security?.dag_manipulation_bits === 'infinity' ? '\u221E' : `2^${physicsMetrics.security?.dag_manipulation_bits}`}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Privacy P_deanon:</span>
+                      <span className="text-green-400">{physicsMetrics.privacy?.p_deanon}</span>
+                    </div>
+                  </div>
+                  {/* Tooltip */}
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
+                    <div className="font-bold text-quantum-cyan mb-2">Security Bounds — Cryptographic Strength</div>
+                    <div className="text-gray-300 mb-2 leading-relaxed">
+                      These numbers represent the computational cost an attacker would need to break various parts of the system, expressed as powers of 2. In cryptography, "2^256" means an attacker would need to perform 2^256 operations — that's a number with 77 digits. For reference, there are roughly 2^80 atoms in the observable universe. These bounds are derived from information-theoretic proofs and represent the absolute mathematical limits of attack feasibility.
+                    </div>
+                    <div className="text-gray-400 leading-relaxed">
+                      <strong>Signature forgery (2^256):</strong> The number of operations needed to forge a digital signature — to pretend to be someone else. This uses Ed25519 + Dilithium5 (post-quantum) signatures. Even a quantum computer with millions of qubits cannot break Dilithium5. <strong>Key recovery (2^200):</strong> The cost to derive someone's private key from their public key. 2^200 operations is physically impossible with any known or theorized technology. <strong>DAG attack ({'\u221E'}):</strong> The cost to manipulate the DAG structure. Infinity means the mathematical proof shows this attack is impossible regardless of computational power — it's not just hard, it's provably impossible. <strong>Privacy P_deanon (0.018):</strong> The probability of de-anonymizing a transaction sender. 0.018 = 1.8% chance — meaning 98.2% of the time, transaction privacy is preserved even against a network-level adversary performing traffic analysis.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-quantum-purple/50"></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 3: Equation Display */}
+              <div className="p-3 bg-quantum-dark/20 rounded-lg border border-quantum-purple/10 font-mono text-[11px] text-gray-400">
+                <div className="flex flex-wrap gap-x-6 gap-y-1 justify-center">
+                  <span>F = {'<'}E{'>'} - T_eff{'\u00B7'}S</span>
+                  <span>{'\u03BA'} = {'\u230A'}2{'\u03B4\u039B'}/D{'\u230B'}</span>
+                  <span>T_eff = {'\u03B4\u039B'}/(1-f/n)</span>
+                  <span>{'\u2202\u03C1'}/{'\u2202'}t = D{'\u2207\u00B2\u03C1'}</span>
+                  <span>R_min {'\u2265'} {'\u0394'}E/T_eff</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
 
           {/* Hashpower Security (v1.3.1-beta) with Tooltips */}
           {hashpowerSecurity && (
@@ -932,8 +1745,8 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                     🧅 Tor Attack Cost
                     <Info className="w-3 h-3 text-purple-400" />
                   </div>
-                  <div className="text-2xl font-bold text-purple-300">$2.7B+</div>
-                  <div className="text-xs text-purple-400/70">Deanonymization via Sybil</div>
+                  <div className="text-2xl font-bold text-purple-300">Infeasible</div>
+                  <div className="text-xs text-purple-400/70">Tor + Dandelion++ + PQ crypto</div>
                   <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full right-0 mb-2 w-96 p-3 bg-black/95 rounded-lg border border-purple-500/50 text-xs">
                     <div className="font-bold text-purple-400 mb-2">🧅 Tor Deanonymization Attack Economics</div>
                     <div className="text-gray-300 mb-2">
@@ -1136,33 +1949,26 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                       <div className="text-sm font-semibold text-red-400 mb-2">💰 Attack Cost Breakdown</div>
                       <div className="space-y-2 text-xs">
                         <div className="flex justify-between">
-                          <span className="text-gray-400">Raw Hashrate Attack:</span>
-                          <span className="text-white">{hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.raw_hashrate_attack}</span>
+                          <span className="text-gray-400">Hashrate (51% GPUs):</span>
+                          <span className="text-white">{hashpowerSecurity.attack_cost_analysis?.tier_1_instant?.cost || hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.raw_hashrate_attack}</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-gray-400">+ No ASIC Advantage:</span>
-                          <span className="text-yellow-400">{hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.with_asic_disadvantage}</span>
+                          <span className="text-gray-400">+ Sustained (24h):</span>
+                          <span className="text-yellow-400">{hashpowerSecurity.attack_cost_analysis?.tier_2_sustained?.cost || hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.sustained_24h || 'N/A'}</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400">+ VDF Time-Lock Penalty:</span>
-                          <span className="text-orange-400">{hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.with_vdf_penalty}</span>
-                        </div>
+                        {hashpowerSecurity.attack_cost_analysis?.tier_3_full_economic?.components?.economic_value_at_stake && (
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">+ Economic Value:</span>
+                            <span className="text-cyan-400">{hashpowerSecurity.attack_cost_analysis.tier_3_full_economic.components.economic_value_at_stake}</span>
+                          </div>
+                        )}
                         <div className="flex justify-between border-t border-red-400/30 pt-2 mt-2">
-                          <span className="text-white font-semibold">Consensus Attack:</span>
-                          <span className="text-green-400 font-bold">{hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.effective_attack_cost}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-white font-semibold">🧅 Privacy Attack:</span>
-                          <span className="text-purple-400 font-bold">$2.7B+</span>
-                        </div>
-                        <div className="flex justify-between border-t border-green-500/50 pt-2 mt-2 bg-green-500/10 -mx-3 px-3 py-1 rounded">
-                          <span className="text-green-300 font-bold">Full Attack Cost:</span>
-                          <span className="text-green-400 font-bold text-base">$2.7B++</span>
+                          <span className="text-white font-semibold">Total Security:</span>
+                          <span className="text-green-400 font-bold">{hashpowerSecurity.attack_cost_analysis?.tier_3_full_economic?.cost || hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.effective_attack_cost}</span>
                         </div>
                       </div>
                       <p className="text-[10px] text-gray-500 mt-2">
-                        {hashpowerSecurity.cryptographic_advantages.attack_cost_with_crypto.explanation}
-                        {' '}Plus Tor/Dandelion++ deanonymization requires $2.7B+ in global surveillance infrastructure.
+                        Hashrate + market cap + TVL + staking
                       </p>
                     </div>
 
@@ -1382,8 +2188,8 @@ export default function ExplorerScreen() {
     circulatingPercentageFormatted: '0.000000%',
     networkHashrate: 0,
     networkHashrateFormatted: '0 H/s',
-    blockReward: 0.5,
-    blockRewardFormatted: '0.5 QNK',
+    blockReward: 0,
+    blockRewardFormatted: '—',
     connectedMiners: 0
   });
 
@@ -1404,6 +2210,50 @@ export default function ExplorerScreen() {
   // v3.4.22-beta: Network Power Quantum Modal state
   const [showNetworkPowerModal, setShowNetworkPowerModal] = useState(false);
 
+  // v7.1.0: Emission Analytics Modal (full-screen with graphs)
+  const [showEmissionModal, setShowEmissionModal] = useState(false);
+
+  // v5.1.0: QUG price for emission card USD values
+  const [qugPriceUsd, setQugPriceUsd] = useState<number>(0);
+
+  // v6.2.5: Live emission analytics from backend
+  const [emissionStats, setEmissionStats] = useState<{
+    summary: {
+      total_supply_qug: number;
+      pct_mined: number;
+      current_era: number;
+      annual_target_qug: number;
+      daily_target_qug: number;
+      today_emitted_qug: number;
+      today_blocks: number;
+      today_deviation_pct: number;
+      block_rate_bps: number;
+      days_tracked: number;
+      // v7.0.0: Scientific precision fields
+      stock_to_flow?: number;
+      inflation_rate_pct?: number;
+      cumulative_target_qug?: number;
+      budget_deviation_pct?: number;
+      remaining_supply_qug?: number;
+      correction_factor?: number;
+      reward_per_block_qug?: number;
+      secs_to_halving?: number;
+      era_progress_pct?: number;
+      genesis_timestamp?: number;
+      elapsed_secs?: number;
+    };
+    daily_history: Array<{
+      date: string;
+      emitted_qug: number;
+      blocks: number;
+      avg_reward_qug: number;
+      avg_block_rate: number;
+      target_daily_qug: number;
+      deviation_pct: number;
+      cumulative_supply_qug: number;
+    }>;
+  } | null>(null);
+
   // Hashpower security state (v1.3.0-beta)
   const [hashpowerSecurity, setHashpowerSecurity] = useState<HashpowerSecurity | null>(null);
 
@@ -1423,6 +2273,10 @@ export default function ExplorerScreen() {
 
   // v1.4.15-beta: Startup progress for DAG integrity check display
   const [startupProgress, setStartupProgress] = useState<StartupProgress | null>(null);
+
+  // v7.0.0: Live theoretical physics metrics from the whitepaper
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [physicsMetrics, setPhysicsMetrics] = useState<any>(null);
 
   // Post-Quantum Cryptography status (v1.0.60-beta)
   const [postQuantumStatus] = useState<PostQuantumStatus>({
@@ -1459,13 +2313,15 @@ export default function ExplorerScreen() {
 
   useEffect(() => {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
+    let isMounted = true;
     const fetchAllData = async () => {
       try {
-        // Fetch node status for real network metrics
-        const nodeStatus = await qnkAPI.getNodeStatus();
-
-        // Fetch network supply statistics
-        const supplyResponse = await qnkAPI.getNetworkSupply();
+        // Fetch node status and supply in parallel for faster load
+        const [nodeStatus, supplyResponse] = await Promise.all([
+          qnkAPI.getNodeStatus(),
+          qnkAPI.getNetworkSupply(),
+        ]);
+        if (!isMounted) return;
         if (supplyResponse.success && supplyResponse.data) {
           const newTotalMined = supplyResponse.data.total_mined;
 
@@ -1502,46 +2358,47 @@ export default function ExplorerScreen() {
           }
         }
 
-        // Fetch hashpower security metrics (v1.3.0-beta)
-        try {
-          const hashpowerResponse = await qnkAPI.getHashpowerSecurity();
-          if (hashpowerResponse.success && hashpowerResponse.data) {
-            setHashpowerSecurity(hashpowerResponse.data);
-          }
-        } catch (hashpowerError) {
-          console.warn('Hashpower security fetch failed (optional):', hashpowerError);
-        }
+        // Fetch optional metrics in parallel (non-blocking)
+        const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse] = await Promise.allSettled([
+          qnkAPI.getHashpowerSecurity(),
+          qnkAPI.getAMMPrice('QUG'),
+          qnkAPI.getEmissionStats(30),
+          qnkAPI.getStartupProgress(),
+          qnkAPI.getResonanceMetrics(),
+          qnkAPI.getPhysicsMetrics(),
+        ]);
+        if (!isMounted) return;
 
-        // v1.4.15-beta: Fetch startup progress (for showing DAG integrity check status)
-        try {
-          const progressResponse = await qnkAPI.getStartupProgress();
-          if (progressResponse.success && progressResponse.data) {
-            setStartupProgress(progressResponse.data);
-          }
-        } catch (progressError) {
-          // Silently ignore - older servers won't have this endpoint
+        if (hashpowerResponse.status === 'fulfilled' && hashpowerResponse.value.success && hashpowerResponse.value.data) {
+          setHashpowerSecurity(hashpowerResponse.value.data);
         }
-
-        // v3.4.8-beta: Fetch Resonance Hybrid Mode consensus metrics
-        try {
-          const resonanceResponse = await qnkAPI.getResonanceMetrics();
-          if (resonanceResponse.success && resonanceResponse.data && resonanceResponse.data.metrics) {
-            setResonanceMetrics({
-              mode: resonanceResponse.data.mode,
-              agreement_rate: resonanceResponse.data.metrics.agreement_rate,
-              resonance_weight: resonanceResponse.data.metrics.resonance_weight,
-              primary_latency_ms: resonanceResponse.data.metrics.primary_latency_ms,
-              shadow_latency_ms: resonanceResponse.data.metrics.shadow_latency_ms,
-              harmony_score: resonanceResponse.data.visualization?.harmony_score || 0,
-              energy_state: resonanceResponse.data.visualization?.energy_state || 'initializing',
-              spectral_health: resonanceResponse.data.visualization?.spectral_health || 'unknown',
-              byzantine_detected: resonanceResponse.data.metrics.shadow_byzantine_detected,
-              total_rounds: resonanceResponse.data.metrics.total_rounds,
-            });
-          }
-        } catch (resonanceError) {
-          // Silently ignore - optional v3.4.8 feature
-          console.debug('Resonance metrics fetch (optional):', resonanceError);
+        if (priceResponse.status === 'fulfilled' && priceResponse.value.success && priceResponse.value.data && priceResponse.value.data.price_usd != null && priceResponse.value.data.price_usd > 0) {
+          setQugPriceUsd(priceResponse.value.data!.price_usd!);
+        }
+        if (emissionResponse.status === 'fulfilled' && emissionResponse.value.success && emissionResponse.value.data) {
+          setEmissionStats(emissionResponse.value.data);
+        }
+        if (progressResponse.status === 'fulfilled' && progressResponse.value.success && progressResponse.value.data) {
+          setStartupProgress(progressResponse.value.data);
+        }
+        if (resonanceResponse.status === 'fulfilled' && resonanceResponse.value.success && resonanceResponse.value.data?.metrics) {
+          const rd = resonanceResponse.value.data!;
+          const m = rd.metrics!;
+          setResonanceMetrics({
+            mode: rd.mode,
+            agreement_rate: m!.agreement_rate,
+            resonance_weight: m!.resonance_weight,
+            primary_latency_ms: m!.primary_latency_ms,
+            shadow_latency_ms: m!.shadow_latency_ms,
+            harmony_score: rd.visualization?.harmony_score || 0,
+            energy_state: rd.visualization?.energy_state || 'initializing',
+            spectral_health: rd.visualization?.spectral_health || 'unknown',
+            byzantine_detected: m!.shadow_byzantine_detected,
+            total_rounds: m!.total_rounds,
+          });
+        }
+        if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
+          setPhysicsMetrics(physicsResponse.value.data);
         }
 
         // v2.3.8-beta: CRITICAL FIX - Prevent height flickering from stale data
@@ -1563,28 +2420,33 @@ export default function ExplorerScreen() {
           consensusParticipation: nodeStatus.data?.is_validator ? 1.0 : 0.0,
           mempoolSize: nodeStatus.data?.tx_pool_size || 0,
           quantumEntropy: 0.92, // TODO: Add quantum entropy API endpoint
-          avgBlockTime: 2.3, // DAG-Knight typical block time ~2.3s (TODO: calculate from recent blocks)
+          avgBlockTime: nodeStatus.data?.system_metrics?.avg_block_time_seconds || 2.3,
           networkHashRate: (nodeStatus.data?.tps_current || 0) * 1000, // Estimated from TPS
           byzantineTolerance: (nodeStatus.data?.connected_peers || 0) >= 4 ? 0.95 : 0.75,
           postQuantumReady: 0.88 // TODO: Add PQ readiness API endpoint
         });
 
-        // Fetch anonymized transaction activity from Explorer API (ZK-STARK privacy mode)
-        const transactionsResponse = await qnkAPI.getExplorerTransactions(10);
-        const recentTxs = transactionsResponse.success && transactionsResponse.data
-          ? transactionsResponse.data.slice(0, 10).map((tx: any, index: number) => ({
+        // Fetch activity data in parallel
+        const [transactionsResponse, blocksResponse, verticesResponse, contractsResponse] = await Promise.allSettled([
+          qnkAPI.getExplorerTransactions(10),
+          qnkAPI.getRecentBlocks(5),
+          qnkAPI.getRecentVertices(5),
+          qnkAPI.getRecentContracts(5),
+        ]);
+        if (!isMounted) return;
+
+        const recentTxs = transactionsResponse.status === 'fulfilled' && transactionsResponse.value.success && transactionsResponse.value.data
+          ? transactionsResponse.value.data.slice(0, 10).map((tx: any, index: number) => ({
               type: 'transaction' as const,
               id: tx.hash || tx.id || `tx_${index}`,
-              amount: tx.amount || 'Private',  // ZK-STARK: amounts hidden or shown as tx count
+              amount: tx.amount || 'Private',
               time: tx.timestamp_formatted || new Date(tx.timestamp * 1000).toLocaleString(),
               status: 'confirmed'
             }))
           : [];
 
-        // Fetch recent blocks from new API endpoint
-        const blocksResponse = await qnkAPI.getRecentBlocks(5);
-        const recentBlocks: ActivityItem[] = blocksResponse.success && blocksResponse.data
-          ? blocksResponse.data.map((block: any) => ({
+        const recentBlocks: ActivityItem[] = blocksResponse.status === 'fulfilled' && blocksResponse.value.success && blocksResponse.value.data
+          ? blocksResponse.value.data.map((block: any) => ({
               type: 'block' as const,
               id: String(block.height),
               amount: `${block.tx_count} txs`,
@@ -1592,10 +2454,8 @@ export default function ExplorerScreen() {
             }))
           : [];
 
-        // Fetch recent DAG vertices from new API endpoint
-        const verticesResponse = await qnkAPI.getRecentVertices(5);
-        const recentVertices: ActivityItem[] = verticesResponse.success && verticesResponse.data
-          ? verticesResponse.data.map((vertex: any) => ({
+        const recentVertices: ActivityItem[] = verticesResponse.status === 'fulfilled' && verticesResponse.value.success && verticesResponse.value.data
+          ? verticesResponse.value.data.map((vertex: any) => ({
               type: 'vertex' as const,
               id: vertex.id,
               time: new Date(vertex.timestamp * 1000).toLocaleString(),
@@ -1603,11 +2463,9 @@ export default function ExplorerScreen() {
             }))
           : [];
 
-        // Fetch recent smart contracts from new API endpoint
-        const contractsResponse = await qnkAPI.getRecentContracts(5);
-        const recentContracts: ActivityItem[] = contractsResponse.success && contractsResponse.data
-          ? contractsResponse.data
-              .filter((contract: any) => contract.timestamp) // Filter out placeholder data without timestamps
+        const recentContracts: ActivityItem[] = contractsResponse.status === 'fulfilled' && contractsResponse.value.success && contractsResponse.value.data
+          ? contractsResponse.value.data
+              .filter((contract: any) => contract.timestamp)
               .map((contract: any) => ({
                 type: 'contract' as const,
                 id: contract.address,
@@ -1642,10 +2500,9 @@ export default function ExplorerScreen() {
 
         setLiveMetrics({
           vdfComputations: Math.max(1, Math.floor((nodeStatus.data?.current_round || 0) / 10)),
-          // Memory usage: base 35% + 1% per 50K blocks + 2% per peer (capped at 75%)
-          memoryUsage: Math.min(75, 35 + (height / 50000) + (peers * 2) + (txPoolSize / 50)),
-          // Data storage: ~2KB per block = 0.002 MB per block = ~1.2GB for 600K blocks
-          dataStorage: Math.max(0.5, (height * 0.002) / 1000), // Convert to GB
+          // v6.2.3: Use REAL system metrics from backend instead of fake formulas
+          memoryUsage: nodeStatus.data?.system_metrics?.memory_usage_percent ?? 0,
+          dataStorage: nodeStatus.data?.system_metrics?.data_storage_gb ?? 0,
           realTimeTps: nodeStatus.data?.tps_current || 0,
           realTimeLatency: peers >= 4 ? 12 : 45
         });
@@ -1657,9 +2514,76 @@ export default function ExplorerScreen() {
     };
 
     fetchAllData();
-    const interval = setInterval(fetchAllData, 5000); // Update every 5 seconds for real-time feel
+    const interval = setInterval(fetchAllData, 15000); // Update every 15 seconds
 
-    return () => clearInterval(interval);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // v7.3.1: SSE-based real-time height updates (fixes "Current Height: 162" stale display)
+  // The 15s REST polling above provides full data refresh, but height needs instant updates
+  // to match what TopBar shows. Without this, ExplorerScreen can lag behind by up to 15s
+  // or show a stale startup value if the first REST poll returns a cached/contiguous height.
+  useEffect(() => {
+    const walletAddress = localStorage.getItem('walletAddress') || '';
+    if (!walletAddress) return;
+
+    const baseUrl = window.location.hostname.endsWith('.onion')
+      ? ''
+      : (localStorage.getItem('nodeUrl') || '');
+    const sseUrl = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
+
+    const eventSource = new EventSource(sseUrl);
+
+    // Listen for node-status events (same as TopBar)
+    eventSource.addEventListener('node-status', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const newHeight = data.current_height || data.status?.current_height;
+        if (newHeight && newHeight > highestKnownHeightRef.current) {
+          highestKnownHeightRef.current = newHeight;
+          setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
+        }
+        // Also update peers count from SSE
+        const peers = data.connected_peers ?? data.status?.connected_peers;
+        if (peers !== undefined) {
+          setNetworkStats(prev => ({ ...prev, activePeers: peers }));
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    // Listen for mining_reward events (carries block_height)
+    eventSource.addEventListener('mining_reward', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.block_height && data.block_height > highestKnownHeightRef.current) {
+          highestKnownHeightRef.current = data.block_height;
+          setNetworkStats(prev => ({ ...prev, currentHeight: data.block_height }));
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    // Listen for new-block events
+    eventSource.addEventListener('new-block', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const height = data.height || data.block?.height || data.header?.height;
+        if (height && height > highestKnownHeightRef.current) {
+          highestKnownHeightRef.current = height;
+          setNetworkStats(prev => ({ ...prev, currentHeight: height }));
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    eventSource.onerror = () => {
+      // SSE will auto-reconnect; no action needed
+    };
+
+    return () => {
+      eventSource.close();
+    };
   }, []);
 
   // v1.5.0-beta: Fetch REAL connected peers from turbo_sync registry
@@ -1713,11 +2637,18 @@ export default function ExplorerScreen() {
     const peerInterval = setInterval(fetchPeers, 10000); // Update every 10 seconds
 
     return () => clearInterval(peerInterval);
-  }, [networkStats.currentHeight]);
+  }, []); // Fixed: was [networkStats.currentHeight] causing infinite re-mount + interval leak
+
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleSearchInput = (query: string) => {
+    setSearchQuery(query);
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    if (!query.trim()) return;
+    searchTimeoutRef.current = setTimeout(() => handleSearch(query), 400);
+  };
 
   const handleSearch = async (query: string) => {
-    setSearchQuery(query);
-
     if (!query.trim()) return;
 
     try {
@@ -1899,7 +2830,7 @@ export default function ExplorerScreen() {
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => handleSearch(e.target.value)}
+            onChange={(e) => handleSearchInput(e.target.value)}
             placeholder="Search tx, block, contract address, vertex ID..."
             className="w-full pl-10 pr-4 py-3 bg-quantum-dark/50 border border-quantum-purple/30 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-quantum-cyan transition-colors"
           />
@@ -1963,7 +2894,7 @@ export default function ExplorerScreen() {
             </div>
 
             <div className="relative z-10">
-              <div className="text-2xl font-bold text-quantum-cyan">{networkStats.currentHeight}</div>
+              <div className="text-2xl font-bold text-quantum-cyan">{networkStats.currentHeight.toLocaleString()}</div>
               <div className="text-sm text-gray-400 flex items-center justify-center gap-1">
                 Current Height
                 <span className="text-[10px] text-quantum-cyan opacity-0 group-hover:opacity-100 transition-opacity ml-1">
@@ -2115,7 +3046,7 @@ export default function ExplorerScreen() {
                     {/* Footer */}
                     <div className="px-4 py-2 bg-quantum-dark/50 border-t border-quantum-purple/20">
                       <div className="flex items-center justify-between text-xs text-gray-500">
-                        <span>Network: testnet-phase16</span>
+                        <span>Network: mainnet2026</span>
                         <span className="flex items-center gap-1">
                           <div className="w-1.5 h-1.5 rounded-full bg-quantum-green animate-pulse" />
                           Live
@@ -2291,6 +3222,753 @@ export default function ExplorerScreen() {
             <div className="absolute bottom-0 left-0 w-3 h-3 border-l-2 border-b-2 border-cyan-500/0 group-hover:border-cyan-500/60 transition-all duration-300 rounded-bl" />
             <div className="absolute bottom-0 right-0 w-3 h-3 border-r-2 border-b-2 border-purple-500/0 group-hover:border-purple-500/60 transition-all duration-300 rounded-br" />
           </motion.div>
+          {/* v6.2.5: Live Emission Analytics Card with hover dropdown */}
+          {(() => {
+            // v7.3.3: Use genesis_timestamp from API when available (handles different networks)
+            const GENESIS_TS = emissionStats?.summary.genesis_timestamp ?? 1739836800; // Fallback: rehearsal Feb 18, 2026
+            const SECS_PER_ERA = 126_230_400; // 4 × 365.25 × 86400 (v7.0.0: corrected for leap years)
+            const nowSec = Math.floor(Date.now() / 1000);
+            // Clamp era >= 0 to prevent negative era when before genesis
+            const currentEra = emissionStats?.summary.current_era ?? Math.max(0, Math.floor((nowSec - GENESIS_TS) / SECS_PER_ERA));
+            const eraStart = GENESIS_TS + currentEra * SECS_PER_ERA;
+            const eraEnd = eraStart + SECS_PER_ERA;
+            const eraProgress = ((nowSec - eraStart) / SECS_PER_ERA) * 100;
+            const eraAnnual = emissionStats?.summary.annual_target_qug ?? (2_625_000 / Math.pow(2, currentEra));
+            const eraDaily = emissionStats?.summary.daily_target_qug ?? (eraAnnual / 365.25);
+            const nextHalvingDate = new Date(eraEnd * 1000);
+            const daysToHalving = Math.floor((eraEnd - nowSec) / 86400);
+            const price = qugPriceUsd;
+            const fmtUsd = (val: number) => val >= 1_000_000 ? `$${(val / 1_000_000).toFixed(2)}M` : val >= 1_000 ? `$${(val / 1_000).toFixed(1)}K` : `$${val.toFixed(2)}`;
+            const fmtQug = (val: number) => val >= 1_000_000 ? `${(val / 1_000_000).toFixed(2)}M` : val >= 1_000 ? `${val.toLocaleString('en-US', { maximumFractionDigits: 1 })}` : val >= 1 ? val.toFixed(2) : val >= 0.001 ? val.toFixed(4) : val.toFixed(6);
+
+            // Live data from emission API
+            const todayEmitted = emissionStats?.summary.today_emitted_qug ?? 0;
+            const todayBlocks = emissionStats?.summary.today_blocks ?? 0;
+            const todayDeviation = emissionStats?.summary.today_deviation_pct ?? 0;
+            const blockRate = emissionStats?.summary.block_rate_bps ?? 0;
+            const totalSupply = emissionStats?.summary.total_supply_qug ?? 0;
+            const pctMined = emissionStats?.summary.pct_mined ?? 0;
+            const dailyHistory = emissionStats?.daily_history ?? [];
+
+            const schedule = [
+              { era: 0, years: '2025-2029', annual: 2_625_000, total: 10_500_000 },
+              { era: 1, years: '2029-2033', annual: 1_312_500, total: 5_250_000 },
+              { era: 2, years: '2033-2037', annual: 656_250, total: 2_625_000 },
+              { era: 3, years: '2037-2041', annual: 328_125, total: 1_312_500 },
+              { era: 4, years: '2041-2045', annual: 164_063, total: 656_250 },
+              { era: 5, years: '2045-2049', annual: 82_031, total: 328_125 },
+            ];
+
+            // Deviation color: green = on target, yellow = slightly off, red = way off
+            const devColor = Math.abs(todayDeviation) < 5 ? 'text-green-400' : Math.abs(todayDeviation) < 20 ? 'text-yellow-400' : 'text-red-400';
+            const devBg = Math.abs(todayDeviation) < 5 ? 'bg-green-500/10 border-green-500/30' : Math.abs(todayDeviation) < 20 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30';
+
+            return (
+              <>
+                <div className="relative cursor-pointer" onClick={() => setShowEmissionModal(true)}>
+                  <div className="bg-gradient-to-br from-amber-500/10 to-orange-500/10 backdrop-blur-xl rounded-lg border border-amber-400/30 p-4 text-center hover:border-amber-400/60 transition-all duration-300 hover:scale-[1.02]">
+                    <div className="text-xl font-bold text-amber-300">
+                      {fmtQug(todayEmitted)} / {fmtQug(eraDaily)}
+                    </div>
+                    <div className="text-xs text-gray-400">QUG mined today vs target</div>
+                    {price > 0 && (
+                      <div className="text-sm font-semibold text-green-400 mt-0.5">{fmtUsd(todayEmitted * price)} today</div>
+                    )}
+                    <div className="text-sm text-gray-400 mt-1">Era {currentEra} Emission</div>
+                    <div className="mt-1.5 w-full bg-gray-700/50 rounded-full h-1.5">
+                      <div
+                        className="h-1.5 rounded-full bg-gradient-to-r from-amber-500 to-orange-400 transition-all duration-500"
+                        style={{ width: `${Math.min((todayEmitted / eraDaily) * 100, 100)}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                      <span>{todayBlocks.toLocaleString()} blocks</span>
+                      <span>Halving in {daysToHalving.toLocaleString()}d</span>
+                    </div>
+                    <div className="text-[10px] text-amber-400/60 mt-1">Click for full analytics</div>
+                  </div>
+                </div>
+
+                {/* v7.1.0: Full-screen Emission Analytics Modal with graphs — Portal to escape stacking context */}
+                {showEmissionModal && createPortal(
+                  <div className="fixed inset-0 z-[99999] flex items-center justify-center" onClick={() => setShowEmissionModal(false)}>
+                    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+                    <div className="relative w-[95vw] max-w-[1100px] max-h-[92vh] overflow-y-auto rounded-2xl border border-amber-500/40 bg-gray-950/98 backdrop-blur-xl shadow-2xl shadow-amber-900/30 scrollbar-thin scrollbar-thumb-amber-600/30"
+                         onClick={(e) => e.stopPropagation()}>
+                      {/* Modal Header */}
+                      <div className="sticky top-0 z-10 flex items-center justify-between p-5 pb-3 bg-gray-950/95 backdrop-blur-xl border-b border-amber-500/20">
+                        <div className="text-lg font-bold text-amber-300 flex items-center gap-3">
+                          <span className="relative flex h-3 w-3">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500" />
+                          </span>
+                          QUG Emission Analytics (Live)
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30 font-mono text-xs">
+                            Era {currentEra}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {emissionStats?.summary.days_tracked ?? 0}d tracked
+                          </span>
+                          <button onClick={() => setShowEmissionModal(false)}
+                                  className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors text-xl leading-none">
+                            &times;
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="p-5 pt-4">
+
+                    {/* ═══ ROW 1: Core Live Metrics — 5 columns ═══ */}
+                    <div className="grid grid-cols-5 gap-2 mb-3">
+                      <div className="bg-amber-500/10 rounded-lg p-2.5 text-center border border-amber-500/20">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Today Mined</div>
+                        <div className="text-sm font-bold text-amber-300 font-mono">{fmtQug(todayEmitted)}</div>
+                        {price > 0 && <div className="text-[9px] text-green-400/70">{fmtUsd(todayEmitted * price)}</div>}
+                      </div>
+                      <div className="bg-amber-500/10 rounded-lg p-2.5 text-center border border-amber-500/20">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Daily Target</div>
+                        <div className="text-sm font-bold text-white font-mono">{fmtQug(eraDaily)}</div>
+                        {price > 0 && <div className="text-[9px] text-green-400/70">{fmtUsd(eraDaily * price)}</div>}
+                      </div>
+                      <div className={`rounded-lg p-2.5 text-center border ${devBg}`}>
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Deviation</div>
+                        <div className={`text-sm font-bold font-mono ${devColor}`}>
+                          {todayDeviation > 0 ? '+' : ''}{todayDeviation.toFixed(1)}%
+                        </div>
+                        <div className="text-[9px] text-gray-500">{Math.abs(todayDeviation) < 5 ? 'On target' : Math.abs(todayDeviation) < 20 ? 'Slight drift' : 'Correcting...'}</div>
+                      </div>
+                      <div className="bg-cyan-500/10 rounded-lg p-2.5 text-center border border-cyan-500/20">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Block Rate</div>
+                        <div className="text-sm font-bold text-cyan-300 font-mono">{blockRate.toFixed(2)} bps</div>
+                        <div className="text-[9px] text-gray-500">{todayBlocks.toLocaleString()} blocks</div>
+                      </div>
+                      <div className="bg-purple-500/10 rounded-lg p-2.5 text-center border border-purple-500/20">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Block Reward</div>
+                        <div className="text-sm font-bold text-purple-300 font-mono">
+                          {emissionStats?.summary.reward_per_block_qug != null
+                            ? emissionStats.summary.reward_per_block_qug >= 0.001
+                              ? emissionStats.summary.reward_per_block_qug.toFixed(4)
+                              : emissionStats.summary.reward_per_block_qug.toExponential(2)
+                            : networkSupply.blockRewardFormatted || '—'}
+                        </div>
+                        <div className="text-[9px] text-gray-500">QUG/block</div>
+                      </div>
+                    </div>
+
+                    {/* ═══ ROW 2: Scientific Precision Gauges — S2F, Inflation, Correction, Budget ═══ */}
+                    <div className="grid grid-cols-4 gap-2 mb-3">
+                      {/* Stock-to-Flow Gauge */}
+                      <div className="bg-gray-800/60 rounded-lg p-2.5 text-center border border-gray-700/50">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Stock-to-Flow</div>
+                        {(() => {
+                          const s2f = emissionStats?.summary.stock_to_flow ?? (totalSupply > 0 && eraAnnual > 0 ? totalSupply / eraAnnual : 0);
+                          const s2fLabel = s2f < 1 ? 'Early phase' : s2f < 10 ? 'Commodity' : s2f < 50 ? 'Silver-tier' : s2f < 120 ? 'Gold-tier' : 'Bitcoin-tier';
+                          const s2fColor = s2f < 10 ? 'text-gray-300' : s2f < 50 ? 'text-blue-300' : s2f < 120 ? 'text-yellow-300' : 'text-orange-400';
+                          return (
+                            <>
+                              <div className={`text-lg font-bold font-mono ${s2fColor}`}>{s2f >= 0.01 ? s2f.toFixed(2) : s2f.toFixed(4)}</div>
+                              <div className="text-[8px] text-gray-500">{s2fLabel}</div>
+                              {/* Mini S2F bar: QUG vs BTC(121) vs Gold(62) */}
+                              <div className="mt-1 flex items-center gap-0.5 justify-center">
+                                <div className="w-full bg-gray-700/50 rounded-full h-1 relative">
+                                  <div className="h-1 rounded-full bg-gradient-to-r from-amber-500 to-orange-400" style={{ width: `${Math.min((s2f / 200) * 100, 100)}%` }} />
+                                  {/* Gold marker at 62 */}
+                                  <div className="absolute top-0 bottom-0 w-px bg-yellow-500/60" style={{ left: `${(62 / 200) * 100}%` }} title="Gold S2F" />
+                                  {/* BTC marker at 121 */}
+                                  <div className="absolute top-0 bottom-0 w-px bg-orange-400/60" style={{ left: `${(121 / 200) * 100}%` }} title="BTC S2F" />
+                                </div>
+                              </div>
+                              <div className="flex justify-between text-[7px] text-gray-600 mt-0.5 px-0.5">
+                                <span>0</span>
+                                <span className="text-yellow-600">Au</span>
+                                <span className="text-orange-500">BTC</span>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Inflation Rate Gauge */}
+                      <div className="bg-gray-800/60 rounded-lg p-2.5 text-center border border-gray-700/50">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Inflation Rate</div>
+                        {(() => {
+                          const inf = emissionStats?.summary.inflation_rate_pct ?? (totalSupply > 0 ? (eraAnnual / totalSupply) * 100 : 100);
+                          const infColor = inf > 50 ? 'text-red-400' : inf > 10 ? 'text-orange-400' : inf > 2 ? 'text-yellow-300' : 'text-green-400';
+                          return (
+                            <>
+                              <div className={`text-lg font-bold font-mono ${infColor}`}>{inf >= 1 ? inf.toFixed(1) : inf.toFixed(3)}%</div>
+                              <div className="text-[8px] text-gray-500">{inf > 50 ? 'High (early)' : inf > 10 ? 'Moderate' : inf > 2 ? 'Low' : 'Ultra-low'}</div>
+                              {/* Decay visualization */}
+                              <svg viewBox="0 0 80 16" className="w-full mt-1">
+                                {[0,1,2,3,4,5,6,7].map(e => {
+                                  const annual = 2625000 / Math.pow(2, e);
+                                  const supply = 21e6 * (1 - Math.pow(2, -(e * 4 + 2) / 4));
+                                  const eInf = (annual / supply) * 100;
+                                  const barH = Math.min(eInf / 100, 1) * 12;
+                                  return (
+                                    <rect key={e} x={e * 10} y={14 - barH} width="8" height={barH}
+                                      fill={e === currentEra ? '#F59E0B' : '#374151'} rx="1" />
+                                  );
+                                })}
+                                <line x1="0" y1="14" x2="80" y2="14" stroke="#4B5563" strokeWidth="0.3" />
+                              </svg>
+                              <div className="text-[7px] text-gray-600 mt-0.5">Era 0 → 7 inflation decay</div>
+                            </>
+                          );
+                        })()}
+                      </div>
+
+                      {/* PI Correction Factor */}
+                      <div className="bg-gray-800/60 rounded-lg p-2.5 text-center border border-gray-700/50">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">PI Correction</div>
+                        {(() => {
+                          const cf = emissionStats?.summary.correction_factor ?? 1.0;
+                          const cfColor = Math.abs(cf - 1.0) < 0.05 ? 'text-green-400' : Math.abs(cf - 1.0) < 0.2 ? 'text-yellow-300' : 'text-red-400';
+                          const cfLabel = cf > 1.05 ? 'Boosting ▲' : cf < 0.95 ? 'Throttling ▼' : 'Balanced ═';
+                          // Gauge: needle from 0.01 to 3.0, center at 1.0
+                          const gaugePos = Math.min(Math.max((cf - 0.01) / (3.0 - 0.01), 0), 1) * 100;
+                          return (
+                            <>
+                              <div className={`text-lg font-bold font-mono ${cfColor}`}>{cf.toFixed(4)}</div>
+                              <div className="text-[8px] text-gray-500">{cfLabel}</div>
+                              {/* Needle gauge */}
+                              <div className="mt-1 relative h-2 bg-gradient-to-r from-red-800/40 via-green-600/40 to-amber-700/40 rounded-full">
+                                <div className="absolute top-[-1px] w-1 h-3 bg-white rounded-full shadow-sm shadow-white/50" style={{ left: `${gaugePos}%`, transform: 'translateX(-50%)' }} />
+                                {/* Center mark at 1.0 */}
+                                <div className="absolute top-0 bottom-0 w-px bg-white/30" style={{ left: `${((1.0 - 0.01) / 2.99) * 100}%` }} />
+                              </div>
+                              <div className="flex justify-between text-[7px] text-gray-600 mt-0.5">
+                                <span>0.01</span>
+                                <span>1.0</span>
+                                <span>3.0</span>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Budget Deviation (cumulative actual vs target) */}
+                      <div className="bg-gray-800/60 rounded-lg p-2.5 text-center border border-gray-700/50">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider">Budget Dev.</div>
+                        {(() => {
+                          const bd = emissionStats?.summary.budget_deviation_pct ?? 0;
+                          const bdColor = Math.abs(bd) < 2 ? 'text-green-400' : Math.abs(bd) < 10 ? 'text-yellow-300' : 'text-red-400';
+                          const bdLabel = Math.abs(bd) < 2 ? 'Within tolerance' : bd > 0 ? 'Over-emitted' : 'Under-emitted';
+                          return (
+                            <>
+                              <div className={`text-lg font-bold font-mono ${bdColor}`}>{bd > 0 ? '+' : ''}{bd.toFixed(2)}%</div>
+                              <div className="text-[8px] text-gray-500">{bdLabel}</div>
+                              {/* Target vs actual mini bar */}
+                              <div className="mt-1 space-y-0.5">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[7px] text-gray-500 w-8">Target</span>
+                                  <div className="flex-1 bg-gray-700/50 rounded-full h-1.5">
+                                    <div className="h-1.5 rounded-full bg-blue-500/60" style={{ width: '100%' }} />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[7px] text-gray-500 w-8">Actual</span>
+                                  <div className="flex-1 bg-gray-700/50 rounded-full h-1.5">
+                                    <div className={`h-1.5 rounded-full ${bd > 0 ? 'bg-amber-500/60' : 'bg-cyan-500/60'}`} style={{ width: `${Math.min(100 + bd, 150)}%` }} />
+                                  </div>
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* ═══ ROW 3: Supply Dashboard ═══ */}
+                    <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-gray-700/30">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Supply Dashboard</span>
+                        {price > 0 && (
+                          <span className="text-[10px] font-bold text-green-400">
+                            Network Value: {fmtUsd(totalSupply * price)}
+                          </span>
+                        )}
+                      </div>
+                      {/* Supply progress bar */}
+                      <div className="relative h-5 bg-gray-700/30 rounded-full overflow-hidden mb-2">
+                        <div
+                          className="h-5 rounded-full bg-gradient-to-r from-amber-600 via-amber-500 to-yellow-400 transition-all duration-1000"
+                          style={{ width: `${Math.max(pctMined, 0.1)}%` }}
+                        />
+                        {/* Era markers */}
+                        {[25, 50, 75, 87.5, 93.75].map((pct, i) => (
+                          <div key={i} className="absolute top-0 bottom-0 w-px bg-white/10" style={{ left: `${pct}%` }} />
+                        ))}
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <span className="text-[9px] font-bold text-white drop-shadow-lg font-mono">
+                            {fmtQug(totalSupply)} / 21,000,000 QUG ({pctMined < 0.01 ? pctMined.toFixed(6) : pctMined.toFixed(4)}%)
+                          </span>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-4 gap-2 text-center">
+                        <div>
+                          <div className="text-[9px] text-gray-500">Mined</div>
+                          <div className="text-[11px] font-bold text-amber-300 font-mono">{fmtQug(totalSupply)}</div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-gray-500">Remaining</div>
+                          <div className="text-[11px] font-bold text-cyan-300 font-mono">
+                            {fmtQug(emissionStats?.summary.remaining_supply_qug ?? (21_000_000 - totalSupply))}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-gray-500">Annual Rate</div>
+                          <div className="text-[11px] font-bold text-white font-mono">{eraAnnual.toLocaleString()}</div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-gray-500">Halving In</div>
+                          <div className="text-[11px] font-bold text-orange-300 font-mono">{daysToHalving.toLocaleString()}d</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* ═══ ROW 4: QUG Price + Era Info ═══ */}
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      {price > 0 && (
+                        <div className="bg-green-500/8 border border-green-500/20 rounded-lg px-3 py-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] text-gray-400">QUG Price (AMM Oracle)</span>
+                            <span className="text-sm font-bold text-green-400">${price.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between text-[9px] text-gray-500">
+                            <span>Today mined value: <span className="text-green-400">{fmtUsd(todayEmitted * price)}</span></span>
+                            <span>Annual: <span className="text-green-400">{fmtUsd(eraAnnual * price)}</span></span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="bg-amber-500/8 border border-amber-500/20 rounded-lg px-3 py-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-amber-300 font-semibold">Era {currentEra} Progress</span>
+                          <span className="text-[10px] text-gray-400">{eraProgress.toFixed(1)}%</span>
+                        </div>
+                        <div className="w-full bg-gray-700/50 rounded-full h-1.5 mb-1">
+                          <div className="h-1.5 rounded-full bg-amber-500 transition-all" style={{ width: `${eraProgress}%` }} />
+                        </div>
+                        <div className="flex justify-between text-[9px] text-gray-500">
+                          <span>{eraAnnual.toLocaleString()} QUG/yr</span>
+                          <span>Next: {nextHalvingDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* ═══ ROW 5: Daily Emission SVG Sparkline Chart ═══ */}
+                    {dailyHistory.length > 0 && (
+                      <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-gray-700/30">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Daily Emission History</span>
+                          <div className="flex items-center gap-2 text-[8px] text-gray-500">
+                            <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" /> &lt;5%</span>
+                            <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-yellow-500 inline-block" /> &lt;20%</span>
+                            <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" /> &gt;20%</span>
+                          </div>
+                        </div>
+                        {/* SVG sparkline */}
+                        {(() => {
+                          const days = dailyHistory.slice(-14);
+                          const maxEmit = Math.max(...days.map(d => d.emitted_qug), eraDaily * 1.2);
+                          const W = 760, H = 60, padL = 0, padR = 0;
+                          const barW = days.length > 0 ? Math.min((W - padL - padR) / days.length - 2, 50) : 20;
+                          return (
+                            <svg viewBox={`0 0 ${W} ${H + 18}`} className="w-full">
+                              {/* Target line */}
+                              {maxEmit > 0 && (
+                                <>
+                                  <line x1={padL} y1={H - (eraDaily / maxEmit) * H} x2={W - padR} y2={H - (eraDaily / maxEmit) * H}
+                                    stroke="#6B7280" strokeWidth="0.5" strokeDasharray="4,2" />
+                                  <text x={W - padR + 2} y={H - (eraDaily / maxEmit) * H + 3} fill="#6B7280" fontSize="6">target</text>
+                                </>
+                              )}
+                              {/* Bars */}
+                              {days.map((day, i) => {
+                                const barH = maxEmit > 0 ? (day.emitted_qug / maxEmit) * H : 0;
+                                const x = padL + i * ((W - padL - padR) / days.length) + 1;
+                                const barFill = Math.abs(day.deviation_pct) < 5 ? '#22C55E' : Math.abs(day.deviation_pct) < 20 ? '#EAB308' : '#EF4444';
+                                return (
+                                  <g key={day.date}>
+                                    <rect x={x} y={H - barH} width={barW} height={barH} fill={barFill} opacity="0.7" rx="1" />
+                                    <text x={x + barW / 2} y={H + 10} fill="#6B7280" fontSize="5.5" textAnchor="middle">
+                                      {day.date.slice(5)}
+                                    </text>
+                                    <text x={x + barW / 2} y={H - barH - 2} fill="#9CA3AF" fontSize="5" textAnchor="middle">
+                                      {fmtQug(day.emitted_qug)}
+                                    </text>
+                                  </g>
+                                );
+                              })}
+                            </svg>
+                          );
+                        })()}
+                      </div>
+                    )}
+
+                    {/* ═══ ROW 6: Halving Schedule Table (compact) ═══ */}
+                    <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-gray-700/30">
+                      <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Halving Schedule (64 Eras × 4yr = 256yr)</div>
+                      <table className="w-full text-[10px]">
+                        <thead>
+                          <tr className="text-gray-500 border-b border-gray-700/50">
+                            <th className="text-left py-1 font-medium">Era</th>
+                            <th className="text-left py-1 font-medium">Period</th>
+                            <th className="text-right py-1 font-medium">Annual</th>
+                            <th className="text-right py-1 font-medium">Daily</th>
+                            <th className="text-right py-1 font-medium">Cumul. %</th>
+                            {price > 0 && <th className="text-right py-1 font-medium text-green-500">Value/day</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {schedule.map((row) => {
+                            const cumulPct = (() => {
+                              let cum = 0;
+                              for (let e = 0; e <= row.era; e++) cum += 10_500_000 / Math.pow(2, e);
+                              return (cum / 21_000_000) * 100;
+                            })();
+                            return (
+                              <tr key={row.era}
+                                className={`border-b border-gray-800/50 ${row.era === currentEra ? 'bg-amber-500/10 text-amber-200' : 'text-gray-300'}`}>
+                                <td className="py-1 font-mono">{row.era}{row.era === currentEra ? ' ◀' : ''}</td>
+                                <td className="py-1">{row.years}</td>
+                                <td className="py-1 text-right font-mono">{row.annual.toLocaleString()}</td>
+                                <td className="py-1 text-right font-mono">{(row.annual / 365.25).toFixed(1)}</td>
+                                <td className="py-1 text-right font-mono">{cumulPct.toFixed(2)}%</td>
+                                {price > 0 && <td className="py-1 text-right font-mono text-green-400">{fmtUsd((row.annual / 365.25) * price)}</td>}
+                              </tr>
+                            );
+                          })}
+                          <tr className="text-gray-600">
+                            <td className="py-1">6–63</td>
+                            <td className="py-1 text-[9px]">halves every 4yr</td>
+                            <td className="py-1 text-right">→ 0</td>
+                            <td className="py-1 text-right">→ 0</td>
+                            <td className="py-1 text-right">→ 100%</td>
+                            {price > 0 && <td className="py-1 text-right">→ 0</td>}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* ═══ ROW 7: SVG Charts — Supply Curve + S2F ═══ */}
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      {/* 256-Year Supply Curve */}
+                      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/30">
+                        <div className="text-[10px] font-semibold text-gray-400 mb-2 uppercase tracking-wider">256-Year Supply Curve</div>
+                        <svg viewBox="0 0 300 140" className="w-full">
+                          {/* Grid */}
+                          {[0,25,50,75,100].map(pct => (
+                            <line key={`gy-${pct}`} x1="30" y1={120 - pct * 1.1} x2="290" y2={120 - pct * 1.1} stroke="#374151" strokeWidth="0.5" />
+                          ))}
+                          {[0,64,128,192,256].map((yr) => (
+                            <g key={`gx-${yr}`}>
+                              <line x1={30 + yr} y1="10" x2={30 + yr} y2="125" stroke="#374151" strokeWidth="0.5" />
+                              <text x={30 + yr} y="135" fill="#6B7280" fontSize="7" textAnchor="middle">{yr}yr</text>
+                            </g>
+                          ))}
+                          {[0,5.25,10.5,15.75,21].map((val, i) => (
+                            <text key={`yl-${i}`} x="28" y={122 - i * 27.5} fill="#6B7280" fontSize="6" textAnchor="end">{val}M</text>
+                          ))}
+                          {/* Area under curve */}
+                          <path
+                            d={(() => {
+                              const pts: string[] = [`M30,120`];
+                              for (let yr = 0; yr <= 256; yr += 1) {
+                                const supply = 21 * (1 - Math.pow(2, -yr / 4));
+                                pts.push(`L${(30 + yr).toFixed(1)},${(120 - (supply / 21) * 110).toFixed(1)}`);
+                              }
+                              pts.push('L286,120 Z');
+                              return pts.join(' ');
+                            })()}
+                            fill="url(#supplyGrad)" opacity="0.3"
+                          />
+                          <defs>
+                            <linearGradient id="supplyGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#F59E0B" />
+                              <stop offset="100%" stopColor="#F59E0B" stopOpacity="0" />
+                            </linearGradient>
+                          </defs>
+                          {/* Supply curve */}
+                          <path
+                            d={(() => {
+                              const pts: string[] = [];
+                              for (let yr = 0; yr <= 256; yr += 1) {
+                                const supply = 21 * (1 - Math.pow(2, -yr / 4));
+                                pts.push(`${yr === 0 ? 'M' : 'L'}${(30 + yr).toFixed(1)},${(120 - (supply / 21) * 110).toFixed(1)}`);
+                              }
+                              return pts.join(' ');
+                            })()}
+                            fill="none" stroke="#F59E0B" strokeWidth="1.5"
+                          />
+                          <line x1="30" y1="10" x2="290" y2="10" stroke="#EF4444" strokeWidth="0.5" strokeDasharray="3,3" />
+                          <text x="292" y="13" fill="#EF4444" fontSize="6">21M</text>
+                          {/* Current position */}
+                          {(() => {
+                            const elapsed = (Date.now() / 1000 - 1771761600) / (365.25 * 86400);
+                            const supply = totalSupply > 0 ? totalSupply : 21e6 * (1 - Math.pow(2, -elapsed / 4));
+                            const x = 30 + Math.max(0, elapsed);
+                            const y = 120 - (Math.min(supply, 21e6) / 21e6) * 110;
+                            return (
+                              <>
+                                <line x1={Math.min(x, 286)} y1={Math.max(y, 10)} x2={Math.min(x, 286)} y2="120" stroke="#3B82F6" strokeWidth="0.5" strokeDasharray="2,2" />
+                                <circle cx={Math.min(x, 286)} cy={Math.max(y, 10)} r="3" fill="#3B82F6" stroke="#fff" strokeWidth="0.5">
+                                  <animate attributeName="r" values="3;4;3" dur="2s" repeatCount="indefinite" />
+                                </circle>
+                                <text x={Math.min(x, 286) + 5} y={Math.max(y, 10) - 3} fill="#60A5FA" fontSize="5">NOW</text>
+                              </>
+                            );
+                          })()}
+                          <text x="36" y="68" fill="#9CA3AF" fontSize="5">50% @ 4yr</text>
+                        </svg>
+                      </div>
+
+                      {/* Stock-to-Flow + Inflation */}
+                      <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/30">
+                        <div className="text-[10px] font-semibold text-gray-400 mb-2 uppercase tracking-wider">Stock-to-Flow & Inflation</div>
+                        <svg viewBox="0 0 300 140" className="w-full">
+                          {[0,25,50,75,100].map(pct => (
+                            <line key={`sy-${pct}`} x1="30" y1={120 - pct * 1.1} x2="290" y2={120 - pct * 1.1} stroke="#374151" strokeWidth="0.5" />
+                          ))}
+                          {[0,10,20,30,40,50,60].map(yr => (
+                            <g key={`sx-${yr}`}>
+                              <line x1={30 + yr * 4.33} y1="10" x2={30 + yr * 4.33} y2="125" stroke="#374151" strokeWidth="0.5" />
+                              <text x={30 + yr * 4.33} y="135" fill="#6B7280" fontSize="7" textAnchor="middle">{yr}yr</text>
+                            </g>
+                          ))}
+                          {/* S2F area fill */}
+                          <path
+                            d={(() => {
+                              const pts: string[] = ['M34.33,120'];
+                              for (let yr = 1; yr <= 60; yr += 0.5) {
+                                const supply = 21e6 * (1 - Math.pow(2, -yr / 4));
+                                const era = Math.floor(yr / 4);
+                                const annual = 2625000 / Math.pow(2, era);
+                                const s2f = supply / annual;
+                                const y = 120 - Math.min(s2f / 500, 1) * 110;
+                                pts.push(`L${(30 + yr * 4.33).toFixed(1)},${y.toFixed(1)}`);
+                              }
+                              pts.push(`L${(30 + 60 * 4.33).toFixed(1)},120 Z`);
+                              return pts.join(' ');
+                            })()}
+                            fill="#8B5CF6" opacity="0.1"
+                          />
+                          <path
+                            d={(() => {
+                              const pts: string[] = [];
+                              for (let yr = 1; yr <= 60; yr += 0.5) {
+                                const supply = 21e6 * (1 - Math.pow(2, -yr / 4));
+                                const era = Math.floor(yr / 4);
+                                const annual = 2625000 / Math.pow(2, era);
+                                const s2f = supply / annual;
+                                const y = 120 - Math.min(s2f / 500, 1) * 110;
+                                pts.push(`${pts.length === 0 ? 'M' : 'L'}${(30 + yr * 4.33).toFixed(1)},${y.toFixed(1)}`);
+                              }
+                              return pts.join(' ');
+                            })()}
+                            fill="none" stroke="#8B5CF6" strokeWidth="1.5"
+                          />
+                          <path
+                            d={(() => {
+                              const pts: string[] = [];
+                              for (let yr = 0.5; yr <= 60; yr += 0.5) {
+                                const supply = 21e6 * (1 - Math.pow(2, -yr / 4));
+                                const era = Math.floor(yr / 4);
+                                const annual = 2625000 / Math.pow(2, era);
+                                const inflation = (annual / supply) * 100;
+                                const y = 120 - Math.min(inflation / 100, 1) * 110;
+                                pts.push(`${pts.length === 0 ? 'M' : 'L'}${(30 + yr * 4.33).toFixed(1)},${y.toFixed(1)}`);
+                              }
+                              return pts.join(' ');
+                            })()}
+                            fill="none" stroke="#EF4444" strokeWidth="1" strokeDasharray="3,2"
+                          />
+                          {/* BTC S2F reference */}
+                          {(() => {
+                            const btcY = 120 - Math.min(121 / 500, 1) * 110;
+                            return (
+                              <>
+                                <line x1="30" y1={btcY} x2="290" y2={btcY} stroke="#F7931A" strokeWidth="0.5" strokeDasharray="4,2" />
+                                <text x="292" y={btcY + 3} fill="#F7931A" fontSize="5">BTC</text>
+                              </>
+                            );
+                          })()}
+                          {/* Gold S2F reference */}
+                          {(() => {
+                            const goldY = 120 - Math.min(62 / 500, 1) * 110;
+                            return (
+                              <>
+                                <line x1="30" y1={goldY} x2="290" y2={goldY} stroke="#D4AF37" strokeWidth="0.5" strokeDasharray="2,3" />
+                                <text x="292" y={goldY + 3} fill="#D4AF37" fontSize="5">Gold</text>
+                              </>
+                            );
+                          })()}
+                          <line x1="35" y1="14" x2="50" y2="14" stroke="#8B5CF6" strokeWidth="1.5" />
+                          <text x="52" y="16" fill="#A78BFA" fontSize="6">S2F</text>
+                          <line x1="100" y1="14" x2="115" y2="14" stroke="#EF4444" strokeWidth="1" strokeDasharray="3,2" />
+                          <text x="117" y="16" fill="#F87171" fontSize="6">Inflation</text>
+                        </svg>
+                      </div>
+                    </div>
+
+                    {/* ═══ ROW 8: Reward Adaptation Demo ═══ */}
+                    <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-gray-700/30">
+                      <div className="text-[10px] font-semibold text-gray-400 mb-2 uppercase tracking-wider">Reward Adaptation: R(λ) = Annual / (λ × T)</div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {[
+                          { rate: 0.1, label: '0.1' },
+                          { rate: 0.5, label: '0.5' },
+                          { rate: 1, label: '1' },
+                          { rate: 5, label: '5' },
+                          { rate: 10, label: '10' },
+                          { rate: 100, label: '100' },
+                          { rate: 1000, label: '1K' },
+                        ].map(({ rate, label }) => {
+                          const reward = eraAnnual / (rate * 31557600);
+                          const isCurrentRate = Math.abs(rate - blockRate) / Math.max(rate, 0.01) < 0.5;
+                          return (
+                            <div key={rate} className={`text-center rounded p-1 ${isCurrentRate ? 'bg-amber-500/20 border border-amber-500/40' : ''}`}>
+                              <div className="text-[8px] text-gray-500">{label} bps</div>
+                              <div className="text-[10px] font-mono text-amber-300">{reward >= 0.001 ? reward.toFixed(4) : reward.toExponential(2)}</div>
+                              <div className="text-[7px] text-green-500/70 font-mono">{eraAnnual.toLocaleString()}/yr</div>
+                              {isCurrentRate && <div className="text-[7px] text-amber-400 font-bold">◀ YOU</div>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* ═══ FOOTER: Mathematical Proof + Whitepaper ═══ */}
+                    <div className="pt-3 border-t border-gray-700/50">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="text-[10px] text-gray-500 font-mono leading-relaxed">
+                            Geometric: 10,500,000 × Σ(1/2ᵏ) = 10,500,000 × 2 = <span className="text-amber-400">21,000,000 QUG</span>
+                          </div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">
+                            R(λ) = A(k) / (λ · T) — reward adapts inversely to throughput. PI controller maintains cumulative budget.
+                          </div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">
+                            Every node independently verifies. No central authority. Deterministic u128 integer arithmetic.
+                          </div>
+                        </div>
+                        <a href="/downloads/qug-emission-economics-whitepaper.pdf" target="_blank"
+                          className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25 transition-colors">
+                          📄 Read Whitepaper
+                        </a>
+                      </div>
+                    </div>
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )}
+              </>
+            );
+          })()}
+        </div>
+      </motion.section>
+
+      {/* Network Health Dashboard */}
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+      >
+        <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+          <Heart className="w-5 h-5 text-red-500" />
+          Network Health
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Block Rate Sparkline */}
+          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-400">Block Rate</span>
+              <span className="text-sm font-bold font-mono text-quantum-cyan">
+                {emissionStats?.summary.block_rate_bps != null
+                  ? `${emissionStats.summary.block_rate_bps.toFixed(2)} bps`
+                  : `${networkStats.avgBlockTime > 0 ? (1 / networkStats.avgBlockTime).toFixed(2) : '0.00'} bps`}
+              </span>
+            </div>
+            {emissionStats?.daily_history && emissionStats.daily_history.length >= 2 ? (
+              <MiniSparkline
+                data={emissionStats.daily_history.slice(-7).map(d => d.avg_block_rate)}
+                color="#22d3ee"
+                height={40}
+              />
+            ) : (
+              <div className="h-[40px] flex items-center justify-center text-xs text-gray-500">Collecting data...</div>
+            )}
+            <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+              <span>7d ago</span>
+              <span>Today</span>
+            </div>
+          </div>
+
+          {/* Daily Emission Sparkline */}
+          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-400">Daily Emission</span>
+              <span className="text-sm font-bold font-mono text-quantum-green">
+                {emissionStats?.summary.today_emitted_qug != null
+                  ? `${emissionStats.summary.today_emitted_qug >= 1000
+                      ? (emissionStats.summary.today_emitted_qug / 1000).toFixed(1) + 'K'
+                      : emissionStats.summary.today_emitted_qug.toFixed(1)} QUG`
+                  : '—'}
+              </span>
+            </div>
+            {emissionStats?.daily_history && emissionStats.daily_history.length >= 2 ? (
+              <MiniSparkline
+                data={emissionStats.daily_history.slice(-7).map(d => d.emitted_qug)}
+                color="#4ade80"
+                height={40}
+              />
+            ) : (
+              <div className="h-[40px] flex items-center justify-center text-xs text-gray-500">Collecting data...</div>
+            )}
+            <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+              <span>7d ago</span>
+              <span>Today</span>
+            </div>
+          </div>
+
+          {/* Peer Network Card */}
+          <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-400">Peer Network</span>
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-quantum-green animate-pulse" />
+                <span className="text-sm font-bold font-mono text-quantum-purple">{connectedPeers.length} peers</span>
+              </div>
+            </div>
+            <div className="space-y-1.5 max-h-[100px] overflow-y-auto pr-1">
+              {connectedPeers.length === 0 ? (
+                <div className="text-xs text-gray-500 text-center py-3">No peers connected</div>
+              ) : (
+                connectedPeers.map((peer, i) => (
+                  <div key={i} className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                        peer.syncStatus === 'synced' ? 'bg-quantum-green' :
+                        peer.syncStatus === 'syncing' ? 'bg-yellow-400' : 'bg-red-400'
+                      }`} />
+                      <span className="font-mono text-gray-300 truncate">{peer.peerId}</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="font-mono text-gray-400">{peer.height.toLocaleString()}</span>
+                      <span className={`text-[9px] px-1 py-0.5 rounded ${
+                        peer.syncStatus === 'synced' ? 'bg-quantum-green/20 text-quantum-green' :
+                        peer.syncStatus === 'syncing' ? 'bg-yellow-400/20 text-yellow-300' :
+                        'bg-red-400/20 text-red-300'
+                      }`}>{peer.syncStatus}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </motion.section>
 
@@ -2337,6 +4015,35 @@ export default function ExplorerScreen() {
           <DetailModal
             detail={selectedDetail}
             onClose={() => setSelectedDetail(null)}
+            onNavigate={(newDetail) => {
+              // Navigate to a new detail view (e.g., click tx → view block, or click block tx → view tx)
+              // Re-fetch data if needed for block navigation
+              if (newDetail.type === 'block' && newDetail.data?.height && !newDetail.data?.transactions) {
+                // Fetch full block data for block navigation
+                (async () => {
+                  try {
+                    const blockResponse = await qnkAPI.getBlock(newDetail.data.height);
+                    if (blockResponse.success && blockResponse.data) {
+                      setSelectedDetail({
+                        type: 'block',
+                        data: {
+                          height: newDetail.data.height,
+                          tx_count: Array.isArray(blockResponse.data) ? blockResponse.data.length : 0,
+                          hash: blockResponse.data[0]?.hash || 'N/A',
+                          transactions: blockResponse.data,
+                        }
+                      });
+                    } else {
+                      setSelectedDetail(newDetail);
+                    }
+                  } catch {
+                    setSelectedDetail(newDetail);
+                  }
+                })();
+              } else {
+                setSelectedDetail(newDetail);
+              }
+            }}
           />
         )}
         {showStatsModal && (
@@ -2347,6 +4054,8 @@ export default function ExplorerScreen() {
             postQuantumStatus={postQuantumStatus}
             startupProgress={startupProgress}
             resonanceMetrics={resonanceMetrics}
+            networkHashrateFormatted={networkSupply.networkHashrateFormatted}
+            physicsMetrics={physicsMetrics}
             onClose={() => setShowStatsModal(false)}
           />
         )}

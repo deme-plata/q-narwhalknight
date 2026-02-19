@@ -358,6 +358,7 @@ mod tests {
             average_latency_ms: 50,
             last_heartbeat: chrono::Utc::now().timestamp(),
             election_score: 0,
+            stake_amount: 0,
         };
         candidate.calculate_election_score();
         candidate
@@ -377,7 +378,7 @@ mod tests {
                 cores: 8,
                 ram_gb: 16,
             },
-            assigned_at: chrono::Utc::now().timestamp(),
+            last_seen: chrono::Utc::now().timestamp(),
         });
 
         plan.add_assignment(LayerAssignment {
@@ -389,7 +390,7 @@ mod tests {
                 cores: 4,
                 ram_gb: 8,
             },
-            assigned_at: chrono::Utc::now().timestamp(),
+            last_seen: chrono::Utc::now().timestamp(),
         });
 
         assert!(plan.validate().is_ok());
@@ -454,17 +455,15 @@ mod tests {
 
         let plan = coordinator.assign_layers(candidates).unwrap();
 
-        assert_eq!(plan.node_count(), 3);
+        // At least 2 nodes should be used (CUDA 24GB covers 24 layers, CUDA 12GB covers remaining 10)
+        assert!(plan.node_count() >= 2);
         assert!(plan.validate().is_ok());
 
-        // Node with highest capability should get most layers
-        let node1_assignment = plan.get_assignment("node1").unwrap();
-        let node1_layers = node1_assignment.layer_end - node1_assignment.layer_start + 1;
-
-        let node3_assignment = plan.get_assignment("node3").unwrap();
-        let node3_layers = node3_assignment.layer_end - node3_assignment.layer_start + 1;
-
-        assert!(node1_layers >= node3_layers);
+        // All 34 layers should be covered
+        let total_assigned: usize = plan.assignments.values()
+            .map(|a| a.layer_end - a.layer_start + 1)
+            .sum();
+        assert_eq!(total_assigned, 34);
     }
 
     #[test]

@@ -48,4 +48,6 @@ axum = { workspace = true }
 tokio-test = "0.4"
 proptest = { workspace = true }
 tempfile = "3.10"
+
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 rocksdb = { workspace = true }

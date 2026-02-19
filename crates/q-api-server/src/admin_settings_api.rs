@@ -1,0 +1,442 @@
+// v7.3.0: Admin Settings API — Node operator admin panel
+// Separate from deploy_admin_api (FOUNDER_WALLET). This uses the configurable
+// --admin-wallet / Q_ADMIN_WALLET which defaults to FOUNDER_WALLET but can be
+// set to any wallet by the node operator.
+
+use axum::{
+    extract::{Json, State},
+    http::{HeaderMap, StatusCode},
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{info, warn};
+
+use crate::AppState;
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Extract wallet address from request headers (same pattern as deploy_admin_api)
+fn extract_wallet(headers: &HeaderMap) -> Option<String> {
+    if let Some(auth) = headers.get("x-wallet-auth") {
+        if let Ok(auth_str) = auth.to_str() {
+            let wallet = auth_str.split(':').next().unwrap_or("");
+            let clean = wallet.replace("qnk", "").replace("qug", "");
+            if clean.len() == 64 {
+                return Some(clean);
+            }
+        }
+    }
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+            let clean = token.replace("qnk", "").replace("qug", "");
+            if clean.len() == 64 {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
+    match extract_wallet(headers) {
+        Some(wallet) => wallet == state.admin_wallet,
+        None => false,
+    }
+}
+
+// ============================================================================
+// Response types
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct IsAdminResponse {
+    pub is_admin: bool,
+}
+
+#[derive(Serialize)]
+pub struct AdminSettingsResponse {
+    pub admin_wallet: String,
+    pub version: String,
+    pub uptime_secs: u64,
+    pub height: u64,
+    pub network_height: u64,
+    pub peers: usize,
+    pub network_id: String,
+    pub oauth2_clients: usize,
+    pub oauth2_active_tokens: usize,
+    pub oauth2_consents: usize,
+}
+
+#[derive(Serialize)]
+pub struct ConsentEntry {
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub granted_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct RevokeConsentRequest {
+    pub client_id: String,
+}
+
+#[derive(Serialize)]
+pub struct NodeInfoResponse {
+    pub version: String,
+    pub uptime_secs: u64,
+    pub height: u64,
+    pub network_height: u64,
+    pub peers: usize,
+    pub network_id: String,
+    pub mining_healthy: bool,
+}
+
+// ============================================================================
+// Handlers
+// ============================================================================
+
+/// GET /api/v1/admin/is-admin
+/// Always responds (no 403). Returns { is_admin: true/false }.
+pub async fn is_admin(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Json<IsAdminResponse> {
+    Json(IsAdminResponse {
+        is_admin: is_node_admin(&headers, &state),
+    })
+}
+
+/// GET /api/v1/admin/settings
+/// Returns admin wallet, node stats, and OAuth2 summary. Admin-only.
+pub async fn admin_settings(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AdminSettingsResponse>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    let peers = state
+        .libp2p_peer_count
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+
+    let oauth2 = &state.oauth2_storage;
+    let client_count = oauth2.client_count().await;
+    let active_tokens = oauth2.active_token_count().await;
+    let admin_wallet_clean = extract_wallet(&headers).unwrap_or_default();
+    let consent_count = oauth2.get_consents_for_wallet(&admin_wallet_clean).await.len();
+
+    Ok(Json(AdminSettingsResponse {
+        admin_wallet: format!("{}...{}", &state.admin_wallet[..8], &state.admin_wallet[56..]),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: uptime,
+        height,
+        network_height,
+        peers,
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        oauth2_clients: client_count,
+        oauth2_active_tokens: active_tokens,
+        oauth2_consents: consent_count,
+    }))
+}
+
+/// GET /api/v1/admin/oauth2/consents
+/// Lists OAuth2 consents granted by the admin wallet. Admin-only.
+pub async fn oauth2_consents(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ConsentEntry>>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let wallet = extract_wallet(&headers).unwrap_or_default();
+    let consents = state.oauth2_storage.get_consents_for_wallet(&wallet).await;
+
+    let entries: Vec<ConsentEntry> = consents
+        .into_iter()
+        .map(|c| ConsentEntry {
+            client_id: c.client_id,
+            scopes: c.scopes,
+            granted_at: c.granted_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+/// POST /api/v1/admin/oauth2/revoke-consent
+/// Revokes a consent and associated tokens. Admin-only.
+pub async fn revoke_consent(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RevokeConsentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let wallet = extract_wallet(&headers).unwrap_or_default();
+    let revoked = state.oauth2_storage.revoke_consent(&wallet, &body.client_id).await;
+
+    if revoked {
+        Ok(Json(serde_json::json!({ "revoked": true, "client_id": body.client_id })))
+    } else {
+        warn!("Admin tried to revoke non-existent consent for client {}", body.client_id);
+        Ok(Json(serde_json::json!({ "revoked": false, "client_id": body.client_id })))
+    }
+}
+
+// ============================================================================
+// User-level OAuth2 endpoints (any authenticated wallet, NOT admin-only)
+// ============================================================================
+
+/// GET /api/v1/oauth2/my-consents
+/// Returns OAuth2 consents for the requesting wallet. Any authenticated user.
+pub async fn my_oauth2_consents(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ConsentEntry>>, StatusCode> {
+    let wallet = extract_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let consents = state.oauth2_storage.get_consents_for_wallet(&wallet).await;
+
+    let entries: Vec<ConsentEntry> = consents
+        .into_iter()
+        .map(|c| ConsentEntry {
+            client_id: c.client_id,
+            scopes: c.scopes,
+            granted_at: c.granted_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+/// POST /api/v1/oauth2/my-consents/revoke
+/// Revokes a consent and associated tokens for the requesting wallet.
+pub async fn my_revoke_consent(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RevokeConsentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let wallet = extract_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let revoked = state.oauth2_storage.revoke_consent(&wallet, &body.client_id).await;
+
+    Ok(Json(serde_json::json!({ "revoked": revoked, "client_id": body.client_id })))
+}
+
+/// GET /api/v1/admin/node/info
+/// Returns basic node info. Admin-only.
+pub async fn node_info(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NodeInfoResponse>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+    let peers = state
+        .libp2p_peer_count
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let mining_healthy = state.mining_is_healthy.load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok(Json(NodeInfoResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: uptime,
+        height,
+        network_height,
+        peers,
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        mining_healthy,
+    }))
+}
+
+// ============================================================================
+// v7.3.1: Node Operator Fee Settings (master-wallet-only)
+// ============================================================================
+
+/// Check if the requesting wallet is the MASTER wallet (founder), not just admin
+fn is_master_wallet(headers: &HeaderMap, _state: &AppState) -> bool {
+    match extract_wallet(headers) {
+        Some(wallet) => wallet == crate::aegis_auth_middleware::FOUNDER_WALLET,
+        None => false,
+    }
+}
+
+#[derive(Serialize)]
+pub struct NodeOperatorFeeResponse {
+    pub node_operator_fee_promille: u64,
+    pub node_operator_fee_percent: String,
+    pub dex_protocol_fee_bps: u64,
+    pub dex_protocol_fee_percent: String,
+    pub admin_wallet: String,
+    pub admin_wallet_balance_qug: f64,
+    pub founder_wallet_balance_qug: f64,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateOperatorFeeRequest {
+    /// Promille of fees routed to node operator (0-500, i.e. 0%-50%)
+    #[serde(default)]
+    pub node_operator_fee_promille: Option<u64>,
+    /// DEX protocol fee in basis points (0-10, i.e. 0%-0.1%)
+    #[serde(default)]
+    pub dex_protocol_fee_bps: Option<u64>,
+}
+
+/// GET /api/v1/admin/operator-fees
+/// Returns node operator fee settings. Master-wallet-only.
+pub async fn get_operator_fees(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NodeOperatorFeeResponse>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let promille = state.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed);
+    let dex_bps = state.dex_protocol_fee_bps.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Get admin wallet balance
+    let admin_balance = {
+        let balances = state.wallet_balances.read().await;
+        if let Ok(bytes) = hex::decode(&state.admin_wallet) {
+            if bytes.len() == 32 {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&bytes);
+                balances.get(&addr).copied().unwrap_or(0) as f64 / 1e24
+            } else { 0.0 }
+        } else { 0.0 }
+    };
+
+    // Get founder wallet balance
+    let founder_balance = {
+        let balances = state.wallet_balances.read().await;
+        if let Ok(bytes) = hex::decode(crate::aegis_auth_middleware::FOUNDER_WALLET) {
+            if bytes.len() == 32 {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&bytes);
+                balances.get(&addr).copied().unwrap_or(0) as f64 / 1e24
+            } else { 0.0 }
+        } else { 0.0 }
+    };
+
+    Ok(Json(NodeOperatorFeeResponse {
+        node_operator_fee_promille: promille,
+        node_operator_fee_percent: format!("{:.1}%", promille as f64 / 10.0),
+        dex_protocol_fee_bps: dex_bps,
+        dex_protocol_fee_percent: format!("{:.2}%", dex_bps as f64 / 100.0),
+        admin_wallet: format!("{}...{}", &state.admin_wallet[..8], &state.admin_wallet[56..]),
+        admin_wallet_balance_qug: admin_balance,
+        founder_wallet_balance_qug: founder_balance,
+    }))
+}
+
+/// POST /api/v1/admin/operator-fees
+/// Update node operator fee settings. Master-wallet-only.
+pub async fn update_operator_fees(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateOperatorFeeRequest>,
+) -> Result<Json<NodeOperatorFeeResponse>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if let Some(promille) = req.node_operator_fee_promille {
+        if promille > 500 {
+            return Err(StatusCode::BAD_REQUEST); // Max 50%
+        }
+        let old = state.node_operator_fee_promille.swap(promille, std::sync::atomic::Ordering::SeqCst);
+        info!(
+            "💰 [ADMIN] Node operator fee updated: {} promille ({:.1}%) → {} promille ({:.1}%)",
+            old, old as f64 / 10.0, promille, promille as f64 / 10.0
+        );
+    }
+
+    if let Some(bps) = req.dex_protocol_fee_bps {
+        if bps > 10 {
+            return Err(StatusCode::BAD_REQUEST); // Max 0.1%
+        }
+        let old = state.dex_protocol_fee_bps.swap(bps, std::sync::atomic::Ordering::SeqCst);
+        info!(
+            "💰 [ADMIN] DEX protocol fee updated: {} bps ({:.2}%) → {} bps ({:.2}%)",
+            old, old as f64 / 100.0, bps, bps as f64 / 100.0
+        );
+    }
+
+    // Return updated state
+    get_operator_fees(headers, State(state)).await
+}
+
+// ============================================================================
+// v7.3.1: Node Update Check API
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct NodeUpdateInfo {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub download_url: Option<String>,
+}
+
+/// GET /api/v1/admin/node/update-check
+/// Check if a newer node binary is available. Admin-only.
+pub async fn check_node_update(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NodeUpdateInfo>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    // Check latest version from bootstrap node
+    let latest = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => {
+            match client.get("https://quillon.xyz/api/v1/status").send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        body.get("data")
+                            .and_then(|d| d.get("version"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else { None }
+                }
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    };
+
+    let update_available = latest.as_ref().map(|l| l != &current).unwrap_or(false);
+    let download_url = if update_available {
+        latest.as_ref().map(|v| format!("https://quillon.xyz/downloads/q-api-server-v{}", v))
+    } else { None };
+
+    Ok(Json(NodeUpdateInfo {
+        current_version: current,
+        latest_version: latest,
+        update_available,
+        download_url,
+    }))
+}

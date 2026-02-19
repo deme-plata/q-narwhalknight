@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 // Default values for backwards compatibility with existing blocks
 fn default_phase() -> u8 { 5 }  // Phase 5 is current testnet phase
-fn default_network_id() -> String { "testnet-phase5".to_string() }
+fn default_network_id() -> String { "mainnet2026.2".to_string() }
 
 /// v1.1.3-beta: Custom serde module for u128 serialization
 /// v3.2.8-beta: RESTORED native u128 for Bincode storage compatibility
@@ -147,8 +147,8 @@ pub struct BlockHeader {
     #[serde(default = "default_phase")]
     pub phase: u8,
 
-    /// Network ID ("testnet-phase1", "testnet-phase5", "mainnet", etc.)
-    /// Optional for backwards compatibility (defaults to "testnet-phase5")
+    /// Network ID ("testnet-phase1", "mainnet", "mainnet", etc.)
+    /// Optional for backwards compatibility (defaults to "mainnet")
     #[serde(default = "default_network_id")]
     pub network_id: String,
 
@@ -1029,7 +1029,7 @@ mod tests {
             header: BlockHeader {
                 height: 1,
                 phase: 5,
-                network_id: "testnet-phase5".to_string(),
+                network_id: "mainnet2026.2".to_string(),
                 prev_block_hash: [0u8; 32],
                 solutions_root: [0u8; 32],
                 tx_root: [0u8; 32],

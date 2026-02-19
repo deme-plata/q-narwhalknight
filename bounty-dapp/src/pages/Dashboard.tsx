@@ -1,15 +1,39 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title } from 'chart.js'
 import { Doughnut, Bar } from 'react-chartjs-2'
-import { Trophy, TrendingUp, Award, Users } from 'lucide-react'
+import { Trophy, TrendingUp, Award, Users, Wallet, ArrowRight, Sparkles } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import bountyApi from '../services/api'
+import { useWallet } from '../App'
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title)
 
 export default function Dashboard() {
+  const { wallet, connect, connecting } = useWallet()
   const [userId, setUserId] = useState('')
   const [searchUserId, setSearchUserId] = useState('')
+
+  // Auto-load user ID from localStorage (set during registration)
+  useEffect(() => {
+    const storedId = localStorage.getItem('bounty_user_id')
+    if (storedId && !searchUserId) {
+      setUserId(storedId)
+      setSearchUserId(storedId)
+    }
+  }, [])
+
+  // Also try wallet address as lookup if no user_id stored
+  useEffect(() => {
+    if (wallet?.connected && wallet.address && !searchUserId) {
+      const storedId = localStorage.getItem('bounty_user_id')
+      if (!storedId) {
+        // Try using wallet address directly as a fallback lookup
+        setUserId(wallet.address)
+        setSearchUserId(wallet.address)
+      }
+    }
+  }, [wallet, searchUserId])
 
   const { data: userScore, isLoading, error } = useQuery({
     queryKey: ['userScore', searchUserId],
@@ -29,26 +53,85 @@ export default function Dashboard() {
     }
   }
 
+  const isRegistered = !!localStorage.getItem('bounty_user_id')
+
   return (
     <div className="space-y-8">
       {/* Header */}
       <div className="text-center">
         <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-blue-400 to-cyan-400 mb-4">
-          Testnet Bounty Dashboard
+          Bounty Dashboard
         </h1>
         <p className="text-slate-300 text-lg">
           Track your contributions and earn rewards for helping build Q-NarwhalKnight
         </p>
       </div>
 
-      {/* Search Section */}
+      {/* Connected wallet + auto-loaded state */}
+      {wallet?.connected && !isRegistered && !userScore && !isLoading && (
+        <div className="glass-card p-6 border-purple-500/20">
+          <div className="flex flex-col sm:flex-row items-center gap-4">
+            <div className="flex items-center gap-3 flex-1">
+              <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                <Sparkles className="w-5 h-5 text-purple-400" />
+              </div>
+              <div>
+                <h3 className="text-white font-semibold text-sm">Wallet connected!</h3>
+                <p className="text-slate-400 text-xs">
+                  Register to start earning bounty points with your wallet.
+                </p>
+              </div>
+            </div>
+            <Link
+              to="/register"
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white text-sm font-semibold rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all whitespace-nowrap"
+            >
+              Register Now
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Not connected — prompt to connect or enter ID manually */}
+      {!wallet?.connected && !isRegistered && (
+        <div className="glass-card p-6 border-slate-700/50">
+          <div className="flex flex-col sm:flex-row items-center gap-4">
+            <div className="flex items-center gap-3 flex-1">
+              <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                <Wallet className="w-5 h-5 text-blue-400" />
+              </div>
+              <div>
+                <h3 className="text-white font-semibold text-sm">Connect your wallet</h3>
+                <p className="text-slate-400 text-xs">
+                  Connect your Quillon wallet to auto-load your bounty stats
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={connect}
+              disabled={connecting}
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white text-sm font-semibold rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all disabled:opacity-50 whitespace-nowrap"
+            >
+              {connecting ? (
+                <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-white" />
+              ) : (
+                <Wallet className="w-4 h-4" />
+              )}
+              {connecting ? 'Connecting...' : 'Connect Wallet'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Search Section — always visible for manual lookup */}
       <div className="bg-slate-800/50 backdrop-blur-lg rounded-xl p-6 border border-purple-500/30">
         <form onSubmit={handleSearch} className="flex gap-4">
           <input
             type="text"
             value={userId}
             onChange={(e) => setUserId(e.target.value)}
-            placeholder="Enter your User ID to view stats..."
+            placeholder={isRegistered ? 'Your Bounty ID (auto-loaded)' : 'Enter Bounty ID or wallet address...'}
             className="flex-1 px-4 py-3 bg-slate-900/50 border border-purple-500/30 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
           />
           <button
@@ -64,12 +147,24 @@ export default function Dashboard() {
       {isLoading && (
         <div className="text-center py-12">
           <div className="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500"></div>
+          <p className="text-slate-400 text-sm mt-3">Loading your stats...</p>
         </div>
       )}
 
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-6 text-red-400">
-          Failed to load user data. Please check the User ID and try again.
+      {error && searchUserId && (
+        <div className="bg-slate-800/50 border border-amber-500/30 rounded-xl p-6">
+          <div className="flex flex-col items-center text-center gap-3">
+            <p className="text-slate-300 text-sm">
+              No stats found for this ID yet. Have you registered?
+            </p>
+            <Link
+              to="/register"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white text-sm font-semibold rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all"
+            >
+              Register Now
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
         </div>
       )}
 

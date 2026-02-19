@@ -150,13 +150,7 @@ pub enum StreamEvent {
         details: String,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
-    /// Faucet tokens dispensed to wallet
-    FaucetDispensed {
-        wallet_address: String,
-        amount_qnk: f64,
-        balance_after: f64,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    },
+    // v7.0.0: FaucetDispensed removed — faucet eliminated
     /// Wallet balance updated (for transaction processing)
     /// v1.2.0-beta Phase 3: Enhanced with block tracking and confirmation status
     BalanceUpdated {
@@ -284,6 +278,8 @@ pub enum StreamEvent {
         miner_id: Option<String>,
         /// v3.2.25-beta: Worker identifier (miner_id, worker_name, or "direct"/"p2p:NODE")
         worker_id: Option<String>,
+        /// v7.4.2: Human-readable miner name from --miner-name CLI arg
+        worker_name: Option<String>,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// v1.3.8-beta: Pending mining reward from P2P gossip
@@ -344,6 +340,107 @@ pub enum StreamEvent {
         reason: String,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// v5.6.0: Server version broadcast after startup/restart
+    /// Clients compare with cached version to show refresh banner
+    ServerVersion {
+        version: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v5.2.0: State sync completed — frontend should refresh contracts/pools/balances
+    StateSyncComplete {
+        contracts_added: usize,
+        pools_added: usize,
+        balances_added: usize,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v5.7.0: Mining pool statistics updated
+    PoolStatsUpdated {
+        hashrate: f64,
+        workers: usize,
+        blocks_found: u64,
+        current_round: u64,
+        difficulty: f64,
+        total_shares: u64,
+        valid_shares: u64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v5.7.0: Mining pool share accepted
+    PoolShareAccepted {
+        worker: String,
+        difficulty: f64,
+        share_id: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v5.7.0: Mining pool block found
+    PoolBlockFound {
+        block_hash: String,
+        height: u64,
+        finder: String,
+        reward: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v5.7.0: Mining pool payout event
+    PoolPayout {
+        batch_id: String,
+        total_reward: f64,
+        payout_count: usize,
+        status: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.2: Email received (wallet-to-wallet or SMTP inbound)
+    EmailReceived {
+        email_id: String,
+        from_address: String,
+        subject: String,
+        preview: String,
+        has_crypto: bool,
+        crypto_amount: Option<f64>,
+        crypto_token: Option<String>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.2: Email sent confirmation
+    EmailSent {
+        email_id: String,
+        to_address: String,
+        subject: String,
+        delivery_method: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.2: Unread email count update
+    EmailUnreadCount {
+        count: u64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.3: Calendar event created/updated
+    CalendarEventCreated {
+        event_id: String,
+        title: String,
+        event_type: String,
+        start_time: u64,
+        has_scheduled_tx: bool,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.3: Calendar reminder notification
+    CalendarReminder {
+        event_id: String,
+        title: String,
+        event_type: String,
+        minutes_until: i64,
+        start_time: u64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    /// v7.3.3: Scheduled transaction executed
+    ScheduledTransactionExecuted {
+        event_id: String,
+        title: String,
+        to_wallet: String,
+        token: String,
+        amount: String,
+        tx_hash: Option<String>,
+        success: bool,
+        error: Option<String>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// v1.4.3: Oracle source information for SSE events
@@ -372,7 +469,10 @@ pub struct EventBroadcaster {
 
 impl EventBroadcaster {
     pub fn new() -> Self {
-        let (tx, _rx) = broadcast::channel(100000); // CRITICAL FIX: Increased from 10k to 100k to handle high mining activity
+        // v6.0.10: Reduced from 100k to 10k to save ~45MB RAM.
+        // 100k × ~500 bytes/event = 50MB buffer that's rarely needed.
+        // 10k is sufficient for real-time SSE delivery.
+        let (tx, _rx) = broadcast::channel(10_000);
         Self {
             tx,
             recent_balance_broadcasts: Arc::new(tokio::sync::Mutex::new(
@@ -427,13 +527,9 @@ impl EventBroadcaster {
                     change_reason, subscriber_count
                 );
             }
-            StreamEvent::PrivacyMixingCompleted {
-                transaction_hash,
-                mixing_session_id,
-                ..
-            } => {
-                info!("📡 [SSE] Broadcasting PrivacyMixingCompleted: tx={}, session={}, subscribers={}",
-                    hex::encode(&transaction_hash[..8]), &mixing_session_id[..8], subscriber_count);
+            StreamEvent::PrivacyMixingCompleted { .. } => {
+                // v6.0.2: No identifying info in privacy transaction logs
+                debug!("📡 [SSE] Broadcasting transaction completion, subscribers={}", subscriber_count);
             }
             _ => {
                 // v3.4.4: Reduced to trace to prevent log spam
@@ -567,16 +663,6 @@ pub async fn sse_events(
                 matches
             }
 
-            // Faucet events - only send if it's for this wallet
-            StreamEvent::FaucetDispensed { wallet_address, .. } => {
-                let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
-                } else {
-                    wallet_address.clone()
-                };
-                normalized_event == normalized_filter
-            }
-
             // Mining rewards - only send if it's for this wallet
             StreamEvent::MiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
@@ -646,7 +732,19 @@ pub async fn sse_events(
             | StreamEvent::MetricsUpdate { .. }
             | StreamEvent::TokenPriceUpdate { .. }
             | StreamEvent::LiquidityPoolUpdate { .. }
-            | StreamEvent::NitroBoostsUpdate { .. } => true,
+            | StreamEvent::NitroBoostsUpdate { .. }
+            | StreamEvent::ServerVersion { .. }
+            | StreamEvent::StateSyncComplete { .. } => true,
+
+            // v7.3.2: Email events - send to all connected clients (filtered by wallet on frontend)
+            StreamEvent::EmailReceived { .. }
+            | StreamEvent::EmailSent { .. }
+            | StreamEvent::EmailUnreadCount { .. } => true,
+
+            // v7.3.3: Calendar events - send to all connected clients (filtered by wallet on frontend)
+            StreamEvent::CalendarEventCreated { .. }
+            | StreamEvent::CalendarReminder { .. }
+            | StreamEvent::ScheduledTransactionExecuted { .. } => true,
 
             // All other events are private - filter them out
             _ => false,
@@ -927,11 +1025,12 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::SecurityAlert { .. } => "security-alert".to_string(),
         StreamEvent::NetworkTopologyChanged { .. } => "network-topology-changed".to_string(),
         StreamEvent::TorCircuitEvent { .. } => "tor-circuit-event".to_string(),
-        StreamEvent::FaucetDispensed { .. } => "faucet-dispensed".to_string(),
+        // v7.0.0: FaucetDispensed removed
         StreamEvent::BalanceUpdated { .. } => "balance-updated".to_string(),
         StreamEvent::TokenBalanceUpdated { .. } => "token-balance-updated".to_string(),
-        StreamEvent::PrivacyMixingStarted { .. } => "privacy-mixing-started".to_string(),
-        StreamEvent::PrivacyMixingCompleted { .. } => "privacy-mixing-completed".to_string(),
+        // v6.0.2: Generic event names — "privacy-mixing-*" leaked that mixer was in use
+        StreamEvent::PrivacyMixingStarted { .. } => "transaction-processing".to_string(),
+        StreamEvent::PrivacyMixingCompleted { .. } => "transaction-confirmed".to_string(),
         StreamEvent::NitroBoost { .. } => "nitro_boost".to_string(),
         StreamEvent::NitroBoostsUpdate { .. } => "nitro_boosts_update".to_string(),
         StreamEvent::TokenPriceUpdate { .. } => "token_price_update".to_string(),
@@ -946,6 +1045,18 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::QnoResolution { .. } => "qno-resolution".to_string(),
         StreamEvent::QnoStake { .. } => "qno-stake".to_string(),
         StreamEvent::QnoSlashing { .. } => "qno-slashing".to_string(),
+        StreamEvent::ServerVersion { .. } => "server-version".to_string(),
+        StreamEvent::StateSyncComplete { .. } => "state-sync-complete".to_string(),
+        StreamEvent::PoolStatsUpdated { .. } => "pool-stats-updated".to_string(),
+        StreamEvent::PoolShareAccepted { .. } => "pool-share-accepted".to_string(),
+        StreamEvent::PoolBlockFound { .. } => "pool-block-found".to_string(),
+        StreamEvent::PoolPayout { .. } => "pool-payout".to_string(),
+        StreamEvent::EmailReceived { .. } => "email-received".to_string(),
+        StreamEvent::EmailSent { .. } => "email-sent".to_string(),
+        StreamEvent::EmailUnreadCount { .. } => "email-unread-count".to_string(),
+        StreamEvent::CalendarEventCreated { .. } => "calendar-event-created".to_string(),
+        StreamEvent::CalendarReminder { .. } => "calendar-reminder".to_string(),
+        StreamEvent::ScheduledTransactionExecuted { .. } => "scheduled-tx-executed".to_string(),
     }
 }
 
@@ -1310,6 +1421,7 @@ impl HighPerformanceEmitter {
         avg_hash_rate: f64,
         miner_id: Option<String>,
         worker_id: Option<String>,
+        worker_name: Option<String>,
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let event = StreamEvent::MiningStats {
             miner_address,
@@ -1319,6 +1431,7 @@ impl HighPerformanceEmitter {
             avg_hash_rate,
             miner_id,
             worker_id,
+            worker_name,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await
@@ -1422,6 +1535,82 @@ impl HighPerformanceEmitter {
             domain,
             amount_slashed,
             reason,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit pool stats updated event
+    pub async fn emit_pool_stats_updated(
+        &self,
+        hashrate: f64,
+        workers: usize,
+        blocks_found: u64,
+        current_round: u64,
+        difficulty: f64,
+        total_shares: u64,
+        valid_shares: u64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::PoolStatsUpdated {
+            hashrate,
+            workers,
+            blocks_found,
+            current_round,
+            difficulty,
+            total_shares,
+            valid_shares,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit pool share accepted event
+    pub async fn emit_pool_share_accepted(
+        &self,
+        worker: String,
+        difficulty: f64,
+        share_id: String,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::PoolShareAccepted {
+            worker,
+            difficulty,
+            share_id,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit pool block found event
+    pub async fn emit_pool_block_found(
+        &self,
+        block_hash: String,
+        height: u64,
+        finder: String,
+        reward: f64,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::PoolBlockFound {
+            block_hash,
+            height,
+            finder,
+            reward,
+            timestamp: chrono::Utc::now(),
+        };
+        self.emit_immediate(event).await
+    }
+
+    /// Emit pool payout event
+    pub async fn emit_pool_payout(
+        &self,
+        batch_id: String,
+        total_reward: f64,
+        payout_count: usize,
+        status: String,
+    ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
+        let event = StreamEvent::PoolPayout {
+            batch_id,
+            total_reward,
+            payout_count,
+            status,
             timestamp: chrono::Utc::now(),
         };
         self.emit_immediate(event).await

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Cpu, Code, Coins, Building, Vote, Lock, ArrowRight, Sparkles, CheckCircle, FileCode, Settings, Flame, Zap, Users, PauseCircle, PlayCircle, RefreshCw, Upload, Send, History, BarChart3, TrendingUp, Activity, Clock, ArrowUpRight, ArrowDownRight, Gift, Percent, PieChart, Landmark, Gem, Leaf, Palette, FileText, Package, Shield, DollarSign, Search, ArrowUpDown, Filter, X, Wallet, HelpCircle } from 'lucide-react';
+import { generateAuthHeader, walletSession } from '../services/walletAuth';
 import RwaPortfolioTab from './RwaPortfolioTab';
 import {
   contractTemplates,
@@ -1053,16 +1054,36 @@ export default function VittuaVMScreen() {
 
       console.log('📡 Sending deployment request:', deploymentRequest);
 
+      // Generate wallet auth header for authenticated deployment
+      const session = walletSession.getSession();
+      if (!session) {
+        throw new Error('Wallet session not found. Please log in again.');
+      }
+      const authHeader = await generateAuthHeader(
+        session.privateKey,
+        session.address,
+        '/api/v1/contracts/deploy'
+      );
+
       // Call the contract deployment API
       const deployResponse = await fetch('/api/v1/contracts/deploy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Wallet-Auth': authHeader,
+        },
         body: JSON.stringify(deploymentRequest),
       });
 
       if (!deployResponse.ok) {
-        const error = await deployResponse.json();
-        throw new Error(error.error || 'Failed to deploy contract via API');
+        let errorMsg = `Server returned ${deployResponse.status}`;
+        try {
+          const error = await deployResponse.json();
+          errorMsg = error.error || errorMsg;
+        } catch (_) {
+          // Response may not be JSON
+        }
+        throw new Error(errorMsg);
       }
 
       const deployResult = await deployResponse.json();

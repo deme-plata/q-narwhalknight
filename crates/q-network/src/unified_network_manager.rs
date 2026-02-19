@@ -80,28 +80,151 @@ use q_types::QBlock;
 /// Server Beta (185.182.185.227) = Primary production bootstrap
 /// Server Gamma (109.205.176.60) = Secondary production bootstrap
 pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
-    // Server Beta - Primary production bootstrap (quillon.xyz)
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx",
-    // Server Gamma - Secondary production bootstrap
-    // Peer ID discovered dynamically via HTTP at startup (fetch_peer_id_from_http)
-    "/ip4/109.205.176.60/tcp/9001",
+    // Server Beta - Primary production bootstrap (quillon.xyz) - Mainnet
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc",
+    // Server Gamma - Secondary production bootstrap (109.205.176.60) - Mainnet
+    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv",
+    // Server Delta - Tertiary production bootstrap (5.79.79.158) - Mainnet
+    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ",
+    // Server Alpha - Quaternary bootstrap (161.35.219.10) - Mainnet
+    "/ip4/161.35.219.10/tcp/9001/p2p/12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY",
 ];
 
 /// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
 /// Used when hardcoded peer IDs are stale or missing (e.g., new server first boot)
+/// Also used to discover correct P2P port when it differs from hardcoded 9001
 pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
     "http://185.182.185.227:8080",
     "http://109.205.176.60:8080",
+    "http://5.79.79.158:8080",
+    "http://161.35.219.10:8080",
 ];
 
 /// Legacy single bootstrap peer constant (for backwards compatibility)
-pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx";
+pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc";
 
-/// v3.3.2-beta: Get bootstrap peers with MULTIPLE HARDCODED FALLBACKS
+/// v5.1.0: Load bootstrap peers from config.toml in data directory
+fn load_config_bootstrap_peers(data_dir: &str) -> Vec<String> {
+    let config_path = std::path::Path::new(data_dir).join("config.toml");
+    if !config_path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(content) => {
+            // Simple TOML parsing: look for bootstrap_peers = [...] or bootstrap_peers = "..."
+            let mut peers = Vec::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("bootstrap_peers") || trimmed.starts_with("bootstrap_peer") {
+                    // Extract multiaddr strings from the line
+                    for part in trimmed.split('"') {
+                        let candidate = part.trim();
+                        if candidate.starts_with("/ip4/") || candidate.starts_with("/dns4/") {
+                            peers.push(candidate.to_string());
+                        }
+                    }
+                }
+            }
+            if !peers.is_empty() {
+                info!("🔧 [BOOTSTRAP] Loaded {} peers from config.toml", peers.len());
+            }
+            peers
+        }
+        Err(e) => {
+            warn!("⚠️ [BOOTSTRAP] Failed to read config.toml: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// v5.1.0: Load previously connected peers from disk cache
+fn load_cached_peers(data_dir: &str) -> Vec<String> {
+    let cache_path = std::path::Path::new(data_dir).join("known_peers.json");
+    if !cache_path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&cache_path) {
+        Ok(content) => {
+            match serde_json::from_str::<Vec<String>>(&content) {
+                Ok(peers) => {
+                    let valid: Vec<String> = peers.into_iter()
+                        .filter(|p| p.contains("/p2p/"))
+                        .take(20) // Max 20 cached peers
+                        .collect();
+                    if !valid.is_empty() {
+                        info!("🔧 [BOOTSTRAP] Loaded {} cached peers from known_peers.json", valid.len());
+                    }
+                    valid
+                }
+                Err(e) => {
+                    warn!("⚠️ [BOOTSTRAP] Failed to parse known_peers.json: {}", e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// v5.1.0: Save connected peers to disk cache for faster reconnection
+pub fn save_known_peers(data_dir: &str, peers: &[String]) {
+    let cache_path = std::path::Path::new(data_dir).join("known_peers.json");
+    // Save top 20 peers
+    let to_save: Vec<&String> = peers.iter().take(20).collect();
+    match serde_json::to_string_pretty(&to_save) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&cache_path, json) {
+                warn!("⚠️ [BOOTSTRAP] Failed to save known_peers.json: {}", e);
+            } else {
+                info!("💾 [BOOTSTRAP] Saved {} known peers to disk", to_save.len());
+            }
+        }
+        Err(e) => {
+            warn!("⚠️ [BOOTSTRAP] Failed to serialize known_peers: {}", e);
+        }
+    }
+}
+
+/// v5.1.0: Resolve bootstrap peers via DNS TXT records
+fn resolve_dns_bootstrap_peers() -> Vec<String> {
+    // Try to resolve _bootstrap._tcp.quillon.xyz TXT records
+    // This allows dynamic peer discovery without code changes
+    // For now, try a simple DNS resolution of bootstrap.quillon.xyz
+    let mut peers = Vec::new();
+
+    // Check Q_DNS_BOOTSTRAP env var for custom DNS bootstrap domain
+    let domain = std::env::var("Q_DNS_BOOTSTRAP")
+        .unwrap_or_else(|_| "bootstrap.quillon.xyz".to_string());
+
+    // Attempt DNS resolution using std::net (blocking, but called once at startup)
+    match std::net::ToSocketAddrs::to_socket_addrs(&format!("{}:9001", domain)) {
+        Ok(addrs) => {
+            for addr in addrs.take(5) {
+                let peer_addr = format!("/ip4/{}/tcp/9001", addr.ip());
+                if !peers.contains(&peer_addr) {
+                    info!("🔧 [BOOTSTRAP] DNS resolved peer: {}", peer_addr);
+                    peers.push(peer_addr);
+                }
+            }
+        }
+        Err(e) => {
+            debug!("ℹ️ [BOOTSTRAP] DNS bootstrap resolution failed (non-fatal): {}", e);
+        }
+    }
+
+    peers
+}
+
+/// v5.1.0: Get bootstrap peers with MULTIPLE DISCOVERY METHODS
 /// Priority:
 /// 1. Q_BOOTSTRAP_PEERS env var (comma-separated)
 /// 2. Q_BOOTSTRAP_PEER env var (single peer)
-/// 3. HARDCODED_BOOTSTRAP_PEERS (all included as fallbacks for mainnet safety)
+/// 3. Config file (data_dir/config.toml)
+/// 4. Cached peers (data_dir/known_peers.json)
+/// 5. DNS bootstrap (bootstrap.quillon.xyz)
+/// 6. HARDCODED_BOOTSTRAP_PEERS (always included as fallback)
 fn get_bootstrap_peers() -> Vec<String> {
     let mut peers = Vec::new();
 
@@ -131,7 +254,32 @@ fn get_bootstrap_peers() -> Vec<String> {
         }
     }
 
-    // 🔧 v3.3.2-beta: ALWAYS add ALL hardcoded bootstrap peers as fallback
+    // v5.1.0: Load from config file
+    let data_dir = std::env::var("Q_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let config_peers = load_config_bootstrap_peers(&data_dir);
+    for peer in config_peers {
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+
+    // v5.1.0: Load cached peers from previous sessions
+    let cached_peers = load_cached_peers(&data_dir);
+    for peer in cached_peers {
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+
+    // v5.1.0: DNS bootstrap resolution
+    let dns_peers = resolve_dns_bootstrap_peers();
+    for peer in dns_peers {
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+
+    // ALWAYS add ALL hardcoded bootstrap peers as fallback
     // This ensures connectivity even when one bootstrap node is down (mainnet safety)
     for hardcoded in HARDCODED_BOOTSTRAP_PEERS {
         let hardcoded_str = hardcoded.to_string();
@@ -303,7 +451,7 @@ pub enum NetworkCommand {
     },
     /// Set the gossipsub message channel (for message propagation)
     SetGossipsubChannel {
-        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        tx: mpsc::Sender<(String, Vec<u8>)>,
     },
     /// Publish a block to the gossipsub network (P2P broadcasting)
     PublishBlock {
@@ -379,7 +527,7 @@ pub enum NetworkCommand {
         topic: String,
         update_bytes: Vec<u8>,
         wallet_address: String,
-        amount: u64,
+        amount: u128,
     },
     /// v2.2.1-beta: Publish mining solution to P2P network
     /// Enables decentralized mining by broadcasting solutions to all nodes
@@ -481,6 +629,46 @@ pub enum NetworkCommand {
         topic: String,
         message: Vec<u8>,
     },
+
+    /// v5.3.0: Publish state sync request to all peers
+    /// Node broadcasts a signed request for full state (contracts, pools, balances)
+    PublishStateSyncRequest {
+        topic: String,
+        request_bytes: Vec<u8>,
+    },
+
+    /// v5.3.0: Publish state sync response to all peers
+    /// Peer responds with signed state data
+    PublishStateSyncResponse {
+        topic: String,
+        response_bytes: Vec<u8>,
+    },
+
+    /// v7.1.8: Subscribe to a gossipsub topic at runtime
+    /// Used for dynamic topic management (e.g., resubscribe after sync catch-up)
+    SubscribeTopic {
+        topic: String,
+    },
+
+    /// v7.1.8: Unsubscribe from a gossipsub topic at runtime
+    /// Used to stop forwarding high-volume topics when node is syncing
+    /// (gossipsub forwards ALL received messages to mesh peers, saturating the send queue)
+    UnsubscribeTopic {
+        topic: String,
+    },
+
+    /// v7.4.0: Publish OAuth2 client registration to all peers
+    /// Client secret is SHA-256 hashed before broadcast — raw secret never leaves the registering node
+    PublishOAuth2Client {
+        topic: String,
+        client_bytes: Vec<u8>,
+    },
+
+    /// v7.4.0: Publish JWT public key announcement so other nodes can verify our tokens
+    PublishOAuth2PubKey {
+        topic: String,
+        pubkey_bytes: Vec<u8>,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -490,9 +678,12 @@ struct PeerIdResponse {
     data: Option<PeerIdData>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PeerIdData {
     peer_id: String,
+    /// v5.1.0: Listen addresses from the remote node (includes correct port)
+    #[serde(default)]
+    listen_addresses: Vec<String>,
 }
 
 /// 🚀 v1.0.4-beta: Load or generate persistent libp2p identity
@@ -542,7 +733,7 @@ fn load_or_generate_identity(data_dir: &std::path::Path) -> anyhow::Result<(Keyp
 /// # Returns
 /// * `Ok(peer_id)` if successfully fetched
 /// * `Err` if HTTP request failed or invalid response
-async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<String> {
+async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<PeerIdData> {
     let url = format!("http://{}:{}/api/v1/peer-id", ip, http_port);
     let endpoint_key = format!("http://{}:{}", ip, http_port);
 
@@ -594,11 +785,11 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Str
                         if peer_response.success {
                             if let Some(data) = peer_response.data {
                                 let rtt = request_start.elapsed();
-                                info!("✅ Successfully fetched peer ID on attempt {}/3: {} ({}ms)",
-                                      attempt, data.peer_id, rtt.as_millis());
+                                info!("✅ Successfully fetched peer ID on attempt {}/3: {} ({}ms, {} listen addrs)",
+                                      attempt, data.peer_id, rtt.as_millis(), data.listen_addresses.len());
                                 // v4.3.0-beta: Record successful fetch for health ordering
                                 BOOTSTRAP_HEALTH_CACHE.record_success(&endpoint_key, rtt, &data.peer_id);
-                                return Ok(data.peer_id);
+                                return Ok(data);
                             } else {
                                 warn!("⚠️ API returned success=true but no data field");
                             }
@@ -795,7 +986,9 @@ pub struct UnifiedNetworkManager {
     /// Channel to send discovered peers to ConnectionManager (Phase 2 bridge)
     peer_tx: Option<mpsc::UnboundedSender<crate::connection_manager::PeerInfo>>,
     /// Channel to forward gossipsub messages (for database replication, etc.)
-    gossipsub_message_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
+    /// v6.0.10: Changed to BOUNDED channel (10k cap) to prevent OOM on 8GB servers.
+    /// When channel is full, oldest messages are dropped (try_send + warn).
+    gossipsub_message_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
     /// Thread-safe atomic counter for connected peers
     connected_peer_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Network configuration (testnet/mainnet)
@@ -934,10 +1127,10 @@ impl UnifiedNetworkManager {
                     }
 
                     if let Some(ref ip) = bootstrap_ip {
-                        // Try HTTP discovery to get CURRENT peer ID
+                        // Try HTTP discovery to get CURRENT peer ID and listen addresses
                         match fetch_peer_id_from_http(ip, 8080).await {
-                            Ok(current_peer_id_str) => {
-                                match current_peer_id_str.parse::<PeerId>() {
+                            Ok(peer_info) => {
+                                match peer_info.peer_id.parse::<PeerId>() {
                                     Ok(current_peer_id) => {
                                         // 🔧 v1.0.88-beta: Skip ourselves as a bootstrap peer
                                         if current_peer_id == local_peer_id {
@@ -954,12 +1147,23 @@ impl UnifiedNetworkManager {
                                             }
                                         }
 
-                                        // Build multiaddr with CURRENT peer ID
-                                        let mut fresh_addr = addr.clone();
-                                        // Remove old /p2p/ component
-                                        fresh_addr = fresh_addr.into_iter()
+                                        // v5.1.0: Use actual listen address from HTTP response (correct port)
+                                        // The hardcoded port may be stale if server restarted with different config
+                                        let mut fresh_addr: Multiaddr = addr.clone().into_iter()
                                             .filter(|p| !matches!(p, Protocol::P2p(_)))
                                             .collect();
+
+                                        // Try to find matching external listen address with correct port
+                                        for la in &peer_info.listen_addresses {
+                                            if la.contains(ip) && la.starts_with("/ip4/") && !la.contains("/ws") {
+                                                if let Ok(discovered_addr) = la.parse::<Multiaddr>() {
+                                                    info!("🔧 [BOOTSTRAP] Using discovered listen address: {} (may differ from hardcoded)", la);
+                                                    fresh_addr = discovered_addr;
+                                                    break;
+                                                }
+                                            }
+                                        }
+
                                         fresh_addr.push(Protocol::P2p(current_peer_id));
 
                                         bootstrap_peer_map.insert(current_peer_id, fresh_addr.clone());
@@ -1024,26 +1228,37 @@ impl UnifiedNetworkManager {
                     }
 
                     if let (Some(bootstrap_ip), Some(_)) = (ip, p2p_port) {
-                        info!("🔄 Attempting automatic peer ID discovery for {}", bootstrap_ip);
+                        info!("🔄 Attempting automatic peer ID + listen address discovery for {}", bootstrap_ip);
 
-                        // Try to fetch peer ID from HTTP endpoint (port 8080 for API server)
-                        // v0.9.21-beta FIX: Changed from 18080 to 8080 (Server Beta API port)
+                        // Try to fetch peer info from HTTP endpoint (port 8080 for API server)
                         match fetch_peer_id_from_http(&bootstrap_ip, 8080).await {
-                            Ok(peer_id_str) => {
-                                // Parse peer ID and append to multiaddr
-                                match peer_id_str.parse::<PeerId>() {
+                            Ok(peer_info) => {
+                                // Parse peer ID
+                                match peer_info.peer_id.parse::<PeerId>() {
                                     Ok(peer_id) => {
                                         // 🔧 v1.0.88-beta: Skip ourselves as a bootstrap peer
                                         if peer_id == local_peer_id {
                                             info!("ℹ️  [BOOTSTRAP] Skipping self as bootstrap peer (dynamic discovery): {} (this is us!)", peer_id);
                                             continue;
                                         }
-                                        addr.push(Protocol::P2p(peer_id));
-                                        // kademlia.add_address(&peer_id, addr.clone());  // Moved to SwarmBuilder closure
-                                        // 🔧 v0.6.8-beta: Track this bootstrap peer for automatic reconnection
-                                        bootstrap_peer_map.insert(peer_id, addr.clone());
-                                        info!("✅ Added {} bootstrap peer with dynamic peer ID: {} at {}",
-                                              network_config.network_id.as_str(), peer_id, addr);
+
+                                        // v5.1.0: Use actual listen address (correct port) instead of hardcoded
+                                        // Server may listen on a different P2P port than hardcoded 9001
+                                        let mut final_addr = addr.clone();
+                                        for la in &peer_info.listen_addresses {
+                                            if la.contains(&bootstrap_ip) && la.starts_with("/ip4/") && !la.contains("/ws") {
+                                                if let Ok(discovered_addr) = la.parse::<Multiaddr>() {
+                                                    info!("🔧 [BOOTSTRAP] Using discovered listen address: {} (instead of hardcoded)", la);
+                                                    final_addr = discovered_addr;
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        final_addr.push(Protocol::P2p(peer_id));
+                                        bootstrap_peer_map.insert(peer_id, final_addr.clone());
+                                        info!("✅ Added {} bootstrap peer with dynamic discovery: {} at {}",
+                                              network_config.network_id.as_str(), peer_id, final_addr);
                                         bootstrap_count += 1;
                                     }
                                     Err(e) => {
@@ -1388,6 +1603,11 @@ impl UnifiedNetworkManager {
             // v3.9.5-beta: Validator announcements for dynamic validator registry
             // Enables decentralized validator discovery and multi-bootstrap peer support
             IdentTopic::new(network_config.network_id.validator_announce_topic()),
+            // v5.3.0: State sync request/response - P2P state recovery for missed gossipsub
+            IdentTopic::new(network_config.network_id.state_sync_requests_topic()),
+            IdentTopic::new(network_config.network_id.state_sync_responses_topic()),
+            // v7.3.1: Bridge attestation requests/responses for multi-sig bridge validation
+            IdentTopic::new(network_config.network_id.bridge_attestations_topic()),
         ];
 
         // UN-DEPRECATED v3.9.5-beta: Balance gossipsub is now enabled by default
@@ -1415,12 +1635,12 @@ impl UnifiedNetworkManager {
         // 🔄 v0.9.60-beta: BACKWARD COMPATIBILITY
         if network_config.network_id == q_types::NetworkId::TestnetPhase5 {
             let phase4_topics = vec![
-                IdentTopic::new("/qnk/testnet-phase4/blocks"),
-                IdentTopic::new("/qnk/testnet-phase4/transactions"),
-                IdentTopic::new("/qnk/testnet-phase4/mining-rewards"),
-                IdentTopic::new("/qnk/testnet-phase4/peer-heights"),
-                IdentTopic::new("/qnk/testnet-phase4/block-pack-requests"),
-                IdentTopic::new("/qnk/testnet-phase4/block-pack-responses"),
+                IdentTopic::new("/qnk/mainnet/blocks"),
+                IdentTopic::new("/qnk/mainnet/transactions"),
+                IdentTopic::new("/qnk/mainnet/mining-rewards"),
+                IdentTopic::new("/qnk/mainnet/peer-heights"),
+                IdentTopic::new("/qnk/mainnet/block-pack-requests"),
+                IdentTopic::new("/qnk/mainnet/block-pack-responses"),
             ];
 
             for topic in &phase4_topics {
@@ -1866,9 +2086,9 @@ impl UnifiedNetworkManager {
     }
 
     /// Set channel for forwarding gossipsub messages to subscribers
-    pub fn set_gossipsub_channel(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
+    pub fn set_gossipsub_channel(&mut self, tx: mpsc::Sender<(String, Vec<u8>)>) {
         self.gossipsub_message_tx = Some(tx);
-        info!("🌉 Gossipsub message forwarding channel established");
+        info!("🌉 Gossipsub message forwarding channel established (bounded, 10k capacity)");
     }
 
     /// Set storage engine for block synchronization (Phase 3a)
@@ -1950,8 +2170,34 @@ impl UnifiedNetworkManager {
                     let batch = crate::gossipsub_queue::gossipsub_queue().drain_batch(10);
                     for msg in batch {
                         let ident_topic = IdentTopic::new(&msg.topic);
-                        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(ident_topic, msg.data) {
-                            debug!("[QUEUE DRAIN] Failed to publish {}: {}", msg.topic, e);
+                        let topic_str = msg.topic.clone();
+                        let data_len = msg.data.len();
+                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), msg.data) {
+                            Ok(msg_id) => {
+                                // Log blocks topic publishes at info level for diagnostics
+                                if topic_str.contains("/blocks") && !topic_str.contains("peer-heights") {
+                                    // Check mesh peers for this topic
+                                    // Collect in separate steps to avoid double mutable borrow
+                                    let topic_hash = ident_topic.hash();
+                                    let mesh_count = self.swarm.behaviour_mut().gossipsub
+                                        .mesh_peers(&topic_hash)
+                                        .count();
+                                    let all_peers: Vec<_> = self.swarm.behaviour_mut().gossipsub
+                                        .all_peers()
+                                        .filter(|(_, topics)| topics.contains(&&topic_hash))
+                                        .map(|(peer, _)| peer.to_string()[..16].to_string())
+                                        .collect();
+                                    if mesh_count == 0 {
+                                        warn!("⚠️ [GOSSIPSUB] Published block ({} bytes) to topic {} but ZERO mesh peers! Subscribers: {:?}", data_len, topic_str, all_peers);
+                                    } else {
+                                        info!("[GOSSIPSUB] Published block ({} bytes) to {} mesh peers, {} topic subscribers: {:?}", data_len, mesh_count, all_peers.len(), all_peers);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Upgraded from debug to warn for visibility
+                                warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                            }
                         }
                     }
                 }
@@ -2692,8 +2938,14 @@ impl UnifiedNetworkManager {
                 if let Some(ref tx) = self.gossipsub_message_tx {
                     let data = message.data.clone();
 
-                    if let Err(e) = tx.send((topic_str.clone(), data)) {
-                        warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic_str, e);
+                    // v6.0.10: Use try_send() on bounded channel - drop message if buffer full
+                    // This prevents unbounded memory growth that caused OOM on 8GB servers
+                    if let Err(e) = tx.try_send((topic_str.clone(), data)) {
+                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_)) {
+                            warn!("⚠️ Gossipsub channel FULL (10k cap) - dropping message on topic {}", topic_str);
+                        } else {
+                            warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic_str, e);
+                        }
                     } else {
                         // 🔇 v0.6.9-beta: Changed to DEBUG to prevent log spam
                         // v0.9.7-beta: Enhanced with block height information
@@ -4030,6 +4282,38 @@ impl UnifiedNetworkManager {
     pub async fn run_once(&mut self) -> anyhow::Result<()> {
         use futures::stream::StreamExt;
 
+        // 🔥 v5.0.1-beta: CRITICAL FIX - Drain gossipsub queue BEFORE select!
+        // BUG: run_once() was missing the gossipsub queue drain that run() has.
+        // Blocks were enqueued via handle_command(PublishBlock) but NEVER actually
+        // published to gossipsub, causing zero P2P block delivery to browsers.
+        // ROOT CAUSE: Queue drain was only in run() (unused), not run_once() (active).
+        {
+            let batch = crate::gossipsub_queue::gossipsub_queue().drain_batch(10);
+            for msg in batch {
+                let ident_topic = IdentTopic::new(&msg.topic);
+                let topic_str = msg.topic.clone();
+                let data_len = msg.data.len();
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), msg.data) {
+                    Ok(_msg_id) => {
+                        if topic_str.contains("/blocks") && !topic_str.contains("peer-heights") {
+                            let topic_hash = ident_topic.hash();
+                            let mesh_count = self.swarm.behaviour_mut().gossipsub
+                                .mesh_peers(&topic_hash)
+                                .count();
+                            let all_count = self.swarm.behaviour_mut().gossipsub
+                                .all_peers()
+                                .filter(|(_, topics)| topics.contains(&&topic_hash))
+                                .count();
+                            info!("[GOSSIPSUB] Published block ({} bytes) → {} mesh peers, {} subscribers", data_len, mesh_count, all_count);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                    }
+                }
+            }
+        }
+
         // 🚀 v1.3.7-beta: CRITICAL FIX - Add block_pack_response_rx polling!
         // BUG: run_once() was missing the response channel polling that run() has.
         // This caused the bootstrap node to receive block requests, fetch blocks,
@@ -4341,6 +4625,46 @@ impl UnifiedNetworkManager {
                     crate::distributed_ai::AIMessagePayload::TensorParallelToken { request_id, token_id, token_text, token_index, .. } => {
                         format!("TensorParallelToken(id={}, token={}, text='{}', idx={})", request_id, token_id, token_text, token_index)
                     }
+                    crate::distributed_ai::AIMessagePayload::RpcWorkerAvailable { peer_id, host, port, .. } => {
+                        format!("RpcWorkerAvailable(peer={}, {}:{})", peer_id, host, port)
+                    }
+                    crate::distributed_ai::AIMessagePayload::RpcWorkerStopped { peer_id } => {
+                        format!("RpcWorkerStopped(peer={})", peer_id)
+                    }
+                    // v6.0.0: Decentralized AI inference messages
+                    crate::distributed_ai::AIMessagePayload::StakedWorkerCapability { peer_id, model_name, stake_amount, .. } => {
+                        format!("StakedWorkerCapability(peer={}, model={}, stake={})", peer_id, model_name, stake_amount / 10u128.pow(24))
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceOffer { request_id, worker_peer_id, .. } => {
+                        format!("InferenceOffer(id={}, worker={})", request_id, worker_peer_id)
+                    }
+                    crate::distributed_ai::AIMessagePayload::InferenceAssignment { request_id, worker_peer_id, .. } => {
+                        format!("InferenceAssignment(id={}, worker={})", request_id, worker_peer_id)
+                    }
+                    crate::distributed_ai::AIMessagePayload::OpMLCommitment { request_id, token_count, .. } => {
+                        format!("OpMLCommitment(id={}, tokens={})", request_id, token_count)
+                    }
+                    crate::distributed_ai::AIMessagePayload::VerificationChallenge { request_id, .. } => {
+                        format!("VerificationChallenge(id={})", request_id)
+                    }
+                    crate::distributed_ai::AIMessagePayload::VerificationResult { request_id, matches_worker, .. } => {
+                        format!("VerificationResult(id={}, match={})", request_id, matches_worker)
+                    }
+                    crate::distributed_ai::AIMessagePayload::DisputeOpened { request_id, .. } => {
+                        format!("DisputeOpened(id={})", request_id)
+                    }
+                    crate::distributed_ai::AIMessagePayload::DisputeBisection { request_id, round, range_lo, range_hi, .. } => {
+                        format!("DisputeBisection(id={}, round={}, range=[{},{}])", request_id, round, range_lo, range_hi)
+                    }
+                    crate::distributed_ai::AIMessagePayload::DisputeResolved { request_id, outcome, .. } => {
+                        format!("DisputeResolved(id={}, outcome={})", request_id, outcome)
+                    }
+                    crate::distributed_ai::AIMessagePayload::StakeEvent { peer_id, event_type, amount, .. } => {
+                        format!("StakeEvent(peer={}, type={}, amount={})", peer_id, event_type, amount / 10u128.pow(24))
+                    }
+                    crate::distributed_ai::AIMessagePayload::ModelRegistered { model_name, family, .. } => {
+                        format!("ModelRegistered(name={}, family={})", model_name, family)
+                    }
                 };
                 info!("   📦 Payload: {}", payload_desc);
 
@@ -4428,7 +4752,8 @@ impl UnifiedNetworkManager {
                 // v2.2.1-beta: P2P mining solution broadcasting
                 // Enables decentralized mining - any node can include the solution in a block
                 // v4.3.0-beta: Rate limiting now handled by gossipsub queue (MessagePriority::Low = 100ms interval)
-                info!("⛏️ [P2P MINING] Broadcasting solution from {} for block #{} (nonce: {}) to topic: {} ({} bytes)",
+                // v7.3.9: Changed info! → debug! to stop 7,620 log lines/sec (1.5MB/sec journald spam)
+                debug!("⛏️ [P2P MINING] Broadcasting solution from {} for block #{} (nonce: {}) to topic: {} ({} bytes)",
                        &miner_address[..16.min(miner_address.len())], block_height, nonce, topic, solution_bytes.len());
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), solution_bytes) {
                     Ok(()) => {
@@ -4496,6 +4821,65 @@ impl UnifiedNetworkManager {
                     Err(reason) => {
                         warn!("⚠️ [QUEUE] DEX event dropped: {} (topic={})", reason, topic);
                     }
+                }
+            }
+            NetworkCommand::PublishStateSyncRequest { topic, request_bytes } => {
+                // v5.3.0: Publish state sync request to P2P network
+                info!("🔄 [STATE SYNC P2P] Publishing state sync request to topic: {} ({} bytes)", topic, request_bytes.len());
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued state sync request (topic={})", topic);
+                    }
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] State sync request dropped: {} (topic={})", reason, topic);
+                    }
+                }
+            }
+            NetworkCommand::PublishStateSyncResponse { topic, response_bytes } => {
+                // v5.3.0: Publish state sync response to P2P network
+                info!("🔄 [STATE SYNC P2P] Publishing state sync response to topic: {} ({} bytes)", topic, response_bytes.len());
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), response_bytes) {
+                    Ok(()) => {
+                        debug!("📤 [QUEUE] Enqueued state sync response (topic={})", topic);
+                    }
+                    Err(reason) => {
+                        warn!("⚠️ [QUEUE] State sync response dropped: {} (topic={})", reason, topic);
+                    }
+                }
+            }
+            NetworkCommand::SubscribeTopic { topic } => {
+                // v7.1.8: Dynamic topic subscription for sync-aware topic management
+                let ident_topic = IdentTopic::new(&topic);
+                match self.swarm.behaviour_mut().gossipsub.subscribe(&ident_topic) {
+                    Ok(_) => {
+                        info!("📢 [TOPIC] Subscribed to gossipsub topic: {}", topic);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [TOPIC] Failed to subscribe to {}: {}", topic, e);
+                    }
+                }
+            }
+            NetworkCommand::UnsubscribeTopic { topic } => {
+                // v7.1.8: Dynamic topic unsubscription to stop forwarding high-volume messages
+                let ident_topic = IdentTopic::new(&topic);
+                if self.swarm.behaviour_mut().gossipsub.unsubscribe(&ident_topic) {
+                    info!("🔇 [TOPIC] Unsubscribed from gossipsub topic: {}", topic);
+                } else {
+                    debug!("⚠️ [TOPIC] Was not subscribed to {}", topic);
+                }
+            }
+            NetworkCommand::PublishOAuth2Client { topic, client_bytes } => {
+                debug!("🔐 [OAUTH2 P2P] Broadcasting client registration ({} bytes) to topic: {}", client_bytes.len(), topic);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), client_bytes) {
+                    Ok(()) => debug!("📤 [QUEUE] Enqueued OAuth2 client announcement (topic={})", topic),
+                    Err(reason) => warn!("⚠️ [QUEUE] OAuth2 client announcement dropped: {} (topic={})", reason, topic),
+                }
+            }
+            NetworkCommand::PublishOAuth2PubKey { topic, pubkey_bytes } => {
+                debug!("🔐 [OAUTH2 P2P] Broadcasting JWT pubkey ({} bytes) to topic: {}", pubkey_bytes.len(), topic);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), pubkey_bytes) {
+                    Ok(()) => debug!("📤 [QUEUE] Enqueued OAuth2 JWT pubkey (topic={})", topic),
+                    Err(reason) => warn!("⚠️ [QUEUE] OAuth2 JWT pubkey dropped: {} (topic={})", reason, topic),
                 }
             }
             NetworkCommand::RequestBlockRangeDirect { peer_id, start_height, end_height, response_tx } => {

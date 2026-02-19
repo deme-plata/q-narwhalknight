@@ -65,6 +65,10 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
   }, []);
 
   // Also listen for storage changes (in case DexScreen updates the points)
+  // v6.0.3: Use ref instead of state in deps to prevent effect re-registration on every change
+  const nitroPointsRef = useRef(nitroPoints);
+  nitroPointsRef.current = nitroPoints;
+
   useEffect(() => {
     const walletAddress = localStorage.getItem('walletAddress') || '';
     if (!walletAddress) return;
@@ -83,7 +87,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
       const storedPoints = localStorage.getItem(`nitroPoints_${walletAddress}`);
       if (storedPoints) {
         const points = parseInt(storedPoints, 10);
-        if (points !== nitroPoints) {
+        if (points !== nitroPointsRef.current) {
           setNitroPoints(points);
         }
       }
@@ -93,7 +97,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
       window.removeEventListener('storage', handleStorageChange);
       clearInterval(interval);
     };
-  }, [nitroPoints]);
+  }, []);
 
   // Fetch tokens from API
   useEffect(() => {
@@ -447,7 +451,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
       <div
         className="backdrop-blur-xl border-b px-6 py-3"
         style={{
-          background: 'linear-gradient(135deg, rgba(20, 15, 40, 0.95) 0%, rgba(40, 25, 60, 0.95) 100%)',
+          background: 'linear-gradient(135deg, rgba(12, 12, 20, 0.95) 0%, rgba(20, 20, 32, 0.95) 100%)',
           borderColor: 'rgba(212, 175, 55, 0.15)',
         }}
       >
@@ -462,7 +466,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
     <div
       className="backdrop-blur-xl border-b px-6 py-3 relative z-40"
       style={{
-        background: 'linear-gradient(135deg, rgba(20, 15, 40, 0.95) 0%, rgba(40, 25, 60, 0.95) 100%)',
+        background: 'linear-gradient(135deg, rgba(12, 12, 20, 0.95) 0%, rgba(20, 20, 32, 0.95) 100%)',
         borderColor: 'rgba(212, 175, 55, 0.15)',
         boxShadow: '0 4px 15px rgba(212, 175, 55, 0.1)'
       }}

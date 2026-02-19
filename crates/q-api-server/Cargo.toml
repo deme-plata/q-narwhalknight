@@ -21,6 +21,11 @@ name = "quillon-bank-cli"
 path = "src/bin/quillon-bank-cli.rs"
 
 [dependencies]
+# v6.1.0: libc for THP disable + malloc tuning (prevents OOM on 8GB servers)
+libc = "0.2"
+
+# v6.2.1: jemalloc - see [target.'cfg(unix)'.dependencies] section below
+
 # Vendored OpenSSL for cross-compilation (ARM64, etc.)
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
@@ -28,9 +33,10 @@ q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: E
 q-wallet = { path = "../q-wallet" }
 # 🔐 v1.3.12-beta: Required for SQIsign post-quantum consensus signatures
 q-crypto-advanced = { path = "../q-crypto-advanced" }  # Was optional, now required for consensus
+q-eternal-cypher = { path = "../q-eternal-cypher" }  # v7.2.12: Unified cryptographic framework (NodeCypher)
 q-aegis-ql = { path = "../q-aegis-ql" }
 libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
-# q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
+q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
 # q-dns-phantom = { path = "../q-dns-phantom" } # DEACTIVATED
 # q-bep44-discovery = { path = "../q-bep44-discovery" } # DEACTIVATED
 q-tor-client = { path = "../q-tor-client" } # Re-enabled for consensus integration
@@ -73,6 +79,9 @@ bincode = { workspace = true }
 
 # HTTP client for automatic bootstrap discovery
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# v7.3.2: Quillon Mail - DNS resolver for MX/SPF/DKIM lookups
+hickory-resolver = "0.24"
 
 # Error handling
 anyhow = { workspace = true }
@@ -120,11 +129,11 @@ q-oracle = { path = "../q-oracle" } # ✅ ENABLED - All compilation errors resol
 # q-stablecoin = { path = "../q-stablecoin" } # Disabled - depends on q-dex
 q-quillon-bank = { path = "../q-quillon-bank" } # ✅ ENABLED - Quantum banking with CDP
 q-tor-circuit = { path = "../q-tor-circuit" }
-# q-robot-control = { path = "../q-robot-control" } # Temporarily disabled due to compilation errors
+q-robot-control = { path = "../q-robot-control" } # Re-enabled: CCC convergence for deploy pipeline
 q-network = { path = "../q-network" }
 q-governance = { path = "../q-governance" } # ✅ v1.0.1 - Proof-of-Contribution governance
 q-plugin-system = { path = "../q-plugin-system" }
-q-ai-inference = { path = "../q-ai-inference" } # AI inference with KV-cache
+q-ai-inference = { path = "../q-ai-inference", default-features = false } # AI inference with KV-cache
 candle-core = { workspace = true } # For Device type in AI inference
 
 # ✨ v1.4.0-beta: Recursive SNARKs for eliminating weak subjectivity
@@ -165,6 +174,7 @@ bip39 = "2.0"
 blake3 = { workspace = true }
 sha2 = "0.10"
 sha3 = "0.10"
+ciborium = "0.2"  # CBOR serialization for bridge attestation gossipsub messages
 bcrypt = "0.15"  # Password hashing for wallet authentication
 argon2 = { version = "0.5", features = ["std"] }  # OWASP-recommended password hashing for API keys
 
@@ -195,6 +205,7 @@ pqcrypto-traits = "0.3"  # PQCrypto trait definitions
 
 # Stripe payment processing integration - ✅ ENABLED (Rust 1.90.0)
 async-stripe = { version = "0.38", default-features = false, features = ["runtime-tokio-hyper-rustls"] }
+hmac = "0.12"  # HMAC-SHA256 for Stripe webhook signature verification
 rust_decimal = "1.33"  # For precise USD amount handling
 
 # TemporalShield: Post-quantum secure secret sharing with zk-STARK (NO TRUSTED SETUP)
@@ -210,12 +221,20 @@ q-consensus-guard = { path = "../q-consensus-guard" }
 q-kernel-io = { path = "../q-kernel-io" }
 q-benchmarks = { path = "../q-benchmarks" }
 
+# v6.4.0: jemalloc only on unix (doesn't cross-compile to Windows with MinGW)
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = "0.6"
+
 [features]
 # v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
 # 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus
 # ✨ v2.2.1-beta: Mining pool ALWAYS enabled - Stratum + PPLNS
-default = ["tui", "resonance"]
+default = ["tui", "llama-cpp"]
+# v6.2.0: resonance DISABLED - causes OOM (coupling_matrix leaks ~200MB/round,
+# energy minimization always produces NaN, falls back to DAG-Knight anyway)
 tui = ["q-tui"]
+# v5.1.0: llama.cpp inference engine (10-50x faster than mistral.rs)
+llama-cpp = ["q-ai-inference/llama-cpp"]
 vendored-openssl = ["openssl"]
 resonance = ["q-resonance", "q-network/resonance"]
 # ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees

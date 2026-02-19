@@ -1,0 +1,147 @@
+import { Theme, QButton, QInput, Card } from "theme.slint";
+
+export component SendScreen inherits Rectangle {
+    in-out property <string> recipient: "";
+    in-out property <string> amount: "";
+    in-out property <string> memo: "";
+    in property <string> balance-display: "0.00 QUG";
+    in-out property <string> status-message: "";
+    in property <bool> sending: false;
+
+    callback send-transaction();
+    callback go-back();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                Text {
+                    text: "<";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xl;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Send QUG";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        // Balance info
+        Card {
+            height: 50px;
+            HorizontalLayout {
+                padding-left: Theme.spacing-md;
+                padding-right: Theme.spacing-md;
+                alignment: space-between;
+
+                Text {
+                    text: "Available Balance";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.balance-display;
+                    color: Theme.accent-green;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Recipient
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Recipient Address";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+                QInput {
+                    text <=> root.recipient;
+                    placeholder: "qnk...";
+                }
+            }
+        }
+
+        // Amount
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Amount (QUG)";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+                QInput {
+                    text <=> root.amount;
+                    placeholder: "0.00";
+                }
+            }
+        }
+
+        // Memo
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Memo (optional)";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+                QInput {
+                    text <=> root.memo;
+                    placeholder: "Payment for...";
+                }
+            }
+        }
+
+        // Status message
+        if root.status-message != "" : Text {
+            text: root.status-message;
+            color: root.status-message == "Transaction sent!" ? Theme.accent-green : Theme.accent-red;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        // Send button
+        QButton {
+            label: root.sending ? "Sending..." : "Send Transaction";
+            button-color: Theme.accent-green;
+            enabled: !root.sending;
+            clicked => { root.send-transaction(); }
+        }
+    }
+}

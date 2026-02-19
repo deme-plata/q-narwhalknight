@@ -110,6 +110,9 @@ pub struct MiningPool {
 
     /// Block found callback
     on_block_found: Option<Arc<dyn Fn(BlockFound) + Send + Sync>>,
+
+    /// Current block reward (updated from emission controller)
+    current_block_reward: Arc<RwLock<u64>>,
 }
 
 /// Internal statistics tracking
@@ -167,6 +170,7 @@ impl MiningPool {
             stats: Arc::new(RwLock::new(PoolStatsInternal::default())),
             start_time: std::time::Instant::now(),
             on_block_found: None,
+            current_block_reward: Arc::new(RwLock::new(290_000)), // ~0.00029 QUG default
         }
     }
 
@@ -404,9 +408,15 @@ impl MiningPool {
 
     /// Get block reward for height
     fn get_block_reward(&self, _height: u64) -> u64 {
-        // Q-NarwhalKnight block reward schedule
-        // For now, return constant 2 QUG (2_000_000_000 atomic units)
-        2_000_000_000
+        // Use the dynamically-set block reward from emission controller
+        // Falls back to 290_000 (~0.00029 QUG) which is the current emission rate
+        let reward = *self.current_block_reward.read();
+        if reward > 0 { reward } else { 290_000 }
+    }
+
+    /// Update block reward from emission controller
+    pub fn set_block_reward(&self, reward: u64) {
+        *self.current_block_reward.write() = reward;
     }
 
     /// Payout processing loop

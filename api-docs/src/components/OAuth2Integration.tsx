@@ -89,17 +89,16 @@ export default function OAuth2Integration() {
                 Register Your Application
               </h3>
               <p className="text-gray-300 mb-4">
-                First, register your application with Quillon to obtain OAuth2 credentials:
+                Register your application with Quillon to obtain OAuth2 credentials. The server auto-generates a <code className="bg-black/30 px-1 rounded">client_id</code> and <code className="bg-black/30 px-1 rounded">client_secret</code> if you don't provide them:
               </p>
               <CodeBlock
                 language="bash"
-                code={`curl -X POST https://api.quillon.xyz/api/v1/oauth2/register \\
+                code={`curl -X POST https://quillon.xyz/api/v1/oauth2/register \\
   -H "Content-Type: application/json" \\
   -d '{
     "name": "My Awesome App",
     "redirect_uris": ["https://myapp.com/callback"],
-    "website": "https://myapp.com",
-    "scopes": ["read:balance", "send:transaction"]
+    "website": "https://myapp.com"
   }'
 
 # Response:
@@ -118,7 +117,7 @@ export default function OAuth2Integration() {
                 <AlertTriangle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
                 <div className="text-sm">
                   <strong className="text-yellow-400">Security Warning:</strong> Store your <code className="bg-black/30 px-2 py-1 rounded">client_secret</code> securely
-                  on your server. Never expose it in client-side code or public repositories.
+                  on your server. For browser-only (public) clients, you can omit the secret and rely on PKCE alone.
                 </div>
               </div>
             </div>
@@ -129,16 +128,39 @@ export default function OAuth2Integration() {
                 <span className="bg-quantum-purple text-white rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold">
                   2
                 </span>
-                Install the SDK
+                Redirect to Authorize (with PKCE)
               </h3>
               <p className="text-gray-300 mb-4">
-                Install the Quillon OAuth2 SDK via NPM:
+                Generate a PKCE code verifier + challenge, then redirect the user to the Quillon consent page:
               </p>
               <CodeBlock
-                language="bash"
-                code="npm install @quillon/oauth2-sdk"
-                onCopy={(code) => copyToClipboard(code, 'install')}
-                copied={copiedSection === 'install'}
+                language="javascript"
+                code={`// Generate PKCE code verifier (random 128-char hex string)
+const codeVerifier = Array.from(crypto.getRandomValues(new Uint8Array(64)),
+  b => b.toString(16).padStart(2, '0')).join('');
+
+// SHA-256 hash → base64url encode for code_challenge
+const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier));
+const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(hash)))
+  .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+
+// Save verifier for step 3
+sessionStorage.setItem('pkce_verifier', codeVerifier);
+
+// Redirect user to Quillon authorization
+const params = new URLSearchParams({
+  response_type: 'code',
+  client_id: 'YOUR_CLIENT_ID',
+  redirect_uri: 'https://myapp.com/callback',
+  scope: 'read:balance read:profile',
+  state: crypto.randomUUID(),
+  code_challenge: codeChallenge,
+  code_challenge_method: 'S256'
+});
+
+window.location.href = \`https://quillon.xyz/api/v1/oauth2/authorize?\${params}\`;`}
+                onCopy={(code) => copyToClipboard(code, 'authorize')}
+                copied={copiedSection === 'authorize'}
               />
             </div>
 
@@ -148,37 +170,41 @@ export default function OAuth2Integration() {
                 <span className="bg-quantum-pink text-white rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold">
                   3
                 </span>
-                Implement Authentication
+                Exchange Code for Token
               </h3>
               <p className="text-gray-300 mb-4">
-                Initialize the SDK and start the OAuth2 flow:
+                On your <code className="bg-black/30 px-1 rounded">/callback</code> page, exchange the authorization code for an access token:
               </p>
               <CodeBlock
                 language="javascript"
-                code={`import QullionOAuth2Client from '@quillon/oauth2-sdk';
+                code={`// In your /callback route handler:
+const urlParams = new URLSearchParams(window.location.search);
+const code = urlParams.get('code');
+const codeVerifier = sessionStorage.getItem('pkce_verifier');
 
-const client = new QullionOAuth2Client({
-  clientId: 'your-client-id',
-  clientSecret: 'your-client-secret', // Server-side only!
-  redirectUri: 'https://myapp.com/callback',
-  scopes: ['read:balance', 'send:transaction']
+const tokenRes = await fetch('https://quillon.xyz/api/v1/oauth2/token', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: 'https://myapp.com/callback',
+    client_id: 'YOUR_CLIENT_ID',
+    client_secret: 'YOUR_CLIENT_SECRET', // omit for public clients
+    code_verifier: codeVerifier
+  })
 });
 
-// Start OAuth2 flow (redirects to Quillon Wallet)
-await client.authorize();
+const { access_token } = await tokenRes.json();
 
-// Handle callback (in your /callback page)
-const tokenResponse = await client.handleCallback();
-
-// Get user info
-const userInfo = await client.getUserInfo();
-console.log('Wallet:', userInfo.wallet_address);
-
-// Get balance
-const balance = await client.getBalance('QUG');
-console.log('Balance:', balance / 100000000, 'QUG');`}
-                onCopy={(code) => copyToClipboard(code, 'auth')}
-                copied={copiedSection === 'auth'}
+// Now fetch user info (wallet address)
+const userRes = await fetch('https://quillon.xyz/api/v1/oauth2/userinfo', {
+  headers: { Authorization: \`Bearer \${access_token}\` }
+});
+const user = await userRes.json();
+console.log('Wallet:', user.data.wallet_address);`}
+                onCopy={(code) => copyToClipboard(code, 'token')}
+                copied={copiedSection === 'token'}
               />
             </div>
           </div>
@@ -246,98 +272,97 @@ console.log('Balance:', balance / 100000000, 'QUG');`}
               icon={<Shield className="w-6 h-6 text-quantum-cyan" />}
             />
             <ScopeCard
+              scope="read:profile"
+              name="Read Profile"
+              description="View user's wallet address and basic account info"
+              icon={<Globe className="w-6 h-6 text-quantum-pink" />}
+            />
+            <ScopeCard
               scope="send:transaction"
               name="Send Transactions"
-              description="Send QUG and tokens on behalf of the user"
+              description="Send QUG and tokens on behalf of the user (coming soon)"
               icon={<Key className="w-6 h-6 text-quantum-purple" />}
               warning="Requires user approval for each transaction"
             />
             <ScopeCard
               scope="read:transactions"
               name="Read Transaction History"
-              description="View user's past transactions and activity"
-              icon={<Globe className="w-6 h-6 text-quantum-pink" />}
-            />
-            <ScopeCard
-              scope="manage:tokens"
-              name="Manage Tokens"
-              description="Create and manage custom tokens"
+              description="View user's past transactions and activity (coming soon)"
               icon={<Lock className="w-6 h-6 text-quantum-green" />}
-              warning="High privilege - request only if necessary"
             />
           </div>
         </section>
 
-        {/* SDK Reference */}
+        {/* REST API Reference */}
         <section className="mb-12 bg-quantum-indigo/20 backdrop-blur-xl border border-quantum-purple/30 rounded-2xl p-8">
-          <h2 className="text-3xl font-bold mb-6">📚 SDK Reference</h2>
+          <h2 className="text-3xl font-bold mb-6">📚 OAuth2 REST API Reference</h2>
+          <p className="text-gray-300 mb-6">
+            All OAuth2 endpoints are on the main Quillon domain: <code className="bg-black/30 px-2 py-1 rounded text-quantum-cyan">https://quillon.xyz</code>
+          </p>
 
           <div className="space-y-6">
             <APIMethod
-              method="authorize()"
-              description="Starts the OAuth2 authorization flow. Redirects user to Quillon Wallet."
-              example="await client.authorize();"
-              returns="Promise<void>"
+              method="POST /api/v1/oauth2/register"
+              description="Register a new OAuth2 client application. Returns client_id and client_secret (auto-generated if not provided)."
+              example={`curl -X POST https://quillon.xyz/api/v1/oauth2/register \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"My App","redirect_uris":["https://myapp.com/callback"]}'`}
+              returns='{ "success": true, "data": { "client_id": "...", "client_secret": "..." } }'
             />
 
             <APIMethod
-              method="handleCallback()"
-              description="Handles OAuth2 callback after user consent. Call this in your redirect URI page."
-              example="const tokenResponse = await client.handleCallback();"
-              returns="Promise<TokenResponse>"
-            />
-
-            <APIMethod
-              method="getUserInfo()"
-              description="Gets authenticated user information (wallet address, scopes)."
-              example="const userInfo = await client.getUserInfo();"
-              returns="Promise<{ wallet_address: string, scopes: string[] }>"
-            />
-
-            <APIMethod
-              method="getBalance(token)"
-              description="Gets user's token balance in base units (8 decimals)."
-              example="const balance = await client.getBalance('QUG');"
-              params={[{ name: 'token', type: 'string', description: 'Token symbol (e.g., "QUG", "QUGUSD")' }]}
-              returns="Promise<number>"
-            />
-
-            <APIMethod
-              method="sendTransaction(params)"
-              description="Sends a transaction on behalf of the user."
-              example={`await client.sendTransaction({
-  to: 'wallet-address',
-  amount: 100000000, // 1 QUG
-  token: 'QUG'
-});`}
+              method="GET /api/v1/oauth2/authorize"
+              description="Start the authorization flow. Redirect the user's browser here with query params. Shows the Quillon consent screen."
+              example={`https://quillon.xyz/api/v1/oauth2/authorize?
+  response_type=code&client_id=YOUR_ID&redirect_uri=https://myapp.com/callback
+  &scope=read:balance+read:profile&state=RANDOM&code_challenge=SHA256_HASH
+  &code_challenge_method=S256`}
               params={[
-                { name: 'to', type: 'string', description: 'Recipient wallet address' },
-                { name: 'amount', type: 'number', description: 'Amount in base units' },
-                { name: 'token', type: 'string', description: 'Token symbol' }
+                { name: 'response_type', type: 'string', description: 'Must be "code"' },
+                { name: 'client_id', type: 'string', description: 'Your registered client ID' },
+                { name: 'redirect_uri', type: 'string', description: 'Must match a registered redirect URI' },
+                { name: 'scope', type: 'string', description: 'Space-separated scopes (e.g., "read:balance read:profile")' },
+                { name: 'state', type: 'string', description: 'CSRF protection token (random string)' },
+                { name: 'code_challenge', type: 'string', description: 'PKCE challenge (base64url of SHA-256 hash of verifier)' },
+                { name: 'code_challenge_method', type: 'string', description: 'Must be "S256"' },
               ]}
-              returns="Promise<Transaction>"
+              returns="Redirects to redirect_uri with ?code=AUTH_CODE&state=STATE"
             />
 
             <APIMethod
-              method="getTransactionHistory(limit)"
-              description="Gets user's transaction history."
-              example="const transactions = await client.getTransactionHistory(20);"
-              params={[{ name: 'limit', type: 'number', description: 'Maximum transactions to return' }]}
-              returns="Promise<Transaction[]>"
+              method="POST /api/v1/oauth2/token"
+              description="Exchange authorization code for an access token. Validates PKCE code_verifier against the original challenge."
+              example={`curl -X POST https://quillon.xyz/api/v1/oauth2/token \\
+  -H "Content-Type: application/json" \\
+  -d '{"grant_type":"authorization_code","code":"AUTH_CODE",
+       "redirect_uri":"https://myapp.com/callback","client_id":"YOUR_ID",
+       "client_secret":"YOUR_SECRET","code_verifier":"ORIGINAL_VERIFIER"}'`}
+              params={[
+                { name: 'grant_type', type: 'string', description: 'Must be "authorization_code"' },
+                { name: 'code', type: 'string', description: 'The authorization code from the callback' },
+                { name: 'redirect_uri', type: 'string', description: 'Must match the one used in /authorize' },
+                { name: 'client_id', type: 'string', description: 'Your registered client ID' },
+                { name: 'client_secret', type: 'string', description: 'Your client secret (optional for public clients using PKCE)' },
+                { name: 'code_verifier', type: 'string', description: 'The original PKCE code verifier' },
+              ]}
+              returns='{ "access_token": "...", "token_type": "bearer", "expires_in": 3600 }'
             />
 
             <APIMethod
-              method="isAuthenticated()"
-              description="Checks if user is currently authenticated."
-              example="if (client.isAuthenticated()) { ... }"
-              returns="boolean"
+              method="GET /api/v1/oauth2/userinfo"
+              description="Get the authenticated user's wallet address and granted scopes. Requires Bearer token."
+              example={`curl https://quillon.xyz/api/v1/oauth2/userinfo \\
+  -H "Authorization: Bearer ACCESS_TOKEN"`}
+              returns='{ "data": { "wallet_address": "qnk...", "scopes": ["read:balance", "read:profile"] } }'
             />
 
             <APIMethod
-              method="revoke()"
-              description="Revokes access token and logs out user."
-              example="await client.revoke();"
-              returns="Promise<void>"
+              method="POST /api/v1/oauth2/revoke"
+              description="Revoke an access token, ending the session."
+              example={`curl -X POST https://quillon.xyz/api/v1/oauth2/revoke \\
+  -H "Content-Type: application/json" \\
+  -d '{"token":"ACCESS_TOKEN"}'`}
+              returns='{ "success": true }'
             />
           </div>
         </section>
@@ -357,8 +382,8 @@ console.log('Balance:', balance / 100000000, 'QUG');`}
             />
             <SecurityItem
               icon={<CheckCircle className="w-6 h-6 text-green-500" />}
-              title="Never expose client_secret in frontend code"
-              description="Use server-side token exchange. The SDK handles PKCE for client-side security."
+              title="Use PKCE for browser-based apps"
+              description="For public clients (SPAs), omit client_secret and use PKCE code_verifier for security."
             />
             <SecurityItem
               icon={<CheckCircle className="w-6 h-6 text-green-500" />}
@@ -368,12 +393,12 @@ console.log('Balance:', balance / 100000000, 'QUG');`}
             <SecurityItem
               icon={<CheckCircle className="w-6 h-6 text-green-500" />}
               title="Validate state parameter"
-              description="The SDK automatically validates state to prevent CSRF attacks."
+              description="Always compare the state returned in the callback with the one you sent to prevent CSRF attacks."
             />
             <SecurityItem
               icon={<CheckCircle className="w-6 h-6 text-green-500" />}
               title="Handle token expiration"
-              description="Use client.getAccessToken() which auto-refreshes expired tokens."
+              description="Access tokens expire after 1 hour. Re-authenticate the user when the token expires."
             />
           </div>
         </section>

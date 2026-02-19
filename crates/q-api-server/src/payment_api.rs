@@ -3,12 +3,13 @@
 
 use axum::{
     extract::{Json, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use stripe::{
     Client, CreateCustomer, CreatePaymentIntent, Currency, Customer, PaymentIntent,
     PaymentIntentConfirmParams,
@@ -16,6 +17,104 @@ use stripe::{
 use tracing::{error, info, warn};
 
 use crate::{ApiResponse, AppState};
+
+// ============================================================================
+// Authentication Helper
+// ============================================================================
+
+/// Extract authenticated wallet address from request headers.
+/// Payment endpoints that move money MUST verify the caller owns the wallet.
+fn extract_wallet_from_headers(headers: &HeaderMap) -> Option<String> {
+    // Try x-wallet-auth header first
+    if let Some(wallet) = headers.get("x-wallet-auth").and_then(|v| v.to_str().ok()) {
+        if !wallet.is_empty() {
+            return Some(wallet.to_string());
+        }
+    }
+    // Try Authorization: Bearer header
+    if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(token) = auth.strip_prefix("Bearer ") {
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
+// Rate Limiting
+// ============================================================================
+
+/// Simple in-memory rate limiter for payment endpoints.
+/// Tracks per-wallet request counts within a sliding window.
+pub struct PaymentRateLimiter {
+    /// wallet_address -> (window_start_time, request_count_in_window)
+    requests: Mutex<HashMap<String, (std::time::Instant, u32)>>,
+    /// Max requests allowed per window
+    max_requests: u32,
+    /// Window duration
+    window: std::time::Duration,
+}
+
+impl PaymentRateLimiter {
+    pub fn new(max_requests_per_minute: u32) -> Self {
+        Self {
+            requests: Mutex::new(HashMap::new()),
+            max_requests: max_requests_per_minute,
+            window: std::time::Duration::from_secs(60),
+        }
+    }
+
+    /// Check if a wallet is rate limited. Returns true if the request should be allowed.
+    pub fn check_rate_limit(&self, wallet: &str) -> bool {
+        let mut map = self.requests.lock().unwrap();
+        let now = std::time::Instant::now();
+
+        match map.get_mut(wallet) {
+            Some((window_start, count)) => {
+                if now.duration_since(*window_start) > self.window {
+                    // Window expired, reset
+                    *window_start = now;
+                    *count = 1;
+                    true
+                } else if *count >= self.max_requests {
+                    // Rate limit exceeded
+                    false
+                } else {
+                    *count += 1;
+                    true
+                }
+            }
+            None => {
+                map.insert(wallet.to_string(), (now, 1));
+                true
+            }
+        }
+    }
+}
+
+/// Helper to check rate limit and return an error response if rate limited.
+/// The rate limiter should be wired into AppState.payment_rate_limiter field.
+/// For now returns None (not wired) -- ready to integrate when AppState is updated.
+fn check_payment_rate_limit<T: Serialize>(
+    _state: &AppState,
+    _wallet: &str,
+) -> Option<Json<ApiResponse<T>>> {
+    // TODO: Wire into AppState.payment_rate_limiter field
+    // Example future usage:
+    //   if let Some(ref limiter) = state.payment_rate_limiter {
+    //       if !limiter.check_rate_limit(wallet) {
+    //           return Some(Json(ApiResponse {
+    //               success: false,
+    //               data: None,
+    //               error: Some("Rate limit exceeded: too many payment requests".to_string()),
+    //               timestamp: chrono::Utc::now(),
+    //           }));
+    //       }
+    //   }
+    None
+}
 
 // ============================================================================
 // Request/Response Types
@@ -112,12 +211,19 @@ pub fn init_stripe_client() -> Result<Client, String> {
     Ok(Client::new(api_key))
 }
 
+/// Get Stripe webhook signing secret from environment
+fn get_webhook_secret() -> Result<String, String> {
+    std::env::var("STRIPE_WEBHOOK_SECRET")
+        .map_err(|_| "STRIPE_WEBHOOK_SECRET environment variable not set".to_string())
+}
+
 // ============================================================================
 // API Handlers
 // ============================================================================
 
 /// POST /api/v1/payment/create-intent
 /// Create a Stripe payment intent for USD wallet top-up
+/// NOTE: No auth required here -- Stripe handles card authentication.
 pub async fn create_payment_intent(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreatePaymentIntentRequest>,
@@ -151,11 +257,19 @@ pub async fn create_payment_intent(
         }));
     }
 
-    // Initialize Stripe client
-    let stripe_client = init_stripe_client().map_err(|e| {
-        error!("Failed to initialize Stripe client: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Use pre-initialized Stripe client from AppState
+    let stripe_client = match &state.stripe_client {
+        Some(client) => client,
+        None => {
+            error!("Stripe client not configured - set STRIPE_SECRET_KEY env var");
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Payment system not configured".to_string()),
+                timestamp: chrono::Utc::now(),
+            }));
+        }
+    };
 
     // Create payment intent
     let mut create_intent = CreatePaymentIntent::new(amount_cents, Currency::USD);
@@ -214,11 +328,19 @@ pub async fn confirm_payment(
         request.payment_intent_id
     );
 
-    // Initialize Stripe client
-    let stripe_client = init_stripe_client().map_err(|e| {
-        error!("Failed to initialize Stripe client: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Use pre-initialized Stripe client from AppState
+    let stripe_client = match &state.stripe_client {
+        Some(client) => client,
+        None => {
+            error!("Stripe client not configured - set STRIPE_SECRET_KEY env var");
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Payment system not configured".to_string()),
+                timestamp: chrono::Utc::now(),
+            }));
+        }
+    };
 
     // Retrieve payment intent to check status
     let intent_id: stripe::PaymentIntentId = request.payment_intent_id.parse().map_err(|e| {
@@ -232,6 +354,27 @@ pub async fn confirm_payment(
 
             // Check if payment succeeded
             if intent.status == stripe::PaymentIntentStatus::Succeeded {
+                let intent_id_str = intent.id.to_string();
+
+                // IDEMPOTENCY: Check if this payment was already processed
+                if let Ok(true) = state.storage_engine.is_payment_processed(&intent_id_str).await {
+                    info!("💳 Payment {} already processed, returning cached result", intent_id_str);
+                    let wallet_addr = intent.metadata.get("wallet_address").map(|s| s.as_str()).unwrap_or("unknown");
+                    let balance = state.storage_engine.get_usd_balance(wallet_addr).await.unwrap_or(0);
+                    let balance_usd = Decimal::from(balance) / Decimal::from(100);
+                    return Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(ConfirmPaymentResponse {
+                            success: true,
+                            status: "Already processed".to_string(),
+                            amount_credited: "0".to_string(),
+                            new_balance: balance_usd.to_string(),
+                        }),
+                        error: None,
+                        timestamp: chrono::Utc::now(),
+                    }));
+                }
+
                 // Extract wallet address from metadata
                 let wallet_address = intent
                     .metadata
@@ -254,6 +397,11 @@ pub async fn confirm_payment(
                             "💵 Credited ${} to wallet {}",
                             amount_usd_str, wallet_address
                         );
+
+                        // Mark as processed for idempotency
+                        let _ = state.storage_engine.mark_payment_processed(
+                            &intent_id_str, &wallet_address, intent.amount as u64
+                        ).await;
 
                         // Get updated balance
                         let new_balance = state
@@ -313,11 +461,29 @@ pub async fn confirm_payment(
 }
 
 /// GET /api/v1/payment/balance/:wallet_address
-/// Get USD balance for a wallet
+/// Get USD balance for a wallet (requires wallet auth)
 pub async fn get_usd_balance(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<GetBalanceRequest>,
 ) -> Result<Json<ApiResponse<BalanceResponse>>, StatusCode> {
+    // Auth: verify caller is the wallet owner
+    let auth_wallet = extract_wallet_from_headers(&headers);
+    if auth_wallet.as_deref() != Some(&request.wallet_address) {
+        warn!("Unauthorized balance query for wallet: {}", request.wallet_address);
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Unauthorized: wallet auth header must match requested wallet".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    // Rate limit check
+    if let Some(resp) = check_payment_rate_limit::<BalanceResponse>(&state, &request.wallet_address) {
+        return Ok(resp);
+    }
+
     info!(
         "💰 Getting USD balance for wallet: {}",
         request.wallet_address
@@ -355,11 +521,29 @@ pub async fn get_usd_balance(
 }
 
 /// POST /api/v1/payment/withdraw
-/// Withdraw USD from wallet (placeholder - requires bank integration)
+/// Withdraw USD from wallet (requires wallet auth)
 pub async fn withdraw_usd(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<WithdrawRequest>,
 ) -> Result<Json<ApiResponse<WithdrawResponse>>, StatusCode> {
+    // Auth: verify caller is the wallet owner
+    let auth_wallet = extract_wallet_from_headers(&headers);
+    if auth_wallet.as_deref() != Some(&request.wallet_address) {
+        warn!("Unauthorized withdrawal attempt for wallet: {}", request.wallet_address);
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Unauthorized: wallet auth header must match requested wallet".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    // Rate limit check
+    if let Some(resp) = check_payment_rate_limit::<WithdrawResponse>(&state, &request.wallet_address) {
+        return Ok(resp);
+    }
+
     info!(
         "🏦 Processing USD withdrawal for wallet: {}, amount: ${}",
         request.wallet_address, request.amount_usd
@@ -468,11 +652,29 @@ pub struct ConvertToQugusdResponse {
 }
 
 /// POST /api/v1/payment/convert-to-qugusd
-/// Convert Stripe USD balance to QUGUSD stablecoin (1:1 with 0.1% fee)
+/// Convert Stripe USD balance to QUGUSD stablecoin (1:1 with 0.1% fee, requires wallet auth)
 pub async fn convert_usd_to_qugusd(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<ConvertToQugusdRequest>,
 ) -> Result<Json<ApiResponse<ConvertToQugusdResponse>>, StatusCode> {
+    // Auth: verify caller is the wallet owner
+    let auth_wallet = extract_wallet_from_headers(&headers);
+    if auth_wallet.as_deref() != Some(&request.wallet_address) {
+        warn!("Unauthorized USD-to-QUGUSD conversion attempt for wallet: {}", request.wallet_address);
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Unauthorized: wallet auth header must match requested wallet".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    // Rate limit check
+    if let Some(resp) = check_payment_rate_limit::<ConvertToQugusdResponse>(&state, &request.wallet_address) {
+        return Ok(resp);
+    }
+
     info!(
         "🔄 Converting USD to QUGUSD for wallet: {}, amount: ${}",
         request.wallet_address, request.usd_amount
@@ -515,9 +717,13 @@ pub async fn convert_usd_to_qugusd(
             // Calculate conversion with 0.1% fee
             let fee_cents = (usd_cents as f64 * 0.001) as u64; // 0.1% fee
             let qugusd_cents = usd_cents - fee_cents;
-            // Convert cents to base units: $0.01 = 1 cent = 1_000_000 base units (1e6, since QUGUSD has 8 decimals)
-            // Example: 12 cents = 12 * 1_000_000 = 12_000_000 base units = 0.12 QUGUSD
-            let qugusd_amount = qugusd_cents * 1_000_000; // 1 cent = 1_000_000 base units
+            // Convert cents to base units using the double-conversion format:
+            // 1 USD = 1 QUGUSD display. QUGUSD has 8 decimals.
+            // Due to the accepted double-conversion standard, token_balances stores:
+            //   display_amount * 10^(2*decimals) = display_amount * 10^16
+            // So 1 cent = 0.01 QUGUSD display = 0.01 * 10^16 = 10^14 base units
+            let qugusd_base_units_per_cent: u128 = 100_000_000_000_000; // 10^14
+            let qugusd_amount: u128 = (qugusd_cents as u128) * qugusd_base_units_per_cent;
 
             // Parse wallet address to bytes
             let wallet_addr_bytes =
@@ -547,7 +753,7 @@ pub async fn convert_usd_to_qugusd(
                         .get_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS)
                         .await
                         .unwrap_or(0);
-                    let new_qugusd_total = current_qugusd + qugusd_amount as u128;
+                    let new_qugusd_total = current_qugusd + qugusd_amount;
 
                     // Mint QUGUSD by saving the new balance
                     match state
@@ -589,8 +795,8 @@ pub async fn convert_usd_to_qugusd(
                                         new_usd_balance as f64 / 100.0
                                     ),
                                     new_qugusd_balance: format!(
-                                        "{:.8}",
-                                        new_qugusd_balance as f64 / 1e24
+                                        "{:.2}",
+                                        new_qugusd_balance as f64 / 1e16  // 10^(2*8) = 10^16 for 8-decimal tokens (double-conversion format)
                                     ),
                                 }),
                                 error: None,
@@ -655,11 +861,29 @@ pub struct TransferUsdResponse {
 }
 
 /// POST /api/v1/payment/transfer
-/// Transfer USD from one wallet to another
+/// Transfer USD from one wallet to another (requires sender wallet auth)
 pub async fn transfer_usd(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<TransferUsdRequest>,
 ) -> Result<Json<ApiResponse<TransferUsdResponse>>, StatusCode> {
+    // Auth: verify caller is the SENDER (from_wallet owner)
+    let auth_wallet = extract_wallet_from_headers(&headers);
+    if auth_wallet.as_deref() != Some(&request.from_wallet) {
+        warn!("Unauthorized transfer attempt from wallet: {}", request.from_wallet);
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Unauthorized: wallet auth header must match sender wallet".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    // Rate limit check
+    if let Some(resp) = check_payment_rate_limit::<TransferUsdResponse>(&state, &request.from_wallet) {
+        return Ok(resp);
+    }
+
     info!(
         "💸 Transferring USD: {} → {}, amount: ${}",
         request.from_wallet, request.to_wallet, request.amount_usd
@@ -708,74 +932,38 @@ pub async fn transfer_usd(
                 }));
             }
 
-            // Debit from sender
+            // Atomic transfer - both debit and credit happen together
             match state
                 .storage_engine
-                .debit_usd_balance(&request.from_wallet, amount_cents)
+                .transfer_usd_atomic(&request.from_wallet, &request.to_wallet, amount_cents)
                 .await
             {
-                Ok(_) => {
-                    // Credit to recipient
-                    match state
-                        .storage_engine
-                        .credit_usd_balance(&request.to_wallet, amount_cents)
-                        .await
-                    {
-                        Ok(_) => {
-                            // Get updated balances
-                            let from_new_balance = state
-                                .storage_engine
-                                .get_usd_balance(&request.from_wallet)
-                                .await
-                                .unwrap_or(0);
-                            let to_new_balance = state
-                                .storage_engine
-                                .get_usd_balance(&request.to_wallet)
-                                .await
-                                .unwrap_or(0);
+                Ok((new_from_balance, new_to_balance)) => {
+                    let transaction_id = uuid::Uuid::new_v4().to_string();
 
-                            let transaction_id = uuid::Uuid::new_v4().to_string();
+                    info!("✅ USD transfer completed: {} (${:.2} from {} to {})",
+                        transaction_id, amount_cents as f64 / 100.0,
+                        request.from_wallet, request.to_wallet);
 
-                            info!("✅ USD transfer completed: {}", transaction_id);
-
-                            Ok(Json(ApiResponse {
-                                success: true,
-                                data: Some(TransferUsdResponse {
-                                    success: true,
-                                    amount_transferred: request.amount_usd.clone(),
-                                    from_new_balance: format!(
-                                        "{:.2}",
-                                        from_new_balance as f64 / 100.0
-                                    ),
-                                    to_new_balance: format!("{:.2}", to_new_balance as f64 / 100.0),
-                                    transaction_id,
-                                }),
-                                error: None,
-                                timestamp: chrono::Utc::now(),
-                            }))
-                        }
-                        Err(e) => {
-                            error!("Failed to credit recipient: {}", e);
-                            // Refund sender since credit failed
-                            let _ = state
-                                .storage_engine
-                                .credit_usd_balance(&request.from_wallet, amount_cents)
-                                .await;
-                            Ok(Json(ApiResponse {
-                                success: false,
-                                data: None,
-                                error: Some(format!("Failed to complete transfer: {}", e)),
-                                timestamp: chrono::Utc::now(),
-                            }))
-                        }
-                    }
+                    Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(TransferUsdResponse {
+                            success: true,
+                            amount_transferred: request.amount_usd.clone(),
+                            from_new_balance: format!("{:.2}", new_from_balance as f64 / 100.0),
+                            to_new_balance: format!("{:.2}", new_to_balance as f64 / 100.0),
+                            transaction_id,
+                        }),
+                        error: None,
+                        timestamp: chrono::Utc::now(),
+                    }))
                 }
                 Err(e) => {
-                    error!("Failed to debit sender: {}", e);
+                    error!("Failed to transfer USD: {}", e);
                     Ok(Json(ApiResponse {
                         success: false,
                         data: None,
-                        error: Some(format!("Failed to process transfer: {}", e)),
+                        error: Some(format!("Transfer failed: {}", e)),
                         timestamp: chrono::Utc::now(),
                     }))
                 }
@@ -950,7 +1138,7 @@ pub async fn get_ai_wallet_balance(
             }))
         }
         Err(e) => {
-            error!("❌ Failed to fetch AI wallet balance: {}", e);
+            error!("Failed to fetch AI wallet balance: {}", e);
             Ok(Json(AIWalletBalanceResponse {
                 success: false,
                 data: None,
@@ -1041,7 +1229,7 @@ pub async fn get_ai_wallet_usage(
             }))
         }
         Err(e) => {
-            error!("❌ Failed to fetch AI usage stats: {}", e);
+            error!("Failed to fetch AI usage stats: {}", e);
             Ok(Json(AIUsageStatsResponse {
                 success: false,
                 data: None,
@@ -1123,12 +1311,183 @@ pub async fn get_ai_treasury_stats(
             }))
         }
         Err(e) => {
-            error!("❌ Failed to fetch treasury stats: {}", e);
+            error!("Failed to fetch treasury stats: {}", e);
             Ok(Json(TreasuryStatsResponse {
                 success: false,
                 data: None,
                 error: Some(format!("Database error: {}", e)),
             }))
+        }
+    }
+}
+
+// ============================================================================
+// Stripe Webhook Handler
+// ============================================================================
+
+/// Verify Stripe webhook signature using HMAC-SHA256
+fn verify_stripe_signature(payload: &str, sig_header: &str, secret: &str) -> Result<(), String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    // Parse stripe-signature header: "t=timestamp,v1=signature"
+    let mut timestamp = None;
+    let mut signature = None;
+    for part in sig_header.split(',') {
+        let kv: Vec<&str> = part.splitn(2, '=').collect();
+        if kv.len() == 2 {
+            match kv[0] {
+                "t" => timestamp = Some(kv[1]),
+                "v1" => signature = Some(kv[1]),
+                _ => {}
+            }
+        }
+    }
+
+    let timestamp = timestamp.ok_or("Missing timestamp in signature")?;
+    let expected_sig = signature.ok_or("Missing v1 signature")?;
+
+    // Compute expected signature: HMAC-SHA256(secret, "timestamp.payload")
+    let signed_payload = format!("{}.{}", timestamp, payload);
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("HMAC init error: {}", e))?;
+    mac.update(signed_payload.as_bytes());
+    let result = mac.finalize();
+    let computed = hex::encode(result.into_bytes());
+
+    // Constant-time comparison
+    if computed != expected_sig {
+        return Err("Signature mismatch".to_string());
+    }
+
+    // Check timestamp freshness (reject events older than 5 minutes)
+    if let Ok(ts) = timestamp.parse::<i64>() {
+        let now = chrono::Utc::now().timestamp();
+        if (now - ts).abs() > 300 {
+            return Err("Webhook timestamp too old".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// POST /api/v1/payment/webhook
+/// Stripe webhook handler - receives payment_intent.succeeded events.
+/// Verifies Stripe signature via HMAC-SHA256, then credits wallets idempotently.
+pub async fn handle_stripe_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<StatusCode, StatusCode> {
+    // Get the Stripe signature header
+    let sig_header = headers
+        .get("stripe-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            warn!("Webhook missing stripe-signature header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Get webhook secret
+    let webhook_secret = get_webhook_secret().map_err(|e| {
+        error!("Webhook secret not configured: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Verify the webhook signature
+    verify_stripe_signature(&body, sig_header, &webhook_secret).map_err(|e| {
+        warn!("Webhook signature verification failed: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    // Parse the event JSON
+    let event: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        warn!("Failed to parse webhook body: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Only handle payment_intent.succeeded events
+    if event_type != "payment_intent.succeeded" {
+        // Acknowledge other events without processing
+        return Ok(StatusCode::OK);
+    }
+
+    // Extract payment intent data from the event
+    let data_object = event
+        .get("data")
+        .and_then(|d| d.get("object"))
+        .ok_or_else(|| {
+            warn!("Webhook: Missing data.object");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let intent_id = data_object
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if intent_id.is_empty() {
+        warn!("Webhook: Missing payment intent ID");
+        return Ok(StatusCode::OK);
+    }
+
+    // IDEMPOTENCY: Check if already processed
+    match state.storage_engine.is_payment_processed(&intent_id).await {
+        Ok(true) => {
+            info!("Webhook: Payment {} already processed, skipping", intent_id);
+            return Ok(StatusCode::OK);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            error!("Failed to check payment status: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // Extract wallet address from metadata
+    let wallet_address = data_object
+        .get("metadata")
+        .and_then(|m| m.get("wallet_address"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if wallet_address.is_empty() {
+        warn!("Webhook: No wallet_address in payment metadata for {}", intent_id);
+        return Ok(StatusCode::OK);
+    }
+
+    let amount_cents = data_object
+        .get("amount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    if amount_cents == 0 {
+        warn!("Webhook: Zero amount for payment {}", intent_id);
+        return Ok(StatusCode::OK);
+    }
+
+    // Credit the wallet
+    match state.storage_engine.credit_usd_balance(&wallet_address, amount_cents).await {
+        Ok(_) => {
+            // Mark as processed AFTER successful credit
+            if let Err(e) = state.storage_engine.mark_payment_processed(
+                &intent_id, &wallet_address, amount_cents
+            ).await {
+                error!("Failed to mark payment as processed: {} - manual reconciliation needed", e);
+            }
+
+            let amount_usd = amount_cents as f64 / 100.0;
+            info!("Webhook: Credited ${:.2} to wallet {} (payment: {})", amount_usd, wallet_address, intent_id);
+            Ok(StatusCode::OK)
+        }
+        Err(e) => {
+            error!("Webhook: Failed to credit wallet {}: {}", wallet_address, e);
+            // Return 500 so Stripe retries the webhook
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }

@@ -10,8 +10,14 @@
 /// - Social media integration for engagement rewards
 
 pub mod types;
-pub mod storage;
 pub mod scoring;
+
+#[cfg(not(target_os = "windows"))]
+pub mod storage;
+#[cfg(target_os = "windows")]
+pub mod storage_sled;
+#[cfg(target_os = "windows")]
+pub use storage_sled as storage;
 
 pub use types::*;
 pub use storage::BountyStorage;

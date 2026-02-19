@@ -54,6 +54,9 @@ uuid = { workspace = true }
 # Hex encoding
 hex = "0.4"
 
+# Hashing for flexible address support
+sha3 = { workspace = true }
+
 # Concurrency
 parking_lot = "0.12"
 

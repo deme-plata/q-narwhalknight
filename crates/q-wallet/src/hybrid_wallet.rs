@@ -251,32 +251,20 @@ impl HybridWallet {
         }
     }
 
-    /// Derive address from public keys (uses highest security key available)
+    /// Derive address from Ed25519 public key (ALWAYS uses Ed25519 regardless of phase).
+    ///
+    /// CRITICAL: Address MUST be deterministic from seed phrase. Dilithium5 keys are
+    /// non-deterministic (pqcrypto ignores the seed), so using them for address derivation
+    /// would cause different addresses on each wallet recovery. Dilithium5/SQIsign keys
+    /// are used for SIGNING only, not address identity.
     pub fn derive_address(&self) -> [u8; 32] {
-        match self.phase {
-            CryptoPhase::Q0 => {
-                // Use Ed25519 public key for Q0
-                let pk = self.ed25519_key.as_ref()
-                    .expect("Ed25519 key required for Q0")
-                    .verifying_key()
-                    .to_bytes();
-                Self::hash_to_address(&pk)
-            }
-            CryptoPhase::Q1 => {
-                // Use Dilithium5 public key for Q1 (higher security)
-                let pk = self.dilithium5_key.as_ref()
-                    .expect("Dilithium5 key required for Q1")
-                    .public_key.as_bytes();
-                Self::hash_to_address(pk)
-            }
-            CryptoPhase::Q2 => {
-                // Use Dilithium5 public key for Q2
-                let pk = self.dilithium5_key.as_ref()
-                    .expect("Dilithium5 key required for Q2")
-                    .public_key.as_bytes();
-                Self::hash_to_address(pk)
-            }
-        }
+        // Always use Ed25519 for address derivation to match frontend behavior
+        // and ensure deterministic recovery from mnemonic
+        let pk = self.ed25519_key.as_ref()
+            .expect("Ed25519 key required for address derivation")
+            .verifying_key()
+            .to_bytes();
+        Self::hash_to_address(&pk)
     }
 
     /// Hash public key to address using SHA3-256
@@ -538,8 +526,9 @@ mod tests {
         assert_eq!(q1_addr.len(), 32);
         assert_eq!(q2_addr.len(), 32);
 
-        // Addresses should be different (statistically certain)
-        assert_ne!(q0_addr, q1_addr);
+        // All addresses derived from Ed25519 (different random keys = different addresses)
+        // But critically, address derivation is ALWAYS from Ed25519, regardless of phase
+        assert_ne!(q0_addr, q1_addr); // Different wallets = different Ed25519 keys
         assert_ne!(q1_addr, q2_addr);
         assert_ne!(q0_addr, q2_addr);
     }

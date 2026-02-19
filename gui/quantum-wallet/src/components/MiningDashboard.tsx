@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
@@ -43,6 +43,10 @@ export default function MiningDashboard() {
   const [miners, setMiners] = useState<Map<string, MinerInfo>>(new Map());
   const [showMinerTooltip, setShowMinerTooltip] = useState(false);
   const [showNetworkAnimation, setShowNetworkAnimation] = useState(false);
+  const [connectedMiners, setConnectedMiners] = useState(0);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animFrameRef = useRef<number>(0);
+  const displayHashRateRef = useRef<number>(0);
 
   // Use the same wallet as Dashboard - from localStorage
   const [walletAddress, setWalletAddress] = useState('');
@@ -55,6 +59,251 @@ export default function MiningDashboard() {
   // Daily earnings calculation
   const [qugPriceUsd, setQugPriceUsd] = useState(0);
   const [blockReward, setBlockReward] = useState(0);
+
+  // ═══════════════════════════════════════════════════════════════
+  // v7.4.3: Epic Network Power Canvas Animation
+  // Renders all connected miners as orbiting particles around a
+  // central pulsing core, with energy beams and hash sparks
+  // ═══════════════════════════════════════════════════════════════
+  const startNetworkCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    const W = rect.width;
+    const H = rect.height;
+    const cx = W / 2;
+    const cy = H / 2;
+
+    const minerCount = Math.max(connectedMiners, 1);
+    const totalHashKhs = stats.networkHashRate / 1000;
+
+    // Generate miner particles in concentric orbital rings
+    interface MinerParticle {
+      angle: number;
+      radius: number;
+      speed: number;
+      size: number;
+      hue: number;
+      brightness: number;
+      ring: number;
+      pulsePhase: number;
+    }
+
+    const particles: MinerParticle[] = [];
+    const rings = Math.min(Math.ceil(minerCount / 30), 8); // Up to 8 orbital rings
+    let placed = 0;
+
+    for (let ring = 0; ring < rings && placed < minerCount; ring++) {
+      const ringRadius = 30 + ring * (Math.min(W, H) * 0.38 / rings);
+      const capacity = Math.min(Math.floor(2 * Math.PI * ringRadius / 6), minerCount - placed);
+      const speed = (0.3 + Math.random() * 0.2) / (ring + 1); // outer = slower
+
+      for (let j = 0; j < capacity && placed < minerCount; j++) {
+        const angle = (j / capacity) * Math.PI * 2 + ring * 0.5;
+        particles.push({
+          angle,
+          radius: ringRadius + (Math.random() - 0.5) * 8,
+          speed: speed * (0.8 + Math.random() * 0.4) * (Math.random() > 0.5 ? 1 : -1),
+          size: 1.2 + Math.random() * 1.8,
+          hue: 180 + ring * 25 + Math.random() * 20, // cyan → blue → purple gradient
+          brightness: 0.5 + Math.random() * 0.5,
+          ring,
+          pulsePhase: Math.random() * Math.PI * 2,
+        });
+        placed++;
+      }
+    }
+
+    // Spark particles (hash operations flying inward)
+    interface Spark {
+      x: number; y: number;
+      vx: number; vy: number;
+      life: number; maxLife: number;
+      hue: number; size: number;
+    }
+    const sparks: Spark[] = [];
+    let sparkTimer = 0;
+
+    let frame = 0;
+    const animate = () => {
+      frame++;
+      ctx.clearRect(0, 0, W, H);
+
+      // === Background: radial gradient glow ===
+      const bgGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.5);
+      bgGrad.addColorStop(0, 'rgba(0, 240, 255, 0.08)');
+      bgGrad.addColorStop(0.4, 'rgba(100, 50, 255, 0.04)');
+      bgGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // === Orbital ring guides ===
+      for (let ring = 0; ring < rings; ring++) {
+        const r = 30 + ring * (Math.min(W, H) * 0.38 / rings);
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(0, 200, 255, ${0.06 - ring * 0.005})`;
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+      }
+
+      // === Central core: pulsing energy ===
+      const pulse = Math.sin(frame * 0.04) * 0.3 + 0.7;
+      const coreSize = 18 + pulse * 8;
+
+      // Outer glow
+      const coreGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreSize * 2.5);
+      coreGlow.addColorStop(0, `rgba(0, 240, 255, ${0.3 * pulse})`);
+      coreGlow.addColorStop(0.5, `rgba(100, 50, 255, ${0.15 * pulse})`);
+      coreGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = coreGlow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreSize * 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Core body
+      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreSize);
+      coreGrad.addColorStop(0, '#ffffff');
+      coreGrad.addColorStop(0.3, '#00f0ff');
+      coreGrad.addColorStop(0.7, '#6432ff');
+      coreGrad.addColorStop(1, 'rgba(100, 50, 255, 0)');
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreSize, 0, Math.PI * 2);
+      ctx.fill();
+
+      // === Energy beams from random miners to core ===
+      if (frame % 3 === 0 && particles.length > 0) {
+        const beamCount = Math.min(3, Math.floor(minerCount / 30) + 1);
+        for (let b = 0; b < beamCount; b++) {
+          const p = particles[Math.floor(Math.random() * particles.length)];
+          const px = cx + Math.cos(p.angle) * p.radius;
+          const py = cy + Math.sin(p.angle) * p.radius;
+          const beamGrad = ctx.createLinearGradient(px, py, cx, cy);
+          beamGrad.addColorStop(0, `hsla(${p.hue}, 100%, 70%, 0.4)`);
+          beamGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(cx, cy);
+          ctx.strokeStyle = beamGrad;
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+        }
+      }
+
+      // === Miner particles ===
+      for (const p of particles) {
+        p.angle += p.speed * 0.01;
+        const px = cx + Math.cos(p.angle) * p.radius;
+        const py = cy + Math.sin(p.angle) * p.radius;
+        const pPulse = Math.sin(frame * 0.06 + p.pulsePhase) * 0.3 + 0.7;
+        const sz = p.size * pPulse;
+
+        // Particle glow
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, sz * 3);
+        glow.addColorStop(0, `hsla(${p.hue}, 100%, 80%, ${0.6 * p.brightness})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(px, py, sz * 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Particle core
+        ctx.fillStyle = `hsla(${p.hue}, 100%, 90%, ${0.9 * p.brightness})`;
+        ctx.beginPath();
+        ctx.arc(px, py, sz, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // === Hash sparks flying inward ===
+      sparkTimer++;
+      if (sparkTimer % 2 === 0 && sparks.length < 40) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.min(W, H) * 0.45;
+        const sx = cx + Math.cos(angle) * dist;
+        const sy = cy + Math.sin(angle) * dist;
+        const speed = 1.5 + Math.random() * 2;
+        const dx = cx - sx;
+        const dy = cy - sy;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        sparks.push({
+          x: sx, y: sy,
+          vx: (dx / len) * speed,
+          vy: (dy / len) * speed,
+          life: 1, maxLife: 40 + Math.random() * 20,
+          hue: 40 + Math.random() * 30, // gold/amber sparks
+          size: 1 + Math.random() * 1.5,
+        });
+      }
+
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const s = sparks[i];
+        s.x += s.vx;
+        s.y += s.vy;
+        s.life++;
+        const alpha = 1 - (s.life / s.maxLife);
+        if (alpha <= 0) { sparks.splice(i, 1); continue; }
+
+        ctx.fillStyle = `hsla(${s.hue}, 100%, 70%, ${alpha * 0.8})`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.size * alpha, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Trail
+        ctx.fillStyle = `hsla(${s.hue}, 100%, 60%, ${alpha * 0.3})`;
+        ctx.beginPath();
+        ctx.arc(s.x - s.vx, s.y - s.vy, s.size * alpha * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // === Text overlay: miner count + hashrate ===
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Miner count (large)
+      ctx.font = 'bold 28px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = '#00f0ff';
+      ctx.shadowBlur = 12;
+      ctx.fillText(`${minerCount}`, cx, cy - 16);
+      ctx.shadowBlur = 0;
+
+      // "Miners" label
+      ctx.font = '11px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(0, 240, 255, 0.9)';
+      ctx.fillText('MINERS', cx, cy + 4);
+
+      // Hashrate
+      ctx.font = 'bold 13px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = '#ffd700';
+      ctx.shadowColor = '#ffd700';
+      ctx.shadowBlur = 6;
+      const hrText = totalHashKhs >= 1000
+        ? `${(totalHashKhs / 1000).toFixed(1)} MH/s`
+        : `${totalHashKhs.toFixed(0)} KH/s`;
+      ctx.fillText(hrText, cx, cy + 22);
+      ctx.shadowBlur = 0;
+
+      // Network share (bottom)
+      const yourSharePct = stats.networkHashRate > 0
+        ? ((displayHashRateRef.current / stats.networkHashRate) * 100).toFixed(1)
+        : '0.0';
+      ctx.font = '10px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(200, 160, 255, 0.8)';
+      ctx.fillText(`Your share: ${yourSharePct}%`, cx, cy + 40);
+
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animate();
+  }, [connectedMiners, stats.networkHashRate]);
 
   // v3.4.21-beta: Fetch authoritative balance from API
   const fetchBalance = async () => {
@@ -98,9 +347,29 @@ export default function MiningDashboard() {
           avgHashRate: serverStats.hash_rate, // KH/s from server
         }));
 
+        // v7.4.2: Populate miners map from REST response (preserves names across refresh)
+        if (serverStats.workers && serverStats.workers.length > 0) {
+          setMiners(prev => {
+            const newMiners = new Map(prev);
+            for (const worker of serverStats.workers!) {
+              const minerId = worker.worker_id || 'unknown';
+              const existing = newMiners.get(minerId);
+              newMiners.set(minerId, {
+                minerId,
+                workerName: worker.worker_name || existing?.workerName || null,
+                hashRate: worker.hash_rate || existing?.hashRate || 0,
+                lastSeen: existing?.lastSeen || new Date(),
+                blocksFound: worker.blocks_found || existing?.blocksFound || 0,
+                totalRewards: existing?.totalRewards || 0,
+              });
+            }
+            return newMiners;
+          });
+        }
+
         // Only log if there are actual mining stats
         if (serverStats.blocks_found > 0 || serverStats.hash_rate > 0) {
-          console.log(`⛏️ [MiningDashboard] Restored: ${serverStats.blocks_found} blocks, ${serverStats.hash_rate.toFixed(2)} KH/s`);
+          console.log(`⛏️ [MiningDashboard] Restored: ${serverStats.blocks_found} blocks, ${serverStats.hash_rate.toFixed(2)} KH/s, ${serverStats.workers?.length || 0} workers`);
         }
       }
     } catch (error) {
@@ -353,7 +622,7 @@ export default function MiningDashboard() {
 
         newMiners.set(minerId, {
           minerId,
-          workerName: statsUpdate.worker_id || null,
+          workerName: statsUpdate.worker_name || existing?.workerName || null,
           hashRate: statsUpdate.avg_hash_rate,
           lastSeen: new Date(),
           blocksFound: existing?.blocksFound || 0,
@@ -379,11 +648,13 @@ export default function MiningDashboard() {
         const json = await response.json();
         // API returns { success: true, data: { network_hashrate: 186539, ... } }
         const networkHashrate = json.data?.network_hashrate || json.network_hashrate || 0;
-        console.log('🌐 Network hashrate fetched:', networkHashrate, 'H/s');
+        const minersCount = json.data?.connected_miners || 0;
+        console.log('🌐 Network hashrate fetched:', networkHashrate, 'H/s, miners:', minersCount);
         setStats(prev => ({
           ...prev,
           networkHashRate: networkHashrate,
         }));
+        if (minersCount > 0) setConnectedMiners(minersCount);
       }
     } catch (error) {
       console.error('Failed to fetch network hashrate:', error);
@@ -418,6 +689,7 @@ export default function MiningDashboard() {
   // v3.5.4-beta: Use maximum of API-reported hashrate and SSE-tracked miners
   // SSE events may have hash_rate=0, but API endpoint calculates from solution timestamps
   const displayHashRate = Math.max(totalMinerHashRate, stats.avgHashRate);
+  displayHashRateRef.current = displayHashRate;
 
   if (!walletAddress) {
     return (
@@ -632,135 +904,66 @@ export default function MiningDashboard() {
           })()}
         </motion.div>
 
+        {/* v7.4.3: Epic Network Power Visualization — Canvas-based miner galaxy */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.35 }}
-          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6 relative cursor-pointer overflow-visible"
-          style={{ zIndex: showNetworkAnimation ? 100 : 1 }}
-          onMouseEnter={() => setShowNetworkAnimation(true)}
-          onMouseLeave={() => setShowNetworkAnimation(false)}
+          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl relative cursor-pointer overflow-hidden"
+          style={{ zIndex: showNetworkAnimation ? 100 : 1, minHeight: showNetworkAnimation ? 340 : 'auto' }}
+          onMouseEnter={() => {
+            setShowNetworkAnimation(true);
+            // Start canvas animation on next tick
+            setTimeout(() => startNetworkCanvas(), 50);
+          }}
+          onMouseLeave={() => {
+            setShowNetworkAnimation(false);
+            if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+          }}
         >
-          <div className="flex items-center justify-between mb-3">
-            <TrendingUp className="w-6 h-6 text-quantum-cyan" />
-            <span className="text-sm text-gray-400">Network Hash Rate</span>
-          </div>
-          <div className="text-3xl font-bold text-white mb-1">
-            {formatHashRate(stats.networkHashRate)}
-          </div>
-          <div className="text-sm text-quantum-cyan">Total Network Power</div>
+          {/* Default compact view */}
+          {!showNetworkAnimation && (
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-3">
+                <TrendingUp className="w-6 h-6 text-quantum-cyan" />
+                <span className="text-sm text-gray-400">Network Hash Rate</span>
+              </div>
+              <div className="text-3xl font-bold text-white mb-1">
+                {formatHashRate(stats.networkHashRate)}
+              </div>
+              <div className="text-sm text-quantum-cyan flex items-center gap-2">
+                Total Network Power
+                {connectedMiners > 0 && (
+                  <span className="text-xs bg-quantum-cyan/20 px-2 py-0.5 rounded-full">
+                    {connectedMiners} miners
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
-          {/* v3.3.4-beta: Epic Mining Animation on Hover */}
+          {/* Expanded canvas visualization */}
           <AnimatePresence>
             {showNetworkAnimation && (
               <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.3 }}
-                className="absolute inset-0 rounded-xl overflow-hidden pointer-events-none"
-                style={{ zIndex: 9999 }}
+                className="w-full"
+                style={{ height: 340 }}
               >
-                {/* Animated Background Glow */}
-                <div className="absolute inset-0 bg-gradient-to-br from-quantum-cyan/30 via-quantum-purple/20 to-quantum-yellow/30 animate-pulse" />
-
-                {/* Mining Sparks */}
-                {[...Array(12)].map((_, i) => (
-                  <motion.div
-                    key={i}
-                    className="absolute w-2 h-2 rounded-full"
-                    style={{
-                      background: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ffd700' : '#ff6b00',
-                      left: `${20 + Math.random() * 60}%`,
-                      top: `${20 + Math.random() * 60}%`,
-                      boxShadow: `0 0 10px ${i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ffd700' : '#ff6b00'}`,
-                    }}
-                    animate={{
-                      y: [-20, -40, -20],
-                      x: [0, (i % 2 === 0 ? 10 : -10), 0],
-                      opacity: [0, 1, 0],
-                      scale: [0.5, 1.2, 0.5],
-                    }}
-                    transition={{
-                      duration: 1 + Math.random() * 0.5,
-                      repeat: Infinity,
-                      delay: i * 0.1,
-                      ease: "easeInOut",
-                    }}
-                  />
-                ))}
-
-                {/* Pickaxe Animation */}
-                <motion.div
-                  className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-4xl"
-                  animate={{
-                    rotate: [-30, 30, -30],
-                    y: [0, -5, 0],
-                  }}
-                  transition={{
-                    duration: 0.4,
-                    repeat: Infinity,
-                    ease: "easeInOut",
-                  }}
-                >
-                  ⛏️
-                </motion.div>
-
-                {/* Hash Rate Pulse Rings */}
-                {[...Array(3)].map((_, i) => (
-                  <motion.div
-                    key={`ring-${i}`}
-                    className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-2 border-quantum-cyan/50 rounded-full"
-                    style={{
-                      width: 60 + i * 40,
-                      height: 60 + i * 40,
-                    }}
-                    animate={{
-                      scale: [1, 1.5, 1],
-                      opacity: [0.5, 0, 0.5],
-                    }}
-                    transition={{
-                      duration: 2,
-                      repeat: Infinity,
-                      delay: i * 0.4,
-                      ease: "easeOut",
-                    }}
-                  />
-                ))}
-
-                {/* Mining Stats Overlay */}
-                <motion.div
-                  className="absolute inset-0 flex flex-col items-center justify-center bg-quantum-dark/80 backdrop-blur-sm"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ delay: 0.2 }}
-                >
-                  <motion.div
-                    className="text-5xl mb-2"
-                    animate={{ scale: [1, 1.1, 1] }}
-                    transition={{ duration: 0.5, repeat: Infinity }}
-                  >
-                    ⚡
-                  </motion.div>
-                  <div className="text-quantum-cyan font-bold text-2xl">
-                    {formatHashRate(stats.networkHashRate)}
-                  </div>
-                  <div className="text-gray-400 text-sm mt-1">Network Mining Power</div>
-                  <div className="flex gap-4 mt-3">
-                    <div className="text-center">
-                      <div className="text-quantum-yellow font-bold">{miners.size}</div>
-                      <div className="text-xs text-gray-500">Your Miners</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-quantum-purple font-bold">
-                        {stats.networkHashRate > 0
-                          ? ((displayHashRate / stats.networkHashRate) * 100).toFixed(1)
-                          : '0.0'}%
-                      </div>
-                      <div className="text-xs text-gray-500">Your Share</div>
-                    </div>
-                  </div>
-                </motion.div>
+                <canvas
+                  ref={canvasRef}
+                  className="w-full h-full rounded-xl"
+                  style={{ background: 'rgba(5, 5, 20, 0.9)' }}
+                />
+                {/* Bottom label */}
+                <div className="absolute bottom-2 left-0 right-0 text-center">
+                  <span className="text-[10px] text-gray-500">
+                    Each particle = 1 miner contributing hash power
+                  </span>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>

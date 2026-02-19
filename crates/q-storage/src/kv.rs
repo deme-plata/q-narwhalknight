@@ -16,7 +16,8 @@ use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 #[cfg(not(target_os = "windows"))]
 use crate::{
     CF_AI_ATTACHMENTS, CF_AI_CHATS, CF_AI_CREDITS, CF_AI_TRANSACTIONS, CF_AI_TREASURY, CF_BALANCES, CF_BANNED_PEERS,
-    CF_BLOCK_HASH_TO_HEIGHT, CF_BLOCKS, CF_BULLSHARK_CERT, CF_DAG_VERTICES, CF_MANIFEST,
+    CF_BLOCK_HASH_TO_HEIGHT, CF_BLOCKS, CF_BULLSHARK_CERT, CF_CALENDAR_BY_DATE, CF_CALENDAR_COMMUNITY,
+    CF_CALENDAR_EVENTS, CF_CALENDAR_SCHEDULED_TX, CF_DAG_VERTICES, CF_MANIFEST,
     CF_NARWHAL_PAYLOADS, CF_PAYMENT_LOCKS, CF_PAYMENT_PROPOSALS, CF_PAYMENT_VOTES, CF_TRANSACTIONS,
 };
 
@@ -124,19 +125,77 @@ impl RocksDBKV {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Hot DB optimizations - reduced threading to fix glibc TLS allocation issue
+        // v6.0.3: Auto-detect system RAM and adapt all memory-sensitive settings
+        // Prevents OOM kills on low-memory systems (e.g., Gamma with 7.8 GB)
+        let total_ram_mb = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize  // bytes → MB
+        };
+
+        // RAM tier determines all memory-sensitive defaults
+        let ram_tier = match total_ram_mb {
+            0..=3999     => "micro",    // ≤4 GB: bare minimum
+            4000..=7999  => "small",    // 4-8 GB: Gamma-class (7.8 GB)
+            8000..=15999 => "medium",   // 8-16 GB: comfortable
+            16000..=31999 => "large",   // 16-32 GB: recommended
+            _            => "xlarge",   // 32+ GB: power user (Beta 94 GB)
+        };
+
+        // Auto-scale block cache: 2-25% of RAM depending on tier
+        // v6.1.0: Reduced small tier to 128MB fixed to prevent OOM on Gamma (7.8GB)
+        let auto_cache_mb = match ram_tier {
+            "micro"  => 64,                                               // 64 MB fixed
+            "small"  => 128,                                              // 128 MB fixed (was 256, OOM fix)
+            "medium" => (total_ram_mb * 15 / 100).clamp(512, 2048),     // 15% of RAM, 512 MB-2 GB
+            "large"  => (total_ram_mb * 20 / 100).clamp(1024, 4096),    // 20% of RAM, 1-4 GB
+            _        => (total_ram_mb * 25 / 100).clamp(2048, 16384),   // 25% of RAM, 2-16 GB
+        };
+
+        // Auto-scale write buffer size (DB-level default CF)
+        // v6.1.0: Reduced small tier from 32→16MB (47 CFs × write_buf = too much)
+        let auto_write_buffer_mb = match ram_tier {
+            "micro"  => 8,
+            "small"  => 16,
+            "medium" => 64,
+            _        => 128,
+        };
+
+        // Auto-scale write buffer count
+        // v6.0.4: Reduced small tier from 4 to 2 to prevent OOM
+        let auto_write_buffer_count = match ram_tier {
+            "micro"  => 2,
+            "small"  => 2,
+            "medium" => 4,
+            _        => 6,
+        };
+
+        info!(
+            "🧠 [RAM AUTO-TUNE] Detected {} MB total RAM → tier={}, block_cache={}MB, write_buf={}MB×{}",
+            total_ram_mb, ram_tier, auto_cache_mb, auto_write_buffer_mb, auto_write_buffer_count
+        );
+
+        // v6.1.0: Auto-scale RocksDB background threads
+        // With 47 CFs, need enough flush threads to drain memtables during burst writes.
+        // Minimum 4 bg_jobs / 2 flushes even on 2-core systems to prevent memtable pile-up.
+        let num_cores = num_cpus::get();
+        let auto_bg_jobs = (num_cores / 8).clamp(4, 16) as i32;
+        let auto_compactions = (num_cores / 16).clamp(2, 8) as i32;
+        let auto_flushes = (num_cores / 32).clamp(2, 4) as i32;
+
         let bg_jobs = std::env::var("ROCKSDB_MAX_BACKGROUND_JOBS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
+            .unwrap_or(auto_bg_jobs);
         let bg_compactions = std::env::var("ROCKSDB_MAX_COMPACTIONS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(auto_compactions);
         let bg_flushes = std::env::var("ROCKSDB_MAX_FLUSHES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(auto_flushes);
 
         info!(
             "🗄️ RocksDB Hot DB Threading: jobs={}, compactions={}, flushes={}",
@@ -151,40 +210,51 @@ impl RocksDBKV {
         // Check if TURBO_SYNC environment variable is set for bulk import mode
         let turbo_sync_mode = std::env::var("TURBO_SYNC_ENABLED").is_ok();
 
+        // v6.0.3: RAM-aware cache sizing — env var overrides auto-detection
+        let cache_size_bytes = std::env::var("ROCKSDB_BLOCK_CACHE_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(auto_cache_mb) * 1024 * 1024;
+        let block_cache = rocksdb::Cache::new_lru_cache(cache_size_bytes);
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_block_cache(&block_cache);
+        block_opts.set_bloom_filter(10.0, true);
+        opts.set_block_based_table_factory(&block_opts);
+
+        info!("🗄️ RocksDB block cache: {} MB (auto={} MB, tier={})",
+              cache_size_bytes / (1024 * 1024), auto_cache_mb, ram_tier);
+
         if turbo_sync_mode {
-            info!("🚀 TURBO SYNC MODE ENABLED - Optimizing RocksDB for bulk writes");
-            // 🚀 v1.4.2-beta: Enhanced sync optimization from SYNC_OPTIMIZATION_TECHNICAL_REVIEW.md
-            opts.set_write_buffer_size(512 * 1024 * 1024); // 512MB for bulk imports (doubled)
-            opts.set_max_write_buffer_number(8); // More buffers to avoid stalls
-            opts.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST files
-            opts.set_level_zero_file_num_compaction_trigger(16); // Delay compaction during sync
+            info!("🚀 TURBO SYNC MODE ENABLED - RAM-aware bulk write optimization");
+            // v6.0.4: Scale turbo sync buffers to available RAM (reduced for OOM safety)
+            let turbo_write_buf = match ram_tier {
+                "micro"  => 32,    // 32 MB — very conservative
+                "small"  => 64,    // 64 MB — safe for 8 GB (was 128)
+                "medium" => 128,   // 128 MB
+                _        => 256,   // 256 MB — big servers (was 512)
+            };
+            let turbo_write_count = match ram_tier {
+                "micro"  => 2,
+                "small"  => 2,     // was 4
+                _        => 4,     // was 8
+            };
+            opts.set_write_buffer_size(turbo_write_buf * 1024 * 1024);
+            opts.set_max_write_buffer_number(turbo_write_count);
+            opts.set_target_file_size_base(256 * 1024 * 1024);
+            opts.set_level_zero_file_num_compaction_trigger(16);
             opts.set_level_zero_slowdown_writes_trigger(32);
             opts.set_level_zero_stop_writes_trigger(64);
 
-            // 🚀 v1.4.2-beta: Add LRU block cache (2GB) for faster reads during sync
-            // This reduces read amplification when verifying blocks
-            let cache_size = std::env::var("ROCKSDB_BLOCK_CACHE_MB")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(2048) * 1024 * 1024;
-            let block_cache = rocksdb::Cache::new_lru_cache(cache_size);
-            let mut block_opts = rocksdb::BlockBasedOptions::default();
-            block_opts.set_block_cache(&block_cache);
-            block_opts.set_bloom_filter(10.0, true); // 10-bit bloom filter for faster lookups
-            opts.set_block_based_table_factory(&block_opts);
-
-            info!("🗄️ RocksDB block cache: {} MB", cache_size / (1024 * 1024));
+            info!("🚀 Turbo write buffers: {}MB × {} (tier={})",
+                  turbo_write_buf, turbo_write_count, ram_tier);
         } else {
-            // 🔧 v1.0.21-beta: OPTIMIZED FOR CONTINUOUS BLOCK PRODUCTION
-            // Problem: Progressive degradation (170ms → 994ms over time)
-            // Root cause: Compaction falling behind write rate
-            // Fix: Larger buffers + more aggressive compaction
-            opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB (doubled from 64MB)
-            opts.set_max_write_buffer_number(6); // 6 buffers (increased from 4)
-            opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB SST files (doubled)
-            opts.set_level_zero_file_num_compaction_trigger(2); // More aggressive (was 4)
-            opts.set_level_zero_slowdown_writes_trigger(6); // Earlier slowdown warning (was 8)
-            opts.set_level_zero_stop_writes_trigger(10); // Earlier stop (was 16)
+            // Normal mode: RAM-aware write buffers
+            opts.set_write_buffer_size(auto_write_buffer_mb * 1024 * 1024);
+            opts.set_max_write_buffer_number(auto_write_buffer_count);
+            opts.set_target_file_size_base(128 * 1024 * 1024);
+            opts.set_level_zero_file_num_compaction_trigger(2);
+            opts.set_level_zero_slowdown_writes_trigger(6);
+            opts.set_level_zero_stop_writes_trigger(10);
         }
 
         // 🚨 v0.9.60-beta: MAXIMUM DURABILITY MODE (5 phases of corruption → NEVER AGAIN!)
@@ -225,10 +295,32 @@ impl RocksDBKV {
         opts.set_bytes_per_sync(1024 * 1024); // 1 MiB - sync data in steady chunks
         opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB - sync WAL in steady chunks
 
+        // v6.0.8: Direct I/O on small nodes to eliminate kernel page cache bloat
+        // ROOT CAUSE of Gamma OOM: 9.7GB database → kernel caches SST file pages → 2-3GB page cache
+        // Page cache is counted against cgroup MemoryMax, pushing total past 7GB limit.
+        // Direct I/O bypasses page cache entirely:
+        //   - Reads go through RocksDB's 256MB block cache (bounded)
+        //   - Writes go directly to disk (no page cache doubling)
+        //   - Memory savings: ~2-3GB on a 10GB database
+        // Trade-off: Reads not in block cache are slower (disk I/O), but Gamma is a backup node.
+        if ram_tier == "micro" || ram_tier == "small" {
+            opts.set_use_direct_reads(true);
+            opts.set_use_direct_io_for_flush_and_compaction(true);
+            info!("🔧 Direct I/O enabled for reads+compaction (eliminates page cache bloat on small nodes)");
+        }
+
         // ========== MEMORY BUDGET (FORCE FLUSHES) ==========
-        // 🔧 v1.0.21-beta: Increased from 128MB to match new write buffer settings
-        // With 6 buffers × 128MB each = 768MB potential, limit total to 384MB
-        opts.set_db_write_buffer_size(384 * 1024 * 1024); // 384MB total memtable budget (tripled)
+        // v6.1.0: RAM-aware memtable budget — TOTAL across all 47 CFs
+        // When total memtable usage exceeds this, RocksDB triggers flushes.
+        // Must be low enough to prevent OOM during burst writes (block catchup).
+        let memtable_budget_mb = match ram_tier {
+            "micro"  => 32,   // 32MB — very tight
+            "small"  => 64,   // 64MB — forces aggressive flushing (was 128, OOM)
+            "medium" => 256,  // 256MB
+            _        => 384,  // 384MB — original value for large servers
+        };
+        opts.set_db_write_buffer_size(memtable_budget_mb * 1024 * 1024);
+        info!("🗄️ RocksDB memtable budget: {}MB (tier={})", memtable_budget_mb, ram_tier);
 
         // 🚨 THE SILVER BULLET: Force flushes on shutdown (RocksDB 7+ defaults to skip!)
         // This was the root cause - graceful shutdowns avoided flushes, relied on WAL
@@ -262,60 +354,73 @@ impl RocksDBKV {
         };
 
         let cfs = vec![
-            Self::create_blocks_cf(),
-            Self::create_dag_vertices_cf(),
-            Self::create_bullshark_cert_cf(),
-            Self::create_manifest_cf(),
-            Self::create_transactions_cf(),
-            Self::create_balances_cf(),  // v0.8.2-beta: Balance consensus storage
-            Self::create_block_hash_to_height_cf(),  // v0.8.3-beta: Block hash index
-            Self::create_ai_chats_cf(),
-            Self::create_ai_credits_cf(),
-            Self::create_ai_transactions_cf(),
-            Self::create_ai_treasury_cf(),
-            Self::create_ai_attachments_cf(),  // v0.9.9-beta: AI chat attachments
-            Self::create_payment_proposals_cf(),
-            Self::create_payment_votes_cf(),
-            Self::create_payment_locks_cf(),
-            Self::create_banned_peers_cf(),  // v0.9.7-beta: ZK proof ban persistence
-            Self::create_sync_certificates_cf(),  // v0.9.18-beta: TurboSync AEGIS-QL certificates
-            Self::create_peer_trust_cf(),  // v0.9.18-beta: AEGIS-QL peer trust metrics
-            Self::create_processed_updates_cf(),  // ✅ v0.9.98-beta: P2P durability idempotency tracking
+            Self::create_blocks_cf(&block_cache),
+            Self::create_dag_vertices_cf(&block_cache),
+            Self::create_bullshark_cert_cf(&block_cache),
+            Self::create_manifest_cf(&block_cache),
+            Self::create_transactions_cf(&block_cache),
+            Self::create_balances_cf(&block_cache),  // v0.8.2-beta: Balance consensus storage
+            Self::create_block_hash_to_height_cf(&block_cache),  // v0.8.3-beta: Block hash index
+            Self::create_ai_chats_cf(&block_cache),
+            Self::create_ai_credits_cf(&block_cache),
+            Self::create_ai_transactions_cf(&block_cache),
+            Self::create_ai_treasury_cf(&block_cache),
+            Self::create_ai_attachments_cf(&block_cache),  // v0.9.9-beta: AI chat attachments
+            Self::create_payment_proposals_cf(&block_cache),
+            Self::create_payment_votes_cf(&block_cache),
+            Self::create_payment_locks_cf(&block_cache),
+            Self::create_banned_peers_cf(&block_cache),  // v0.9.7-beta: ZK proof ban persistence
+            Self::create_sync_certificates_cf(&block_cache),  // v0.9.18-beta: TurboSync AEGIS-QL certificates
+            Self::create_peer_trust_cf(&block_cache),  // v0.9.18-beta: AEGIS-QL peer trust metrics
+            Self::create_processed_updates_cf(&block_cache),  // ✅ v0.9.98-beta: P2P durability idempotency tracking
             // ========== v1.0.60-beta: Comprehensive State Sync CFs ==========
-            Self::create_state_trie_cf(),        // Sparse Merkle trie for state roots
-            Self::create_token_balances_cf(),    // Token balances (all tokens including QUG/QUGUSD)
-            Self::create_tokens_cf(),            // Token metadata
-            Self::create_dex_pools_cf(),         // DEX liquidity pools
-            Self::create_lp_balances_cf(),       // LP token balances
-            Self::create_vaults_cf(),            // Collateral vaults
-            Self::create_oracle_prices_cf(),     // Oracle price feeds
-            Self::create_contracts_cf(),         // Smart contracts
-            Self::create_contract_storage_cf(),  // Contract storage
-            Self::create_ai_credits_v2_cf(),     // AI credits v2 (with stats)
-            Self::create_stakes_cf(),            // Staking positions
-            Self::create_nonces_cf(),            // Account nonces
+            Self::create_state_trie_cf(&block_cache),        // Sparse Merkle trie for state roots
+            Self::create_token_balances_cf(&block_cache),    // Token balances (all tokens including QUG/QUGUSD)
+            Self::create_tokens_cf(&block_cache),            // Token metadata
+            Self::create_dex_pools_cf(&block_cache),         // DEX liquidity pools
+            Self::create_lp_balances_cf(&block_cache),       // LP token balances
+            Self::create_vaults_cf(&block_cache),            // Collateral vaults
+            Self::create_oracle_prices_cf(&block_cache),     // Oracle price feeds
+            Self::create_contracts_cf(&block_cache),         // Smart contracts
+            Self::create_contract_storage_cf(&block_cache),  // Contract storage
+            Self::create_ai_credits_v2_cf(&block_cache),     // AI credits v2 (with stats)
+            Self::create_stakes_cf(&block_cache),            // Staking positions
+            Self::create_nonces_cf(&block_cache),            // Account nonces
             // ========== v1.4.2-beta: QNO Prediction Staking ==========
-            Self::create_qno_stakes_cf(),        // QNO staking positions
-            Self::create_qno_domains_cf(),       // QNO prediction domains
-            Self::create_qno_stats_cf(),         // QNO global statistics
+            Self::create_qno_stakes_cf(&block_cache),        // QNO staking positions
+            Self::create_qno_domains_cf(&block_cache),       // QNO prediction domains
+            Self::create_qno_stats_cf(&block_cache),         // QNO global statistics
             // ========== v2.3.9-beta: Swap History ==========
-            Self::create_swap_history_cf(),      // Swap/transaction history for Token Details Modal
+            Self::create_swap_history_cf(&block_cache),      // Swap/transaction history for Token Details Modal
             // ========== v2.7.9-beta: Perpetual Trading ==========
-            Self::create_perp_positions_cf(),    // Perpetual futures positions
-            Self::create_perp_orders_cf(),       // Perpetual futures orders
-            Self::create_perp_trades_cf(),       // Perpetual futures trade history
-            Self::create_perp_funding_cf(),      // Perpetual funding rate history
-            Self::create_perp_liquidations_cf(), // Perpetual liquidation records
+            Self::create_perp_positions_cf(&block_cache),    // Perpetual futures positions
+            Self::create_perp_orders_cf(&block_cache),       // Perpetual futures orders
+            Self::create_perp_trades_cf(&block_cache),       // Perpetual futures trade history
+            Self::create_perp_funding_cf(&block_cache),      // Perpetual funding rate history
+            Self::create_perp_liquidations_cf(&block_cache), // Perpetual liquidation records
             // ========== v3.5.8-beta: Wallet Transaction History ==========
-            Self::create_wallet_tx_index_cf(),   // Wallet-indexed transaction history
-            Self::create_wallet_swap_index_cf(), // Wallet-indexed DEX swap history
+            Self::create_wallet_tx_index_cf(&block_cache),   // Wallet-indexed transaction history
+            Self::create_wallet_swap_index_cf(&block_cache), // Wallet-indexed DEX swap history
             // ========== v3.6.0-beta: Price History ==========
-            Self::create_price_history_cf(),     // Consensus-verified price history
+            Self::create_price_history_cf(&block_cache),     // Consensus-verified price history
             // ========== v3.9.1-beta: Bank Messaging & Identity ==========
-            Self::create_bank_messages_cf(),     // Bank messages storage
-            Self::create_bank_msg_index_cf(),    // Bank message index by wallet
-            Self::create_user_identities_cf(),   // User identity records
-            Self::create_death_certificates_cf(), // Death certificates for inheritance
+            Self::create_bank_messages_cf(&block_cache),     // Bank messages storage
+            Self::create_bank_msg_index_cf(&block_cache),    // Bank message index by wallet
+            Self::create_user_identities_cf(&block_cache),   // User identity records
+            Self::create_death_certificates_cf(&block_cache), // Death certificates for inheritance
+            // ========== v7.3.1: Block Storage Optimization ==========
+            Self::create_quantum_metadata_cf(&block_cache),  // Quantum metadata (lazy-loaded from blocks)
+            // ========== v7.3.2: Quillon Mail ==========
+            Self::create_emails_cf(&block_cache),
+            Self::create_emails_by_wallet_cf(&block_cache),
+            Self::create_emails_by_folder_cf(&block_cache),
+            Self::create_email_contacts_cf(&block_cache),
+            Self::create_email_outbound_cf(&block_cache),
+            // ========== v7.3.3: Blockchain Calendar ==========
+            Self::create_calendar_events_cf(&block_cache),
+            Self::create_calendar_by_date_cf(&block_cache),
+            Self::create_calendar_scheduled_tx_cf(&block_cache),
+            Self::create_calendar_community_cf(&block_cache),
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -335,29 +440,43 @@ impl RocksDBKV {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Cold DB optimizations - reduced threading to fix glibc TLS allocation issue
+        // v5.1.0: Auto-scale cold DB threads (lower than hot, cold is less active)
+        let num_cores = num_cpus::get();
+        let cold_auto_jobs = (num_cores / 32).clamp(1, 8) as i32;
+        let cold_auto_compactions = (num_cores / 64).clamp(1, 4) as i32;
+        let cold_auto_flushes = (num_cores / 128).clamp(1, 2) as i32;
+
         let cold_bg_jobs = std::env::var("ROCKSDB_COLD_MAX_BACKGROUND_JOBS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(cold_auto_jobs);
         let cold_bg_compactions = std::env::var("ROCKSDB_COLD_MAX_COMPACTIONS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(cold_auto_compactions);
         let cold_bg_flushes = std::env::var("ROCKSDB_COLD_MAX_FLUSHES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(cold_auto_flushes);
 
         info!(
             "🧊 RocksDB Cold DB Threading: jobs={}, compactions={}, flushes={}",
             cold_bg_jobs, cold_bg_compactions, cold_bg_flushes
         );
 
-        opts.set_max_background_jobs(cold_bg_jobs); // Reduced from 4 to avoid TLS allocation failures
-        opts.set_max_background_compactions(cold_bg_compactions); // Single compaction thread
-        opts.set_max_background_flushes(cold_bg_flushes); // Single flush thread
-        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
+        opts.set_max_background_jobs(cold_bg_jobs);
+        opts.set_max_background_compactions(cold_bg_compactions);
+        opts.set_max_background_flushes(cold_bg_flushes);
+
+        // v6.0.3: RAM-aware cold DB write buffers
+        let cold_total_ram_mb = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize
+        };
+        let cold_write_buf = if cold_total_ram_mb < 8000 { 32 } else { 128 };
+        opts.set_write_buffer_size(cold_write_buf * 1024 * 1024);
         opts.set_max_write_buffer_number(2);
         opts.set_target_file_size_base(256 * 1024 * 1024); // 256MB
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
@@ -369,7 +488,9 @@ impl RocksDBKV {
         opts.set_bytes_per_sync(1024 * 1024); // 1 MiB
         opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB
 
-        let cfs = vec![Self::create_narwhal_payloads_cf()];
+        // v6.0.5: Cold DB also needs a shared block cache for its CFs
+        let cold_cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024); // 64MB for cold DB
+        let cfs = vec![Self::create_narwhal_payloads_cf(&cold_cache)];
 
         Self::open_with_cfs(path, opts, cfs).await
     }
@@ -444,8 +565,27 @@ impl RocksDBKV {
                 encryption_manager: None, // Will be set by caller
             })
         } else {
+            // v7.1.2: RocksDB requires ALL existing CFs to be opened.
+            // If the DB has extra CFs not in our requested list (e.g., from a newer binary),
+            // add them with default options to prevent "Column families not opened" error.
+            let extra_cfs: Vec<String> = existing_cfs.iter()
+                .filter(|name| !requested_cf_names.contains(name))
+                .cloned()
+                .collect();
+
+            let mut all_cfs = cfs;
+            if !extra_cfs.is_empty() {
+                warn!("⚠️  [CF-COMPAT] DB has {} extra column families not in code: {:?}", extra_cfs.len(), extra_cfs);
+                info!("🔧 [CF-COMPAT] Adding them to open list with default options");
+                for cf_name in &extra_cfs {
+                    let mut cf_opts = Options::default();
+                    cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+                    all_cfs.push(ColumnFamilyDescriptor::new(cf_name.as_str(), cf_opts));
+                }
+            }
+
             // Normal path - database is new or already has all CFs
-            let db = DB::open_cf_descriptors(&opts, &path, cfs).context("Failed to open RocksDB")?;
+            let db = DB::open_cf_descriptors(&opts, &path, all_cfs).context("Failed to open RocksDB")?;
 
             Ok(Self {
                 db: Arc::new(db),
@@ -464,17 +604,53 @@ impl RocksDBKV {
         self.db.clone()
     }
 
+    /// v6.0.5: Apply shared block cache to CF options (prevents 48× separate 8MB caches)
+    fn apply_shared_block_cache(opts: &mut Options, cache: &rocksdb::Cache) {
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_block_cache(cache);
+        block_opts.set_bloom_filter(10.0, true);
+        // v6.0.8: CRITICAL - force index/filter blocks INTO the shared cache
+        // Without this, RocksDB stores them in unbounded separate memory.
+        // With 9.7GB data across 49 CFs, this can consume 1-3GB uncapped.
+        block_opts.set_cache_index_and_filter_blocks(true);
+        opts.set_block_based_table_factory(&block_opts);
+    }
+
+    /// v6.0.8: Scale per-CF write buffer size based on available RAM
+    /// Uses a cached static to avoid calling sysinfo::System::new() 40+ times.
+    fn scale_write_buffer(requested_mb: usize) -> usize {
+        use std::sync::OnceLock;
+        static RAM_MB: OnceLock<usize> = OnceLock::new();
+        let ram_mb = *RAM_MB.get_or_init(|| {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize
+        });
+        let scaled = match ram_mb {
+            0..=3999     => requested_mb.min(2),    // micro: cap at 2MB per CF
+            4000..=7999  => requested_mb.min(4),    // small (Gamma): cap at 4MB per CF
+            8000..=15999 => requested_mb.min(16),   // medium: cap at 16MB per CF
+            _            => requested_mb,            // large: use requested size
+        };
+        scaled * 1024 * 1024
+    }
+
     /// Create blocks column family (height || hash -> block)
-    fn create_blocks_cf() -> ColumnFamilyDescriptor {
+    fn create_blocks_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
+        // v7.3.5: RocksDB-level LZ4 compression on CF_BLOCKS.
+        // App-level LZ4 was removed (blocks stored as QRAW) due to lz4::block
+        // compress/decompress roundtrip failures. RocksDB LZ4 is transparent
+        // and handles compression/decompression correctly.
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_block_based_table_factory(&rocksdb::BlockBasedOptions::default());
+        Self::apply_shared_block_cache(&mut opts, cache);
 
         // 🚨 CRITICAL FIX v0.7.3-beta: Force persistent flushes (Expert-reviewed)
         // Root cause: avoid_flush_during_shutdown=true + unlimited WAL = data loss
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - balanced (~1600 blocks/flush)
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - balanced (~1600 blocks/flush)
         opts.set_min_write_buffer_number_to_merge(1); // Flush immediately
-        opts.set_max_write_buffer_number(3); // Triple buffering
+        opts.set_max_write_buffer_number(2); // Double buffering
         opts.set_disable_auto_compactions(false); // Enable auto compactions
         opts.set_level_zero_file_num_compaction_trigger(2); // Compact aggressively
 
@@ -494,366 +670,409 @@ impl RocksDBKV {
     }
 
     /// Create DAG vertices column family (round || author || seq -> vertex)
-    fn create_dag_vertices_cf() -> ColumnFamilyDescriptor {
+    fn create_dag_vertices_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
 
         // Enable prefix seek for round-based queries
         // Use fixed prefix length of 8 bytes for round number
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
 
-        let mut table_opts = rocksdb::BlockBasedOptions::default();
-        table_opts.set_index_type(rocksdb::BlockBasedIndexType::HashSearch);
-        opts.set_block_based_table_factory(&table_opts);
+        Self::apply_shared_block_cache(&mut opts, cache);
 
         ColumnFamilyDescriptor::new(CF_DAG_VERTICES, opts)
     }
 
     /// Create Bullshark certificates column family (round -> certificate)
-    fn create_bullshark_cert_cf() -> ColumnFamilyDescriptor {
+    fn create_bullshark_cert_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Snappy);
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_BULLSHARK_CERT, opts)
     }
 
     /// Create manifest column family (metadata -> value)
-    fn create_manifest_cf() -> ColumnFamilyDescriptor {
+    fn create_manifest_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::None); // Small data
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_MANIFEST, opts)
     }
 
     /// Create transactions column family (tx_id -> transaction)
-    fn create_transactions_cf() -> ColumnFamilyDescriptor {
+    fn create_transactions_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
-        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB write buffer
+        opts.set_write_buffer_size(Self::scale_write_buffer(64)); // 64MB write buffer
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
     }
 
     /// Create balances column family (wallet_address -> balance)
     /// v0.8.1-beta: Balance consensus storage for mining rewards and transfers
-    fn create_balances_cf() -> ColumnFamilyDescriptor {
+    fn create_balances_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB write buffer (frequent updates)
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB write buffer (frequent updates)
         opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB target file size
 
         // Optimize for frequent balance updates
-        opts.set_max_write_buffer_number(3); // Triple buffering for high write load
+        opts.set_max_write_buffer_number(2); // Double buffering for high write load
         opts.set_level_zero_file_num_compaction_trigger(4); // Compact when 4 files accumulate
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_BALANCES, opts)
     }
 
     /// Create block hash to height column family (block_hash -> height)
     /// v0.8.3-beta: Block hash index for efficient block lookups by hash
-    fn create_block_hash_to_height_cf() -> ColumnFamilyDescriptor {
+    fn create_block_hash_to_height_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB write buffer
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB write buffer
         opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB target file size
 
         // Optimize for read-heavy workload (hash lookups)
         opts.set_max_write_buffer_number(2); // Dual buffering sufficient
         opts.set_level_zero_file_num_compaction_trigger(4);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_BLOCK_HASH_TO_HEIGHT, opts)
     }
 
     /// Create AI chats column family (chat:* keys -> chat data)
-    fn create_ai_chats_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_chats_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression for text
-
-        // Enable prefix seek for chat-based queries
-        // Use fixed prefix length of 5 bytes for "chat:" prefix
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5));
 
-        let mut table_opts = rocksdb::BlockBasedOptions::default();
-        table_opts.set_index_type(rocksdb::BlockBasedIndexType::HashSearch);
-        opts.set_block_based_table_factory(&table_opts);
-
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_AI_CHATS, opts)
     }
 
     /// Create AI credits column family (credits:* -> wallet credits)
-    fn create_ai_credits_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_credits_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8)); // "credits:"
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_AI_CREDITS, opts)
     }
 
     /// Create AI transactions column family (aitx:* -> transaction records)
-    fn create_ai_transactions_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_transactions_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "aitx:"
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5));
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_AI_TRANSACTIONS, opts)
     }
 
     /// Create AI treasury column family (treasury:master -> master wallet balance)
-    fn create_ai_treasury_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_treasury_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        // Single key "treasury:master" - no prefix needed
+        opts.set_write_buffer_size(Self::scale_write_buffer(2)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_AI_TREASURY, opts)
     }
 
     /// Create AI attachments column family (attachment:* -> metadata) - v0.9.9-beta
-    fn create_ai_attachments_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_attachments_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11)); // "attachment:"
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_AI_ATTACHMENTS, opts)
     }
 
     /// Create payment proposals column family (proposal:* -> payment proposals)
-    fn create_payment_proposals_cf() -> ColumnFamilyDescriptor {
+    fn create_payment_proposals_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(9)); // "proposal:"
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_PAYMENT_PROPOSALS, opts)
     }
 
     /// Create payment votes column family (vote:* -> validator votes)
-    fn create_payment_votes_cf() -> ColumnFamilyDescriptor {
+    fn create_payment_votes_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "vote:"
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5));
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_PAYMENT_VOTES, opts)
     }
 
     /// Create payment locks column family (lock:* -> payment locks)
-    fn create_payment_locks_cf() -> ColumnFamilyDescriptor {
+    fn create_payment_locks_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5)); // "lock:"
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // v6.1.0: was missing → 64MB default OOM
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(5));
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_PAYMENT_LOCKS, opts)
     }
 
     /// Create banned peers column family (peer_id -> BanRecord) - v0.9.7-beta
     /// Stores persistent ban list for ZK proof verification failures
-    fn create_banned_peers_cf() -> ColumnFamilyDescriptor {
+    fn create_banned_peers_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Small values (PeerId + timestamp + reason), optimize for reads
-        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // 8MB
         opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_BANNED_PEERS, opts)
     }
 
     /// Create Narwhal payloads column family (digest -> payload)
-    fn create_narwhal_payloads_cf() -> ColumnFamilyDescriptor {
+    fn create_narwhal_payloads_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Large values, optimize for sequential writes
-        opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(256)); // 256MB
         opts.set_max_write_buffer_number(2);
         opts.set_target_file_size_base(512 * 1024 * 1024); // 512MB
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_NARWHAL_PAYLOADS, opts)
     }
 
     /// Create sync certificates column family (sync_id -> SyncCertificate) - v0.9.18-beta
     /// Stores AEGIS-QL sync affirmation certificates for TurboSync
-    fn create_sync_certificates_cf() -> ColumnFamilyDescriptor {
+    fn create_sync_certificates_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Small-medium values (certificates), optimize for reads during sync
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_SYNC_CERTIFICATES, opts)
     }
 
     /// Create peer trust column family (peer_id -> TrustMetrics) - v0.9.18-beta
     /// Stores AEGIS-QL peer trust metrics for sync reliability
-    fn create_peer_trust_cf() -> ColumnFamilyDescriptor {
+    fn create_peer_trust_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Small values (metrics), optimize for frequent updates
-        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // 8MB
         opts.set_max_write_buffer_number(2);
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PEER_TRUST, opts)
     }
 
     /// Create processed updates column family (update_id -> timestamp) - v0.9.98-beta
     /// Stores processed update IDs for P2P durability and idempotency
     /// AI Expert Consensus: Required to prevent duplicate processing of gossipsub messages
-    fn create_processed_updates_cf() -> ColumnFamilyDescriptor {
+    fn create_processed_updates_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Small values (timestamps), optimize for fast lookups
-        opts.set_write_buffer_size(4 * 1024 * 1024); // 4MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // 4MB
         opts.set_max_write_buffer_number(2);
         // TTL could be added in future for automatic cleanup of old update IDs
 
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new("processed_updates", opts)
     }
 
     // ========== v1.0.60-beta: Comprehensive State Sync Column Families ==========
 
     /// State Merkle Trie nodes for cryptographic state root verification
-    fn create_state_trie_cf() -> ColumnFamilyDescriptor {
+    fn create_state_trie_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         // Trie nodes are 65 bytes (internal) or 65 bytes (leaf)
         // Optimize for random reads (proof generation)
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
-        opts.set_max_write_buffer_number(4);
-        opts.optimize_for_point_lookup(128 * 1024 * 1024); // 128MB bloom filter cache
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
+        opts.set_max_write_buffer_number(2);
+        // v6.0.8: Removed optimize_for_point_lookup (created separate 128MB cache, overridden by shared cache anyway)
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::sparse_merkle_trie::CF_STATE_TRIE, opts)
     }
 
     /// Token balances (account + token -> balance)
-    fn create_token_balances_cf() -> ColumnFamilyDescriptor {
+    fn create_token_balances_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         // Keys are 64 bytes (account + token), values are 8 bytes (u64 balance)
-        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB
-        opts.set_max_write_buffer_number(4);
-        opts.optimize_for_point_lookup(256 * 1024 * 1024); // 256MB bloom filter
+        opts.set_write_buffer_size(Self::scale_write_buffer(64)); // 64MB
+        opts.set_max_write_buffer_number(2);
+        // v6.0.8: Removed optimize_for_point_lookup (created separate 256MB cache, overridden by shared cache anyway)
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_TOKEN_BALANCES, opts)
     }
 
     /// Token metadata (token address -> metadata)
-    fn create_tokens_cf() -> ColumnFamilyDescriptor {
+    fn create_tokens_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_TOKENS, opts)
     }
 
     /// DEX liquidity pools (pool_id -> pool state)
-    fn create_dex_pools_cf() -> ColumnFamilyDescriptor {
+    fn create_dex_pools_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_DEX_POOLS, opts)
     }
 
     /// LP token balances (pool_id + account -> LP balance)
-    fn create_lp_balances_cf() -> ColumnFamilyDescriptor {
+    fn create_lp_balances_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_LP_BALANCES, opts)
     }
 
     /// Collateral vaults (vault_id -> vault state)
-    fn create_vaults_cf() -> ColumnFamilyDescriptor {
+    fn create_vaults_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_VAULTS, opts)
     }
 
     /// Oracle price feeds (feed_id -> price data)
-    fn create_oracle_prices_cf() -> ColumnFamilyDescriptor {
+    fn create_oracle_prices_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // 8MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_ORACLE_PRICES, opts)
     }
 
     /// Smart contracts (contract_address -> code hash + metadata)
-    fn create_contracts_cf() -> ColumnFamilyDescriptor {
+    fn create_contracts_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_CONTRACTS, opts)
     }
 
     /// Contract storage (contract_address + key -> value)
-    fn create_contract_storage_cf() -> ColumnFamilyDescriptor {
+    fn create_contract_storage_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         // Largest CF - contract storage can be huge
-        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
-        opts.set_max_write_buffer_number(4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(128)); // 128MB
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_CONTRACT_STORAGE, opts)
     }
 
     /// AI credits (account -> credits balance + stats)
-    fn create_ai_credits_v2_cf() -> ColumnFamilyDescriptor {
+    fn create_ai_credits_v2_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_AI_CREDITS_V2, opts)
     }
 
     /// Staking positions (staker + validator -> stake info)
-    fn create_stakes_cf() -> ColumnFamilyDescriptor {
+    fn create_stakes_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_STAKES, opts)
     }
 
     /// Account nonces for replay protection (account -> nonce)
-    fn create_nonces_cf() -> ColumnFamilyDescriptor {
+    fn create_nonces_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
-        opts.optimize_for_point_lookup(64 * 1024 * 1024); // Fast nonce lookups
+        // v6.0.8: Removed optimize_for_point_lookup (created separate 64MB cache, overridden by shared cache anyway)
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_NONCES, opts)
     }
 
     // ========== QNO (Quantum Neural Oracle) Column Families ==========
 
     /// QNO staking positions: wallet_address:stake_id -> StakingPosition JSON
-    fn create_qno_stakes_cf() -> ColumnFamilyDescriptor {
+    fn create_qno_stakes_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
-        opts.set_max_write_buffer_number(3);
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_QNO_STAKES, opts)
     }
 
     /// QNO prediction domains: domain_id -> PredictionDomain JSON
-    fn create_qno_domains_cf() -> ColumnFamilyDescriptor {
+    fn create_qno_domains_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB - small, rarely changes
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // 8MB - small, rarely changes
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_QNO_DOMAINS, opts)
     }
 
     /// QNO global statistics: "global" -> StakingStats JSON
-    fn create_qno_stats_cf() -> ColumnFamilyDescriptor {
+    fn create_qno_stats_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(4 * 1024 * 1024); // 4MB - single key
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // 4MB - single key
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_QNO_STATS, opts)
     }
 
@@ -861,138 +1080,286 @@ impl RocksDBKV {
 
     /// Swap history for Token Details Modal transaction history
     /// Key format: "swap:{token}:{timestamp}:{tx_id}" -> JSON swap record
-    fn create_swap_history_cf() -> ColumnFamilyDescriptor {
+    fn create_swap_history_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB - many small records
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB - many small records
         opts.set_max_write_buffer_number(2);
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8)); // "swap:{T}"
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_SWAP_HISTORY, opts)
     }
 
     // ========== v2.7.9-beta: Perpetual Trading Column Families ==========
 
-    fn create_perp_positions_cf() -> ColumnFamilyDescriptor {
+    fn create_perp_positions_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PERP_POSITIONS, opts)
     }
 
-    fn create_perp_orders_cf() -> ColumnFamilyDescriptor {
+    fn create_perp_orders_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PERP_ORDERS, opts)
     }
 
-    fn create_perp_trades_cf() -> ColumnFamilyDescriptor {
+    fn create_perp_trades_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PERP_TRADES, opts)
     }
 
-    fn create_perp_funding_cf() -> ColumnFamilyDescriptor {
+    fn create_perp_funding_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - smaller, less frequent
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - smaller, less frequent
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PERP_FUNDING, opts)
     }
 
-    fn create_perp_liquidations_cf() -> ColumnFamilyDescriptor {
+    fn create_perp_liquidations_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB - smaller, less frequent
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - smaller, less frequent
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PERP_LIQUIDATIONS, opts)
     }
 
     /// v3.5.8-beta: Wallet transaction index for decentralized history
-    fn create_wallet_tx_index_cf() -> ColumnFamilyDescriptor {
+    fn create_wallet_tx_index_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
-        opts.set_max_write_buffer_number(3);
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB
+        opts.set_max_write_buffer_number(2);
         // Optimize for prefix scans (first 32 bytes are wallet address)
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_WALLET_TX_INDEX, opts)
     }
 
     /// v3.5.8-beta: Wallet swap index for decentralized DEX history
-    fn create_wallet_swap_index_cf() -> ColumnFamilyDescriptor {
+    fn create_wallet_swap_index_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
         // Optimize for prefix scans (first 32 bytes are wallet address)
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_WALLET_SWAP_INDEX, opts)
     }
 
     /// v3.6.0-beta: Consensus-verified price history for tokens
     /// Key format: [token_address:32][inverted_timestamp:8] for reverse chronological order
-    fn create_price_history_cf() -> ColumnFamilyDescriptor {
+    fn create_price_history_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB - many small price snapshots
+        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB - many small price snapshots
         opts.set_max_write_buffer_number(2);
         // Optimize for prefix scans (first 32 bytes are token address)
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_PRICE_HISTORY, opts)
     }
 
     /// v3.9.1-beta: Bank messages storage
     /// Key format: msg_id (string), Value: BankMessage JSON
-    fn create_bank_messages_cf() -> ColumnFamilyDescriptor {
+    fn create_bank_messages_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_BANK_MESSAGES, opts)
     }
 
     /// v3.9.1-beta: Bank message index by wallet
     /// Key format: [wallet:32][inverted_timestamp:8], Value: msg_id
-    fn create_bank_msg_index_cf() -> ColumnFamilyDescriptor {
+    fn create_bank_msg_index_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
         // Optimize for prefix scans (first 32 bytes are wallet address)
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_BANK_MSG_INDEX, opts)
     }
 
     /// v3.9.1-beta: User identity records
     /// Key format: wallet_address (string), Value: UserIdentity JSON
-    fn create_user_identities_cf() -> ColumnFamilyDescriptor {
+    fn create_user_identities_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_USER_IDENTITIES, opts)
     }
 
     /// v3.9.1-beta: Death certificates for inheritance
     /// Key format: cert_id (string), Value: DeathCertificate JSON
-    fn create_death_certificates_cf() -> ColumnFamilyDescriptor {
+    fn create_death_certificates_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB - smaller, less frequent
+        opts.set_write_buffer_size(Self::scale_write_buffer(8)); // 8MB - smaller, less frequent
         opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_DEATH_CERTIFICATES, opts)
     }
 
+    // v7.3.1: Quantum metadata stored separately for lazy loading
+    // Key format: "qm:{height}" (string), Value: bincode-serialized QuantumMetadata
+    fn create_quantum_metadata_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - one per block
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_QUANTUM_METADATA, opts)
+    }
+
+    // ========== v7.3.2: Quillon Mail CFs ==========
+
+    fn create_emails_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(32));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_EMAILS, opts)
+    }
+
+    fn create_emails_by_wallet_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16));
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_EMAILS_BY_WALLET, opts)
+    }
+
+    fn create_emails_by_folder_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16));
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_EMAILS_BY_FOLDER, opts)
+    }
+
+    fn create_email_contacts_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_EMAIL_CONTACTS, opts)
+    }
+
+    fn create_email_outbound_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_EMAIL_OUTBOUND, opts)
+    }
+
+    // ========== v7.3.3: Blockchain Calendar ==========
+
+    fn create_calendar_events_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(CF_CALENDAR_EVENTS, opts)
+    }
+
+    fn create_calendar_by_date_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(CF_CALENDAR_BY_DATE, opts)
+    }
+
+    fn create_calendar_scheduled_tx_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(CF_CALENDAR_SCHEDULED_TX, opts)
+    }
+
+    fn create_calendar_community_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(CF_CALENDAR_COMMUNITY, opts)
+    }
+
     /// Get column family handle (public for transactions - v0.8.1-beta)
+    /// v7.1.2: Auto-creates missing CFs instead of failing, preventing batch write failures
+    /// when new CFs are added in code but don't yet exist in the database.
     pub fn get_cf(&self, cf_name: &str) -> Result<Arc<rocksdb::BoundColumnFamily>> {
+        // Fast path: CF already exists
+        if let Some(cf) = self.db.cf_handle(cf_name) {
+            return Ok(cf);
+        }
+
+        // Slow path: CF missing - auto-create it with default options
+        warn!(
+            "⚠️  [CF-AUTO-CREATE] Column family '{}' not found in database, creating on-the-fly",
+            cf_name
+        );
+
+        let mut cf_opts = Options::default();
+        cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        cf_opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB default
+        cf_opts.set_max_write_buffer_number(2);
+
+        self.db
+            .create_cf(cf_name, &cf_opts)
+            .with_context(|| format!(
+                "Failed to auto-create column family '{}'. DB path: {}",
+                cf_name, self.db_path
+            ))?;
+
+        info!(
+            "✅ [CF-AUTO-CREATE] Column family '{}' created successfully at runtime",
+            cf_name
+        );
+
+        // Now fetch the handle - it must exist after successful create_cf
         self.db
             .cf_handle(cf_name)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))
+            .ok_or_else(|| anyhow::anyhow!(
+                "Column family '{}' still not found after create_cf succeeded. DB path: {}",
+                cf_name, self.db_path
+            ))
     }
 }
 
@@ -1878,6 +2245,49 @@ impl RocksDBKV {
     /// Get Arc<DB> handle for SafeBatchedWriter (v1.0.2-beta Phase 1A)
     pub fn db(&self) -> Arc<DB> {
         self.db.clone()
+    }
+
+    /// v6.1.3: Report RocksDB memory usage for OOM diagnostics
+    /// FIX: Query per-CF and sum results. DB-level property_int_value only queries
+    /// the default CF which has no data (all data in named CFs → always returned 0).
+    pub fn get_memory_usage_mb(&self) -> (f64, f64, f64) {
+        let mut total_memtable: u64 = 0;
+        let mut total_readers: u64 = 0;
+
+        // Sum memtable and table reader memory across all column families
+        let cf_names = [
+            "blocks", "dag_vertices", "bullshark_cert", "manifest",
+            "transactions", "balances", "block_hash_to_height",
+            "cf_token_balances", "cf_tokens", "cf_dex_pools", "cf_contracts",
+            "cf_contract_storage", "cf_stakes", "cf_swap_history",
+            "cf_price_history", "cf_wallet_tx_index", "cf_wallet_swap_index",
+        ];
+        for cf_name in &cf_names {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                if let Ok(Some(v)) = self.db.property_int_value_cf(&cf, "rocksdb.cur-size-all-mem-tables") {
+                    total_memtable += v;
+                }
+                if let Ok(Some(v)) = self.db.property_int_value_cf(&cf, "rocksdb.estimate-table-readers-mem") {
+                    total_readers += v;
+                }
+            }
+        }
+
+        // Block cache usage is shared across CFs - query once from any CF
+        let block_cache = cf_names.iter()
+            .find_map(|cf_name| {
+                self.db.cf_handle(cf_name).and_then(|cf| {
+                    self.db.property_int_value_cf(&cf, "rocksdb.block-cache-usage")
+                        .ok().flatten()
+                })
+            })
+            .unwrap_or(0);
+
+        (
+            total_memtable as f64 / 1_048_576.0,
+            total_readers as f64 / 1_048_576.0,
+            block_cache as f64 / 1_048_576.0,
+        )
     }
 
     // ==================== v1.0.43-beta: RocksDB Encryption Integration ====================

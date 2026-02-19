@@ -6,43 +6,31 @@
  */
 
 // Network configuration
-// 🔥 v3.4.2-browser: Updated to match Server Beta (testnet-phase19)
-export const NETWORK_ID = 'testnet-phase19'
-export const PROTOCOL_VERSION = '3.4.2'
+// v7.3.2-browser: Auto-detect network based on current time
+// Before Feb 22, 2026 12:00 UTC → mainnet2026.1.1 (rehearsal)
+// After Feb 22, 2026 12:00 UTC → mainnet2026.2 (production)
+export const NETWORK_ID = Date.now() / 1000 >= 1771761600
+  ? 'mainnet2026.2'
+  : 'mainnet2026.1.1'
+export const PROTOCOL_VERSION = '6.6.0'
 
 /**
- * Bootstrap Peers - ALL connections routed through Tor bridge
- *
- * 🧅 MANDATORY TOR: All browser P2P traffic goes through Tor
- * - Port 9444: Dedicated Tor bridge WebSocket server
- * - Server-side Tor SOCKS5 proxy routes to Tor network
- * - User's IP is NEVER exposed to the P2P network
+ * Bootstrap Peers - WebSocket Secure connections to bootstrap node
  *
  * Architecture:
- * Browser → wss://quillon.xyz:9444 → Tor SOCKS5 → Tor Network → .onion Bootstrap
+ * Browser → wss://quillon.xyz:9443 → nginx proxy → libp2p:9001/ws
  *
- * NO clearnet connections allowed - privacy is mandatory, not optional
+ * Port 9443: Dedicated WebSocket proxy to libp2p (verified working)
+ * Port 9444: Tor bridge (currently returns 502 - not yet functional)
  */
 export const BOOTSTRAP_PEERS = [
-  // 🧅 Server Beta (EU) - Tor Bridge Bootstrap
-  // Port 9444: Tor bridge WebSocket endpoint
-  // Traffic flows: Browser WebSocket → nginx:9444 → websockify → Tor SOCKS5 → Tor network
-  // PeerID: 12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx
-  '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx',
+  // Server Beta (EU) - WebSocket Bootstrap
+  // Port 9443: nginx WSS proxy → libp2p WebSocket listener on port 9001
+  // PeerID: will be updated after Mainnet servers start (Mainnet)
+  '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
 
-  // TODO: Add .onion bootstrap when Tor hidden service is configured
-  // '/onion3/<56-char-onion-address>:9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx',
-
-  // TODO: Add community Tor bridges for decentralization
-  // '/dns4/community1.quillon.xyz/tcp/9444/wss/p2p/<Community-PeerID-1>',
-]
-
-/**
- * Legacy clearnet peers (DISABLED - kept for reference only)
- * DO NOT USE - these would leak user IPs
- */
-export const CLEARNET_PEERS_DISABLED = [
-  // '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx',
+  // TODO: Fix Tor bridge on port 9444 (websockify → SOCKS5 → Tor)
+  // '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
 ]
 
 /**

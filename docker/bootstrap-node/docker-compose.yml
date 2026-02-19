@@ -1,0 +1,82 @@
+# Q-NarwhalKnight Bootstrap Node - Docker Compose
+# v2.9.0-beta: Multi-bootstrap decentralization
+#
+# Deployment Instructions:
+# 1. Copy this entire folder to Server Alpha (161.35.219.10)
+# 2. Build and run: docker-compose up -d
+# 3. The bootstrap node will sync from Server Beta and become a secondary bootstrap
+#
+# Environment Variables (set in .env or pass directly):
+# - Q_BOOTSTRAP_URL: Primary bootstrap to sync from (default: Server Beta)
+# - Q_NETWORK_ID: Network identifier (default: testnet-phase16)
+# - Q_API_PORT: HTTP API port (default: 8080)
+# - Q_P2P_PORT: P2P port (default: 9001)
+
+version: '3.8'
+
+services:
+  q-bootstrap-node:
+    image: q-narwhalknight-bootstrap:latest
+    build:
+      context: ../..
+      dockerfile: docker/bootstrap-node/Dockerfile
+    container_name: q-bootstrap-alpha
+    restart: unless-stopped
+
+    # Network mode: host for P2P connectivity
+    network_mode: host
+
+    environment:
+      # Core configuration
+      - RUST_LOG=info,q_api_server=info,q_network=info,q_storage=info
+      - Q_NETWORK_ID=${Q_NETWORK_ID:-testnet-phase16}
+
+      # Bootstrap configuration (sync from Server Beta initially)
+      - Q_BOOTSTRAP_URL=${Q_BOOTSTRAP_URL:-http://185.182.185.227:8080}
+      - Q_BOOTSTRAP_URLS=${Q_BOOTSTRAP_URLS:-http://185.182.185.227:8080}
+
+      # Port configuration
+      - Q_API_PORT=${Q_API_PORT:-8080}
+      - Q_P2P_PORT=${Q_P2P_PORT:-9001}
+
+      # Mining disabled for bootstrap node (saves resources)
+      - Q_DISABLE_MINING=true
+
+      # Data directory
+      - Q_DATA_DIR=/data
+
+      # Performance tuning
+      - Q_HTTP_BATCH_SIZE=500
+      - Q_HTTP_PARALLELISM=4
+      - Q_SYNC_BATCH_SIZE=1000
+
+    volumes:
+      # Persistent blockchain data
+      - bootstrap-data:/data
+
+      # libp2p identity (persistent peer ID)
+      - bootstrap-identity:/identity
+
+    ports:
+      # These are informational when using network_mode: host
+      - "8080:8080"   # HTTP API
+      - "9001:9001"   # P2P libp2p
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+volumes:
+  bootstrap-data:
+    driver: local
+  bootstrap-identity:
+    driver: local

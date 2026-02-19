@@ -58,7 +58,7 @@ core_affinity = "0.8" # For CPU pinning on multi-socket systems
 
 # Memory management
 memmap2 = "0.9"
-jemallocator = { version = "0.5", optional = true }
+tikv-jemallocator = { version = "0.6", optional = true }
 
 # Networking for pool mining
 # Override reqwest to use native-tls for cross-compilation compatibility
@@ -73,6 +73,10 @@ tower-http = { workspace = true }
 # SSE client for real-time mining rewards
 eventsource-client = "0.12"
 futures = { workspace = true }
+
+# WebSocket for miner-link relay connection
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
 
 # JSON-RPC for Stratum protocol
 jsonrpc-core = "18.0"
@@ -113,7 +117,8 @@ vdf = { workspace = true }
 signal-hook = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi"] }
+winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi", "timeapi", "winbase"] }
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -141,7 +146,7 @@ pool-mining = []
 tor-support = []
 
 # Performance features
-jemalloc = ["jemallocator"]
+jemalloc = ["tikv-jemallocator"]
 avx2 = []
 avx512 = []
 neon = []

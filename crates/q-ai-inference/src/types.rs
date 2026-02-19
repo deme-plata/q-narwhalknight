@@ -11,6 +11,21 @@ pub struct InferenceRequest {
     pub model: String, // "mistral-7b-instruct-v0.3"
     #[serde(skip)]
     pub timestamp: Option<Instant>,
+
+    /// v6.0.0: Deterministic seed for reproducible inference (opML verification).
+    /// When set, forces greedy decoding (temperature=0, top_k=1) so that
+    /// two nodes with the same model produce identical output for the same input.
+    #[serde(default)]
+    pub deterministic_seed: Option<u64>,
+
+    /// v6.0.0: Required model hash (SHA3-256 of GGUF file) for integrity verification.
+    /// Workers must serve this exact model or the request is rejected.
+    #[serde(default)]
+    pub required_model_hash: Option<[u8; 32]>,
+
+    /// v6.0.0: Maximum price per token the user is willing to pay (in QUG base units, 24-decimal).
+    #[serde(default)]
+    pub max_price_per_token: Option<u128>,
 }
 
 /// Response from distributed inference
@@ -143,6 +158,14 @@ pub enum AIMessage {
 
     /// Heartbeat from active nodes
     Heartbeat { node_id: String, timestamp: i64 },
+
+    /// v5.1.0: Node announcing its RPC worker endpoint for pipeline parallelism
+    /// When a node starts a llama.cpp rpc-server, it broadcasts this so the
+    /// coordinator can build `--rpc worker1:port,worker2:port` for distributed inference.
+    RpcWorkerAvailable(crate::rpc_worker::RpcWorkerInfo),
+
+    /// v5.1.0: Node announcing its RPC worker has stopped
+    RpcWorkerStopped { peer_id: String },
 }
 
 /// Compress tensor data using gzip

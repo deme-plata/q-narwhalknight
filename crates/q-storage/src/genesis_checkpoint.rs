@@ -172,14 +172,53 @@ impl GenesisCheckpointValidator {
         // Genesis: Will be hardcoded before mainnet launch
         // ========================================================================
         genesis_checkpoints.insert(
-            NetworkId::Mainnet,
+            NetworkId::Mainnet2026,
             GenesisCheckpoint {
-                network_id: NetworkId::Mainnet,
-                genesis_block_hash: [0u8; 32], // To be set before mainnet launch
+                network_id: NetworkId::Mainnet2026,
+                genesis_block_hash: [0u8; 32],
                 genesis_height: 1,
                 genesis_prev_hash: [0u8; 32],
-                network_name: "mainnet".to_string(),
-                description: "Q-NarwhalKnight Mainnet - Production network".to_string(),
+                network_name: "mainnet2026".to_string(),
+                description: "Q-NarwhalKnight Mainnet 2026 (deprecated)".to_string(),
+            },
+        );
+
+        // v7.1.2: Mainnet 2026.1 - Clean relaunch with emission fix + data isolation
+        genesis_checkpoints.insert(
+            NetworkId::Mainnet2026_1,
+            GenesisCheckpoint {
+                network_id: NetworkId::Mainnet2026_1,
+                genesis_block_hash: [0u8; 32],
+                genesis_height: 1,
+                genesis_prev_hash: [0u8; 32],
+                network_name: "mainnet2026.1".to_string(),
+                description: "Q-NarwhalKnight Mainnet 2026.1 - Production network (deprecated)".to_string(),
+            },
+        );
+
+        // v7.3.2: Mainnet 2026.1.1 - 4-day rehearsal chain (Feb 18-22, 2026)
+        genesis_checkpoints.insert(
+            NetworkId::Mainnet2026_1_1,
+            GenesisCheckpoint {
+                network_id: NetworkId::Mainnet2026_1_1,
+                genesis_block_hash: [0u8; 32],
+                genesis_height: 1,
+                genesis_prev_hash: [0u8; 32],
+                network_name: "mainnet2026.1.1".to_string(),
+                description: "Q-NarwhalKnight Mainnet 2026.1.1 - Rehearsal chain".to_string(),
+            },
+        );
+
+        // v7.3.0: Mainnet 2026.2 - Fresh directory relaunch with zero contamination
+        genesis_checkpoints.insert(
+            NetworkId::Mainnet2026_2,
+            GenesisCheckpoint {
+                network_id: NetworkId::Mainnet2026_2,
+                genesis_block_hash: [0u8; 32],
+                genesis_height: 1,
+                genesis_prev_hash: [0u8; 32],
+                network_name: "mainnet2026.2".to_string(),
+                description: "Q-NarwhalKnight Mainnet 2026.2 - Production network".to_string(),
             },
         );
 

@@ -326,7 +326,7 @@ impl BitcoinPeerDiscovery {
         let mut suspicious_count = 0;
 
         for output in &tx.output {
-            let value = output.value.to_sat();
+            let value = output.value;
 
             // Check for round numbers +/- 1 (even/odd encoding)
             if value > 10000 && value < 1000000 {

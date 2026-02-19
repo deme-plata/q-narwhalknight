@@ -46,18 +46,23 @@ pub struct BlockProducerConfig {
     /// Total number of validators in network
     /// v0.0.22-beta Quick Win #4
     pub total_validators: u64,
+
+    /// Network ID string (e.g. "mainnet2026.1.1", "mainnet2026.2")
+    /// v7.3.2: Used for network-specific genesis timestamp and block headers
+    pub network_id_str: String,
 }
 
 impl Default for BlockProducerConfig {
     fn default() -> Self {
         Self {
             block_interval_secs: 15, // 15 second blocks
-            max_solutions_per_block: 100,
+            max_solutions_per_block: 250, // v7.2.6: Reduced from 10K - blocks with 10K+ coinbase txs stall serialization/broadcast
             min_solutions_per_block: 1,
             node_id: [0u8; 32],
             is_validator: true,
             validator_index: 0,  // Default to primary validator
             total_validators: 1, // Default to single validator
+            network_id_str: "mainnet2026.2".to_string(),
         }
     }
 }
@@ -103,7 +108,7 @@ pub struct BlockProducer {
     simd_merkle: Option<Arc<q_crypto_simd::SimdMerkleTree>>,
 
     /// ✅ v0.9.99-beta: Adaptive block reward calculation
-    /// Provides throughput-independent emission (82,031 QUG/year regardless of bps)
+    /// Provides throughput-independent emission (2,625,000 QUG/year Era 0, halving every 4 years)
     /// Activates at block 200,000 for gradual migration
     balance_consensus: Option<Arc<q_storage::BalanceConsensusEngine>>,
 
@@ -150,6 +155,9 @@ pub struct BlockProducer {
     /// When present, updates transaction status from InMempool to Confirmed
     /// after they are included in a block
     tx_status: Option<Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>>,
+
+    /// 💰 v7.1.5: Configurable dev fee (shared atomic with AppState)
+    dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// 📊 v1.0.72-beta: Finality metrics for sub-50ms tracking
@@ -197,6 +205,7 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution (use set_node_identity to enable)
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
         }
     }
 
@@ -228,6 +237,7 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
         }
     }
 
@@ -270,7 +280,13 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
         })
+    }
+
+    /// 💰 v7.1.5: Set configurable dev fee (shared with AppState)
+    pub fn set_dev_fee_bps(&mut self, dev_fee_bps: Arc<std::sync::atomic::AtomicU64>) {
+        self.dev_fee_bps = dev_fee_bps;
     }
 
     /// 📡 v2.3.5-beta: Set node identity for P2P mining attribution
@@ -416,6 +432,22 @@ impl BlockProducer {
             return None;
         }
 
+        // v7.3.2: PRE-GENESIS GUARD - Dynamic genesis timestamp based on network
+        // mainnet2026.1.1 (rehearsal): Feb 18, 2026 00:00 UTC
+        // mainnet2026.2 (production): Feb 22, 2026 12:00 UTC
+        let genesis_ts = match self.config.network_id_str.as_str() {
+            "mainnet2026.1.1" => q_storage::emission_controller::REHEARSAL_GENESIS_TIMESTAMP,
+            _ => q_storage::emission_controller::GENESIS_TIMESTAMP,
+        };
+        let now_ts = chrono::Utc::now().timestamp() as u64;
+        if now_ts < genesis_ts {
+            debug!(
+                "⏳ [PRE-GENESIS] Block production blocked: current time {} < genesis {} (network: {})",
+                now_ts, genesis_ts, self.config.network_id_str
+            );
+            return None;
+        }
+
         // 🚀 v2.3.14-beta: RACE CONDITION FIX - Skip if we already produced at this height
         // Root cause: Two production loops (block_production_v2 and mining handler) both
         // call produce_block() at the same height before height is advanced after storage.
@@ -499,6 +531,20 @@ impl BlockProducer {
         // Drain up to max_solutions_per_block without any locks
         let mut solutions = Vec::with_capacity(self.config.max_solutions_per_block);
 
+        // v7.2.6: Safety drain — if queue is > 5000 deep, discard oldest to prevent unbounded growth.
+        // This handles the case where block production stalls and solutions pile up.
+        let queue_depth = self.pending_solutions.len();
+        if queue_depth > 5000 {
+            let discard_count = queue_depth - 1000; // Keep newest ~1000
+            warn!(
+                "⚠️ [QUEUE SAFETY] Solution queue too deep ({} pending), discarding {} stale solutions",
+                queue_depth, discard_count
+            );
+            for _ in 0..discard_count {
+                let _ = self.pending_solutions.pop();
+            }
+        }
+
         while solutions.len() < self.config.max_solutions_per_block {
             // LOCK-FREE! SegQueue::pop never blocks
             if let Some(solution) = self.pending_solutions.pop() {
@@ -534,8 +580,8 @@ impl BlockProducer {
             debug!("📦 Producing block with {} user transactions (no mining solutions)", user_transactions.len());
         }
 
-        info!(
-            "🏗️  Producing block: height={}, solutions={}, user_txs={} (Phase 2.2 lock-free drain)",
+        debug!(
+            "🏗️  Producing block: height={}, solutions={}, user_txs={}",
             self.current_height + 1,
             solutions.len(),
             user_transactions.len()
@@ -565,7 +611,7 @@ impl BlockProducer {
         // Compute Merkle roots
         // Phase 3.1: Use SIMD if available (8x speedup), fallback to scalar
         let solutions_root = self.compute_solutions_merkle_root_simd(&solutions).await;
-        let state_root = [0u8; 32]; // TODO: Compute state root
+        // State root computed below after all_transactions is assembled (needs tx hashes)
 
         // 🚀 v3.4.2-beta: user_transactions already fetched at the start of produce_block()
         // to enable the empty-block-skip optimization (prevents race condition)
@@ -742,6 +788,17 @@ impl BlockProducer {
         // 🚀 v1.0.72-beta: Compute proper tx_root from all transactions
         let tx_root = self.compute_tx_merkle_root(&all_transactions);
 
+        // 🔐 v5.1.0: Compute real state root (height-gated via StateRootV1 upgrade)
+        let next_height = self.current_height + 1;
+        let state_root = if q_consensus_guard::is_upgrade_active(
+            q_consensus_guard::Upgrade::StateRootV1,
+            next_height,
+        ) {
+            Self::compute_state_root(&all_transactions)
+        } else {
+            [0u8; 32]
+        };
+
         // 📊 v1.0.72-beta: Record production latency
         let production_latency_us = production_start.elapsed().as_micros() as u64;
         self.finality_metrics.avg_production_latency_us.store(
@@ -753,8 +810,8 @@ impl BlockProducer {
         let block = QBlock {
             header: BlockHeader {
                 height: self.current_height + 1,
-                phase: 19, // Phase 19 testnet - AsyncStorageEngine Key Format Fix (v3.2.14-beta)
-                network_id: "testnet-phase19".to_string(), // ✅ v3.2.14-beta: Phase 19 - CRITICAL Bug #4 fix
+                phase: 21, // Phase 21 testnet - Phase Data Purge & Clean Transition (v6.4.0-beta)
+                network_id: self.config.network_id_str.clone(), // ✅ v7.3.2: Dynamic network ID
                 prev_block_hash: self.latest_block_hash,
                 solutions_root,
                 tx_root,
@@ -881,8 +938,8 @@ impl BlockProducer {
         // Height advancement is now done by caller AFTER storage confirmation.
         // See: advance_height() method (must be called after save_qblock succeeds)
 
-        info!(
-            "📦 BLOCK CREATED (NOT YET SAVED): Height {}, Hash {}, Solutions {}, Difficulty {}",
+        debug!(
+            "📦 Block created: h={}, hash={}, sol={}, diff={}",
             block.header.height,
             hex::encode(&block_hash[..8]),
             solutions.len(),
@@ -974,8 +1031,8 @@ impl BlockProducer {
                 let tx_count = hashes.len();
                 tokio::spawn(async move {
                     mempool_clone.remove_included_transactions(&hashes).await;
-                    info!(
-                        "🗑️  [MEMPOOL] Removed {} transactions after block inclusion",
+                    debug!(
+                        "🗑️  [MEMPOOL] Removed {} txs after block inclusion",
                         tx_count
                     );
                 });
@@ -996,13 +1053,18 @@ impl BlockProducer {
                         },
                     );
                 }
-                info!(
-                    "✅ [TX-CONFIRMED] Marked {} P2P transactions as confirmed at block {}",
+                debug!(
+                    "✅ [TX-CONFIRMED] {} txs confirmed at block {}",
                     user_tx_ids_for_status.len(),
                     block_height
                 );
             }
         }
+
+        // v6.2.0-beta: Emission tracking moved to process_block_mining_rewards()
+        // (balance_consensus.rs) which is called for ALL blocks (local + P2P).
+        // Previously tracking only local blocks here caused N× emission overshoot
+        // when N nodes independently produced blocks.
 
         Some(block)
     }
@@ -1019,7 +1081,7 @@ impl BlockProducer {
     /// ✅ v0.9.99-beta: ADAPTIVE BLOCK REWARDS
     /// - Blocks 0-199,999: Fixed 0.05 QUG per block (90-day migration period)
     /// - Block 200,000+: Adaptive rewards (throughput-independent emission)
-    /// - Annual emission: 82,031 QUG/year regardless of throughput (1-10,000+ bps)
+    /// - Annual emission: 2,625,000 QUG/year (Era 0) regardless of throughput (1-10,000+ bps)
     /// - Reward scales inversely with block rate: reward = annual_target / blocks_per_year
     /// - Time-based halving every 4 years (handled by EmissionController)
     ///
@@ -1049,66 +1111,67 @@ impl BlockProducer {
         use chrono::Utc;
         use sha2::{Digest, Sha256};
 
-        // v1.4.5-beta: Use integer basis points instead of floating-point for determinism
-        // 100 basis points = 1% (10_000 bps = 100%)
-        const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+        // v7.1.5: Read configurable dev fee from atomic (set by admin API)
+        let dev_fee_bps_val = self.dev_fee_bps.load(std::sync::atomic::Ordering::Relaxed) as u128;
         const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
         const FOUNDER_WALLET_HEX: &str =
             "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
-        const ADAPTIVE_ACTIVATION_HEIGHT: u64 = 200_000; // ~90 days at 5-10 bps
-        const LEGACY_FIXED_REWARD: u128 = 5_000_000; // 0.05 QUG (Phase 1-10 legacy)
-
         let mut transactions = Vec::new();
 
         if solutions.is_empty() {
             return Ok(transactions); // No rewards for empty blocks
         }
 
-        // ✅ v0.9.99-beta: MIGRATION STRATEGY - Gradual transition from fixed to adaptive
-        let total_reward = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
-            // Phase 1 (Bootstrap): Fixed 0.05 QUG reward for backward compatibility
-            info!(
-                "📊 Block #{}: Using FIXED reward (0.05 QUG) - Phase 1 Bootstrap",
-                block_height
-            );
-            LEGACY_FIXED_REWARD
-        } else {
-            // Phase 2 (Adaptive): Calculate reward based on throughput
-            match &self.balance_consensus {
-                Some(bc) => {
-                    // Get approximate total supply for reward calculation
-                    // Uses emission controller stats (fast, no storage I/O)
-                    let total_supply = bc
-                        .get_total_supply_approx()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to get total supply: {}", e))?;
+        // v7.1.2: ALWAYS use adaptive reward from emission controller.
+        //
+        // PREVIOUS BUG (v6.3.0 - v7.1.1): For blocks < 200,000 (ADAPTIVE_ACTIVATION_HEIGHT),
+        // coinbase rewards used `calculate_block_reward_time_based()` which assumes a FIXED
+        // 1.0 bps block rate. If real network rate is higher (e.g. 1.44 bps), the per-block
+        // reward is too high, causing 1.44x emission overshoot (10,330 vs target 7,187 QUG/day).
+        //
+        // FIX: Always use the emission controller which measures ACTUAL block rate and applies
+        // error correction. The bootstrap/adaptive split is no longer needed because:
+        // 1. track_block_for_emission() is called for ALL blocks (local + P2P)
+        // 2. Emission controller state is persisted to RocksDB every 30s
+        // 3. On fresh start with no data, controller defaults to 1.0 bps (conservative)
+        // 4. Error correction factor automatically compensates for past overshoot
+        let total_reward = match &self.balance_consensus {
+            Some(bc) => {
+                let total_supply = bc
+                    .get_total_supply_approx()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to get total supply: {}", e))?;
 
-                    // Calculate adaptive reward
-                    let reward = bc.calculate_block_reward(block_timestamp, total_supply).await
-                        .map_err(|e| {
-                            error!("🚨 CRITICAL: Block reward calculation failed at height {}: {}", block_height, e);
-                            error!("   Block production MUST abort - cannot produce block without valid reward!");
-                            anyhow::anyhow!("Adaptive reward calculation failed: {}", e)
-                        })?;
+                let reward = bc.calculate_block_reward(block_timestamp, total_supply).await
+                    .map_err(|e| {
+                        error!("🚨 CRITICAL: Block reward calculation failed at height {}: {}", block_height, e);
+                        anyhow::anyhow!("Adaptive reward calculation failed: {}", e)
+                    })?;
 
-                    info!(
-                        "📊 Block #{}: Adaptive reward = {} QUG (throughput-adjusted)",
-                        block_height,
-                        reward as f64 / 1e24
-                    );
-                    reward
-                }
-                None => {
-                    // Fallback to fixed if balance_consensus not provided (backward compat)
-                    warn!("⚠️  Block #{}: No balance_consensus configured - falling back to FIXED reward", block_height);
-                    warn!("   This is NOT recommended for mainnet - adaptive rewards required at block 200,000!");
-                    LEGACY_FIXED_REWARD
-                }
+                info!(
+                    "📊 Block #{}: Adaptive reward = {:.6} QUG (throughput-adjusted)",
+                    block_height,
+                    reward as f64 / 1e24
+                );
+                reward
+            }
+            None => {
+                // Fallback to time-based ONLY if balance_consensus not available
+                warn!("⚠️  Block #{}: No balance_consensus - falling back to TIME-BASED reward", block_height);
+                crate::handlers::calculate_block_reward_time_based(
+                    q_storage::emission_controller::GENESIS_TIMESTAMP,
+                    block_timestamp,
+                )
             }
         };
+
+        // NOTE: record_daily_emission is NOT called here to avoid double-recording.
+        // It is already called in balance_consensus.rs process_block_mining_rewards_tx()
+        // when the coinbase transaction is processed.
+
         // v1.4.5-beta: Integer-only fee calculation for cross-platform determinism
         // Using saturating_mul to prevent overflow (handled in next task)
-        let dev_fee_amount = total_reward.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
+        let dev_fee_amount = total_reward.saturating_mul(dev_fee_bps_val) / BPS_DIVISOR;
         let miner_reward_per_solution = (total_reward.saturating_sub(dev_fee_amount)) / solutions.len() as u128;
 
         // Decode founder wallet
@@ -1233,29 +1296,14 @@ impl BlockProducer {
         let qug_dev_fee = dev_fee_amount as f64 / 1e24;
         let qug_per_miner = miner_reward_per_solution as f64 / 1e24;
 
-        let reward_type = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
-            "FIXED (Phase 1 Bootstrap)"
-        } else {
-            "ADAPTIVE (Phase 2 - Throughput Independent)"
-        };
-
         info!(
-            "💎 [v0.9.99-beta - {}] Created {} coinbase transactions:",
-            reward_type,
+            "💎 [v7.1.2 ADAPTIVE] Created {} coinbase transactions:",
             transactions.len()
         );
-        // v2.2.4: Privacy - reduce amount logging to debug level
         debug!(
-            "   📊 Block #{}: {} solutions",
-            block_height,
-            solutions.len()
+            "   📊 Block #{}: {} solutions, {:.9} QUG total, {:.9} dev fee, {:.9} per miner",
+            block_height, solutions.len(), qug_total, qug_dev_fee, qug_per_miner
         );
-        // v2.2.4: Privacy - reduce reward logging to debug level
-        debug!("   🏦 Dev Fee (1%): {:.9} QUG", qug_dev_fee);
-        debug!("   ⛏️  Miner reward: {:.9} QUG each", qug_per_miner);
-        if block_height >= ADAPTIVE_ACTIVATION_HEIGHT {
-            trace!("   ⚡ Adaptive rewards active");
-        }
 
         Ok(transactions)
     }
@@ -1299,6 +1347,29 @@ impl BlockProducer {
         let mut hasher = Sha3_256::new();
         for tx in transactions {
             hasher.update(tx.hash());
+        }
+        hasher.finalize().into()
+    }
+
+    /// 🔐 v5.1.0: Compute state root from block transactions
+    /// SHA3-256 over sorted transaction hashes to create a deterministic commitment.
+    /// This ensures all nodes computing state from the same transactions get the same root.
+    fn compute_state_root(transactions: &[Transaction]) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+
+        if transactions.is_empty() {
+            return [0u8; 32];
+        }
+
+        // Collect and sort transaction IDs for deterministic ordering
+        let mut tx_ids: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.id).collect();
+        tx_ids.sort();
+
+        // Merkle-like hash: H(sorted_tx_id_0 || sorted_tx_id_1 || ... || "state_root_v1")
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"state_root_v1"); // Domain separator
+        for tx_id in &tx_ids {
+            hasher.update(tx_id);
         }
         hasher.finalize().into()
     }
@@ -1887,19 +1958,44 @@ impl BlockProducer {
     /// **FIX**: Reset `last_block_time` to (now - block_interval_secs) so the next
     /// `should_produce()` check returns true immediately, allowing block production to resume.
     pub fn set_latest_block(&mut self, height: u64, hash: BlockHash, difficulty: u128) {
+        let height_changed = height != self.current_height;
         self.current_height = height;
         self.latest_block_hash = hash;
         self.total_difficulty = difficulty;
         self.dag_round = height; // Sync DAG round with height
 
-        // 🔥 CRITICAL FIX: Reset timer to allow immediate block production
-        // Subtract block_interval to ensure should_produce() returns true on next check
-        self.last_block_time =
-            Instant::now() - std::time::Duration::from_secs(self.config.block_interval_secs);
-        debug!(
-            "🔄 Producer synced to height {} - timer reset for immediate production",
-            height
-        );
+        // v7.1.4: CRITICAL FIX - Only reset timer when a NEW block arrives from P2P.
+        //
+        // HISTORY OF THIS BUG:
+        // - Pre-v7.1.1: Back-dated timer by block_interval_secs → runaway 85 blocks/sec
+        // - v7.1.1: Reset to Instant::now() → BROKE block production entirely!
+        //   Because sync_from_storage() is called BEFORE produce_blocks() in the main loop,
+        //   the timer was reset to NOW every iteration, so should_produce_block() always
+        //   returned false (elapsed=0ms < 2000ms needed).
+        //
+        // v7.1.4 FIX: Only reset the timer when the height ACTUALLY CHANGED (meaning a
+        // new P2P block arrived). When we're just re-syncing at the same height, leave
+        // the timer alone so should_produce_block() can eventually return true.
+        if height_changed {
+            self.last_block_time = Instant::now();
+            debug!(
+                "🔄 Producer synced to NEW height {} - timer reset (will wait {}s before next block)",
+                height, self.config.block_interval_secs
+            );
+        }
+
+        // v1.0.2 CRITICAL FIX: Reset stale last_produced_height when height regresses.
+        // Without this, if block N is produced in-memory but fails to save to storage,
+        // sync_from_storage() resets current_height to N-1 but last_produced_height stays
+        // at N. The duplicate prevention check (proposed_height <= last_produced_height)
+        // then permanently blocks production: (N-1)+1 = N <= N → always true → 0 blocks forever.
+        if height < self.last_produced_height {
+            warn!(
+                "🔧 [STALL-FIX] Resetting stale last_produced_height {} → {} (height regressed, likely unsaved block)",
+                self.last_produced_height, height
+            );
+            self.last_produced_height = height;
+        }
     }
 
     /// ✅ v1.0.1-beta CRITICAL FIX: Advance height ONLY after block storage confirms

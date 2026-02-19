@@ -72,6 +72,16 @@ pub const TOPIC_AI_NODE_CAPABILITY: &str = "qnk/ai/node-capability/v1";
 pub const TOPIC_AI_COORDINATOR: &str = "qnk/ai/coordinator/v1";
 pub const TOPIC_AI_HEARTBEAT: &str = "qnk/ai/heartbeat/v1";
 
+// v6.0.0: New topics for decentralized inference protocol
+/// Offers from workers to handle inference requests (offer-based routing)
+pub const TOPIC_AI_INFERENCE_OFFER: &str = "qnk/ai/inference-offer/v1";
+/// opML verification challenges and results
+pub const TOPIC_AI_OPML_VERIFICATION: &str = "qnk/ai/opml-verification/v1";
+/// Worker staking events (stake, unstake, slash)
+pub const TOPIC_AI_STAKING: &str = "qnk/ai/staking/v1";
+/// Model registry events (new model registered)
+pub const TOPIC_AI_MODEL_REGISTRY: &str = "qnk/ai/model-registry/v1";
+
 /// AI-specific Gossipsub topics manager
 pub struct DistributedAITopics {
     pub inference_request: IdentTopic,
@@ -79,11 +89,16 @@ pub struct DistributedAITopics {
     pub node_capability: IdentTopic,
     pub coordinator: IdentTopic,
     pub heartbeat: IdentTopic,
+    // v6.0.0: Decentralized inference topics
+    pub inference_offer: IdentTopic,
+    pub opml_verification: IdentTopic,
+    pub staking: IdentTopic,
+    pub model_registry: IdentTopic,
 }
 
 impl DistributedAITopics {
     pub fn new() -> Self {
-        info!("🤖 Initializing Distributed AI Gossipsub topics");
+        info!("🤖 Initializing Distributed AI Gossipsub topics (v6.0.0 decentralized)");
 
         Self {
             inference_request: IdentTopic::new(TOPIC_AI_INFERENCE_REQUEST),
@@ -91,6 +106,10 @@ impl DistributedAITopics {
             node_capability: IdentTopic::new(TOPIC_AI_NODE_CAPABILITY),
             coordinator: IdentTopic::new(TOPIC_AI_COORDINATOR),
             heartbeat: IdentTopic::new(TOPIC_AI_HEARTBEAT),
+            inference_offer: IdentTopic::new(TOPIC_AI_INFERENCE_OFFER),
+            opml_verification: IdentTopic::new(TOPIC_AI_OPML_VERIFICATION),
+            staking: IdentTopic::new(TOPIC_AI_STAKING),
+            model_registry: IdentTopic::new(TOPIC_AI_MODEL_REGISTRY),
         }
     }
 
@@ -102,6 +121,10 @@ impl DistributedAITopics {
             self.node_capability.clone(),
             self.coordinator.clone(),
             self.heartbeat.clone(),
+            self.inference_offer.clone(),
+            self.opml_verification.clone(),
+            self.staking.clone(),
+            self.model_registry.clone(),
         ]
     }
 
@@ -757,6 +780,153 @@ pub enum AIMessagePayload {
         #[serde(default)]
         encrypted_tokens: Option<EncryptedContent>,
     } = 22,
+
+    // ============================================================
+    // RPC PIPELINE PARALLELISM MESSAGES (v5.1.0+)
+    // llama.cpp RPC workers for distributed layer processing
+    // ============================================================
+
+    /// Node announcing its llama.cpp RPC worker endpoint is available
+    /// Coordinator collects these to build `--rpc host1:port,host2:port` args
+    RpcWorkerAvailable {
+        peer_id: String,
+        host: String,
+        port: u16,
+        available_memory_gb: usize,
+    } = 23,
+
+    /// Node announcing its RPC worker has stopped
+    RpcWorkerStopped {
+        peer_id: String,
+    } = 24,
+
+    // ═══════════════════════════════════════════════════════════════
+    // v6.0.0: Decentralized AI Inference Protocol Messages
+    // ═══════════════════════════════════════════════════════════════
+
+    /// v6.0.0: Worker announces capability with staking info for decentralized routing.
+    /// Replaces single-coordinator model with offer-based routing.
+    StakedWorkerCapability {
+        peer_id: String,
+        node_id: String,
+        capability: NodeCapability,
+        /// SHA3-256 of model GGUF file
+        model_hash: Vec<u8>,
+        /// Human-readable model name
+        model_name: String,
+        /// QUG staked (24-decimal base units)
+        stake_amount: u128,
+        /// Worker's price per token (24-decimal QUG)
+        price_per_token: u128,
+        /// Current load (active requests / max capacity)
+        #[serde(default)]
+        load_fraction: f32,
+    } = 25,
+
+    /// v6.0.0: Worker offers to handle an inference request (offer-based routing).
+    /// First valid offer wins — natural load balancing without coordinator.
+    InferenceOffer {
+        request_id: String,
+        worker_peer_id: String,
+        worker_address: Vec<u8>,
+        estimated_latency_ms: u64,
+        price_per_token: u128,
+        model_hash: Vec<u8>,
+    } = 26,
+
+    /// v6.0.0: User accepts a worker's offer and assigns the inference task.
+    InferenceAssignment {
+        request_id: String,
+        worker_peer_id: String,
+        user_address: Vec<u8>,
+        /// Payment commitment (escrow reference)
+        escrow_amount: u128,
+        /// Deterministic seed for verifiable inference
+        #[serde(default)]
+        deterministic_seed: Option<u64>,
+    } = 27,
+
+    /// v6.0.0: Worker commits inference output hash (opML commitment).
+    OpMLCommitment {
+        request_id: String,
+        worker_address: Vec<u8>,
+        output_hash: Vec<u8>,
+        token_count: u32,
+        model_hash: Vec<u8>,
+        seed: u64,
+        /// Dilithium signature over (request_id ++ output_hash)
+        signature: Vec<u8>,
+    } = 28,
+
+    /// v6.0.0: Verification challenge — assigned verifier must re-execute.
+    VerificationChallenge {
+        request_id: String,
+        verifier_address: Vec<u8>,
+        /// Worker's commitment for the verifier to check against
+        worker_output_hash: Vec<u8>,
+        worker_token_count: u32,
+        model_hash: Vec<u8>,
+        seed: u64,
+        prompt: String,
+        max_tokens: u32,
+    } = 29,
+
+    /// v6.0.0: Verifier submits re-execution result.
+    VerificationResult {
+        request_id: String,
+        verifier_address: Vec<u8>,
+        output_hash: Vec<u8>,
+        matches_worker: bool,
+    } = 30,
+
+    /// v6.0.0: Dispute opened (hashes differ between worker and verifier).
+    DisputeOpened {
+        request_id: String,
+        worker_address: Vec<u8>,
+        verifier_address: Vec<u8>,
+    } = 31,
+
+    /// v6.0.0: Bisection round in dispute protocol.
+    DisputeBisection {
+        request_id: String,
+        round: u32,
+        range_lo: u32,
+        range_hi: u32,
+        /// Prefix hash at midpoint from each party
+        worker_hash_at_mid: Vec<u8>,
+        verifier_hash_at_mid: Vec<u8>,
+    } = 32,
+
+    /// v6.0.0: Dispute resolved with slashing.
+    DisputeResolved {
+        request_id: String,
+        /// "worker_correct", "verifier_correct", or "inconclusive"
+        outcome: String,
+        slashed_address: Vec<u8>,
+        slashed_amount: u128,
+        bounty_recipient: Vec<u8>,
+        bounty_amount: u128,
+    } = 33,
+
+    /// v6.0.0: Worker staking/unstaking event broadcast.
+    StakeEvent {
+        worker_address: Vec<u8>,
+        peer_id: String,
+        /// "stake", "unstake_request", "unstake_complete", "slash"
+        event_type: String,
+        amount: u128,
+        new_total_stake: u128,
+    } = 34,
+
+    /// v6.0.0: Model registration broadcast.
+    ModelRegistered {
+        model_hash: Vec<u8>,
+        model_name: String,
+        family: String,
+        quantization: String,
+        parameter_count: u64,
+        registered_by: Vec<u8>,
+    } = 35,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

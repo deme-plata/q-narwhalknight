@@ -91,6 +91,15 @@ pub struct P2PBalanceUpdate {
     /// v1.1.9-beta: Public key of the signing node (for verification without lookup)
     /// 32 bytes for Ed25519, 2592 bytes for Dilithium5
     pub signer_public_key: Vec<u8>,
+
+    /// v5.1.0: Block hash that contains the transaction proving this balance update
+    /// Required after BlockEvidenceRequired upgrade activation
+    #[serde(default)]
+    pub block_hash: Option<[u8; 32]>,
+
+    /// v5.1.0: Transaction index within the block (for verification)
+    #[serde(default)]
+    pub tx_index: Option<u32>,
 }
 
 /// Type of balance update
@@ -147,6 +156,8 @@ impl P2PBalanceUpdate {
             solution_hash,
             signature: Vec::new(), // Must be filled by sign()
             signer_public_key: Vec::new(), // Must be filled by sign()
+            block_hash: None,   // v5.1.0: Set when block evidence is available
+            tx_index: None,     // v5.1.0: Set when block evidence is available
         }
     }
 

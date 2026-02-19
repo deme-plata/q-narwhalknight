@@ -143,9 +143,32 @@ pub async fn get_multi_token_balance(
     let mut total_usd_value = 0.0;
 
     // Get QUG balance from wallet_balances (native balance)
+    // v5.0.1: Also check storage_engine as fallback - wallet_balances in-memory can be stale
     let qug_balance = {
         let wallet_balances = state.wallet_balances.read().await;
-        wallet_balances.get(&addr_bytes).copied().unwrap_or(0)
+        let mem_bal = wallet_balances.get(&addr_bytes).copied().unwrap_or(0);
+        info!(
+            "💰 [MULTI-TOKEN] QUG in-memory balance for {}: {} base units = {:.8} QUG (wallet_balances has {} entries)",
+            &address_hex[..16], mem_bal, mem_bal as f64 / 1e24, wallet_balances.len()
+        );
+        mem_bal
+    };
+    // Fallback: If in-memory shows 0, check RocksDB (source of truth)
+    let qug_balance = if qug_balance == 0 {
+        let db_bal = state.storage_engine.load_wallet_balance(&addr_bytes).await
+            .unwrap_or(None).unwrap_or(0);
+        if db_bal > 0 {
+            info!(
+                "💰 [MULTI-TOKEN] QUG RocksDB fallback for {}: {} base units = {:.8} QUG (in-memory was 0!)",
+                &address_hex[..16], db_bal, db_bal as f64 / 1e24
+            );
+            // Also update in-memory to stay in sync
+            let mut wallet_balances = state.wallet_balances.write().await;
+            wallet_balances.insert(addr_bytes, db_bal);
+        }
+        db_bal
+    } else {
+        qug_balance
     };
 
     // Get QUGUSD balance from BOTH sources:
@@ -257,6 +280,11 @@ pub async fn get_multi_token_balance(
         // Convert [u8; 32] to ContractAddress for lookup
         let contract_addr = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
         if let Some(contract_info) = deployed_contracts.get(&contract_addr) {
+            // v7.1.7: Skip pre-genesis (testnet) contracts - don't show testnet balances on mainnet
+            let genesis_ts = q_storage::emission_controller::GENESIS_TIMESTAMP;
+            if contract_info.deployed_at < genesis_ts {
+                continue;
+            }
             let symbol = contract_info.metadata.symbol.clone().unwrap_or_else(|| "UNKNOWN".to_string());
             // Get decimals from deployment_params if available
             let decimals = contract_info.deployment_params

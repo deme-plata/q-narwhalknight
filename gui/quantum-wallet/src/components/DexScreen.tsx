@@ -878,6 +878,37 @@ export default function DexScreen() {
 
     window.addEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
 
+    // v5.0.1: Listen for wallet-balance-updated events (dispatched by Dashboard/TopBar on SSE)
+    // This ensures QUG/QUGUSD balance updates from SSE are reflected in DEX instantly,
+    // even if the REST API returns stale data
+    const handleWalletBalanceUpdated = (event: CustomEvent) => {
+      if (!mounted) return;
+      const { symbol, balance, reason } = event.detail || {};
+      if (!symbol || balance === undefined) return;
+
+      const numericBalance = typeof balance === 'number' ? balance :
+        typeof balance === 'string' ? parseFloat(balance) || 0 : 0;
+
+      // Only process valid positive balances
+      if (numericBalance <= 0) return;
+
+      const displayBalance = numericBalance > 1e15 ? numericBalance / 1e24 : numericBalance;
+      console.log(`💰 [DEX] wallet-balance-updated: ${symbol} = ${displayBalance} (reason: ${reason})`);
+
+      setTokens(prev => prev.map(token => {
+        if (token.symbol === symbol) {
+          return { ...token, balance: displayBalance };
+        }
+        return token;
+      }));
+
+      // Cache QUG balance
+      if (symbol === 'QUG') {
+        safeCacheBalance(displayBalance);
+      }
+    };
+    window.addEventListener('wallet-balance-updated', handleWalletBalanceUpdated as EventListener);
+
     // Also listen for storage events (works across tabs/windows)
     window.addEventListener('storage', (e) => {
       if (e.key === `nitroPoints_${walletAddress}` && e.newValue && mounted) {
@@ -1101,6 +1132,8 @@ export default function DexScreen() {
         eventSource.close();
       }
       window.removeEventListener('token-price-updated', handleTokenPriceUpdated as EventListener);
+      window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
+      window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdated as EventListener);
     };
   }, []);
 
@@ -1621,8 +1654,11 @@ export default function DexScreen() {
                 holders: customHolders,
                 createdAt: apiToken.deployed_at ? apiToken.deployed_at * 1000 : undefined,
                 txCount: apiToken.tx_count || 0,
-                icon: '🪙',
+                icon: apiToken.contract_type === 'Wrapped'
+                  ? (apiToken.symbol === 'wBTC' ? '₿' : apiToken.symbol === 'wZEC' ? '🛡' : apiToken.symbol === 'wIRON' ? '🐟' : apiToken.symbol === 'wETH' ? 'Ξ' : '🌉')
+                  : '🪙',
                 logoUrl: apiToken.logo_url || localStorage.getItem(`token_logo_${apiToken.address}`) || undefined,
+                isBridgeToken: apiToken.contract_type === 'Wrapped',
                 // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
                 // Without this, custom tokens default to 24 decimals which causes U128 overflow
                 decimals: decimals,
@@ -1648,13 +1684,15 @@ export default function DexScreen() {
           const apiTokens = await Promise.all(apiTokensPromises);
 
           // ✅ FILTER: Only show tokens that have liquidity pools (liquidity > 0)
-          // This ensures token pairs are tradeable before appearing in the DEX
+          // Exception: Bridge tokens (wBTC, wZEC, wIRON, wETH) always shown so users can add liquidity
+          const bridgeSymbols = ['wBTC', 'wZEC', 'wIRON', 'wETH'];
           const tokensWithLiquidity = apiTokens.filter(token => {
+            const isBridge = bridgeSymbols.includes(token.symbol);
             const hasLiquidity = token.liquidity > 0;
-            if (!hasLiquidity) {
+            if (!hasLiquidity && !isBridge) {
               console.log(`🚫 Filtering out ${token.symbol} - no liquidity pool exists`);
             }
-            return hasLiquidity;
+            return hasLiquidity || isBridge;
           });
 
           console.log(`✅ Filtered tokens: ${tokensWithLiquidity.length} with liquidity, ${apiTokens.length - tokensWithLiquidity.length} without liquidity`);
@@ -2048,8 +2086,24 @@ export default function DexScreen() {
           const eventHex = data.data?.wallet_address?.toLowerCase() || data.wallet_address?.toLowerCase();
 
           if (currentHex && eventHex === currentHex) {
-            console.log('✅ [DEX] Balance update confirmed for current wallet - refreshing tokens');
-            fetchTokens();
+            console.log('✅ [DEX] Balance update confirmed for current wallet');
+            // v5.0.1: Directly update QUG balance from SSE event data instead of
+            // re-fetching from API (which can return stale 0 if wallet_balances is out of sync)
+            const newBalance = data.data?.new_balance ?? data.new_balance;
+            if (typeof newBalance === 'number' && newBalance > 0) {
+              const displayBalance = newBalance > 1e15 ? newBalance / 1e24 : newBalance;
+              console.log(`✅ [DEX] Updating QUG balance directly from SSE: ${displayBalance}`);
+              setTokens(prev => prev.map(token => {
+                if (token.symbol === 'QUG') {
+                  return { ...token, balance: displayBalance };
+                }
+                return token;
+              }));
+              safeCacheBalance(displayBalance);
+            } else {
+              // Fallback: re-fetch from API
+              fetchTokens();
+            }
           } else {
             console.log('⚠️ [DEX] Balance update ignored (different wallet)');
           }
@@ -3917,6 +3971,9 @@ export default function DexScreen() {
               // === Token Distribution ===
               const totalCirculating = tokens.reduce((sum, t) => sum + (t.circulatingSupply || 0), 0);
               const totalTotalSupply = tokens.reduce((sum, t) => sum + (t.totalSupply || 0), 0);
+              // v7.2.5: Bridge token stats
+              const bridgeTokens = tokens.filter(t => ['wBTC', 'wZEC', 'wIRON', 'wETH'].includes(t.symbol));
+              const bridgeTVL = bridgeTokens.reduce((sum, t) => sum + (t.liquidity || 0), 0);
               const avgCirculatingPct = totalTotalSupply > 0 ? (totalCirculating / totalTotalSupply * 100) : 0;
               const tokensWithFeatures = {
                 reflection: tokens.filter(t => t.features?.reflection).length,
@@ -3982,6 +4039,8 @@ export default function DexScreen() {
                 { label: 'Custom Tokens', value: `${customTokens}`, color: 'text-gray-300' },
                 { label: 'Index Funds', value: `${indexTokens}`, color: 'text-purple-400' },
                 { label: 'Perpetuals', value: `${perpTokens}`, color: 'text-orange-400' },
+                { label: 'Bridge Pairs', value: `${bridgeTokens.length} (wBTC/wZEC/wIRON/wETH)`, color: 'text-amber-400' },
+                { label: 'Bridge TVL', value: formatNumber(bridgeTVL), color: 'text-amber-400' },
                 // Fees
                 { label: 'Avg Buy Fee', value: `${avgBuyFee.toFixed(2)}%`, color: 'text-gray-300' },
                 { label: 'Avg Sell Fee', value: `${avgSellFee.toFixed(2)}%`, color: 'text-gray-300' },
@@ -4511,6 +4570,49 @@ export default function DexScreen() {
                   <span>Fee</span>
                   <span className="text-white">0.3%</span>
                 </div>
+                {/* v5.1.0: Deal Value in USD */}
+                {(() => {
+                  const fromToken = findToken(swapFrom);
+                  const toToken = findToken(swapTo);
+                  if (!fromToken || !toToken || !swapAmount || parseFloat(swapAmount) <= 0) return null;
+                  const payUsd = parseFloat(swapAmount) * (fromToken.price || 0);
+                  if (payUsd <= 0) return null;
+                  // Calculate expected output using AMM formula
+                  const fmtId = (id: string) => id === 'native-qug' ? 'QUG' : id === 'qugusd-stable' ? 'QUGUSD' : id;
+                  const fromFmt = fmtId(fromToken.id);
+                  const toFmt = fmtId(toToken.id);
+                  const pool = liquidityPools.find(p => {
+                    const p0 = p.token0.toUpperCase(), p1 = p.token1.toUpperCase();
+                    const f = fromFmt.toUpperCase(), t = toFmt.toUpperCase();
+                    const fS = fromToken.symbol.toUpperCase(), tS = toToken.symbol.toUpperCase();
+                    return (p0 === f && p1 === t) || (p0 === t && p1 === f) ||
+                           (p0 === fS && p1 === tS) || (p0 === tS && p1 === fS);
+                  });
+                  let receiveUsd = payUsd * 0.997; // default: same minus fee
+                  if (pool) {
+                    const isFwd = pool.token0.toUpperCase() === fromFmt.toUpperCase() || pool.token0.toUpperCase() === fromToken.symbol.toUpperCase();
+                    const rIn = (isFwd ? parseU128(pool.reserve0) : parseU128(pool.reserve1)) / 1e24;
+                    const rOut = (isFwd ? parseU128(pool.reserve1) : parseU128(pool.reserve0)) / 1e24;
+                    if (rIn > 0 && rOut > 0) {
+                      const aIn = parseFloat(swapAmount) * 0.997;
+                      const aOut = (aIn * rOut) / (rIn + aIn);
+                      receiveUsd = aOut * (toToken.price || 0);
+                    }
+                  }
+                  const fmtUsd = (v: number) => v >= 1_000_000 ? `$${(v/1_000_000).toFixed(2)}M` : v >= 1_000 ? `$${(v/1_000).toFixed(2)}K` : `$${v.toFixed(2)}`;
+                  return (
+                    <>
+                      <div className="flex justify-between text-gray-400 pt-1 border-t border-white/5">
+                        <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />You Pay</span>
+                        <span className="text-white font-medium">{fmtUsd(payUsd)}</span>
+                      </div>
+                      <div className="flex justify-between text-gray-400">
+                        <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />You Receive</span>
+                        <span className="text-green-400 font-medium">≈ {fmtUsd(receiveUsd)}</span>
+                      </div>
+                    </>
+                  );
+                })()}
                 {/* v4.0.1: Show price impact to user */}
                 {(() => {
                   if (!swapAmount || parseFloat(swapAmount) <= 0) return null;
@@ -4593,17 +4695,17 @@ export default function DexScreen() {
                   const isBetterDeal = ammRate > oracleRate;
 
                   return (
-                    <div className={`mt-2 p-2 rounded-lg text-xs ${isBetterDeal ? 'bg-green-500/20 border border-green-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'}`}>
-                      <div className="flex items-center gap-1">
+                    <div className={`mt-2 p-3 rounded-lg text-xs ${isBetterDeal ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-900/30 border border-amber-500/40'}`}>
+                      <div className="flex items-center gap-1.5">
                         <span>{isBetterDeal ? '🎉' : '⚠️'}</span>
-                        <span className={isBetterDeal ? 'text-green-400' : 'text-yellow-400'}>
+                        <span className={isBetterDeal ? 'text-green-300 font-medium' : 'text-white font-medium'}>
                           {isBetterDeal
                             ? `Pool rate is ${((ammRate/oracleRate - 1) * 100).toFixed(0)}% better than market!`
                             : `Pool rate is ${((1 - ammRate/oracleRate) * 100).toFixed(0)}% worse than market price`
                           }
                         </span>
                       </div>
-                      <div className="text-gray-400 mt-1">
+                      <div className="text-gray-300 mt-1">
                         Market: 1 {swapFrom} = {oracleRate.toFixed(2)} {swapTo} | Pool: {ammRate.toFixed(2)} {swapTo}
                       </div>
                     </div>
@@ -5467,7 +5569,11 @@ export default function DexScreen() {
                       >
                         <td className="py-3 px-3">
                           <div className="flex items-center gap-2">
-                            <div className="w-8 h-8 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0 ${
+                              (token as any).isBridgeToken
+                                ? 'bg-gradient-to-br from-amber-500 to-orange-600 ring-1 ring-amber-400/50'
+                                : 'bg-gradient-to-br from-quantum-cyan to-quantum-purple'
+                            }`}>
                               {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
                                 <div className="relative w-5 h-5">
                                   <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)', padding: '1px' }}>
@@ -5485,6 +5591,7 @@ export default function DexScreen() {
                                 <span className="font-bold text-white text-sm">{token.symbol}</span>
                                 {token.isIndexToken && <span className="px-1 rounded bg-purple-600/50 text-[10px] font-bold text-purple-200">IDX</span>}
                                 {token.isPerp && <span className="px-1 rounded bg-pink-600/50 text-[10px] font-bold text-pink-200">PERP</span>}
+                                {['wBTC', 'wZEC', 'wIRON', 'wETH'].includes(token.symbol) && <span className="px-1 rounded bg-amber-500/50 text-[10px] font-bold text-amber-200">BRIDGE</span>}
                                 {boostedTokens.has(token.id) && <span className="px-1 rounded bg-orange-500/50 text-[10px] font-bold text-orange-200">NITRO</span>}
                               </div>
                               <div className="text-xs text-gray-500 truncate">{token.name}</div>
@@ -6081,7 +6188,7 @@ export default function DexScreen() {
                       <div className="flex items-center gap-4">
                         <div className={`w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold ${
                           aiAnalysisResult.verdict === 'GOOD' ? 'bg-green-500/20 text-green-400 border-2 border-green-500/50' :
-                          aiAnalysisResult.verdict === 'CAUTION' ? 'bg-yellow-500/20 text-yellow-400 border-2 border-yellow-500/50' :
+                          aiAnalysisResult.verdict === 'CAUTION' ? 'bg-amber-900/30 text-amber-300 border-2 border-amber-500/50' :
                           'bg-red-500/20 text-red-400 border-2 border-red-500/50'
                         }`}>
                           {aiAnalysisResult.score}
@@ -6140,9 +6247,9 @@ export default function DexScreen() {
                     </div>
 
                     {/* Disclaimer */}
-                    <div className="flex items-start gap-2 p-3 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
-                      <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
-                      <p className="text-xs text-yellow-400/80">
+                    <div className="flex items-start gap-2 p-3 bg-amber-900/20 rounded-lg border border-amber-500/30">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                      <p className="text-xs text-gray-300">
                         This analysis is for informational purposes only and should not be considered financial advice. Always DYOR (Do Your Own Research) before investing.
                       </p>
                     </div>

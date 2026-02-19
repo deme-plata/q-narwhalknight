@@ -81,7 +81,7 @@ export default function PrivacyAsAService() {
 import bitcoin  # pip install python-bitcoinlib
 
 API_KEY = "your_api_key"
-BASE_URL = "https://api.quillon.xyz"
+BASE_URL = "https://quillon.xyz"
 
 def mix_bitcoin_transaction(
     from_address: str,
@@ -150,7 +150,7 @@ print(f"Anonymity set: {result['anonymity_set_size']} participants")`;
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function privateUniswapSwap(
   tokenIn,      // e.g., WETH address
@@ -230,7 +230,7 @@ privateUniswapSwap(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixSolanaTransaction(
   fromPubkey,
@@ -313,7 +313,7 @@ mixSolanaTransaction(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixSuiTransaction(
   senderAddress,
@@ -380,7 +380,7 @@ mixSuiTransaction(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixLitecoinTransaction(
   fromAddress,
@@ -442,7 +442,7 @@ mixLitecoinTransaction(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixDogecoinTransaction(
   fromAddress,
@@ -510,7 +510,7 @@ mixDogecoinTransaction(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixPolygonTransaction(
   fromAddress,
@@ -582,7 +582,7 @@ mixPolygonTransaction(
 const axios = require('axios');
 
 const API_KEY = "your_api_key";
-const BASE_URL = "https://api.quillon.xyz";
+const BASE_URL = "https://quillon.xyz";
 
 async function mixAvalancheTransaction(
   fromAddress,

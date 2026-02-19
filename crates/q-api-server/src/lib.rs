@@ -224,6 +224,11 @@ pub mod aegis_auth_middleware; // ✅ ENABLED - AEGIS-QL post-quantum authentica
 pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
 pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod email_api; // ✅ v7.3.2 - Quillon Mail: decentralized email with crypto transfers
+pub mod email_smtp; // ✅ v7.3.2 - Quillon Mail: SMTP server for inbound/outbound
+pub mod calendar_api; // ✅ v7.3.3 - Blockchain Calendar: events, scheduled TXs, P2P sync
+pub mod email_mta; // ✅ v7.3.2 - Quillon Mail: Mail Transport Agent for SMTP delivery
+pub mod email_auth_verify; // ✅ v7.3.2 - Quillon Mail: SPF/DKIM/DMARC verification
 pub mod ai_intent; // ✅ v2.3.18-beta - Safe AI intent schema (AI parses, Rust executes)
 pub mod ai_intent_parser; // ✅ v2.3.18-beta - Mistral 7B intent parsing with validation
 pub mod ai_intent_executor; // ✅ v2.3.18-beta - Deterministic Rust intent execution
@@ -277,6 +282,13 @@ pub mod lockfree_producer;
 pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
 pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
 pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
+pub mod listing_api; // ✅ v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
+pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
+pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
+pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge (QNK ↔ IRON)
+pub mod ethereum_bridge_api; // ✅ v7.3.0: Ethereum atomic swap bridge (QNK ↔ ETH)
+pub mod bridge_committee; // ✅ v7.3.1: Multi-sig bridge validation with rotating 11-node committee
+pub mod bridge_tokens; // ✅ v7.2.5: Wrapped bridge tokens (wBTC, wZEC, wIRON) mint/burn system
 pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
 pub mod price_history_indexer; // ✅ v3.7.1-beta: Consensus-verified price history indexer
 pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
@@ -288,47 +300,18 @@ pub mod temporal_memo; // ✅ v2.4.1-beta: TemporalShield protection for private
 pub mod validator_backup_api; // ✅ v2.7.0-beta: TemporalShield validator key backup (5-of-9 threshold)
 pub mod chat_protector; // ✅ v2.7.0-beta: TemporalShield protection for AI chat content (3-of-5 threshold)
 pub mod bootstrap_config; // ✅ v2.9.0-beta: Multi-bootstrap with automatic failover (decentralization)
+pub mod upgrade_verifier; // ✅ v5.1.1: Safe rolling deployment verification
+pub mod admin_settings_api; // ✅ v7.3.0: Node operator admin settings API (--admin-wallet)
+pub mod deploy_admin_api; // ✅ v5.1.1: Deploy admin panel API (master-wallet-only)
+pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, balances) from bootstrap peers
+pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
 pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent};
 pub use contracts_api::TokenSocialProfile;
 
-/// Faucet request tracking for IP-based rate limiting
-#[derive(Debug, Clone)]
-pub struct FaucetRequestRecord {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub address: String,
-    pub amount: u64,
-}
-
-/// Smart detection patterns for scripted abuse
-#[derive(Debug, Clone)]
-pub struct AbusePattern {
-    pub requests_per_minute: u32,
-    pub address_pattern_score: f64,
-    pub timing_regularity_score: f64,
-    pub user_agent_consistency: bool,
-}
-
-/// Daily faucet state with comprehensive protection
-#[derive(Debug)]
-pub struct FaucetState {
-    /// Daily total coins distributed (resets at midnight UTC)
-    pub daily_total_distributed: u64,
-    /// Daily limit (1000 coins)
-    pub daily_limit: u64,
-    /// Last reset date for daily tracking
-    pub last_reset_date: chrono::NaiveDate,
-    /// IP-based request tracking (IP -> Vec<FaucetRequestRecord>)
-    pub ip_requests: HashMap<String, Vec<FaucetRequestRecord>>,
-    /// Address-based request tracking (address -> last_request_time)
-    pub address_requests: HashMap<String, chrono::DateTime<chrono::Utc>>,
-    /// Smart abuse detection patterns (IP -> AbusePattern)
-    pub abuse_patterns: HashMap<String, AbusePattern>,
-    /// Temporarily blacklisted IPs with expiration time
-    pub blacklisted_ips: HashMap<String, chrono::DateTime<chrono::Utc>>,
-}
+// v7.0.0: FaucetState, FaucetRequestRecord, AbusePattern removed — faucet eliminated
 
 /// Pending quantum mixing request
 #[derive(Debug, Clone)]
@@ -374,6 +357,61 @@ fn default_token_decimals() -> u8 {
     24 // Default to 24 for QUG/QUGUSD (existing pools assumed to be QUG pairs)
 }
 
+/// v7.2.5: Bootstrap bridge token AMM pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+/// Called during AppState initialization to create cross-chain trading pairs
+pub async fn bootstrap_bridge_pools(
+    liquidity_pools_map: &mut HashMap<String, LiquidityPool>,
+    storage_engine: &std::sync::Arc<q_storage::StorageEngine>,
+    qug_price: f64,
+) {
+    // Bridge pool definitions: (pool_id, wrapped_symbol, native_price_usd, initial_amount_native)
+    let bridge_pools: [(&str, &str, f64, f64); 3] = [
+        ("pool-qug-wbtc-bridge", "wBTC", 97_000.0, 0.25),   // 0.25 BTC @ ~$97K
+        ("pool-qug-wzec-bridge", "wZEC", 55.0, 100.0),       // 100 ZEC @ ~$55
+        ("pool-qug-wiron-bridge", "wIRON", 0.008, 50_000.0), // 50K IRON @ ~$0.008
+    ];
+
+    for (pool_id, symbol, native_price_usd, native_amount) in &bridge_pools {
+        if liquidity_pools_map.contains_key(*pool_id) {
+            tracing::debug!("🌉 Bridge pool {} already exists, skipping bootstrap", pool_id);
+            continue;
+        }
+
+        // Calculate QUG equivalent: native_amount * native_price / qug_price
+        let qug_equivalent = native_amount * native_price_usd / qug_price;
+        let bootstrap_qug: u128 = (qug_equivalent * 1e24) as u128;
+        // Wrapped token amount in 8-decimal base units (satoshis/zatoshis/ore)
+        let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
+        // Store reserves in 24-decimal format internally (8-dec → 24-dec)
+        let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
+
+        let pool = LiquidityPool {
+            pool_id: pool_id.to_string(),
+            token0: "QUG".to_string(),
+            token1: symbol.to_string(),
+            reserve0: bootstrap_qug,
+            reserve1: reserve_wrapped_24,
+            provider: [0u8; 32], // System-owned bridge liquidity
+            created_at: chrono::Utc::now(),
+            lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+            token0_decimals: 24,
+            token1_decimals: 24, // Internal reserves always 24-decimal
+        };
+
+        liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
+        if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
+            if let Err(e) = storage_engine.save_liquidity_pool(pool_id, &pool_bytes).await {
+                tracing::warn!("⚠️ Failed to persist bootstrap {} pool: {}", symbol, e);
+            }
+        }
+        tracing::info!(
+            "🌉 [STARTUP v7.2.5] Created bridge pool {}: {:.4} QUG / {:.4} {} (${:.2}/{} @ ${:.2}/QUG)",
+            pool_id, qug_equivalent, native_amount, symbol,
+            native_price_usd, symbol, qug_price
+        );
+    }
+}
+
 /// Mining submission for async queue processing
 /// v3.3.3-beta: Added miner_id and worker_name for miner identification
 #[derive(Debug, Clone)]
@@ -390,185 +428,7 @@ pub struct MiningSubmission {
     pub worker_name: Option<String>,
 }
 
-impl Default for FaucetState {
-    fn default() -> Self {
-        Self {
-            daily_total_distributed: 0,
-            daily_limit: 1000_000_000_000, // 1000 QNK in base units
-            last_reset_date: chrono::Utc::now().date_naive(),
-            ip_requests: HashMap::new(),
-            address_requests: HashMap::new(),
-            abuse_patterns: HashMap::new(),
-            blacklisted_ips: HashMap::new(),
-        }
-    }
-}
-
-impl FaucetState {
-    /// Create a new FaucetState instance
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Check if daily reset is needed and reset if so
-    pub fn maybe_reset_daily(&mut self) {
-        let today = chrono::Utc::now().date_naive();
-        if today != self.last_reset_date {
-            self.daily_total_distributed = 0;
-            self.last_reset_date = today;
-            // Clean up old IP requests (keep only last 24 hours)
-            let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-            for requests in self.ip_requests.values_mut() {
-                requests.retain(|req| req.timestamp > cutoff);
-            }
-            self.ip_requests.retain(|_, requests| !requests.is_empty());
-            // Clean up expired blacklisted IPs
-            let now = chrono::Utc::now();
-            self.blacklisted_ips.retain(|_, expires| *expires > now);
-        }
-    }
-
-    /// Check if IP is rate limited (max 10 requests per hour)
-    pub fn is_ip_rate_limited(&self, ip: &str) -> bool {
-        let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
-        if let Some(requests) = self.ip_requests.get(ip) {
-            let recent_requests = requests
-                .iter()
-                .filter(|req| req.timestamp > one_hour_ago)
-                .count();
-            return recent_requests >= 10;
-        }
-        false
-    }
-
-    /// Check if address has requested within cooldown period (24 hours)
-    pub fn is_address_in_cooldown(&self, address: &str) -> bool {
-        let cooldown_period = chrono::Duration::hours(24);
-        if let Some(last_request) = self.address_requests.get(address) {
-            let now = chrono::Utc::now();
-            return now.signed_duration_since(*last_request) < cooldown_period;
-        }
-        false
-    }
-
-    /// Check if IP is blacklisted due to abuse
-    pub fn is_ip_blacklisted(&self, ip: &str) -> bool {
-        if let Some(expires) = self.blacklisted_ips.get(ip) {
-            return chrono::Utc::now() < *expires;
-        }
-        false
-    }
-
-    /// Analyze patterns to detect scripted abuse
-    pub fn analyze_abuse_patterns(&mut self, ip: &str) -> bool {
-        let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
-        if let Some(requests) = self.ip_requests.get(ip) {
-            let recent_requests: Vec<_> = requests
-                .iter()
-                .filter(|req| req.timestamp > one_hour_ago)
-                .collect();
-
-            if recent_requests.len() >= 5 {
-                let mut pattern = AbusePattern {
-                    requests_per_minute: (recent_requests.len() * 60 / 3600) as u32,
-                    address_pattern_score: 0.0,
-                    timing_regularity_score: 0.0,
-                    user_agent_consistency: true,
-                };
-
-                // Calculate address pattern score (random vs sequential patterns)
-                let addresses: Vec<_> = recent_requests.iter().map(|r| &r.address).collect();
-                let unique_addresses = addresses
-                    .iter()
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                pattern.address_pattern_score = if unique_addresses > 1 {
-                    // Check for sequential patterns in addresses
-                    let mut sequential_score = 0.0;
-                    for i in 1..addresses.len() {
-                        if let (Ok(prev), Ok(curr)) = (
-                            u64::from_str_radix(
-                                &addresses[i - 1]
-                                    .replace("qnk", "")
-                                    .chars()
-                                    .take(16)
-                                    .collect::<String>(),
-                                16,
-                            ),
-                            u64::from_str_radix(
-                                &addresses[i]
-                                    .replace("qnk", "")
-                                    .chars()
-                                    .take(16)
-                                    .collect::<String>(),
-                                16,
-                            ),
-                        ) {
-                            if curr.saturating_sub(prev) <= 10 {
-                                sequential_score += 1.0;
-                            }
-                        }
-                    }
-                    sequential_score / (addresses.len() - 1) as f64
-                } else {
-                    0.0
-                };
-
-                // Calculate timing regularity score
-                if recent_requests.len() >= 3 {
-                    let mut intervals = Vec::new();
-                    for i in 1..recent_requests.len() {
-                        let interval = recent_requests[i]
-                            .timestamp
-                            .signed_duration_since(recent_requests[i - 1].timestamp)
-                            .num_seconds();
-                        intervals.push(interval.abs());
-                    }
-                    let avg_interval =
-                        intervals.iter().sum::<i64>() as f64 / intervals.len() as f64;
-                    let variance = intervals
-                        .iter()
-                        .map(|&x| (x as f64 - avg_interval).powi(2))
-                        .sum::<f64>()
-                        / intervals.len() as f64;
-                    pattern.timing_regularity_score = 1.0 / (1.0 + variance / 100.0);
-                }
-
-                // Determine if this is likely scripted abuse
-                let is_abuse = pattern.requests_per_minute > 5
-                    || pattern.address_pattern_score > 0.7
-                    || pattern.timing_regularity_score > 0.8;
-
-                self.abuse_patterns.insert(ip.to_string(), pattern);
-
-                if is_abuse {
-                    // Blacklist IP for 24 hours
-                    let expires = chrono::Utc::now() + chrono::Duration::hours(24);
-                    self.blacklisted_ips.insert(ip.to_string(), expires);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Record a faucet request
-    pub fn record_request(&mut self, ip: &str, address: &str, amount: u64) {
-        let now = chrono::Utc::now();
-        let request = FaucetRequestRecord {
-            timestamp: now,
-            address: address.to_string(),
-            amount,
-        };
-
-        self.ip_requests
-            .entry(ip.to_string())
-            .or_insert_with(Vec::new)
-            .push(request);
-
-        self.address_requests.insert(address.to_string(), now);
-        self.daily_total_distributed += amount;
-    }
-}
+// v7.0.0: FaucetState impl removed — faucet eliminated
 
 /// 🔒 Supply Consensus State - Post-Quantum Protected Max Supply Enforcement
 /// This structure ensures that the 21M QNK supply cap is enforced across
@@ -609,6 +469,9 @@ pub struct MinerStats {
     /// v3.3.4-beta: Worker identifier to distinguish multiple miners to same wallet
     /// Format: "direct" for local submissions, "p2p:NODE_ID" for P2P relayed, or custom worker_name
     pub worker_id: String,
+    /// v7.4.2: Human-readable miner name (e.g., "My Rig", "Server Alpha")
+    /// Set from --miner-name CLI arg. Separate from worker_id which is used as internal key.
+    pub worker_name: Option<String>,
     /// v3.5.3-beta: Track recent solution timestamps for accurate hashrate calculation
     /// Stores up to 100 recent solution timestamps for rolling hashrate computation
     pub solution_timestamps: Vec<std::time::Instant>,
@@ -742,7 +605,7 @@ impl MiningStatistics {
     /// Update miner statistics with new submission
     /// v3.3.4-beta: Added worker_id to distinguish multiple miners to same wallet
     pub fn update_miner(&mut self, miner_address: String, hash_rate: f64) {
-        self.update_miner_with_worker(miner_address, hash_rate, "direct".to_string());
+        self.update_miner_with_worker(miner_address, hash_rate, "direct".to_string(), None);
     }
 
     /// v3.3.4-beta: Update miner with specific worker identifier
@@ -750,7 +613,7 @@ impl MiningStatistics {
     /// v3.5.3-beta: Calculate hashrate from solution submissions instead of client-reported values
     /// v3.5.4-beta: Returns the calculated hashrate for use in SSE events
     /// v3.9.3-beta: Added memory management - caps entries and resets counters periodically
-    pub fn update_miner_with_worker(&mut self, miner_address: String, hash_rate: f64, worker_id: String) -> f64 {
+    pub fn update_miner_with_worker(&mut self, miner_address: String, hash_rate: f64, worker_id: String, worker_name: Option<String>) -> f64 {
         // Use composite key: address:worker_id to track miners separately
         let key = format!("{}:{}", miner_address, worker_id);
         let now = std::time::Instant::now();
@@ -800,10 +663,15 @@ impl MiningStatistics {
                 last_update: now,
                 total_solutions: 0,
                 worker_id: worker_id.clone(),
+                worker_name: worker_name.clone(),
                 solution_timestamps: Vec::with_capacity(120), // Pre-allocate for ~2 solutions/sec
                 blocks_found: 0,      // v3.5.7-beta: Track actual blocks found
                 rewards_earned: 0,    // v3.5.7-beta: Track rewards in base units
             });
+        // v7.4.2: Update worker_name if provided (may not be set on first insert from stats event)
+        if worker_name.is_some() {
+            stats.worker_name = worker_name;
+        }
 
         // v3.5.3-beta: Track solution timestamp for hashrate calculation
         stats.solution_timestamps.push(now);
@@ -887,6 +755,7 @@ impl MiningStatistics {
                 last_update: now,
                 total_solutions: 0,
                 worker_id: worker_id.clone(),
+                worker_name: None, // P2P stats don't include worker_name yet
                 solution_timestamps: Vec::new(),
                 blocks_found: 0,      // v3.5.7-beta: Track actual blocks found
                 rewards_earned: 0,    // v3.5.7-beta: Track rewards in base units
@@ -1012,14 +881,13 @@ pub struct AppState {
 
     // ✅ v0.9.99-beta: Adaptive Block Rewards - Throughput-independent emission
     /// Balance consensus engine with adaptive reward calculation
-    /// Ensures constant 82,031 QUG/year emission regardless of network throughput (1-10,000+ bps)
+    /// Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of network throughput (1-10,000+ bps)
     pub balance_consensus_engine: Arc<q_storage::BalanceConsensusEngine>,
 
     pub event_broadcaster: Arc<EventBroadcaster>,
     pub event_emitter: Arc<HighPerformanceEmitter>,
 
-    // Faucet system with rate limiting and abuse protection
-    pub faucet_state: Arc<RwLock<FaucetState>>,
+    // v7.0.0: Faucet removed — all QUG earned through mining
 
     // 🔒 MAX SUPPLY ENFORCEMENT - Post-Quantum Consensus Protected
     // Total supply tracking with Dilithium5 signature verification
@@ -1075,8 +943,36 @@ pub struct AppState {
     // Persisted to disk for consistency across restarts
     pub node_signing_key: Arc<ed25519_dalek::SigningKey>,
 
+    // v7.2.12: Unified cryptographic engine (EternalCypher)
+    pub node_cypher: Arc<q_eternal_cypher::NodeCypher>,
+
+    // v7.2.13: Configurable admin wallet for node operator settings
+    // Set via --admin-wallet CLI arg or Q_ADMIN_WALLET env var. Defaults to FOUNDER_WALLET.
+    pub admin_wallet: String,
+
+    // Stripe payment client - initialized once at startup from STRIPE_SECRET_KEY env var
+    pub stripe_client: Option<stripe::Client>,
+
     // SYNC MODE: Track highest block height seen from network to prevent mining during sync
     pub highest_network_height: Arc<std::sync::atomic::AtomicU64>,
+
+    // v5.2.0: Timestamp of last peer height update (Unix secs) - for stale detection & decay
+    pub last_peer_height_update: Arc<std::sync::atomic::AtomicU64>,
+
+    // v5.2.0: Immediate sync trigger - wakes sync loop when peer announces higher height
+    pub sync_trigger: Arc<tokio::sync::Notify>,
+
+    // v7.1.5: Configurable dev fee in basis points (100 = 1%, adjustable by master wallet)
+    pub dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
+
+    // v7.3.1: Node operator fee share in promille (1000 = 100%, 100 = 10%, 0 = disabled)
+    // Controls what fraction of collected protocol fees (tx fees + DEX protocol fees) goes to admin_wallet
+    // Remainder goes to FOUNDER_WALLET. Configurable via Q_NODE_OPERATOR_FEE_PROMILLE env or admin API.
+    pub node_operator_fee_promille: Arc<std::sync::atomic::AtomicU64>,
+
+    // v7.3.1: DEX protocol fee in basis points (out of the 30 bps LP fee)
+    // Default 5 bps = 0.05% of swap amount extracted as protocol revenue
+    pub dex_protocol_fee_bps: Arc<std::sync::atomic::AtomicU64>,
 
     // ⚡ v0.9.66-beta: Lock-free current blockchain height for fast mining challenge generation
     // Updated atomically when blocks are produced, avoids RwLock contention on node_status
@@ -1110,6 +1006,12 @@ pub struct AppState {
     // Tracks (challenge_hash_prefix, nonce) pairs. Entries auto-expire when challenge rotates.
     // Uses DashMap for lock-free concurrent access from multiple mining submissions.
     pub mining_nonce_dedup: Arc<dashmap::DashMap<(u64, u64), u64>>, // (challenge_height, nonce) -> timestamp
+
+    /// v5.1.0: Optimistic swap deduplication — prevents double-application of swap txs
+    /// When a swap is executed locally, its tx.id is recorded here. When the same tx arrives
+    /// in a P2P block, block state processing skips it to prevent double-credit.
+    /// Key: tx_id ([u8; 32]), Value: timestamp (seconds since epoch) for expiry
+    pub optimistic_applied_txs: Arc<dashmap::DashMap<[u8; 32], u64>>,
 
     // BREAKTHROUGH: DNS-Phantom → Connection Integration
     pub connection_manager: Option<Arc<q_network::connection_manager::ConnectionManager>>,
@@ -1293,6 +1195,9 @@ pub struct AppState {
     // OAuth2 Provider for third-party integrations
     pub oauth2_storage: Arc<oauth2_provider::OAuth2Storage>,
 
+    // v7.4.0: Peer JWT public keys for cross-node token verification
+    pub peer_jwt_keys: Arc<dashmap::DashMap<String, oauth2_provider::PeerJwtKeyInfo>>,
+
     // AI Inference Engine - Privacy-first distributed inference with KV-cache (OLD - slow)
     pub inference_engine: Option<
         Arc<tokio::sync::Mutex<q_ai_inference::distributed_cache::DistributedInferenceWithCache>>,
@@ -1391,6 +1296,9 @@ pub struct AppState {
     // Used to send pool messages to P2P network via gossipsub
     pub distributed_pool_outbound_tx: Option<tokio::sync::mpsc::Sender<q_mining_pool::distributed::coordinator::OutboundMessage>>,
 
+    // 📊 v5.7.0: Pool hashrate history ring buffer (last 24h, sampled every 60s)
+    pub pool_hashrate_history: Arc<tokio::sync::RwLock<Vec<pool_api::HashrateEntry>>>,
+
     // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
     // Enables users to automate recurring token purchases at configured intervals
     pub dca_storage: Option<Arc<dca_api::DcaStorage>>,
@@ -1442,6 +1350,27 @@ pub struct AppState {
 
     // 🔐 v4.2.0-beta: VAULT RWA Token - Physical hardware wallet redemption tracking
     pub vault_redemptions: Arc<RwLock<Vec<contracts_api::VaultRedemption>>>,
+
+    // v5.1.0: FORGE RWA Token - Physical mining machine redemption tracking
+    pub forge_redemptions: Arc<RwLock<Vec<contracts_api::ForgeRedemption>>>,
+
+    // v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
+    pub listing_orders: Arc<RwLock<Vec<listing_api::ListingOrder>>>,
+
+    // v5.1.1: Node start time for uptime tracking in health endpoint
+    pub start_time: std::time::Instant,
+
+    // v5.1.1: Deploy admin state for rolling upgrade verification
+    pub deploy_state: Arc<RwLock<deploy_admin_api::DeployState>>,
+
+    // v7.2.0: Miner Link WebSocket relay — bridges wallet ↔ personal miner communication
+    pub miner_link_registry: miner_link_api::MinerLinkRegistry,
+
+    // v7.2.0: Bitcoin atomic swap manager (QNK ↔ BTC via HTLC)
+    pub atomic_swap_manager: Option<Arc<q_bitcoin_bridge::atomic_swap::AtomicSwapManager>>,
+
+    // v7.3.1: Multi-sig bridge validation committee (7-of-11 rotating attestations)
+    pub bridge_committee: Arc<RwLock<bridge_committee::BridgeCommittee>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -1714,41 +1643,109 @@ impl AppState {
             uptime: std::time::Duration::from_secs(0),
         };
 
-        // Load existing wallet balances from storage
-        let mut wallet_balances = HashMap::new();
-        match storage_engine.load_wallet_balances().await {
-            Ok(persisted_balances) => {
-                wallet_balances = persisted_balances;
-                tracing::info!(
-                    "Loaded {} wallet balances from persistent storage",
-                    wallet_balances.len()
-                );
+        // v7.2.4: Genesis filter — purge testnet BALANCES only (never delete blocks!)
+        // The old code deleted blocks with timestamp < GENESIS_TIMESTAMP on every restart,
+        // causing height drops from 295K to 77K. Fixed to only purge stale balances/state.
+        match storage_engine.purge_pre_genesis_balances_only().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER] Stale testnet balances purged — blocks preserved");
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER] No stale testnet data found — clean state");
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load wallet balances from storage: {}, starting with empty balances",
-                    e
-                );
+                tracing::warn!("⚠️ [GENESIS FILTER] Error during balance purge: {} — continuing", e);
             }
         }
 
-        // 💎 Load total minted supply from storage (max supply enforcement)
-        let total_supply = match storage_engine.load_total_supply().await {
-            Ok(supply) => {
-                tracing::info!(
-                    "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
-                    supply / 1_000_000_000_000_000_000_000_000u128
-                );
-                supply
+        // v7.2.6: Second purge — clears testnet balances re-synced via P2P
+        match storage_engine.purge_testnet_balances_v726().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER v7.2.6] Testnet balances purged from ALL nodes");
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER v7.2.6] Already purged — clean state");
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load total supply from storage: {}, starting from 0",
-                    e
-                );
-                0
+                tracing::warn!("⚠️ [GENESIS FILTER v7.2.6] Error: {} — continuing", e);
+            }
+        }
+
+        // v7.2.12: Third purge — nuclear option. Delete ALL wallet balances and rebuild from chain.
+        // Previous purges (v7.2.5, v7.2.6) ran once but P2P re-introduced testnet balances.
+        // This time we purge AND rebuild from on-chain data only.
+        let wallet_purge_ran = match storage_engine.purge_testnet_wallets_v7212().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER v7.2.12] Purged ALL wallet balances — will rebuild from chain");
+                true
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER v7.2.12] Already purged — skip rebuild");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("⚠️ [GENESIS FILTER v7.2.12] Purge error: {} — continuing", e);
+                false
             }
         };
+
+        // Load or rebuild wallet balances
+        let mut wallet_balances = HashMap::new();
+        let mut total_supply;
+
+        if wallet_purge_ran {
+            // Rebuild balances from chain (only mainnet blocks)
+            match storage_engine.rebuild_balances_from_chain().await {
+                Ok((rebuilt_balances, rebuilt_supply)) => {
+                    tracing::info!(
+                        "✅ [REBUILD v7.2.12] Rebuilt {} wallet balances, supply={} QUG",
+                        rebuilt_balances.len(),
+                        rebuilt_supply / 1_000_000_000_000_000_000_000_000u128
+                    );
+                    wallet_balances = rebuilt_balances;
+                    total_supply = rebuilt_supply;
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ [REBUILD v7.2.12] Failed: {} — starting with empty balances", e);
+                    total_supply = 0;
+                }
+            }
+        } else {
+            // Normal path: load from storage
+            match storage_engine.load_wallet_balances().await {
+                Ok(persisted_balances) => {
+                    wallet_balances = persisted_balances;
+                    tracing::info!(
+                        "Loaded {} wallet balances from persistent storage",
+                        wallet_balances.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load wallet balances from storage: {}, starting with empty balances",
+                        e
+                    );
+                }
+            }
+
+            // 💎 Load total minted supply from storage (max supply enforcement)
+            total_supply = match storage_engine.load_total_supply().await {
+                Ok(supply) => {
+                    tracing::info!(
+                        "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
+                        supply / 1_000_000_000_000_000_000_000_000u128
+                    );
+                    supply
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load total supply from storage: {}, starting from 0",
+                        e
+                    );
+                    0
+                }
+            };
+        }
 
         // Load existing token balances from persistent storage
         let mut token_balances = HashMap::new();
@@ -1768,45 +1765,42 @@ impl AppState {
             }
         }
 
-        // v3.9.5-beta: One-time restore of token balances destroyed by MAX_SANE_BALANCE bug
-        // The old code had a hardcoded 1e31 threshold that was too low for 24-decimal tokens,
-        // causing balances >10M tokens to be permanently reset to zero in RocksDB.
+        // v7.2.12: Clear stale QUGUSD token_balances from testnet — BOTH in-memory AND RocksDB
+        // v6.5.1 only cleared in-memory, but stablecoin_api reads directly from RocksDB (v2.9.21),
+        // so the testnet QUGUSD balances would reappear on every API request.
         {
-            let restore_wallet: [u8; 32] = {
-                let mut arr = [0u8; 32];
-                if let Ok(bytes) = hex::decode("4902cccc027cd41480d9157467cb268fe12a6cadb880532b8ae926340a41a6b5") {
-                    arr.copy_from_slice(&bytes);
-                }
-                arr
-            };
-            let restore_pairs: &[(&str, u128)] = &[
-                ("ec6dba2c5e83fe2070865d4f2cdbb18575740260413c7d354d0fcbf189d8f56e", 13915517938741345604225359000000000000_u128),
-                ("3ecab66e135e20085b63008136a6ba2b527a2510628ea69df05c184f6449ba78", 9988467429964296674602000000000000_u128),
-                ("f867ecf63542dbbb8b1af539a09b6f58976ce51d873666db789e4ce1a41f63f2", 3797766368006652584918928000000000000_u128),
-                ("4b403b701fde3fdcd93fb54a83a4152b1429f6a3bece40172581662daa3c5fac", 9000000000000000024943707780816848563_u128),
-            ];
-            for (token_hex, original_balance) in restore_pairs {
-                let mut token_addr = [0u8; 32];
-                if let Ok(bytes) = hex::decode(token_hex) {
-                    token_addr.copy_from_slice(&bytes);
-                }
-                let key = (restore_wallet, token_addr);
-                let current = token_balances.get(&key).copied().unwrap_or(0);
-                if current == 0 {
-                    tracing::warn!(
-                        "🔧 [v3.9.5 RESTORE] Restoring destroyed token balance: token={}, amount={}",
-                        &token_hex[..8], original_balance
-                    );
-                    token_balances.insert(key, *original_balance);
-                    if let Err(e) = storage_engine.save_token_balance(&restore_wallet, &token_addr, *original_balance).await {
-                        tracing::error!("Failed to persist restored token balance: {}", e);
-                    }
+            use q_types::QUGUSD_TOKEN_ADDRESS;
+            let mut removed_from_memory = 0usize;
+            let mut removed_from_rocksdb = 0usize;
+
+            // Collect QUGUSD wallet addresses before removing (for RocksDB cleanup)
+            let qugusd_wallets: Vec<[u8; 32]> = token_balances
+                .iter()
+                .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
+                .map(|((wallet, _), _)| *wallet)
+                .collect();
+
+            // Remove from in-memory HashMap
+            let before = token_balances.len();
+            token_balances.retain(|(_wallet, token_addr), _balance| {
+                *token_addr != QUGUSD_TOKEN_ADDRESS
+            });
+            removed_from_memory = before - token_balances.len();
+
+            // Also delete from RocksDB so stablecoin_api (which reads RocksDB directly) won't find them
+            for wallet in &qugusd_wallets {
+                if let Err(e) = storage_engine.delete_token_balance(wallet, &QUGUSD_TOKEN_ADDRESS).await {
+                    tracing::warn!("⚠️ Failed to delete QUGUSD from RocksDB for wallet {}: {}", hex::encode(&wallet[..8]), e);
                 } else {
-                    tracing::info!(
-                        "✅ [v3.9.5 RESTORE] Token {} already has balance {}, skipping",
-                        &token_hex[..8], current
-                    );
+                    removed_from_rocksdb += 1;
                 }
+            }
+
+            if removed_from_memory > 0 || removed_from_rocksdb > 0 {
+                tracing::info!(
+                    "🧹 Cleared {} stale QUGUSD entries (memory={}, RocksDB={})",
+                    removed_from_memory.max(removed_from_rocksdb), removed_from_memory, removed_from_rocksdb
+                );
             }
         }
 
@@ -1829,13 +1823,21 @@ impl AppState {
         }
 
         // Load existing liquidity pools from persistent storage
+        // v7.1.6: Filter out pre-genesis (testnet) pools
+        let pool_genesis_ts = q_storage::emission_controller::GENESIS_TIMESTAMP;
         let mut liquidity_pools_map = HashMap::new();
         match storage_engine.load_liquidity_pools().await {
             Ok(persisted_pools) => {
-                // Deserialize each pool from bytes
+                let mut filtered_pool_count = 0u64;
                 for (pool_id, pool_bytes) in persisted_pools {
                     match serde_json::from_slice::<LiquidityPool>(&pool_bytes) {
                         Ok(pool) => {
+                            let pool_ts = pool.created_at.timestamp() as u64;
+                            if pool_ts > 0 && pool_ts < pool_genesis_ts {
+                                filtered_pool_count += 1;
+                                let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
+                                continue;
+                            }
                             liquidity_pools_map.insert(pool_id.clone(), pool);
                         }
                         Err(e) => {
@@ -1846,6 +1848,12 @@ impl AppState {
                             );
                         }
                     }
+                }
+                if filtered_pool_count > 0 {
+                    tracing::info!(
+                        "🧹 [GENESIS FILTER] Purged {} pre-genesis testnet pools from storage",
+                        filtered_pool_count
+                    );
                 }
                 tracing::info!(
                     "💧 Loaded {} liquidity pools from persistent storage",
@@ -1872,6 +1880,22 @@ impl AppState {
         // Transactions remain in storage and can be queried on-demand
         tracing::info!("💳 Historical transactions available in storage (not loaded into memory)");
 
+        // v7.1.2: Purge old testnet contracts when starting fresh mainnet
+        // RocksDB CF_MANIFEST stores contracts from ALL networks without filtering.
+        // When a fresh data-mainnet2026 directory is created, old testnet contracts
+        // contaminate the contract list (1778+ old tokens appear).
+        if initial_height == 0 {
+            let network_id_str = std::env::var("Q_NETWORK_ID").unwrap_or_default();
+            if network_id_str.contains("mainnet") {
+                tracing::info!("🧹 [MAINNET SAFETY] Fresh mainnet detected (height=0) - purging old testnet contracts and pools");
+                if let Err(e) = storage_engine.purge_dex_and_contracts().await {
+                    tracing::warn!("⚠️  Failed to purge old contracts: {} (non-fatal)", e);
+                } else {
+                    tracing::info!("✅ [MAINNET SAFETY] Old testnet contracts purged successfully");
+                }
+            }
+        }
+
         // Initialize real-time streaming
         let event_broadcaster = Arc::new(EventBroadcaster::new());
         let event_emitter = Arc::new(HighPerformanceEmitter::new(event_broadcaster.clone()));
@@ -1887,6 +1911,57 @@ impl AppState {
 
         // NOTE: Token balances are now loaded from persistent storage above
         // No need to restore from deployed contracts - persistence handles it
+
+        // v7.1.7: Purge token balances for pre-genesis (testnet) contracts
+        // orobit_ecosystem already filtered pre-genesis contracts at this point.
+        // Remove token balances whose contract was purged (testnet orphans).
+        // v7.2.12: Also delete from RocksDB so stablecoin_api won't resurrect them.
+        {
+            use q_types::{QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS};
+            let deployed = orobit_ecosystem.deployed_contracts.read().await;
+            let before_count = token_balances.len();
+
+            // Collect entries to remove BEFORE retain, for RocksDB cleanup
+            let entries_to_remove: Vec<([u8; 32], [u8; 32])> = token_balances
+                .iter()
+                .filter(|((_wallet_addr, token_addr), _balance)| {
+                    if *token_addr == QUG_TOKEN_ADDRESS || *token_addr == QUGUSD_TOKEN_ADDRESS {
+                        return false; // keep native tokens
+                    }
+                    let ca = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
+                    !deployed.contains_key(&ca)
+                })
+                .map(|((wallet_addr, token_addr), _)| (*wallet_addr, *token_addr))
+                .collect();
+
+            token_balances.retain(|(_wallet_addr, token_addr), _balance| {
+                // Always keep native tokens
+                if *token_addr == QUG_TOKEN_ADDRESS || *token_addr == QUGUSD_TOKEN_ADDRESS {
+                    return true;
+                }
+                // Keep only if contract exists in post-genesis ecosystem
+                let ca = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
+                deployed.contains_key(&ca)
+            });
+
+            let removed = before_count - token_balances.len();
+
+            // Delete from RocksDB so they don't reappear after restart
+            let mut rocksdb_deleted = 0usize;
+            for (wallet_addr, token_addr) in &entries_to_remove {
+                if storage_engine.delete_token_balance(wallet_addr, token_addr).await.is_ok() {
+                    rocksdb_deleted += 1;
+                }
+            }
+
+            if removed > 0 {
+                tracing::info!(
+                    "🧹 [GENESIS FILTER] Purged {} testnet token balances (memory={}, RocksDB={}), {} remaining",
+                    removed, removed, rocksdb_deleted, token_balances.len()
+                );
+            }
+            drop(deployed);
+        }
 
         // Initialize Quillon Bank - Full Quantum Banking System with CDP
         let plugin_manager = Arc::new(PluginManager::new());
@@ -1989,6 +2064,21 @@ impl AppState {
                             tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
                         }
 
+                        // v7.2.13: Clear testnet minted_qugusd from vault on every startup
+                        // QUGUSD minting on mainnet hasn't started, so ALL minted_qugusd is testnet.
+                        if !persisted_vault.minted_qugusd.is_empty() {
+                            let stale_count = persisted_vault.minted_qugusd.len();
+                            let stale_total: u128 = persisted_vault.minted_qugusd.values().sum();
+                            tracing::info!(
+                                "🧹 [GENESIS FILTER] Clearing {} stale minted_qugusd entries (total={:.2}) from CollateralVault",
+                                stale_count, stale_total as f64 / 1e24
+                            );
+                            persisted_vault.minted_qugusd.clear();
+                            persisted_vault.total_qugusd_minted = 0;
+                            persisted_vault.locked_qug.clear();
+                            persisted_vault.total_qug_locked = 0;
+                        }
+
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -2087,6 +2177,14 @@ impl AppState {
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
+        // v7.2.5: Bootstrap bridge token pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+        {
+            let vault_r = collateral_vault.read().await;
+            let qug_price = vault_r.qug_price_usd;
+            drop(vault_r);
+            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price).await;
+        }
+
         // Load existing loan applications from persistent storage
         let mut pending_loan_applications_map = HashMap::new();
         match storage_engine.load_loan_applications().await {
@@ -2121,19 +2219,19 @@ impl AppState {
         }
 
         // ✅ v0.9.99-beta: Initialize Adaptive Block Rewards System
-        // Ensures constant 82,031 QUG/year emission regardless of throughput (1-10,000+ bps)
-        let genesis_timestamp = 1700000000; // Nov 15, 2023 00:00:00 UTC - Testnet Phase 8 launch
+        // Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of throughput (1-10,000+ bps)
+        let genesis_timestamp = q_storage::balance_consensus::active_genesis_timestamp();
         let dev_wallet = crate::aegis_auth_middleware::FOUNDER_WALLET.to_string();
         let balance_consensus_engine = Arc::new(q_storage::BalanceConsensusEngine::new(
             genesis_timestamp,
             dev_wallet,
         ));
         tracing::info!("✅ v0.9.99-beta: Adaptive Block Rewards initialized");
-        tracing::info!("   📊 Emission: 82,031 QUG/year (throughput-independent)");
+        tracing::info!("   📊 Emission: 2,625,000 QUG/year Era 0 (~7,187 QUG/day), halving every 4 years");
         tracing::info!("   ⏰ Halving: Every 4 years (time-based)");
         tracing::info!("   🎯 Supply cap: 21,000,000 QUG");
         tracing::info!("   📅 Timeline: 256 years to full emission");
-        tracing::info!("   🔀 Migration: Block 200,000 activation");
+        tracing::info!("   📅 Genesis: {} (active_genesis_timestamp)", genesis_timestamp);
 
         Ok(Self {
             config,
@@ -2159,7 +2257,7 @@ impl AppState {
             event_emitter,
 
             // Faucet system with rate limiting and abuse protection
-            faucet_state: Arc::new(RwLock::new(FaucetState::default())),
+            // v7.0.0: faucet_state removed
 
             // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
             total_minted_supply: Arc::new(RwLock::new(total_supply)), // Loaded from storage on startup
@@ -2246,7 +2344,15 @@ impl AppState {
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key
+            node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: test dummy
+            admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
+            stripe_client: crate::payment_api::init_stripe_client().ok(),
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
+            last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
+            sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
+            node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
+            dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
@@ -2259,6 +2365,7 @@ impl AppState {
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             mining_submission_tx: None, // Disabled in test mode
             mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
+            optimistic_applied_txs: Arc::new(dashmap::DashMap::new()),
             connection_manager: None,
             dag_sync_manager: None, // Will be initialized with PeerRegistry
 
@@ -2334,6 +2441,10 @@ impl AppState {
                     is_validator,
                     validator_index: 0, // Will be overridden by pool for each producer
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
+                    network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
+                        let now = chrono::Utc::now().timestamp() as u64;
+                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.1".to_string() }
+                    }),
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
@@ -2469,8 +2580,15 @@ impl AppState {
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
 
-            // OAuth2 Provider - Initialize with empty storage
-            oauth2_storage: Arc::new(oauth2_provider::OAuth2Storage::new()),
+            // OAuth2 Provider - v7.3.5: RocksDB-persisted clients (survive restarts)
+            oauth2_storage: {
+                let oauth2 = Arc::new(oauth2_provider::OAuth2Storage::with_storage(storage_engine.clone()));
+                oauth2.load_clients_from_disk().await;
+                oauth2
+            },
+
+            // v7.4.0: Peer JWT public keys for cross-node token verification
+            peer_jwt_keys: Arc::new(dashmap::DashMap::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -2565,6 +2683,7 @@ impl AppState {
             // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
             distributed_pool_coordinator: None,
             distributed_pool_outbound_tx: None,
+            pool_hashrate_history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
 
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
             dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
@@ -2600,6 +2719,20 @@ impl AppState {
             death_certificates: Arc::new(RwLock::new(Vec::new())),
             // 🔐 v4.2.0: VAULT RWA redemptions
             vault_redemptions: Arc::new(RwLock::new(Vec::new())),
+            // v5.1.0: FORGE RWA redemptions
+            forge_redemptions: Arc::new(RwLock::new(Vec::new())),
+            // v6.5.0: Exchange Listing RWA orders
+            listing_orders: Arc::new(RwLock::new(Vec::new())),
+            // v5.1.1: Node start time
+            start_time: std::time::Instant::now(),
+            // v5.1.1: Deploy admin state
+            deploy_state: Arc::new(RwLock::new(deploy_admin_api::DeployState::new())),
+            // v7.2.0: Miner link relay
+            miner_link_registry: miner_link_api::new_registry(),
+            // v7.2.0: Bitcoin bridge (initialized separately if configured)
+            atomic_swap_manager: None,
+            // v7.3.1: Bridge committee (peer ID set later)
+            bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
         })
     }
 
@@ -2698,36 +2831,38 @@ impl AppState {
 
         // v1.3.4-beta: Skip NetworkManager when Tor is not enabled
         // NetworkManager uses Tor for DNS-phantom bridging, which blocks startup without Tor
-        let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
-            std::env::var("Q_TOR_PROXY").is_ok();
+        let network_manager = {
+            let tor_enabled = std::env::var("Q_TOR_ENABLED").is_ok() ||
+                std::env::var("Q_TOR_PROXY").is_ok();
 
-        let network_manager = if tor_enabled {
-            let mut tor_config = q_tor_client::TorConfig::default();
-            tor_config.enabled = true; // Enable Tor for NetworkManager
+            if tor_enabled {
+                let mut tor_config = q_tor_client::TorConfig::default();
+                tor_config.enabled = true; // Enable Tor for NetworkManager
 
-            let network_config = q_network::NetworkManagerConfig {
-                local_validator_id: node_id,
-                tor_config,
-                phase: q_types::Phase::Phase1,
-                channel_rotation_hours: 24,
-                sync_enabled: true,
-                heartbeat_interval_secs: 30,
-                max_peers: 100,
-            };
+                let network_config = q_network::NetworkManagerConfig {
+                    local_validator_id: node_id,
+                    tor_config,
+                    phase: q_types::Phase::Phase1,
+                    channel_rotation_hours: 24,
+                    sync_enabled: true,
+                    heartbeat_interval_secs: 30,
+                    max_peers: 100,
+                };
 
-            match NetworkManager::new(network_config).await {
-                Ok(nm) => {
-                    tracing::info!("✅ NetworkManager initialized - DNS-phantom bridge ready (Tor enabled)");
-                    Some(Arc::new(nm))
+                match NetworkManager::new(network_config).await {
+                    Ok(nm) => {
+                        tracing::info!("✅ NetworkManager initialized - DNS-phantom bridge ready (Tor enabled)");
+                        Some(Arc::new(nm))
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️ NetworkManager initialization failed: {}, continuing without peer bridge", e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("⚠️ NetworkManager initialization failed: {}, continuing without peer bridge", e);
-                    None
-                }
+            } else {
+                tracing::info!("🔌 Skipping NetworkManager (Tor not enabled) - using direct libp2p connections");
+                None
             }
-        } else {
-            tracing::info!("🔌 Skipping NetworkManager (Tor not enabled) - using direct libp2p connections");
-            None
         };
 
         // Use the libp2p discovery passed in from main.rs (which has topic subscriptions configured)
@@ -2752,41 +2887,109 @@ impl AppState {
             }
         };
 
-        // Load existing wallet balances from storage
-        let mut wallet_balances = HashMap::new();
-        match storage_engine.load_wallet_balances().await {
-            Ok(persisted_balances) => {
-                wallet_balances = persisted_balances;
-                tracing::info!(
-                    "Loaded {} wallet balances from persistent storage",
-                    wallet_balances.len()
-                );
+        // v7.2.4: Genesis filter — purge testnet BALANCES only (never delete blocks!)
+        // The old code deleted blocks with timestamp < GENESIS_TIMESTAMP on every restart,
+        // causing height drops from 295K to 77K. Fixed to only purge stale balances/state.
+        match storage_engine.purge_pre_genesis_balances_only().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER] Stale testnet balances purged — blocks preserved");
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER] No stale testnet data found — clean state");
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load wallet balances from storage: {}, starting with empty balances",
-                    e
-                );
+                tracing::warn!("⚠️ [GENESIS FILTER] Error during balance purge: {} — continuing", e);
             }
         }
 
-        // 💎 Load total minted supply from storage (max supply enforcement)
-        let total_supply = match storage_engine.load_total_supply().await {
-            Ok(supply) => {
-                tracing::info!(
-                    "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
-                    supply / 1_000_000_000_000_000_000_000_000u128
-                );
-                supply
+        // v7.2.6: Second purge — clears testnet balances re-synced via P2P
+        match storage_engine.purge_testnet_balances_v726().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER v7.2.6] Testnet balances purged from ALL nodes");
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER v7.2.6] Already purged — clean state");
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load total supply from storage: {}, starting from 0",
-                    e
-                );
-                0
+                tracing::warn!("⚠️ [GENESIS FILTER v7.2.6] Error: {} — continuing", e);
+            }
+        }
+
+        // v7.2.12: Third purge — nuclear option. Delete ALL wallet balances and rebuild from chain.
+        // Previous purges (v7.2.5, v7.2.6) ran once but P2P re-introduced testnet balances.
+        // This time we purge AND rebuild from on-chain data only.
+        let wallet_purge_ran = match storage_engine.purge_testnet_wallets_v7212().await {
+            Ok(true) => {
+                tracing::info!("🧹 [GENESIS FILTER v7.2.12] Purged ALL wallet balances — will rebuild from chain");
+                true
+            }
+            Ok(false) => {
+                tracing::info!("✅ [GENESIS FILTER v7.2.12] Already purged — skip rebuild");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("⚠️ [GENESIS FILTER v7.2.12] Purge error: {} — continuing", e);
+                false
             }
         };
+
+        // Load or rebuild wallet balances
+        let mut wallet_balances = HashMap::new();
+        let mut total_supply;
+
+        if wallet_purge_ran {
+            // Rebuild balances from chain (only mainnet blocks)
+            match storage_engine.rebuild_balances_from_chain().await {
+                Ok((rebuilt_balances, rebuilt_supply)) => {
+                    tracing::info!(
+                        "✅ [REBUILD v7.2.12] Rebuilt {} wallet balances, supply={} QUG",
+                        rebuilt_balances.len(),
+                        rebuilt_supply / 1_000_000_000_000_000_000_000_000u128
+                    );
+                    wallet_balances = rebuilt_balances;
+                    total_supply = rebuilt_supply;
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ [REBUILD v7.2.12] Failed: {} — starting with empty balances", e);
+                    total_supply = 0;
+                }
+            }
+        } else {
+            // Normal path: load from storage
+            match storage_engine.load_wallet_balances().await {
+                Ok(persisted_balances) => {
+                    wallet_balances = persisted_balances;
+                    tracing::info!(
+                        "Loaded {} wallet balances from persistent storage",
+                        wallet_balances.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load wallet balances from storage: {}, starting with empty balances",
+                        e
+                    );
+                }
+            }
+
+            // 💎 Load total minted supply from storage (max supply enforcement)
+            total_supply = match storage_engine.load_total_supply().await {
+                Ok(supply) => {
+                    tracing::info!(
+                        "💎 Loaded total minted supply: {} QUG (max: 21M QUG)",
+                        supply / 1_000_000_000_000_000_000_000_000u128
+                    );
+                    supply
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load total supply from storage: {}, starting from 0",
+                        e
+                    );
+                    0
+                }
+            };
+        }
 
         // Load existing token balances from persistent storage
         let mut token_balances = HashMap::new();
@@ -2806,45 +3009,42 @@ impl AppState {
             }
         }
 
-        // v3.9.5-beta: One-time restore of token balances destroyed by MAX_SANE_BALANCE bug
-        // The old code had a hardcoded 1e31 threshold that was too low for 24-decimal tokens,
-        // causing balances >10M tokens to be permanently reset to zero in RocksDB.
+        // v7.2.12: Clear stale QUGUSD token_balances from testnet — BOTH in-memory AND RocksDB
+        // v6.5.1 only cleared in-memory, but stablecoin_api reads directly from RocksDB (v2.9.21),
+        // so the testnet QUGUSD balances would reappear on every API request.
         {
-            let restore_wallet: [u8; 32] = {
-                let mut arr = [0u8; 32];
-                if let Ok(bytes) = hex::decode("4902cccc027cd41480d9157467cb268fe12a6cadb880532b8ae926340a41a6b5") {
-                    arr.copy_from_slice(&bytes);
-                }
-                arr
-            };
-            let restore_pairs: &[(&str, u128)] = &[
-                ("ec6dba2c5e83fe2070865d4f2cdbb18575740260413c7d354d0fcbf189d8f56e", 13915517938741345604225359000000000000_u128),
-                ("3ecab66e135e20085b63008136a6ba2b527a2510628ea69df05c184f6449ba78", 9988467429964296674602000000000000_u128),
-                ("f867ecf63542dbbb8b1af539a09b6f58976ce51d873666db789e4ce1a41f63f2", 3797766368006652584918928000000000000_u128),
-                ("4b403b701fde3fdcd93fb54a83a4152b1429f6a3bece40172581662daa3c5fac", 9000000000000000024943707780816848563_u128),
-            ];
-            for (token_hex, original_balance) in restore_pairs {
-                let mut token_addr = [0u8; 32];
-                if let Ok(bytes) = hex::decode(token_hex) {
-                    token_addr.copy_from_slice(&bytes);
-                }
-                let key = (restore_wallet, token_addr);
-                let current = token_balances.get(&key).copied().unwrap_or(0);
-                if current == 0 {
-                    tracing::warn!(
-                        "🔧 [v3.9.5 RESTORE] Restoring destroyed token balance: token={}, amount={}",
-                        &token_hex[..8], original_balance
-                    );
-                    token_balances.insert(key, *original_balance);
-                    if let Err(e) = storage_engine.save_token_balance(&restore_wallet, &token_addr, *original_balance).await {
-                        tracing::error!("Failed to persist restored token balance: {}", e);
-                    }
+            use q_types::QUGUSD_TOKEN_ADDRESS;
+            let mut removed_from_memory = 0usize;
+            let mut removed_from_rocksdb = 0usize;
+
+            // Collect QUGUSD wallet addresses before removing (for RocksDB cleanup)
+            let qugusd_wallets: Vec<[u8; 32]> = token_balances
+                .iter()
+                .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
+                .map(|((wallet, _), _)| *wallet)
+                .collect();
+
+            // Remove from in-memory HashMap
+            let before = token_balances.len();
+            token_balances.retain(|(_wallet, token_addr), _balance| {
+                *token_addr != QUGUSD_TOKEN_ADDRESS
+            });
+            removed_from_memory = before - token_balances.len();
+
+            // Also delete from RocksDB so stablecoin_api (which reads RocksDB directly) won't find them
+            for wallet in &qugusd_wallets {
+                if let Err(e) = storage_engine.delete_token_balance(wallet, &QUGUSD_TOKEN_ADDRESS).await {
+                    tracing::warn!("⚠️ Failed to delete QUGUSD from RocksDB for wallet {}: {}", hex::encode(&wallet[..8]), e);
                 } else {
-                    tracing::info!(
-                        "✅ [v3.9.5 RESTORE] Token {} already has balance {}, skipping",
-                        &token_hex[..8], current
-                    );
+                    removed_from_rocksdb += 1;
                 }
+            }
+
+            if removed_from_memory > 0 || removed_from_rocksdb > 0 {
+                tracing::info!(
+                    "🧹 Cleared {} stale QUGUSD entries (memory={}, RocksDB={})",
+                    removed_from_memory.max(removed_from_rocksdb), removed_from_memory, removed_from_rocksdb
+                );
             }
         }
 
@@ -2867,13 +3067,21 @@ impl AppState {
         }
 
         // Load existing liquidity pools from persistent storage
+        // v7.1.6: Filter out pre-genesis (testnet) pools
+        let pool_genesis_ts = q_storage::emission_controller::GENESIS_TIMESTAMP;
         let mut liquidity_pools_map = HashMap::new();
         match storage_engine.load_liquidity_pools().await {
             Ok(persisted_pools) => {
-                // Deserialize each pool from bytes
+                let mut filtered_pool_count = 0u64;
                 for (pool_id, pool_bytes) in persisted_pools {
                     match serde_json::from_slice::<LiquidityPool>(&pool_bytes) {
                         Ok(pool) => {
+                            let pool_ts = pool.created_at.timestamp() as u64;
+                            if pool_ts > 0 && pool_ts < pool_genesis_ts {
+                                filtered_pool_count += 1;
+                                let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
+                                continue;
+                            }
                             liquidity_pools_map.insert(pool_id.clone(), pool);
                         }
                         Err(e) => {
@@ -2884,6 +3092,12 @@ impl AppState {
                             );
                         }
                     }
+                }
+                if filtered_pool_count > 0 {
+                    tracing::info!(
+                        "🧹 [GENESIS FILTER] Purged {} pre-genesis testnet pools from storage",
+                        filtered_pool_count
+                    );
                 }
                 tracing::info!(
                     "💧 Loaded {} liquidity pools from persistent storage",
@@ -2925,6 +3139,57 @@ impl AppState {
 
         // NOTE: Token balances are now loaded from persistent storage above
         // No need to restore from deployed contracts - persistence handles it
+
+        // v7.1.7: Purge token balances for pre-genesis (testnet) contracts
+        // orobit_ecosystem already filtered pre-genesis contracts at this point.
+        // Remove token balances whose contract was purged (testnet orphans).
+        // v7.2.12: Also delete from RocksDB so stablecoin_api won't resurrect them.
+        {
+            use q_types::{QUG_TOKEN_ADDRESS, QUGUSD_TOKEN_ADDRESS};
+            let deployed = orobit_ecosystem.deployed_contracts.read().await;
+            let before_count = token_balances.len();
+
+            // Collect entries to remove BEFORE retain, for RocksDB cleanup
+            let entries_to_remove: Vec<([u8; 32], [u8; 32])> = token_balances
+                .iter()
+                .filter(|((_wallet_addr, token_addr), _balance)| {
+                    if *token_addr == QUG_TOKEN_ADDRESS || *token_addr == QUGUSD_TOKEN_ADDRESS {
+                        return false; // keep native tokens
+                    }
+                    let ca = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
+                    !deployed.contains_key(&ca)
+                })
+                .map(|((wallet_addr, token_addr), _)| (*wallet_addr, *token_addr))
+                .collect();
+
+            token_balances.retain(|(_wallet_addr, token_addr), _balance| {
+                // Always keep native tokens
+                if *token_addr == QUG_TOKEN_ADDRESS || *token_addr == QUGUSD_TOKEN_ADDRESS {
+                    return true;
+                }
+                // Keep only if contract exists in post-genesis ecosystem
+                let ca = q_vm::contracts::orobit_smart_contracts::ContractAddress(*token_addr);
+                deployed.contains_key(&ca)
+            });
+
+            let removed = before_count - token_balances.len();
+
+            // Delete from RocksDB so they don't reappear after restart
+            let mut rocksdb_deleted = 0usize;
+            for (wallet_addr, token_addr) in &entries_to_remove {
+                if storage_engine.delete_token_balance(wallet_addr, token_addr).await.is_ok() {
+                    rocksdb_deleted += 1;
+                }
+            }
+
+            if removed > 0 {
+                tracing::info!(
+                    "🧹 [GENESIS FILTER] Purged {} testnet token balances (memory={}, RocksDB={}), {} remaining",
+                    removed, removed, rocksdb_deleted, token_balances.len()
+                );
+            }
+            drop(deployed);
+        }
 
         // Initialize Quillon Bank - Full Quantum Banking System with CDP
         let plugin_manager = Arc::new(PluginManager::new());
@@ -3027,6 +3292,21 @@ impl AppState {
                             tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
                         }
 
+                        // v7.2.13: Clear testnet minted_qugusd from vault on every startup
+                        // QUGUSD minting on mainnet hasn't started, so ALL minted_qugusd is testnet.
+                        if !persisted_vault.minted_qugusd.is_empty() {
+                            let stale_count = persisted_vault.minted_qugusd.len();
+                            let stale_total: u128 = persisted_vault.minted_qugusd.values().sum();
+                            tracing::info!(
+                                "🧹 [GENESIS FILTER] Clearing {} stale minted_qugusd entries (total={:.2}) from CollateralVault",
+                                stale_count, stale_total as f64 / 1e24
+                            );
+                            persisted_vault.minted_qugusd.clear();
+                            persisted_vault.total_qugusd_minted = 0;
+                            persisted_vault.locked_qug.clear();
+                            persisted_vault.total_qug_locked = 0;
+                        }
+
                         Arc::new(RwLock::new(persisted_vault))
                     }
                     Err(e) => {
@@ -3125,6 +3405,14 @@ impl AppState {
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
+        // v7.2.5: Bootstrap bridge token pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+        {
+            let vault_r = collateral_vault.read().await;
+            let qug_price = vault_r.qug_price_usd;
+            drop(vault_r);
+            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price).await;
+        }
+
         // Load existing loan applications from persistent storage
         let mut pending_loan_applications_map = HashMap::new();
         match storage_engine.load_loan_applications().await {
@@ -3159,19 +3447,19 @@ impl AppState {
         }
 
         // ✅ v0.9.99-beta: Initialize Adaptive Block Rewards System
-        // Ensures constant 82,031 QUG/year emission regardless of throughput (1-10,000+ bps)
-        let genesis_timestamp = 1700000000; // Nov 15, 2023 00:00:00 UTC - Testnet Phase 8 launch
+        // Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of throughput (1-10,000+ bps)
+        let genesis_timestamp = q_storage::balance_consensus::active_genesis_timestamp();
         let dev_wallet = crate::aegis_auth_middleware::FOUNDER_WALLET.to_string();
         let balance_consensus_engine = Arc::new(q_storage::BalanceConsensusEngine::new(
             genesis_timestamp,
             dev_wallet,
         ));
         tracing::info!("✅ v0.9.99-beta: Adaptive Block Rewards initialized");
-        tracing::info!("   📊 Emission: 82,031 QUG/year (throughput-independent)");
+        tracing::info!("   📊 Emission: 2,625,000 QUG/year Era 0 (~7,187 QUG/day), halving every 4 years");
         tracing::info!("   ⏰ Halving: Every 4 years (time-based)");
         tracing::info!("   🎯 Supply cap: 21,000,000 QUG");
         tracing::info!("   📅 Timeline: 256 years to full emission");
-        tracing::info!("   🔀 Migration: Block 200,000 activation");
+        tracing::info!("   📅 Genesis: {} (active_genesis_timestamp)", genesis_timestamp);
 
         Ok(Self {
             config,
@@ -3197,7 +3485,7 @@ impl AppState {
             event_emitter,
 
             // Faucet system
-            faucet_state: Arc::new(RwLock::new(FaucetState::default())),
+            // v7.0.0: faucet_state removed
 
             // 🔒 MAX SUPPLY ENFORCEMENT - Initialize supply tracking
             total_minted_supply: Arc::new(RwLock::new(total_supply)), // Loaded from storage on startup
@@ -3241,7 +3529,15 @@ impl AppState {
             // Atomic peer count (will be populated from network manager)
             libp2p_peer_count: None, // Will be initialized in main.rs after network manager creation
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key (will be replaced in main.rs)
+            node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: placeholder, replaced in main.rs
+            admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
+            stripe_client: crate::payment_api::init_stripe_client().ok(),
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
+            last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
+            sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
+            node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
+            dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
@@ -3256,6 +3552,7 @@ impl AppState {
             // Mining submission async queue
             mining_submission_tx: None, // Will be initialized in main.rs
             mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
+            optimistic_applied_txs: Arc::new(dashmap::DashMap::new()),
 
             // BREAKTHROUGH: DNS-Phantom → Connection Integration
             connection_manager: {
@@ -3427,6 +3724,10 @@ impl AppState {
                     is_validator,
                     validator_index: 0, // Will be overridden by pool for each producer
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
+                    network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
+                        let now = chrono::Utc::now().timestamp() as u64;
+                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.1".to_string() }
+                    }),
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
@@ -3562,8 +3863,15 @@ impl AppState {
             // Distributed VM and DEX - Initialize in production mode
             distributed_protocol: None, // Initialized separately
 
-            // OAuth2 Provider - Initialize with empty storage
-            oauth2_storage: Arc::new(oauth2_provider::OAuth2Storage::new()),
+            // OAuth2 Provider - v7.3.5: RocksDB-persisted clients (survive restarts)
+            oauth2_storage: {
+                let oauth2 = Arc::new(oauth2_provider::OAuth2Storage::with_storage(storage_engine.clone()));
+                oauth2.load_clients_from_disk().await;
+                oauth2
+            },
+
+            // v7.4.0: Peer JWT public keys for cross-node token verification
+            peer_jwt_keys: Arc::new(dashmap::DashMap::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -3658,6 +3966,7 @@ impl AppState {
             // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
             distributed_pool_coordinator: None,
             distributed_pool_outbound_tx: None,
+            pool_hashrate_history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
 
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
             dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
@@ -3693,6 +4002,20 @@ impl AppState {
             death_certificates: Arc::new(RwLock::new(Vec::new())),
             // 🔐 v4.2.0: VAULT RWA redemptions
             vault_redemptions: Arc::new(RwLock::new(Vec::new())),
+            // v5.1.0: FORGE RWA redemptions
+            forge_redemptions: Arc::new(RwLock::new(Vec::new())),
+            // v6.5.0: Exchange Listing RWA orders
+            listing_orders: Arc::new(RwLock::new(Vec::new())),
+            // v5.1.1: Node start time
+            start_time: std::time::Instant::now(),
+            // v5.1.1: Deploy admin state
+            deploy_state: Arc::new(RwLock::new(deploy_admin_api::DeployState::new())),
+            // v7.2.0: Miner link relay
+            miner_link_registry: miner_link_api::new_registry(),
+            // v7.2.0: Bitcoin bridge (initialized separately if configured)
+            atomic_swap_manager: None,
+            // v7.3.1: Bridge committee (peer ID set later)
+            bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
         })
     }
 

@@ -37,8 +37,18 @@ use tracing::{debug, error, info, trace, warn};
 use lru::LruCache;
 use crate::emission_controller::EmissionController;
 
-/// Genesis timestamp for reward calculation (Oct 26, 2025 00:00:00 UTC)
-pub const GENESIS_TIMESTAMP: u64 = 1761436800;
+/// Genesis timestamp for reward calculation (Feb 22, 2026 12:00:00 UTC - Mainnet 2026.2)
+pub const GENESIS_TIMESTAMP: u64 = 1771761600;
+
+/// v7.3.2: Get the active genesis timestamp based on current network
+pub fn active_genesis_timestamp() -> u64 {
+    let network = std::env::var("Q_NETWORK_ID").unwrap_or_default();
+    if network == "mainnet2026.1.1" {
+        crate::emission_controller::REHEARSAL_GENESIS_TIMESTAMP
+    } else {
+        GENESIS_TIMESTAMP
+    }
+}
 
 // v1.4.5-beta: Use integer basis points instead of floating-point for cross-platform determinism
 // 100 basis points = 1% (10_000 bps = 100%)
@@ -129,7 +139,7 @@ pub struct BalanceConsensusEngine {
     stats: std::sync::Arc<RwLock<ConsensusStats>>,
 
     /// ✅ v0.9.99-beta: Adaptive block reward controller
-    /// Ensures constant annual emission (82,031 QUG/year) regardless of throughput
+    /// Ensures constant annual emission (2,625,000 QUG/year Era 0, halving every 4 years) regardless of throughput
     emission_controller: std::sync::Arc<RwLock<EmissionController>>,
 
     /// ✅ v0.9.99-beta: Cached total supply for 10,000 bps performance
@@ -205,6 +215,15 @@ impl BalanceConsensusEngine {
         storage: &dyn BalanceStorage,
         block: &QBlock,
     ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
+        // v7.1.3: Reject pre-genesis blocks (testnet contamination)
+        {
+            let active_genesis = active_genesis_timestamp();
+            if block.header.timestamp > 0 && block.header.timestamp < active_genesis {
+                tracing::debug!("🧹 [GENESIS FILTER] Skipping pre-genesis block reward h={}", block.header.height);
+                return Ok(Vec::new());
+            }
+        }
+
         // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
         // Previous Issue (v0.9.77-beta Phase 7):
@@ -217,6 +236,23 @@ impl BalanceConsensusEngine {
         // - This ensures synced blocks update balances correctly on all nodes
 
         let mut updates = Vec::new();
+
+        // =========================================================================
+        // 🔐 v7.1.3: CRITICAL FIX - Atomic check-and-set prevents TOCTOU race
+        // =========================================================================
+        // v7.1.1 used read lock for check → write lock for set. But async tasks
+        // could pass the read check concurrently before any marks the block.
+        // FIX: Use write lock for BOTH check AND set atomically.
+        let block_hash = self.calculate_block_hash(block);
+        {
+            let mut processed = self.processed_blocks.write().await;
+            if processed.contains(&block_hash) {
+                debug!("⏭️ Block {} already processed (height {}), skipping",
+                       hex::encode(&block_hash[..8]), block.header.height);
+                return Ok(Vec::new());
+            }
+            processed.put(block_hash, true);
+        }
 
         // =========================================================================
         // 🔐 v1.2.0-beta Phase 3 Step 6: Verify Coinbase Security
@@ -259,6 +295,21 @@ impl BalanceConsensusEngine {
             ));
         }
 
+        // ✅ v6.2.0-beta: CRITICAL FIX - Track ALL blocks for emission rate calculation
+        // Previously only locally-produced blocks were tracked (block_producer.rs:1024).
+        // With N nodes each producing blocks, the emission controller only saw 1/N of
+        // the network block rate, causing N× emission overshoot.
+        // FIX: Track every block here (called for ALL blocks: local + P2P received).
+        // This gives the emission controller the TRUE network-wide block rate.
+        let has_txs = !block.transactions.is_empty();
+        if let Err(e) = self.track_block_for_emission(
+            block.header.height,
+            block.header.timestamp,
+            has_txs,
+        ).await {
+            warn!("⚠️ Failed to track block {} for emission: {}", block.header.height, e);
+        }
+
         // Process existing coinbase transactions from the block
         info!("🔍 [BALANCE] Block {} has {} transactions to process",
               block.header.height, block.transactions.len());
@@ -284,6 +335,13 @@ impl BalanceConsensusEngine {
                 // Apply the mining reward to the miner's balance
                 storage.add_balance(&miner_address, reward_amount).await
                     .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                // v6.2.4: Record daily emission for audit trail
+                {
+                    let mut controller = self.emission_controller.write().await;
+                    controller.record_emission(reward_amount);
+                    controller.record_daily_emission(block.header.timestamp, reward_amount);
+                }
 
                 updates.push(BalanceUpdate {
                     address: miner_address.clone(),
@@ -357,6 +415,8 @@ impl BalanceConsensusEngine {
                 updates.iter().map(|u| u.amount).sum::<u128>()
             );
         }
+
+        // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
 
         // Return updates
         Ok(updates)
@@ -510,6 +570,15 @@ impl BalanceConsensusEngine {
         tx: &crate::transaction::QTransaction,
         block: &QBlock,
     ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
+        // v7.1.3: Reject pre-genesis blocks (testnet contamination)
+        {
+            let active_genesis = active_genesis_timestamp();
+            if block.header.timestamp > 0 && block.header.timestamp < active_genesis {
+                tracing::debug!("🧹 [GENESIS FILTER] Skipping pre-genesis block reward TX h={}", block.header.height);
+                return Ok(Vec::new());
+            }
+        }
+
         // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
         // Previous Issue (v0.9.77-beta Phase 7):
@@ -526,12 +595,37 @@ impl BalanceConsensusEngine {
 
         let mut updates = Vec::new();
 
+        // =========================================================================
+        // 🔐 v7.1.1: CRITICAL FIX - Dedup check prevents multi-path double-crediting
+        // =========================================================================
+        let block_hash = self.calculate_block_hash(block);
+        // v7.1.3: Atomic check-and-set (prevents TOCTOU double-crediting)
+        {
+            let mut processed = self.processed_blocks.write().await;
+            if processed.contains(&block_hash) {
+                debug!("⏭️ Block {} already processed via TX path (height {}), skipping",
+                       hex::encode(&block_hash[..8]), block.header.height);
+                return Ok(Vec::new());
+            }
+            processed.put(block_hash, true);
+        }
+
         // v1.3.10-beta: Reduced to trace! to avoid log spam during sync
         // Empty blocks are normal in DAG-based consensus (not every block has coinbase)
         trace!(
             "[SYNC TX] Block {} has {} transactions",
             block.header.height, block.transactions.len()
         );
+
+        // ✅ v6.2.0-beta: Track ALL blocks for emission rate (same fix as process_block_mining_rewards)
+        let has_txs = !block.transactions.is_empty();
+        if let Err(e) = self.track_block_for_emission(
+            block.header.height,
+            block.header.timestamp,
+            has_txs,
+        ).await {
+            warn!("⚠️ Failed to track block {} for emission: {}", block.header.height, e);
+        }
 
         // Process existing coinbase transactions from the block
         for (idx, block_tx) in block.transactions.iter().enumerate() {
@@ -549,6 +643,13 @@ impl BalanceConsensusEngine {
                 // Apply the mining reward to the miner's balance
                 self.add_balance_tx(tx, &miner_address, reward_amount).await
                     .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                // v6.2.4: Record daily emission for audit trail
+                {
+                    let mut controller = self.emission_controller.write().await;
+                    controller.record_emission(reward_amount);
+                    controller.record_daily_emission(block.header.timestamp, reward_amount);
+                }
 
                 updates.push(BalanceUpdate {
                     address: miner_address.clone(),
@@ -626,6 +727,9 @@ impl BalanceConsensusEngine {
                 updates.iter().map(|u| u.amount).sum::<u128>()
             );
         }
+
+        // v7.1.1: Mark block as processed to prevent double-crediting
+        // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
 
         // Return updates (caller can use for SSE broadcast, logging, etc.)
         Ok(updates)
@@ -745,6 +849,89 @@ impl BalanceConsensusEngine {
 
         Ok(updates)
         */  // END COMMENTED OUT - Phase 7 double-reward fix (TX variant)
+    }
+
+    /// Process ONLY coinbase (mining reward) transactions from a block
+    ///
+    /// v7.1.2: Lightweight version used during skip_balances sync mode.
+    /// Processes mining rewards so miners get credited even during fast sync,
+    /// but skips transfer transactions for speed (transfers are rebuiltlater).
+    ///
+    /// This ensures:
+    /// 1. Mining rewards are never lost during sync
+    /// 2. Emission tracking stays accurate (all blocks counted)
+    /// 3. Sync speed remains high (no transfer validation overhead)
+    pub async fn process_block_coinbase_only_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        block: &QBlock,
+    ) -> Result<Vec<BalanceUpdate>, BalanceConsensusError> {
+        // v7.1.3: Reject pre-genesis blocks (testnet contamination)
+        {
+            let active_genesis = active_genesis_timestamp();
+            if block.header.timestamp > 0 && block.header.timestamp < active_genesis {
+                tracing::debug!("🧹 [GENESIS FILTER] Skipping pre-genesis coinbase h={}", block.header.height);
+                return Ok(Vec::new());
+            }
+        }
+
+        let mut updates = Vec::new();
+
+        // Dedup check - don't double-credit
+        let block_hash = self.calculate_block_hash(block);
+        {
+            let mut processed = self.processed_blocks.write().await;
+            if processed.contains(&block_hash) {
+                return Ok(Vec::new());
+            }
+            processed.put(block_hash, true);
+        }
+
+        // Track ALL blocks for emission rate calculation (critical for correct emission)
+        let has_txs = !block.transactions.is_empty();
+        if let Err(e) = self.track_block_for_emission(
+            block.header.height,
+            block.header.timestamp,
+            has_txs,
+        ).await {
+            warn!("⚠️ Failed to track block {} for emission: {}", block.header.height, e);
+        }
+
+        // Process ONLY coinbase transactions
+        for (idx, block_tx) in block.transactions.iter().enumerate() {
+            let is_coinbase = block_tx.is_coinbase() || block_tx.tx_type.is_coinbase();
+            if !is_coinbase {
+                continue; // Skip transfers for speed
+            }
+
+            let miner_address = hex::encode(&block_tx.to);
+            let reward_amount = block_tx.amount;
+
+            self.add_balance_tx(tx, &miner_address, reward_amount).await
+                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+            // Record emission
+            {
+                let mut controller = self.emission_controller.write().await;
+                controller.record_emission(reward_amount);
+                controller.record_daily_emission(block.header.timestamp, reward_amount);
+            }
+
+            updates.push(BalanceUpdate {
+                address: miner_address.clone(),
+                amount: reward_amount,
+                reason: ChangeReason::MiningReward,
+                block_height: block.header.height,
+                solution_index: idx,
+            });
+
+            trace!("💰 [COINBASE-ONLY] height {}: {} → {} QUG",
+                   block.header.height, &miner_address[..16.min(miner_address.len())], reward_amount);
+        }
+
+        // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
+
+        Ok(updates)
     }
 
     /// Add balance within a transaction
@@ -867,8 +1054,8 @@ impl BalanceConsensusEngine {
     /// reward_per_block = (annual_target_emission / blocks_produced_this_year)
     ///
     /// # Benefits
-    /// - At 10 blocks/sec: 0.00026 QUG/block → 82,031 QUG/year → 256 years to 21M
-    /// - At 10,000 blocks/sec: 0.00000026 QUG/block → 82,031 QUG/year → 256 years to 21M
+    /// - At 10 blocks/sec: 0.00832 QUG/block → 2,625,000 QUG/year → 256 years to 21M
+    /// - At 10,000 blocks/sec: 0.00000832 QUG/block → 2,625,000 QUG/year → 256 years to 21M
     /// - Network can scale to ANY throughput without affecting emission timeline!
     ///
     /// # Arguments
@@ -1047,6 +1234,50 @@ impl BalanceConsensusEngine {
         Ok(controller.get_stats())
     }
 
+    /// v6.2.4: Record daily emission for a mined block
+    pub async fn record_daily_emission(&self, timestamp: u64, reward_amount: u128) -> anyhow::Result<()> {
+        let mut controller = self.emission_controller.write().await;
+        controller.record_daily_emission(timestamp, reward_amount);
+        Ok(())
+    }
+
+    /// v6.2.4: Get daily emission history
+    pub async fn get_daily_emission_history(&self, days: usize) -> anyhow::Result<Vec<crate::emission_controller::DailyEmissionRecord>> {
+        let controller = self.emission_controller.read().await;
+        Ok(controller.get_daily_history(days))
+    }
+
+    /// v6.2.4: Get emission summary
+    pub async fn get_emission_summary(&self) -> anyhow::Result<crate::emission_controller::EmissionSummary> {
+        let controller = self.emission_controller.read().await;
+        Ok(controller.get_emission_summary())
+    }
+
+    /// v7.0.0: Get correction factor from emission controller (for API display)
+    pub async fn get_correction_factor(&self) -> f64 {
+        let controller = self.emission_controller.read().await;
+        controller.correction_factor()
+    }
+
+    /// v7.1.0: Serialize emission controller state for persistence
+    pub async fn serialize_emission_state(&self) -> anyhow::Result<Vec<u8>> {
+        let controller = self.emission_controller.read().await;
+        controller.serialize_state().map_err(|e| anyhow::anyhow!("Failed to serialize emission state: {}", e))
+    }
+
+    /// v7.1.0: Restore emission controller from persisted state
+    pub async fn restore_emission_state(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        let restored = crate::emission_controller::EmissionController::restore_from_bytes(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize emission state: {}", e))?;
+        let mut controller = self.emission_controller.write().await;
+        *controller = restored;
+        // v7.4.2: Always override genesis_timestamp with current correct value
+        // (persisted state may have stale genesis from before bug fix)
+        controller.set_genesis_timestamp(self.genesis_timestamp);
+        info!("💰 Emission controller state restored from disk");
+        Ok(())
+    }
+
     /// Get total supply with 1-second caching for 10,000 bps performance
     ///
     /// ✅ v0.9.99-beta: Performance Optimization
@@ -1109,11 +1340,10 @@ impl BalanceConsensusEngine {
     /// v2.10.0: Returns u128 for 24 decimal precision
     pub async fn get_total_supply_approx(&self) -> anyhow::Result<u128> {
         let controller = self.emission_controller.read().await;
-        let stats = controller.get_stats();
-
-        // Return total emitted this era as approximation
-        // This is sufficient for adaptive reward calculations
-        Ok(stats.total_emitted_this_era as u128)
+        // v7.1.3: Return TOTAL cumulative emission across all eras, not just this era.
+        // Using only this-era emission would undercount supply after era transitions,
+        // causing block rewards to exceed the remaining supply cap.
+        Ok(controller.total_cumulative_emission())
     }
 }
 

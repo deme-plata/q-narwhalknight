@@ -76,18 +76,8 @@ use crate::{
     PrivacyConfig, PrivacyLayer,
 };
 
-/// Streaming events for real-time feedback
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// Progress indicator (e.g., "Loading model...", "Generating token 5/150...")
-    Progress(String),
-    /// Generated token text
-    Token(String),
-    /// Generation complete with statistics
-    Complete(GenerationStats),
-    /// Error occurred
-    Error(String),
-}
+// Re-export StreamEvent and GenerationStats from engine_trait (canonical location)
+pub use crate::engine_trait::{StreamEvent, GenerationStats};
 
 /// Configuration for the Mistral.rs engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,18 +137,7 @@ impl Default for MistralRsConfig {
     }
 }
 
-/// Generation statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenerationStats {
-    pub tokens_generated: usize,
-    pub prompt_tokens: usize,
-    pub total_time_ms: f64,
-    pub tokens_per_second: f64,
-    pub time_to_first_token_ms: f64,
-    pub kv_cache_hits: usize,
-    pub kv_cache_misses: usize,
-    pub speedup_factor: f64,
-}
+// GenerationStats is now defined in engine_trait.rs and re-exported above
 
 /// High-performance Mistral.rs engine with Q-NarwhalKnight features
 pub struct MistralRsEngine {
@@ -1054,6 +1033,39 @@ pub struct ModelShard {
     pub end_layer: usize,
     pub size_mb: usize,
     pub loaded: bool,
+}
+
+// v5.1.0: InferenceEngine trait implementation for MistralRsEngine
+// Bridges the callback-based generate_stream API to the channel-based trait API
+#[async_trait::async_trait]
+impl crate::engine_trait::InferenceEngine for MistralRsEngine {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<String> {
+        let tx_clone = tx.clone();
+        self.generate_stream(prompt, max_tokens, move |event: StreamEvent| {
+            let tx = tx_clone.clone();
+            async move {
+                let _ = tx.send(event);
+                Ok(())
+            }
+        }).await
+    }
+
+    async fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+        MistralRsEngine::generate(self, prompt, max_tokens).await
+    }
+
+    async fn get_stats(&self) -> GenerationStats {
+        MistralRsEngine::get_stats(self).await
+    }
+
+    fn engine_name(&self) -> &str {
+        "mistral.rs (GGUF)"
+    }
 }
 
 #[cfg(test)]

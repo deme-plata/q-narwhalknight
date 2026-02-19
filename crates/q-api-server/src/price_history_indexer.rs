@@ -116,6 +116,11 @@ impl PriceHistoryIndexer {
     }
 
     /// Get price change data for a token
+    ///
+    /// v6.1.0: When no snapshot exists at the exact time window, use the earliest
+    /// available snapshot as fallback. This prevents showing 0% when there simply
+    /// haven't been trades within the window - the last known price before the
+    /// window is the correct reference point.
     pub async fn get_price_changes(
         &self,
         token_address: &[u8; 32],
@@ -128,11 +133,18 @@ impl PriceHistoryIndexer {
         let price_24h_ago = self.get_price_at_time(token_address, now_ms - 86_400_000).await;
         let price_7d_ago = self.get_price_at_time(token_address, now_ms - 604_800_000).await;
 
+        // v6.1.0: Fallback chain - if no data at requested time, use next available
+        // This prevents showing 0% when the token simply hasn't traded in that window.
+        // The percentage should reflect change from the last known price before that time.
+        let price_1h = price_1h_ago.or(price_24h_ago).or(price_7d_ago);
+        let price_24h = price_24h_ago.or(price_7d_ago);
+        let price_7d = price_7d_ago;
+
         let data = PriceChangeData {
             current_price,
-            price_1h_ago,
-            price_24h_ago,
-            price_7d_ago,
+            price_1h_ago: price_1h,
+            price_24h_ago: price_24h,
+            price_7d_ago: price_7d,
         };
 
         data.calculate_changes()

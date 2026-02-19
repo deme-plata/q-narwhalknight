@@ -24,6 +24,9 @@ pub struct OrobitSmartContractEcosystem {
     pub collateral_positions: Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>,
     /// v4.1.0: RWA auto-distribution schedules per wallet
     pub distribution_schedules: Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>,
+    /// v7.1.7: Addresses of contracts purged at startup (testnet contamination)
+    /// Used as blocklist to prevent P2P re-addition
+    pub purged_contract_addresses: Arc<RwLock<Vec<[u8; 32]>>>,
 }
 
 /// All contract types from VirtualMachine.tsx
@@ -442,6 +445,7 @@ impl OrobitSmartContractEcosystem {
             storage_engine: storage_engine.clone(),
             collateral_positions: Arc::new(RwLock::new(HashMap::new())),
             distribution_schedules: Arc::new(RwLock::new(HashMap::new())),
+            purged_contract_addresses: Arc::new(RwLock::new(Vec::new())),
         };
 
         eprintln!("📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚");
@@ -463,7 +467,12 @@ impl OrobitSmartContractEcosystem {
             eprintln!("💾💾💾 STORAGE ENGINE IS AVAILABLE - LOADING CONTRACTS 💾💾💾");
             tracing::info!("💾 Storage engine is available, loading persisted contracts...");
             match ecosystem.load_contracts_from_storage(storage).await {
-                Ok(_) => {
+                Ok(purged) => {
+                    if !purged.is_empty() {
+                        tracing::info!("🚫 [BLOCKLIST] {} testnet contract addresses added to P2P blocklist", purged.len());
+                        let mut blocklist = ecosystem.purged_contract_addresses.write().await;
+                        *blocklist = purged;
+                    }
                     eprintln!("✅✅✅ CONTRACT LOADING COMPLETED SUCCESSFULLY ✅✅✅");
                     tracing::info!("✅ Contract loading completed");
                 }
@@ -1199,18 +1208,65 @@ impl OrobitSmartContractEcosystem {
     }
 
     /// Load all contracts from persistent storage
-    async fn load_contracts_from_storage(&self, storage: &Arc<q_storage::StorageEngine>) -> Result<()> {
+    ///
+    /// v7.1.3: Genesis-based filter rejects contracts deployed before genesis timestamp.
+    /// This ensures testnet contracts don't contaminate mainnet.
+    /// Returns list of purged contract addresses for P2P blocklist
+    pub async fn load_contracts_from_storage(&self, storage: &Arc<q_storage::StorageEngine>) -> Result<Vec<[u8; 32]>> {
         tracing::info!("📂 Loading contracts from persistent storage...");
 
         let contract_entries = storage.load_all_contracts().await
             .map_err(|e| anyhow!("Failed to load contracts from storage: {}", e))?;
 
+        let genesis_timestamp = q_storage::emission_controller::GENESIS_TIMESTAMP;
+        // v7.1.7: System contract addresses that should NOT be purged
+        let system_addresses: std::collections::HashSet<[u8; 32]> = [
+            q_types::QUGUSD_TOKEN_ADDRESS,
+            q_types::VAULT_TOKEN_ADDRESS,
+            q_types::FORGE_TOKEN_ADDRESS,
+        ].into_iter().collect();
+
         let mut deployed = self.deployed_contracts.write().await;
         let mut loaded_count = 0;
+        let mut filtered_count = 0;
+        let mut purged_addresses: Vec<[u8; 32]> = Vec::new();
 
         for (address_bytes, contract_data) in contract_entries {
             match serde_json::from_slice::<DeployedSmartContract>(&contract_data) {
                 Ok(contract) => {
+                    // v7.1.7: Skip system contracts (VAULT, FORGE, QUGUSD) - always load
+                    let is_system = if address_bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&address_bytes);
+                        system_addresses.contains(&addr)
+                    } else {
+                        false
+                    };
+
+                    // v7.1.3: Reject pre-genesis contracts (testnet contamination)
+                    // v7.1.7: Also reject non-system contracts received via P2P from testnet
+                    // P2P-received testnet tokens set deployed_at=SystemTime::now() (post-genesis)
+                    // so the timestamp check alone is insufficient. We detect P2P origin by
+                    // the description marker "received via P2P" or pre-genesis timestamp.
+                    let is_p2p_received = contract.metadata.description.contains("received via P2P");
+                    if !is_system && (contract.deployed_at < genesis_timestamp || is_p2p_received) {
+                        tracing::info!("🧹 [GENESIS FILTER] Rejecting {} contract: {} ({}) deployed_at={} p2p={}",
+                            if is_p2p_received { "P2P testnet" } else { "pre-genesis" },
+                            contract.metadata.name,
+                            hex::encode(&address_bytes[..8]),
+                            contract.deployed_at,
+                            is_p2p_received);
+                        filtered_count += 1;
+                        // Also remove from RocksDB to prevent loading again
+                        if address_bytes.len() == 32 {
+                            let mut addr = [0u8; 32];
+                            addr.copy_from_slice(&address_bytes);
+                            purged_addresses.push(addr);
+                            let _ = storage.delete_contract(&addr).await;
+                        }
+                        continue;
+                    }
+
                     let mut address = [0u8; 32];
                     address.copy_from_slice(&address_bytes);
                     tracing::debug!("📄 Loaded contract: {} ({})",
@@ -1226,13 +1282,16 @@ impl OrobitSmartContractEcosystem {
             }
         }
 
+        if filtered_count > 0 {
+            tracing::info!("🧹 [GENESIS FILTER] Purged {} testnet contracts from RocksDB (blocklist active)", filtered_count);
+        }
         if loaded_count > 0 {
-            tracing::info!("✅ Loaded {} contracts from persistent storage", loaded_count);
+            tracing::info!("✅ Loaded {} contracts from persistent storage (post-genesis)", loaded_count);
         } else {
             tracing::info!("📭 No contracts found in storage (starting fresh)");
         }
 
-        Ok(())
+        Ok(purged_addresses)
     }
 
     // Helper methods for loading bytecode and source

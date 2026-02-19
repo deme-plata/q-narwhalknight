@@ -19,6 +19,7 @@
 /// - Memory overhead: ~1-2 KB per transaction (negligible)
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -94,6 +95,12 @@ pub struct QTransaction {
     /// v1.0.64-beta: Track max block height saved in this transaction
     /// Used to update qblock:latest pointer on commit for batch sync
     max_saved_height: Arc<std::sync::atomic::AtomicU64>,
+
+    /// v7.1.1: Pending writes cache - tracks buffered writes so get() can read them back
+    /// CRITICAL FIX: Without this, concurrent balance updates within a single batch
+    /// transaction all read the same stale DB value, causing lost mining reward credits.
+    /// Key format: "cf_name:key_hex" → value bytes
+    pending_writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -109,6 +116,7 @@ impl QTransaction {
             balance_updates: Arc::new(Mutex::new(Vec::new())),
             tx_id,
             max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_writes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -125,7 +133,13 @@ impl QTransaction {
         }
         drop(state);
 
-        // Add to write batch
+        // v7.1.1: Cache in pending_writes FIRST so get() can read back buffered values
+        // CRITICAL FIX: Without this, sequential balance updates within a batch
+        // all read the same stale DB value, causing lost mining reward credits
+        let cache_key = format!("{}:{}", cf, hex::encode(key));
+        self.pending_writes.lock().await.insert(cache_key, value.to_vec());
+
+        // Add to write batch (cf_handle must not be held across the await above)
         let mut batch = self.write_batch.lock().await;
         let cf_handle = self.hot_db.get_cf(cf)?;
         batch.put_cf(&cf_handle, key, value);
@@ -314,7 +328,19 @@ impl QTransaction {
     }
 
     /// Get value from column family (read operation during transaction)
+    ///
+    /// v7.1.1: CRITICAL FIX - Checks pending_writes cache before falling back to DB.
+    /// Without this, sequential balance updates within a batch transaction all read
+    /// the same stale DB value, causing only the last block's credit to survive.
+    /// Example: 10 blocks in a batch each credit 0.001 QUG to the same wallet,
+    /// but only 0.001 total is credited instead of 0.01.
     pub async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        // Check pending writes first (buffered but not yet committed)
+        let cache_key = format!("{}:{}", cf, hex::encode(key));
+        if let Some(cached) = self.pending_writes.lock().await.get(&cache_key) {
+            return Ok(Some(cached.clone()));
+        }
+        // Fall back to reading from the actual database
         use crate::kv::KVStore;
         self.hot_db.get(cf, key).await
     }
@@ -497,6 +523,11 @@ pub struct QTransaction {
 
     /// Track max block height saved in this transaction
     max_saved_height: Arc<std::sync::atomic::AtomicU64>,
+
+    /// v7.1.1: Pending writes cache - tracks buffered writes so get() can read them back
+    /// CRITICAL FIX: Without this, concurrent balance updates within a single batch
+    /// transaction all read the same stale DB value, causing lost mining reward credits.
+    pending_writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -510,6 +541,7 @@ impl QTransaction {
             balance_updates: Arc::new(Mutex::new(Vec::new())),
             tx_id,
             max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_writes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -522,6 +554,11 @@ impl QTransaction {
 
         let mut ops = self.ops.lock().await;
         ops.push((cf.to_string(), key.to_vec(), Some(value.to_vec())));
+
+        // v7.1.1: Also cache in pending_writes so get() can read back buffered values
+        let cache_key = format!("{}:{}", cf, hex::encode(key));
+        self.pending_writes.lock().await.insert(cache_key, value.to_vec());
+
         debug!("🔄 Transaction {}: PUT {} bytes to CF {}", self.tx_id, value.len(), cf);
         Ok(())
     }
@@ -623,7 +660,16 @@ impl QTransaction {
         &self.hot_db
     }
 
+    /// v7.1.1: CRITICAL FIX - Checks pending_writes cache before falling back to DB.
+    /// Without this, sequential balance updates within a batch transaction all read
+    /// the same stale DB value, causing only the last block's credit to survive.
     pub async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        // Check pending writes first (buffered but not yet committed)
+        let cache_key = format!("{}:{}", cf, hex::encode(key));
+        if let Some(cached) = self.pending_writes.lock().await.get(&cache_key) {
+            return Ok(Some(cached.clone()));
+        }
+        // Fall back to reading from the actual database
         use crate::kv::KVStore;
         self.hot_db.get(cf, key).await
     }

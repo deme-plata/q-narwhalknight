@@ -108,7 +108,7 @@ mod dex_tests {
         assert_eq!(success.data.unwrap(), "test data");
         assert!(success.error.is_none());
         assert_eq!(success.api_version, "1.0.0");
-        assert_eq!(success.network, "mainnet");
+        assert_eq!(success.network, "mainnet2026.2");
         assert!(success.timestamp > 0);
 
         // Test error response
@@ -117,7 +117,7 @@ mod dex_tests {
         assert!(error.data.is_none());
         assert_eq!(error.error.unwrap(), "test error");
         assert_eq!(error.api_version, "1.0.0");
-        assert_eq!(error.network, "mainnet");
+        assert_eq!(error.network, "mainnet2026.2");
         assert!(error.timestamp > 0);
     }
 

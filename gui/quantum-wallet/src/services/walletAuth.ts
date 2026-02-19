@@ -9,6 +9,9 @@
 
 import * as ed25519 from '@noble/ed25519';
 import { sha3_256 } from '@noble/hashes/sha3';
+import { entropyToMnemonic as _entropyToMnemonic } from '@scure/bip39';
+// @ts-ignore - exports map uses .js extension
+import { wordlist as english } from '@scure/bip39/wordlists/english.js';
 import {
   AegisQL,
   type AegisPublicKey,
@@ -620,6 +623,16 @@ export function hasStoredWallet(): boolean {
     localStorage.getItem('walletAddress') &&
     localStorage.getItem('walletEncryptedKey')
   );
+}
+
+/**
+ * Convert hex entropy string to BIP39 mnemonic phrase.
+ * Used by MetaMask login to deterministically derive a wallet from an ETH signature.
+ * @param hexEntropy - 32 hex chars (16 bytes = 128 bits) for 12 words
+ */
+export function entropyToMnemonic(hexEntropy: string): string {
+  const bytes = new Uint8Array(hexEntropy.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
+  return _entropyToMnemonic(bytes, english);
 }
 
 // Helper functions

@@ -32,10 +32,14 @@ pub struct ElectionCandidate {
     pub average_latency_ms: u64,
     pub last_heartbeat: i64,
     pub election_score: u64,
+    /// v6.0.0: Staked QUG amount (24-decimal). Higher stake = higher priority.
+    #[serde(default)]
+    pub stake_amount: u128,
 }
 
 impl ElectionCandidate {
     /// Calculate election score based on multiple factors
+    /// v6.0.0: Added stake_weight for economic security
     pub fn calculate_election_score(&mut self) {
         let capability_score = self.capability.score();
         let uptime_score = (self.uptime_secs / 60).min(1000); // Max 1000 points for uptime
@@ -46,15 +50,27 @@ impl ElectionCandidate {
         };
         let reliability_score = (self.inference_count / 10).min(500); // Max 500 points for reliability
 
-        self.election_score = capability_score + uptime_score + latency_penalty + reliability_score;
+        // v6.0.0: Stake-weighted scoring
+        // log2(stake / 1000_QUG) * 10, capped at 30 points
+        // Bronze (1K) = 0, Silver (10K) = 10, Gold (100K) = 20, Diamond (1M) = 30
+        let stake_qug = self.stake_amount / 10u128.pow(24);
+        let stake_weight = if stake_qug >= 1000 {
+            let log_val = (stake_qug / 1000) as f64;
+            (log_val.log2() * 10.0).min(30.0) as u64
+        } else {
+            0
+        };
+
+        self.election_score = capability_score + uptime_score + latency_penalty + reliability_score + stake_weight;
         debug!(
-            "📊 Election score for {}: {} (cap={}, uptime={}, latency={}, reliability={})",
+            "📊 Election score for {}: {} (cap={}, uptime={}, latency={}, reliability={}, stake={})",
             self.node_id,
             self.election_score,
             capability_score,
             uptime_score,
             latency_penalty,
-            reliability_score
+            reliability_score,
+            stake_weight
         );
     }
 }
@@ -131,6 +147,7 @@ impl CoordinatorElection {
             average_latency_ms,
             last_heartbeat: chrono::Utc::now().timestamp(),
             election_score: 0,
+            stake_amount: 0, // v6.0.0: Updated by worker registry when staking
         };
 
         self_candidate.calculate_election_score();
@@ -292,6 +309,7 @@ mod tests {
             average_latency_ms: 100,
             last_heartbeat: chrono::Utc::now().timestamp(),
             election_score: 0,
+            stake_amount: 0,
         };
 
         candidate.calculate_election_score();
@@ -348,6 +366,7 @@ mod tests {
             average_latency_ms: 50,
             last_heartbeat: chrono::Utc::now().timestamp(),
             election_score: 0,
+            stake_amount: 0,
         };
         candidate2.calculate_election_score();
 
@@ -391,6 +410,7 @@ mod tests {
             average_latency_ms: 200,
             last_heartbeat: old_timestamp,
             election_score: 100,
+            stake_amount: 0,
         };
 
         election.add_candidate(stale_candidate).await.unwrap();

@@ -95,12 +95,14 @@ pub struct SimdCryptoConfig {
 
 impl Default for SimdCryptoConfig {
     fn default() -> Self {
+        // v5.1.0: Auto-scale batch sizes based on core count for high-core systems
+        let num_cores = num_cpus::get();
         Self {
-            max_signature_batch: 256,   // Process 256 signatures at once (4x increase)
-            max_hash_batch: 128,        // Process 128 hashes at once (4x increase)
-            enable_avx512: true,        // Use AVX-512 if available
-            enable_avx2: true,          // Use AVX2 if available
-            cache_alignment: 64,        // 64-byte cache line alignment
+            max_signature_batch: (num_cores * 8).clamp(256, 4096),  // 256 on 32-core, 2048 on 256-core
+            max_hash_batch: (num_cores * 4).clamp(128, 2048),       // 128 on 32-core, 1024 on 256-core
+            enable_avx512: true,
+            enable_avx2: true,
+            cache_alignment: 64,
         }
     }
 }

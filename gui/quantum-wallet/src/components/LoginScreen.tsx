@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 import ExplorerSearchBar from './ExplorerSearchBar';
@@ -9,270 +9,383 @@ interface LoginScreenProps {
   onAuthenticate: () => void;
 }
 
-// --- Twinkling Universe Background ---
-function UniverseBackground() {
+// --- Quantum Field Background ---
+// Inspired by the theoretical physics whitepaper: String-Theoretic Resonance Consensus
+// Particles implement ψ(x,t) = A · e^(i(kx - ωt + φ)) · sin(nπx/L)
+// Powered by real-time production API data from /api/v1/health
+
+interface StringParticle {
+  x: number; y: number;
+  amplitude: number;      // A = √(stake_weight) → particle size
+  frequency: number;      // ω = 2π·priority → oscillation speed
+  phase: number;          // φ ∈ [0, 2π) → color hue
+  mode: number;           // n = harmonic mode → wave complexity
+  vx: number; vy: number; // velocity in consensus space
+  radius: number;
+  life: number;           // 0..1 lifecycle
+  type: 'honest' | 'resonance' | 'entangled' | 'finalized';
+}
+
+interface NetworkPulse {
+  x: number; y: number;
+  radius: number;
+  maxRadius: number;
+  alpha: number;
+  color: string;
+}
+
+function QuantumFieldBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
+  const networkDataRef = useRef({ height: 0, peers: 0, uptime: 0, status: 'starting' });
+  const prevHeightRef = useRef(0);
 
-  const initStars = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return { stars: [], shootingStars: [], nebulae: [] };
-
-    const w = canvas.width = window.innerWidth;
-    const h = canvas.height = window.innerHeight;
-
-    // Generate star layers
-    const stars: Array<{
-      x: number; y: number; radius: number;
-      baseAlpha: number; twinkleSpeed: number; twinkleOffset: number;
-      color: string;
-    }> = [];
-
-    // Deep background stars (tiny, many)
-    for (let i = 0; i < 400; i++) {
-      stars.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        radius: Math.random() * 0.8 + 0.2,
-        baseAlpha: Math.random() * 0.5 + 0.3,
-        twinkleSpeed: Math.random() * 0.02 + 0.005,
-        twinkleOffset: Math.random() * Math.PI * 2,
-        color: ['#ffffff', '#ffe4b5', '#b0c4de', '#add8e6', '#ffd700'][Math.floor(Math.random() * 5)],
-      });
-    }
-
-    // Medium stars
-    for (let i = 0; i < 120; i++) {
-      stars.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        radius: Math.random() * 1.5 + 0.8,
-        baseAlpha: Math.random() * 0.6 + 0.4,
-        twinkleSpeed: Math.random() * 0.03 + 0.01,
-        twinkleOffset: Math.random() * Math.PI * 2,
-        color: ['#ffffff', '#ffecd2', '#c9d6ff', '#ffd700', '#f0e68c'][Math.floor(Math.random() * 5)],
-      });
-    }
-
-    // Bright prominent stars (few, large)
-    for (let i = 0; i < 25; i++) {
-      stars.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        radius: Math.random() * 2.0 + 1.5,
-        baseAlpha: Math.random() * 0.3 + 0.7,
-        twinkleSpeed: Math.random() * 0.04 + 0.015,
-        twinkleOffset: Math.random() * Math.PI * 2,
-        color: ['#ffffff', '#ffd700', '#87ceeb', '#f5f5dc', '#fffacd'][Math.floor(Math.random() * 5)],
-      });
-    }
-
-    // Nebula clouds
-    const nebulae: Array<{
-      x: number; y: number; radiusX: number; radiusY: number;
-      color: string; alpha: number; rotation: number;
-    }> = [];
-    const nebulaColors = [
-      'rgba(212, 175, 55, 0.03)',   // gold
-      'rgba(139, 92, 246, 0.025)',  // purple
-      'rgba(59, 130, 246, 0.02)',   // blue
-      'rgba(245, 158, 11, 0.025)', // amber
-      'rgba(168, 85, 247, 0.02)',  // violet
-    ];
-    for (let i = 0; i < 6; i++) {
-      nebulae.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        radiusX: Math.random() * 300 + 150,
-        radiusY: Math.random() * 200 + 100,
-        color: nebulaColors[i % nebulaColors.length],
-        alpha: Math.random() * 0.5 + 0.5,
-        rotation: Math.random() * Math.PI,
-      });
-    }
-
-    // Shooting stars
-    const shootingStars: Array<{
-      x: number; y: number; length: number; speed: number;
-      angle: number; alpha: number; active: boolean; timer: number;
-      delay: number;
-    }> = [];
-    for (let i = 0; i < 3; i++) {
-      shootingStars.push({
-        x: 0, y: 0, length: Math.random() * 80 + 40,
-        speed: Math.random() * 8 + 4,
-        angle: Math.random() * 0.5 + 0.3,
-        alpha: 0, active: false,
-        timer: 0,
-        delay: Math.random() * 500 + 200,
-      });
-    }
-
-    return { stars, shootingStars, nebulae };
+  // Fetch real-time network data
+  useEffect(() => {
+    const fetchNetworkData = async () => {
+      try {
+        const res = await fetch('/api/v1/health');
+        if (res.ok) {
+          const json = await res.json();
+          const d = json?.data;
+          if (d) {
+            const prevHeight = networkDataRef.current.height;
+            networkDataRef.current = {
+              height: d.height || 0,
+              peers: d.peers || 0,
+              uptime: d.uptime_secs || 0,
+              status: d.status || 'starting',
+            };
+            prevHeightRef.current = prevHeight;
+          }
+        }
+      } catch { /* silent */ }
+    };
+    fetchNetworkData();
+    const interval = setInterval(fetchNetworkData, 4000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let { stars, shootingStars, nebulae } = initStars();
-    let frame = 0;
+    let w = canvas.width = window.innerWidth;
+    let h = canvas.height = window.innerHeight;
 
     const handleResize = () => {
-      const result = initStars();
-      stars = result.stars;
-      shootingStars = result.shootingStars;
-      nebulae = result.nebulae;
+      w = canvas.width = window.innerWidth;
+      h = canvas.height = window.innerHeight;
     };
     window.addEventListener('resize', handleResize);
 
+    // Particle system
+    const particles: StringParticle[] = [];
+    const pulses: NetworkPulse[] = [];
+    const bgStars: Array<{ x: number; y: number; r: number; a: number; s: number }> = [];
+
+    // Initialize background stars
+    for (let i = 0; i < 300; i++) {
+      bgStars.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: Math.random() * 1.2 + 0.2,
+        a: Math.random() * 0.6 + 0.2,
+        s: Math.random() * 0.015 + 0.003,
+      });
+    }
+
+    // Spawn a new string particle with physics properties
+    const spawnParticle = (type: StringParticle['type'] = 'honest') => {
+      const nd = networkDataRef.current;
+      const stakeWeight = 0.3 + Math.random() * 0.7;
+      const priority = Math.random();
+      const colors: Record<string, number[]> = {
+        honest: [0.55, 0.65],      // blue range
+        resonance: [0.08, 0.15],   // gold range
+        entangled: [0.48, 0.52],   // cyan range
+        finalized: [0.75, 0.85],   // purple range
+      };
+      const hueRange = colors[type];
+      const phaseHue = hueRange[0] + Math.random() * (hueRange[1] - hueRange[0]);
+
+      particles.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        amplitude: Math.sqrt(stakeWeight) * (2.5 + Math.random() * 2.5),
+        frequency: 2 * Math.PI * (priority * 0.8 + 0.2),
+        phase: phaseHue * Math.PI * 2,
+        mode: Math.floor(Math.random() * 4) + 1,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: (Math.random() - 0.5) * 0.3 - 0.1,
+        radius: Math.sqrt(stakeWeight) * (1.5 + Math.random() * 2),
+        life: 1.0,
+        type,
+      });
+
+      // Emit pulse on block height change
+      if (nd.height > prevHeightRef.current && Math.random() < 0.3) {
+        pulses.push({
+          x: Math.random() * w, y: Math.random() * h,
+          radius: 0, maxRadius: 80 + Math.random() * 120,
+          alpha: 0.3, color: type === 'finalized' ? '#9455F7' : '#D4AF37',
+        });
+      }
+    };
+
+    // Seed initial particles
+    for (let i = 0; i < 60; i++) {
+      const types: StringParticle['type'][] = ['honest', 'resonance', 'entangled', 'finalized'];
+      spawnParticle(types[Math.floor(Math.random() * types.length)]);
+      particles[particles.length - 1].life = Math.random(); // stagger lifecycle
+    }
+
+    let frame = 0;
+    let lastSpawn = 0;
+
     const draw = () => {
-      const w = canvas.width;
-      const h = canvas.height;
       frame++;
+      const t = frame * 0.016; // ~60fps time in seconds
+      const nd = networkDataRef.current;
 
-      // Clear with deep space gradient
-      const gradient = ctx.createLinearGradient(0, 0, 0, h);
-      gradient.addColorStop(0, '#020617');    // slate-950
-      gradient.addColorStop(0.3, '#0a0f1e');  // deep navy
-      gradient.addColorStop(0.6, '#0c0a1a');  // deep purple-black
-      gradient.addColorStop(1, '#050210');     // near black with hint of blue
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, w, h);
+      // Clear canvas - transparent so background image shows through
+      ctx.clearRect(0, 0, w, h);
 
-      // Draw nebulae (soft gradient clouds)
-      for (const neb of nebulae) {
+      // Nebula clouds (subtle, atmospheric)
+      const nebulaPositions = [
+        { x: w * 0.2, y: h * 0.3, rx: 300, ry: 200, c: 'rgba(59,130,246,0.06)' },
+        { x: w * 0.7, y: h * 0.6, rx: 350, ry: 250, c: 'rgba(139,92,246,0.05)' },
+        { x: w * 0.5, y: h * 0.15, rx: 280, ry: 180, c: 'rgba(212,175,55,0.04)' },
+        { x: w * 0.85, y: h * 0.2, rx: 200, ry: 160, c: 'rgba(6,182,212,0.05)' },
+        { x: w * 0.15, y: h * 0.75, rx: 260, ry: 200, c: 'rgba(148,85,247,0.045)' },
+      ];
+      for (const neb of nebulaPositions) {
+        const breathe = 1 + Math.sin(t * 0.15 + neb.x * 0.01) * 0.08;
+        const ng = ctx.createRadialGradient(neb.x, neb.y, 0, neb.x, neb.y, neb.rx * breathe);
+        ng.addColorStop(0, neb.c);
+        ng.addColorStop(0.6, neb.c.replace(/[\d.]+\)$/, '0.005)'));
+        ng.addColorStop(1, 'transparent');
+        ctx.fillStyle = ng;
         ctx.save();
-        ctx.translate(neb.x, neb.y);
-        ctx.rotate(neb.rotation);
-        const nebGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, neb.radiusX);
-        nebGrad.addColorStop(0, neb.color);
-        nebGrad.addColorStop(0.5, neb.color.replace(/[\d.]+\)$/, '0.01)'));
-        nebGrad.addColorStop(1, 'transparent');
-        ctx.fillStyle = nebGrad;
-        ctx.scale(1, neb.radiusY / neb.radiusX);
+        ctx.scale(1, neb.ry / neb.rx);
         ctx.beginPath();
-        ctx.arc(0, 0, neb.radiusX, 0, Math.PI * 2);
+        ctx.arc(neb.x, neb.y * (neb.rx / neb.ry), neb.rx * breathe, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
 
-      // Draw twinkling stars
-      for (const star of stars) {
-        const twinkle = Math.sin(frame * star.twinkleSpeed + star.twinkleOffset);
-        const alpha = star.baseAlpha + twinkle * 0.3;
-        const clampedAlpha = Math.max(0.05, Math.min(1, alpha));
-
-        // Star glow
-        if (star.radius > 1.2) {
-          const glowGrad = ctx.createRadialGradient(
-            star.x, star.y, 0,
-            star.x, star.y, star.radius * 4
-          );
-          glowGrad.addColorStop(0, star.color.replace(')', `, ${clampedAlpha * 0.3})`).replace('rgb', 'rgba'));
-          glowGrad.addColorStop(1, 'transparent');
-          ctx.fillStyle = glowGrad;
+      // Background stars with twinkling - brighter for visibility over image
+      for (const s of bgStars) {
+        const twinkle = Math.sin(frame * s.s + s.x * 0.1) * 0.3 + 0.7;
+        ctx.globalAlpha = Math.min(1, s.a * twinkle * 1.5);
+        ctx.fillStyle = '#fff8e8';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fill();
+        if (s.r > 0.8) {
+          const sg = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r * 4);
+          sg.addColorStop(0, `rgba(255,250,230,${0.25 * twinkle})`);
+          sg.addColorStop(0.5, `rgba(255,248,220,${0.08 * twinkle})`);
+          sg.addColorStop(1, 'transparent');
+          ctx.fillStyle = sg;
           ctx.beginPath();
-          ctx.arc(star.x, star.y, star.radius * 4, 0, Math.PI * 2);
+          ctx.arc(s.x, s.y, s.r * 4, 0, Math.PI * 2);
           ctx.fill();
         }
+      }
+      ctx.globalAlpha = 1;
 
-        // Star core
-        ctx.globalAlpha = clampedAlpha;
-        ctx.fillStyle = star.color;
+      // Spawn particles based on network activity
+      if (frame - lastSpawn > 8) {
+        lastSpawn = frame;
+        const types: StringParticle['type'][] = ['honest', 'resonance', 'entangled', 'finalized'];
+        const weights = [0.4, 0.25, 0.2, 0.15];
+        let r = Math.random();
+        let chosen: StringParticle['type'] = 'honest';
+        for (let i = 0; i < types.length; i++) {
+          r -= weights[i];
+          if (r <= 0) { chosen = types[i]; break; }
+        }
+        if (particles.length < 120) spawnParticle(chosen);
+      }
+
+      // Physics: compute resonance coupling and draw connections
+      const coupledPairs: Array<[number, number, number]> = [];
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const pi = particles[i], pj = particles[j];
+          const dx = pi.x - pj.x, dy = pi.y - pj.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > 150) continue;
+          // R_ij = A_i · A_j · cos²(Δφ/2) · e^(-Δω²/2)
+          const phaseDiff = pi.phase - pj.phase;
+          const freqDiff = Math.abs(pi.frequency - pj.frequency);
+          const resonance = pi.amplitude * pj.amplitude *
+            Math.pow(Math.cos(phaseDiff / 2), 2) *
+            Math.exp(-freqDiff * freqDiff / 2);
+          if (resonance > 1.5) {
+            coupledPairs.push([i, j, resonance]);
+          }
+        }
+      }
+
+      // Draw resonance coupling lines
+      for (const [i, j, R] of coupledPairs) {
+        const pi = particles[i], pj = particles[j];
+        const lineAlpha = Math.min(0.4, R * 0.07) * Math.min(pi.life, pj.life);
+        const hue = ((pi.phase + pj.phase) / 2 / (Math.PI * 2)) * 360;
+        ctx.strokeStyle = `hsla(${hue}, 75%, 70%, ${lineAlpha})`;
+        ctx.lineWidth = 0.7 + R * 0.15;
         ctx.beginPath();
-        ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+        ctx.moveTo(pi.x, pi.y);
+        // Slight curve for elegance
+        const mx = (pi.x + pj.x) / 2 + Math.sin(t + i) * 8;
+        const my = (pi.y + pj.y) / 2 + Math.cos(t + j) * 8;
+        ctx.quadraticCurveTo(mx, my, pj.x, pj.y);
+        ctx.stroke();
+      }
+
+      // Update and draw particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+
+        // Wavefunction modulation: ψ(x,t) = A · sin(ωt + φ) · sin(nπx/L)
+        const psi = p.amplitude * Math.sin(p.frequency * t + p.phase) *
+          Math.sin((p.mode * Math.PI * p.x) / w);
+
+        // Update position with velocity + wavefunction perturbation
+        p.x += p.vx + psi * 0.15;
+        p.y += p.vy + Math.cos(p.frequency * t * 0.7 + p.phase) * 0.12;
+
+        // Wrap around edges
+        if (p.x < -20) p.x = w + 20;
+        if (p.x > w + 20) p.x = -20;
+        if (p.y < -20) p.y = h + 20;
+        if (p.y > h + 20) p.y = -20;
+
+        // Lifecycle decay
+        p.life -= 0.0008;
+        if (p.life <= 0) { particles.splice(i, 1); continue; }
+
+        const alpha = Math.min(1, p.life * 3) * Math.min(1, (1 - p.life) * 5);
+        const hue = (p.phase / (Math.PI * 2)) * 360;
+        const pulseR = p.radius * (1 + Math.sin(p.frequency * t + p.phase) * 0.25);
+
+        // Outer glow - boosted for visibility over background image
+        const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, pulseR * 6);
+        glow.addColorStop(0, `hsla(${hue}, 85%, 75%, ${alpha * 0.45})`);
+        glow.addColorStop(0.3, `hsla(${hue}, 75%, 60%, ${alpha * 0.15})`);
+        glow.addColorStop(0.6, `hsla(${hue}, 70%, 55%, ${alpha * 0.04})`);
+        glow.addColorStop(1, 'transparent');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, pulseR * 6, 0, Math.PI * 2);
         ctx.fill();
 
-        // Cross-shaped twinkle for bright stars
-        if (star.radius > 1.8 && clampedAlpha > 0.7) {
-          const spikeLen = star.radius * 3 * clampedAlpha;
-          ctx.strokeStyle = star.color;
-          ctx.lineWidth = 0.5;
-          ctx.globalAlpha = clampedAlpha * 0.5;
+        // Core particle - brighter and more vivid
+        ctx.globalAlpha = alpha;
+        const coreGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, pulseR * 1.3);
+        coreGrad.addColorStop(0, `hsla(${hue}, 95%, 92%, 1)`);
+        coreGrad.addColorStop(0.35, `hsla(${hue}, 85%, 72%, 0.9)`);
+        coreGrad.addColorStop(0.7, `hsla(${hue}, 75%, 55%, 0.4)`);
+        coreGrad.addColorStop(1, `hsla(${hue}, 70%, 50%, 0)`);
+        ctx.fillStyle = coreGrad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, pulseR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Cross-spike for finalized particles (high amplitude)
+        if (p.type === 'finalized' && alpha > 0.4) {
+          const sLen = pulseR * 2.5;
+          ctx.strokeStyle = `hsla(${hue}, 80%, 75%, ${alpha * 0.4})`;
+          ctx.lineWidth = 0.6;
           ctx.beginPath();
-          ctx.moveTo(star.x - spikeLen, star.y);
-          ctx.lineTo(star.x + spikeLen, star.y);
-          ctx.moveTo(star.x, star.y - spikeLen);
-          ctx.lineTo(star.x, star.y + spikeLen);
+          ctx.moveTo(p.x - sLen, p.y);
+          ctx.lineTo(p.x + sLen, p.y);
+          ctx.moveTo(p.x, p.y - sLen);
+          ctx.lineTo(p.x, p.y + sLen);
           ctx.stroke();
         }
 
         ctx.globalAlpha = 1;
       }
 
-      // Draw shooting stars
-      for (const ss of shootingStars) {
-        ss.timer++;
-        if (!ss.active) {
-          if (ss.timer > ss.delay) {
-            ss.active = true;
-            ss.timer = 0;
-            ss.x = Math.random() * w * 0.7;
-            ss.y = Math.random() * h * 0.4;
-            ss.alpha = 1;
-            ss.delay = Math.random() * 600 + 300;
-          }
-          continue;
+      // Draw network pulses (block confirmations)
+      for (let i = pulses.length - 1; i >= 0; i--) {
+        const pulse = pulses[i];
+        pulse.radius += 1.5;
+        pulse.alpha -= 0.004;
+        if (pulse.alpha <= 0 || pulse.radius > pulse.maxRadius) {
+          pulses.splice(i, 1); continue;
         }
-
-        // Move shooting star
-        ss.x += Math.cos(ss.angle) * ss.speed;
-        ss.y += Math.sin(ss.angle) * ss.speed;
-        ss.alpha -= 0.015;
-
-        if (ss.alpha <= 0 || ss.x > w || ss.y > h) {
-          ss.active = false;
-          ss.timer = 0;
-          continue;
+        ctx.strokeStyle = pulse.color.replace(')', `, ${pulse.alpha})`).replace('rgb', 'rgba');
+        if (pulse.color.startsWith('#')) {
+          const r = parseInt(pulse.color.slice(1, 3), 16);
+          const g = parseInt(pulse.color.slice(3, 5), 16);
+          const b = parseInt(pulse.color.slice(5, 7), 16);
+          ctx.strokeStyle = `rgba(${r},${g},${b},${pulse.alpha})`;
         }
-
-        // Draw trail
-        const tailX = ss.x - Math.cos(ss.angle) * ss.length;
-        const tailY = ss.y - Math.sin(ss.angle) * ss.length;
-        const trailGrad = ctx.createLinearGradient(tailX, tailY, ss.x, ss.y);
-        trailGrad.addColorStop(0, `rgba(255, 255, 255, 0)`);
-        trailGrad.addColorStop(0.7, `rgba(255, 215, 0, ${ss.alpha * 0.4})`);
-        trailGrad.addColorStop(1, `rgba(255, 255, 255, ${ss.alpha})`);
-
-        ctx.strokeStyle = trailGrad;
-        ctx.lineWidth = 2;
-        ctx.lineCap = 'round';
+        ctx.lineWidth = 1.2;
         ctx.beginPath();
-        ctx.moveTo(tailX, tailY);
-        ctx.lineTo(ss.x, ss.y);
+        ctx.arc(pulse.x, pulse.y, pulse.radius, 0, Math.PI * 2);
         ctx.stroke();
+      }
 
-        // Bright head
-        const headGlow = ctx.createRadialGradient(ss.x, ss.y, 0, ss.x, ss.y, 4);
-        headGlow.addColorStop(0, `rgba(255, 255, 255, ${ss.alpha})`);
-        headGlow.addColorStop(1, `rgba(255, 215, 0, 0)`);
-        ctx.fillStyle = headGlow;
+      // Network data overlay - subtle standing wave at bottom
+      if (nd.height > 0) {
+        ctx.globalAlpha = 0.04;
+        ctx.strokeStyle = '#D4AF37';
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(ss.x, ss.y, 4, 0, Math.PI * 2);
-        ctx.fill();
+        for (let x = 0; x < w; x += 2) {
+          const wave = Math.sin((x / w) * Math.PI * (nd.peers + 2)) *
+            Math.cos(t * 0.5) * 20 + h - 40;
+          if (x === 0) ctx.moveTo(x, wave);
+          else ctx.lineTo(x, wave);
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
       }
 
       animationRef.current = requestAnimationFrame(draw);
     };
 
     draw();
-
     return () => {
       cancelAnimationFrame(animationRef.current);
       window.removeEventListener('resize', handleResize);
     };
-  }, [initStars]);
+  }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="fixed inset-0 w-full h-full"
-      style={{ zIndex: 0 }}
-    />
+    <>
+      {/* Background image layer - space nebula/lightning over city lights */}
+      <div
+        className="fixed inset-0 w-full h-full"
+        style={{
+          zIndex: 0,
+          backgroundImage: 'url(/login-bg.webp)',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+        }}
+      />
+      {/* Dark overlay to let particles pop over the image */}
+      <div
+        className="fixed inset-0 w-full h-full"
+        style={{
+          zIndex: 0,
+          background: 'rgba(0, 0, 0, 0.35)',
+        }}
+      />
+      {/* Particle canvas overlay - ON TOP of the background image, screen-blended for glow */}
+      <canvas
+        ref={canvasRef}
+        className="fixed inset-0 w-full h-full pointer-events-none"
+        style={{ zIndex: 1, opacity: 0.9, mixBlendMode: 'screen' }}
+      />
+    </>
   );
 }
 
@@ -327,12 +440,202 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
-  // Persistent Tor onion address for the frontend (v3 hidden service)
-  const TOR_ONION_URL = "http://3c6ixbraumi7ljfqzji4ovnsd75kduicu2tuwmg5qrr57zyt76lghsyd.onion";
+  const [showMinerModal, setShowMinerModal] = useState(false);
+  const [showNodeModal, setShowNodeModal] = useState(false);
+  const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
+  const [hasMetaMask, setHasMetaMask] = useState(false);
+  // Persisted Tor onion address - fetched from backend, fallback to hardcoded
+  const [torOnionUrl, setTorOnionUrl] = useState("http://vyjmkppguki7xpqcfzxqqapgphejhhybx3hm3ljzcgszdin5cypghjad.onion");
+
+  // Explorer dropdown state - live data from API + SSE
+  const [showExplorerDropdown, setShowExplorerDropdown] = useState(false);
+  const [explorerData, setExplorerData] = useState<{
+    blocks: any[];
+    transactions: any[];
+    health: any;
+    networkStats: any;
+  }>({ blocks: [], transactions: [], health: null, networkStats: null });
+  const [explorerLoading, setExplorerLoading] = useState(false);
+  const [liveBlockHeight, setLiveBlockHeight] = useState(0);
+  const [livePeers, setLivePeers] = useState(0);
+  const [blockPulse, setBlockPulse] = useState(false);
+  const [qugPrice, setQugPrice] = useState(0);
+  const [qugMarketCap, setQugMarketCap] = useState(0);
+  const [minerCount, setMinerCount] = useState(0);
+  const [networkHashrate, setNetworkHashrate] = useState('');
+  const explorerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // SSE connection for real-time block/node-status updates (works without auth)
+  useEffect(() => {
+    if (!showExplorerDropdown) return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/v1/events');
+      es.addEventListener('node-status', (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.current_height && data.current_height > liveBlockHeight) {
+            setLiveBlockHeight(data.current_height);
+            setBlockPulse(true);
+            setTimeout(() => setBlockPulse(false), 600);
+          }
+          if (data.connected_peers !== undefined) setLivePeers(data.connected_peers);
+        } catch { /* ignore parse errors */ }
+      });
+      es.addEventListener('block-mined', (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.height) {
+            // Prepend new block to the list
+            setExplorerData(prev => ({
+              ...prev,
+              blocks: [{ height: data.height, tx_count: data.tx_count || 0, timestamp: Math.floor(Date.now() / 1000), dag_round: data.dag_round || 0 }, ...prev.blocks].slice(0, 5),
+            }));
+            setBlockPulse(true);
+            setTimeout(() => setBlockPulse(false), 600);
+          }
+        } catch { /* ignore */ }
+      });
+      es.onerror = () => { /* SSE reconnects automatically */ };
+    } catch { /* SSE not supported - fallback to polling */ }
+    return () => { es?.close(); };
+  }, [showExplorerDropdown]);
+
+  // Initial data fetch + periodic refresh via HTTP (fallback)
+  useEffect(() => {
+    if (!showExplorerDropdown) return;
+    let cancelled = false;
+    const fetchExplorerData = async () => {
+      setExplorerLoading(true);
+      try {
+        const [blocksRes, txRes, healthRes, statsRes, priceRes, emissionRes, supplyRes] = await Promise.allSettled([
+          fetch('/api/v1/blocks/recent?limit=5'),
+          fetch('/api/v1/transactions/explorer?limit=6'),
+          fetch('/api/v1/health'),
+          fetch('/api/v1/statistics/network'),
+          fetch('/api/v1/oracle/price/QUG'),
+          fetch('/api/v1/emission/stats'),
+          fetch('/api/v1/network/supply'),
+        ]);
+        if (cancelled) return;
+        const blocks = blocksRes.status === 'fulfilled' && blocksRes.value.ok
+          ? (await blocksRes.value.json())?.data || [] : [];
+        const transactions = txRes.status === 'fulfilled' && txRes.value.ok
+          ? (await txRes.value.json())?.data || [] : [];
+        const health = healthRes.status === 'fulfilled' && healthRes.value.ok
+          ? (await healthRes.value.json())?.data || null : null;
+        const networkStats = statsRes.status === 'fulfilled' && statsRes.value.ok
+          ? (await statsRes.value.json())?.data || null : null;
+        // QUG price from oracle
+        if (priceRes.status === 'fulfilled' && priceRes.value.ok) {
+          const priceData = (await priceRes.value.json())?.data;
+          if (priceData?.price_usd) setQugPrice(priceData.price_usd);
+        }
+        // Circulating supply from emission stats → market cap
+        if (emissionRes.status === 'fulfilled' && emissionRes.value.ok) {
+          const emData = (await emissionRes.value.json())?.data;
+          const history = emData?.daily_history;
+          if (Array.isArray(history) && history.length > 0) {
+            const latest = history[history.length - 1];
+            const supply = latest?.cumulative_supply_qug || 0;
+            if (supply > 0) {
+              const price = qugPrice || 42.5;
+              setQugMarketCap(supply * price);
+            }
+          }
+        }
+        // Miner count and hashrate from supply endpoint
+        if (supplyRes.status === 'fulfilled' && supplyRes.value.ok) {
+          const supplyData = (await supplyRes.value.json())?.data;
+          if (supplyData?.connected_miners) setMinerCount(supplyData.connected_miners);
+          if (supplyData?.network_hashrate_formatted) setNetworkHashrate(supplyData.network_hashrate_formatted);
+          // Also use supply data for market cap if available
+          if (supplyData?.total_mined && supplyData.total_mined > 0) {
+            const price = qugPrice || 42.5;
+            setQugMarketCap(supplyData.total_mined * price);
+          }
+        }
+        setExplorerData({ blocks, transactions, health, networkStats });
+        if (health?.height) setLiveBlockHeight(health.height);
+        if (health?.peers) setLivePeers(health.peers);
+      } catch { /* silent */ }
+      setExplorerLoading(false);
+    };
+    fetchExplorerData();
+    const interval = setInterval(fetchExplorerData, 12000); // Less frequent since SSE handles live updates
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [showExplorerDropdown]);
+
+  const handleExplorerEnter = () => {
+    if (explorerTimeoutRef.current) clearTimeout(explorerTimeoutRef.current);
+    setShowExplorerDropdown(true);
+  };
+  const handleExplorerLeave = () => {
+    explorerTimeoutRef.current = setTimeout(() => setShowExplorerDropdown(false), 300);
+  };
+
+  const formatTimeAgo = (timestamp: number) => {
+    const seconds = Math.floor(Date.now() / 1000 - timestamp);
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+  };
+
+  const formatUptime = (secs: number) => {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
+  // Track Tor service status
+  const [torActive, setTorActive] = useState(false);
+
+  // Check Tor status - onion address is configured in Nginx, always available
+  useEffect(() => {
+    const fetchTorStatus = async () => {
+      try {
+        const res = await fetch('/api/v1/tor/status');
+        if (res.ok) {
+          const data = await res.json();
+          const torRunning = data?.data?.active || data?.data?.tor_enabled || false;
+          // Onion service is configured in Nginx - always available when Tor infra is active
+          setTorActive(torRunning);
+          // Use backend onion_address if provided, otherwise keep hardcoded default
+          const addr = data?.data?.onion_address;
+          if (addr && typeof addr === 'string' && addr.length > 10) {
+            const cleanAddr = addr.endsWith('.onion') ? addr : `${addr}.onion`;
+            setTorOnionUrl(`http://${cleanAddr}`);
+          }
+        }
+      } catch {
+        // Even if API fails, onion service may still be accessible
+        setTorActive(true);
+      }
+    };
+    fetchTorStatus();
+  }, []);
 
   // Open Tor version of the site
   const openTorSite = () => {
-    window.open(TOR_ONION_URL, '_blank', 'noopener,noreferrer');
+    window.open(torOnionUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleDownloadMiner = (platform: 'linux' | 'linux-arm64' | 'windows' | 'macos-intel' | 'macos-arm') => {
+    if (platform === 'windows') {
+      window.open('/downloads/q-miner-windows-x64.exe', '_blank');
+    } else if (platform === 'linux-arm64') {
+      window.open('/downloads/q-miner-linux-arm64', '_blank');
+    } else if (platform === 'macos-intel') {
+      window.open('/downloads/q-miner-macos-x64', '_blank');
+    } else if (platform === 'macos-arm') {
+      window.open('/downloads/q-miner-macos-arm64', '_blank');
+    } else {
+      window.open('/downloads/q-miner-linux-x64', '_blank');
+    }
   };
 
   // Validate seed phrase is a proper BIP39 mnemonic (12 or 24 words)
@@ -354,6 +657,121 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     }
 
     return { valid: true };
+  };
+
+  // Find MetaMask provider (handles multiple wallet extensions)
+  const getMetaMaskProvider = (): any => {
+    const win = window as any;
+    // EIP-6963: Modern provider discovery
+    if (win.ethereum?.providers?.length) {
+      return win.ethereum.providers.find((p: any) => p.isMetaMask) || null;
+    }
+    // Legacy: single provider
+    if (win.ethereum?.isMetaMask) return win.ethereum;
+    return null;
+  };
+
+  // MetaMask detection
+  useEffect(() => {
+    const checkMetaMask = () => {
+      setHasMetaMask(!!getMetaMaskProvider());
+    };
+    checkMetaMask();
+    // Check again after a brief delay (MetaMask may inject late)
+    const timer = setTimeout(checkMetaMask, 1000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // MetaMask sign-in handler: sign a deterministic message, derive wallet from signature
+  const handleMetaMaskLogin = async () => {
+    setIsMetaMaskConnecting(true);
+    setGenerationError(null);
+
+    try {
+      const ethereum = getMetaMaskProvider();
+      if (!ethereum) {
+        throw new Error('MetaMask not detected. Please install the MetaMask browser extension.');
+      }
+
+      // 1. Request accounts (triggers MetaMask popup)
+      const accounts: string[] = await ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || accounts.length === 0) throw new Error('No accounts returned from MetaMask');
+      const ethAddress = accounts[0];
+
+      // 2. Sign a deterministic message to derive wallet entropy
+      // This message is always the same for a given ETH address, so the same
+      // MetaMask account always derives the same QNK wallet (deterministic)
+      const message = `Q-NarwhalKnight Wallet Derivation\nAddress: ${ethAddress.toLowerCase()}\nChain: QNK Mainnet 2026.1`;
+      const signature: string = await ethereum.request({
+        method: 'personal_sign',
+        params: [message, ethAddress],
+      });
+
+      // 3. Derive BIP39 mnemonic from the 65-byte signature
+      // Use the signature bytes as entropy for a 12-word seed phrase
+      const sigBytes = signature.startsWith('0x') ? signature.slice(2) : signature;
+      // Take first 32 hex chars (16 bytes = 128 bits) for 12-word BIP39
+      const entropyHex = sigBytes.slice(0, 32);
+
+      // Convert hex entropy to a mnemonic using the wallet's BIP39 implementation
+      const { entropyToMnemonic } = await import('../services/walletAuth');
+      let mnemonic: string;
+      try {
+        mnemonic = entropyToMnemonic(entropyHex);
+      } catch {
+        // Fallback: use SHA-256 of signature for cleaner entropy
+        const encoder = new TextEncoder();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(signature));
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        // 16 bytes = 128-bit entropy = 12 words
+        const fallbackEntropy = hashHex.slice(0, 32);
+        mnemonic = entropyToMnemonic(fallbackEntropy);
+      }
+
+      // 4. Set a password derived from the signature (so user doesn't need to type one)
+      const pwBytes = sigBytes.slice(32, 64);
+      const autoPassword = `mm_${pwBytes.slice(0, 16)}`;
+
+      // 5. Auto-fill and authenticate
+      setSeedPhrase(mnemonic);
+      setPassword(autoPassword);
+
+      // 6. Create wallet via API
+      const response = await qnkAPI.createWallet(mnemonic, autoPassword);
+
+      if (response.success && response.data) {
+        localStorage.setItem('walletAddress', response.data.address_formatted || '');
+        localStorage.setItem('walletId', response.data.id);
+        localStorage.setItem('metamaskLinked', ethAddress.toLowerCase());
+        localStorage.removeItem('cachedBalance');
+        localStorage.removeItem('cachedQugusdBalance');
+        localStorage.removeItem('walletBalanceHistory');
+
+        const wallet = await storeWallet(mnemonic, autoPassword, true, true, true);
+        walletSession.setSession(
+          wallet.privateKey,
+          wallet.address,
+          mnemonic,
+          wallet.dilithium5SecretKey,
+          wallet.dilithium5PublicKey
+        );
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+        onAuthenticate();
+      } else {
+        throw new Error(response.error || 'Failed to create wallet');
+      }
+    } catch (error: any) {
+      console.error('MetaMask login failed:', error);
+      if (error?.code === 4001) {
+        setGenerationError('MetaMask sign request was rejected. Please approve to continue.');
+      } else {
+        setGenerationError(error?.message || 'MetaMask login failed');
+      }
+    } finally {
+      setIsMetaMaskConnecting(false);
+    }
   };
 
   const handleAuthenticate = async () => {
@@ -400,11 +818,24 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             console.log('✅ Password verified via key decryption (legacy wallet)!');
           }
         } catch (decryptError) {
-          console.error('❌ WRONG PASSWORD - Authentication BLOCKED');
-          console.error('   Error:', decryptError);
-          setIsAuthenticating(false);
-          setGenerationError('Incorrect password. Please enter the correct password for your existing wallet.');
-          return;
+          // v7.2.12: User has correct mnemonic (address matches) but stored encrypted
+          // data uses a different password. This happens when:
+          // 1. User changed their password
+          // 2. localStorage has stale data from a previous session
+          // 3. Encrypted data got corrupted
+          // Since mnemonic proves ownership, clear stale encrypted data and re-encrypt
+          // with the new password via storeWallet() below.
+          console.warn('⚠️ Stored encrypted data uses different password - re-encrypting with new password');
+          console.warn('   (User proved ownership via correct mnemonic → address match)');
+          localStorage.removeItem('walletEncryptedMnemonic');
+          localStorage.removeItem('walletEncryptedKey');
+          localStorage.removeItem('walletEncryptedAegisKey');
+          localStorage.removeItem('walletAegisPublicKey');
+          localStorage.removeItem('walletEncryptedSQIsignKey');
+          localStorage.removeItem('walletSQIsignPublicKey');
+          localStorage.removeItem('walletEncryptedDilithium5Key');
+          localStorage.removeItem('walletDilithium5PublicKey');
+          localStorage.removeItem('walletPasswordHash');
         }
       } else if (storedAddress && providedWalletAddress !== storedAddress) {
         console.warn('⚠️ Different wallet detected (address mismatch)');
@@ -419,15 +850,11 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         localStorage.removeItem('cachedQugusdBalance');
         localStorage.removeItem('walletBalanceHistory');
       } else if (!hasExistingEncryptedWallet && hasPasswordHash()) {
-        console.log('🔐 No encrypted data but password hash exists - verifying password...');
-        const isPasswordValid = await verifyPasswordHash(password);
-        if (!isPasswordValid) {
-          console.error('❌ WRONG PASSWORD - Password hash verification failed');
-          setIsAuthenticating(false);
-          setGenerationError('Incorrect password. Please enter the correct password for your wallet.');
-          return;
-        }
-        console.log('✅ Password verified via hash!');
+        // Stale password hash from a previous wallet (e.g., after logout or switching wallets).
+        // No encrypted wallet data exists, so the hash is orphaned. Clear it and proceed
+        // with the new wallet — the user will get a fresh password hash from storeWallet().
+        console.warn('⚠️ Stale password hash found with no encrypted wallet data - clearing');
+        localStorage.removeItem('walletPasswordHash');
       }
 
       const response = await qnkAPI.createWallet(seedPhrase, password);
@@ -499,34 +926,86 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
   return (
     <div className="flex flex-col min-h-screen px-4 relative overflow-hidden">
-      {/* Twinkling Universe Background */}
-      <UniverseBackground />
+      {/* Quantum Field Background - Physics-inspired particles powered by live API data */}
+      <QuantumFieldBackground />
 
-      {/* Subtle radial vignette overlay */}
+      {/* Subtle radial vignette overlay - above particles */}
       <div
         className="fixed inset-0 pointer-events-none"
         style={{
-          zIndex: 1,
-          background: 'radial-gradient(ellipse at 50% 40%, transparent 0%, rgba(0,0,0,0.4) 70%, rgba(0,0,0,0.7) 100%)',
+          zIndex: 2,
+          background: 'radial-gradient(ellipse at 50% 40%, transparent 0%, rgba(0,0,0,0.3) 70%, rgba(0,0,0,0.55) 100%)',
         }}
       />
 
-      {/* All content sits above the background */}
-      <div className="relative" style={{ zIndex: 2 }}>
+      {/* All content sits above the background + particles */}
+      <div className="relative" style={{ zIndex: 3 }}>
 
-        {/* Help & Tor Icons - Top Right */}
+        {/* Help, Mining & Tor Icons - Top Right */}
         <div className="absolute top-4 right-4 flex items-center gap-2 z-50">
+          {/* Mining Download Icon */}
+          <motion.button
+            className="p-2 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
+            whileHover={{ scale: 1.15, rotate: -10 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, scale: 0, rotate: 20 }}
+            animate={{ opacity: 1, scale: 1, rotate: 0 }}
+            transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
+            title="Download Miner"
+            onClick={() => setShowMinerModal(true)}
+          >
+            <Pickaxe className="w-7 h-7 text-amber-400" />
+            <div className="absolute inset-0 rounded-full bg-amber-500/0 group-hover:bg-amber-500/20 transition-all blur-md" />
+          </motion.button>
+
+          {/* Node Download Icon */}
+          <motion.button
+            className="p-2 bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
+            whileHover={{ scale: 1.15, rotate: 8 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, scale: 0, rotate: -15 }}
+            animate={{ opacity: 1, scale: 1, rotate: 0 }}
+            transition={{ delay: 0.25, type: "spring", stiffness: 200 }}
+            title="Download Full Node"
+            onClick={() => setShowNodeModal(true)}
+          >
+            {/* Custom server/node SVG icon */}
+            <svg viewBox="0 0 100 100" className="w-7 h-7" fill="none">
+              {/* Server chassis */}
+              <rect x="18" y="15" width="64" height="20" rx="4" fill="#06B6D4" opacity="0.9"/>
+              <rect x="18" y="40" width="64" height="20" rx="4" fill="#0891B2" opacity="0.85"/>
+              <rect x="18" y="65" width="64" height="20" rx="4" fill="#0E7490" opacity="0.8"/>
+              {/* LED dots */}
+              <circle cx="30" cy="25" r="3" fill="#34D399"/>
+              <circle cx="40" cy="25" r="3" fill="#34D399"/>
+              <circle cx="30" cy="50" r="3" fill="#34D399"/>
+              <circle cx="40" cy="50" r="3" fill="#FBBF24"/>
+              <circle cx="30" cy="75" r="3" fill="#34D399"/>
+              <circle cx="40" cy="75" r="3" fill="#34D399"/>
+              {/* Drive bays */}
+              <rect x="55" y="21" width="20" height="8" rx="1.5" fill="#164E63" opacity="0.6"/>
+              <rect x="55" y="46" width="20" height="8" rx="1.5" fill="#164E63" opacity="0.6"/>
+              <rect x="55" y="71" width="20" height="8" rx="1.5" fill="#164E63" opacity="0.6"/>
+            </svg>
+            <div className="absolute inset-0 rounded-full bg-cyan-500/0 group-hover:bg-cyan-500/20 transition-all blur-md" />
+          </motion.button>
+
           {/* Tor Onion Icon */}
           <motion.button
-            className="p-2 bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
+            className={`p-2 ${torActive ? 'bg-purple-600/30 hover:bg-purple-600/50 border-purple-400/50' : 'bg-gray-600/20 hover:bg-gray-600/30 border-gray-500/30'} border rounded-full transition-all cursor-pointer group backdrop-blur-sm relative`}
             whileHover={{ scale: 1.15, rotate: 10 }}
             whileTap={{ scale: 0.95 }}
             initial={{ opacity: 0, scale: 0, rotate: -20 }}
             animate={{ opacity: 1, scale: 1, rotate: 0 }}
             transition={{ delay: 0.3, type: "spring", stiffness: 200 }}
-            title="Open Tor version of Quillon Graph"
+            title={torActive ? "Open Tor version of Quillon Graph" : "Tor service offline - .onion address unavailable"}
             onClick={openTorSite}
           >
+            {!torActive && (
+              <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-gray-500 border border-gray-400 flex items-center justify-center">
+                <span className="text-[7px] text-gray-200 font-bold">!</span>
+              </div>
+            )}
             <svg viewBox="0 0 100 100" className="w-8 h-8" fill="none">
               <ellipse cx="50" cy="55" rx="35" ry="40" fill="#7B4397" opacity="0.9"/>
               <ellipse cx="50" cy="53" rx="28" ry="32" fill="#9B59B6"/>
@@ -553,18 +1032,240 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           </motion.button>
         </div>
 
-        {/* Explorer Search Bar at top */}
+        {/* Explorer Search Bar + Live Data Dropdown */}
         <motion.div
           className="pt-6 pb-4"
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
+          onMouseEnter={handleExplorerEnter}
+          onMouseLeave={handleExplorerLeave}
         >
-          <div className="flex items-center justify-center gap-3 mb-2">
+          <div
+            className="flex items-center justify-center gap-3 mb-2 cursor-pointer group"
+            onClick={() => setShowExplorerDropdown(prev => !prev)}
+          >
             <Search className="w-4 h-4 text-amber-400" />
-            <span className="text-amber-200/70 text-sm">Search transactions, blocks, addresses</span>
+            <span className="text-amber-200/70 text-sm group-hover:text-amber-200 transition-colors">
+              Explore the Quantum Blockchain
+            </span>
+            <motion.div
+              animate={{ rotate: showExplorerDropdown ? 180 : 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <ChevronDown className="w-4 h-4 text-amber-400/60" />
+            </motion.div>
           </div>
           <ExplorerSearchBar />
+
+          {/* Live Explorer Data Dropdown */}
+          <AnimatePresence>
+            {showExplorerDropdown && (
+              <motion.div
+                initial={{ opacity: 0, y: -15, scaleY: 0.8 }}
+                animate={{ opacity: 1, y: 0, scaleY: 1 }}
+                exit={{ opacity: 0, y: -10, scaleY: 0.8 }}
+                transition={{ duration: 0.25, ease: 'easeOut' }}
+                className="mt-3 max-w-2xl mx-auto rounded-2xl overflow-hidden backdrop-blur-xl"
+                style={{
+                  background: 'linear-gradient(145deg, rgba(8,12,30,0.95) 0%, rgba(15,10,35,0.95) 50%, rgba(8,15,30,0.95) 100%)',
+                  border: '1px solid rgba(212,175,55,0.25)',
+                  boxShadow: '0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(212,175,55,0.1), inset 0 1px 0 rgba(255,255,255,0.05)',
+                  transformOrigin: 'top center',
+                }}
+                onMouseEnter={handleExplorerEnter}
+                onMouseLeave={handleExplorerLeave}
+              >
+                {/* Network Stats Bar - SSE-driven live data */}
+                {(explorerData.health || liveBlockHeight > 0) && (
+                  <div className="px-4 py-3 border-b border-amber-500/15 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-4 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <div className={`w-2 h-2 rounded-full ${(explorerData.health?.status === 'ready') ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-amber-400 animate-pulse'}`} />
+                        <span className="text-amber-100/80 font-medium uppercase tracking-wide">{explorerData.health?.status || 'connecting'}</span>
+                      </div>
+                      <motion.div
+                        className="flex items-center gap-1"
+                        animate={blockPulse ? { scale: [1, 1.2, 1], color: ['#67e8f9', '#fbbf24', '#67e8f9'] } : {}}
+                        transition={{ duration: 0.5 }}
+                      >
+                        <Blocks className="w-3 h-3 text-cyan-400" />
+                        <span className="text-cyan-300/90 font-mono font-bold">{(liveBlockHeight || explorerData.health?.height || 0).toLocaleString()}</span>
+                        {blockPulse && <span className="text-emerald-400 text-[9px] font-bold ml-0.5 animate-pulse">NEW</span>}
+                      </motion.div>
+                      <div className="flex items-center gap-1">
+                        <Users className="w-3 h-3 text-purple-400" />
+                        <span className="text-purple-300/90">{livePeers || explorerData.health?.peers || 0} peers</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-amber-400" />
+                        <span className="text-amber-300/80">{formatUptime(explorerData.health?.uptime_secs || 0)}</span>
+                      </div>
+                      {qugMarketCap > 0 && (
+                        <div className="flex items-center gap-1">
+                          <TrendingUp className="w-3 h-3 text-emerald-400" />
+                          <span className="text-emerald-300/90 font-mono font-bold">${qugMarketCap >= 1_000_000 ? (qugMarketCap / 1_000_000).toFixed(2) + 'M' : qugMarketCap >= 1_000 ? (qugMarketCap / 1_000).toFixed(1) + 'K' : qugMarketCap.toFixed(0)}</span>
+                          <span className="text-emerald-400/50 text-[9px]">MCap</span>
+                        </div>
+                      )}
+                      {qugPrice > 0 && (
+                        <div className="flex items-center gap-1">
+                          <span className="text-amber-200/70 font-mono text-[10px]">QUG</span>
+                          <span className="text-amber-300/90 font-mono font-bold">${qugPrice.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {minerCount > 0 && (
+                        <div className="flex items-center gap-1">
+                          <Pickaxe className="w-3 h-3 text-orange-400" />
+                          <span className="text-orange-300/90 font-mono font-bold">{minerCount}</span>
+                          <span className="text-orange-400/50 text-[9px]">miners</span>
+                        </div>
+                      )}
+                      {networkHashrate && (
+                        <div className="flex items-center gap-1">
+                          <Cpu className="w-3 h-3 text-sky-400" />
+                          <span className="text-sky-300/90 font-mono font-bold">{networkHashrate}</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[10px] text-amber-400/50 font-mono">
+                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse" />
+                      <span>LIVE</span>
+                      <span className="text-amber-400/30">|</span>
+                      <span>v{explorerData.health?.version || '...'}</span>
+                    </div>
+                  </div>
+                )}
+
+                {explorerLoading && !explorerData.health && (
+                  <div className="px-4 py-6 flex items-center justify-center gap-2">
+                    <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
+                      <Activity className="w-4 h-4 text-amber-400" />
+                    </motion.div>
+                    <span className="text-amber-300/60 text-sm">Loading live blockchain data...</span>
+                  </div>
+                )}
+
+                {/* Two-Column Layout: Recent Blocks + Recent Activity */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-amber-500/10">
+                  {/* Recent Blocks */}
+                  <div className="p-3">
+                    <div className="flex items-center gap-2 mb-2.5 px-1">
+                      <Blocks className="w-3.5 h-3.5 text-cyan-400" />
+                      <span className="text-xs font-bold text-cyan-300/90 uppercase tracking-wider">Recent Blocks</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {explorerData.blocks.slice(0, 5).map((block: any, idx: number) => (
+                        <motion.div
+                          key={block.height || idx}
+                          initial={{ opacity: 0, x: -10 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: idx * 0.05 }}
+                          className="p-2.5 rounded-xl hover:bg-cyan-500/8 transition-all group cursor-pointer"
+                          style={{ background: 'rgba(6,182,212,0.03)' }}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <div className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/20 flex items-center justify-center group-hover:bg-cyan-500/25 transition-colors">
+                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                              </div>
+                              <div>
+                                <div className="text-xs font-bold text-cyan-100 font-mono">#{(block.height || 0).toLocaleString()}</div>
+                                <div className="text-[10px] text-cyan-300/50">{block.tx_count || 0} txs &middot; round {block.dag_round || '?'}</div>
+                              </div>
+                            </div>
+                            <div className="text-[10px] text-cyan-400/50">
+                              {block.timestamp ? formatTimeAgo(block.timestamp) : ''}
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))}
+                      {explorerData.blocks.length === 0 && !explorerLoading && (
+                        <div className="text-center text-amber-300/40 text-xs py-4">No blocks yet</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Recent Activity */}
+                  <div className="p-3">
+                    <div className="flex items-center gap-2 mb-2.5 px-1">
+                      <Activity className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="text-xs font-bold text-amber-300/90 uppercase tracking-wider">Recent Activity</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {explorerData.transactions.slice(0, 5).map((tx: any, idx: number) => {
+                        const isMining = tx.type === 'mining_rewards';
+                        const icon = isMining
+                          ? <Pickaxe className="w-3.5 h-3.5 text-amber-400" />
+                          : <Hash className="w-3.5 h-3.5 text-purple-400" />;
+                        const bgColor = isMining ? 'rgba(212,175,55,0.03)' : 'rgba(148,85,247,0.03)';
+                        const borderColor = isMining ? 'border-amber-500/20' : 'border-purple-500/20';
+                        const iconBg = isMining ? 'bg-amber-500/15' : 'bg-purple-500/15';
+
+                        return (
+                          <motion.div
+                            key={tx.id || idx}
+                            initial={{ opacity: 0, x: 10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: idx * 0.05 }}
+                            className={`p-2.5 rounded-xl hover:brightness-125 transition-all cursor-pointer`}
+                            style={{ background: bgColor }}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className={`w-7 h-7 rounded-lg ${iconBg} border ${borderColor} flex items-center justify-center`}>
+                                  {icon}
+                                </div>
+                                <div>
+                                  <div className="text-xs font-medium text-amber-100 truncate max-w-[140px]">
+                                    {tx.amount || tx.type || 'Activity'}
+                                  </div>
+                                  <div className="text-[10px] text-amber-300/50 truncate max-w-[140px]">
+                                    {tx.from || 'Private'} &rarr; {tx.to || 'Private'}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex flex-col items-end gap-0.5">
+                                <div className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300/80 border border-emerald-500/20">
+                                  {tx.status || 'confirmed'}
+                                </div>
+                                <div className="text-[10px] text-amber-400/40">
+                                  {tx.timestamp ? formatTimeAgo(tx.timestamp) : ''}
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        );
+                      })}
+                      {explorerData.transactions.length === 0 && !explorerLoading && (
+                        <div className="text-center text-amber-300/40 text-xs py-4">No recent activity</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Network Analytics Footer */}
+                {explorerData.networkStats && (
+                  <div className="px-4 py-2.5 border-t border-amber-500/10 flex items-center justify-between text-[10px] text-amber-300/50">
+                    <div className="flex items-center gap-3">
+                      <span>Health: <span className={`font-bold ${(explorerData.networkStats.network_health_score || 0) > 0.7 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {((explorerData.networkStats.network_health_score || 0) * 100).toFixed(0)}%
+                      </span></span>
+                      {explorerData.networkStats.tor_active && (
+                        <span className="flex items-center gap-1 text-purple-400">
+                          <Shield className="w-2.5 h-2.5" /> Tor
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 text-amber-400/40">
+                      <TrendingUp className="w-2.5 h-2.5" />
+                      <span>Live from Quillon Graph</span>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
 
         <div className="flex-1 flex items-center justify-center">
@@ -780,10 +1481,55 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     </>
                   )}
                 </motion.button>
+
+                {/* MetaMask Divider */}
+                <div className="flex items-center gap-3 my-1">
+                  <div className="flex-1 h-px bg-gradient-to-r from-transparent via-amber-500/30 to-transparent" />
+                  <span className="text-amber-400/60 text-xs font-medium uppercase tracking-wider">or</span>
+                  <div className="flex-1 h-px bg-gradient-to-r from-transparent via-amber-500/30 to-transparent" />
+                </div>
+
+                {/* MetaMask Sign-In Button */}
+                <motion.button
+                  onClick={handleMetaMaskLogin}
+                  disabled={isMetaMaskConnecting || isAuthenticating}
+                  className="w-full py-4 px-6 bg-gradient-to-r from-[#E2761B]/20 to-[#CD6116]/20 border-2 border-[#E2761B]/40 rounded-xl text-white font-bold flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed hover:border-[#E2761B]/70 hover:shadow-[0_0_25px_rgba(226,118,27,0.3)] hover:bg-[#E2761B]/30 transition-all backdrop-blur-sm"
+                  whileHover={{ scale: isMetaMaskConnecting ? 1 : 1.02 }}
+                  whileTap={{ scale: isMetaMaskConnecting ? 1 : 0.98 }}
+                >
+                  {isMetaMaskConnecting ? (
+                    <>
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      >
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                          <path d="M21.17 5.17L12.85 1.15a2 2 0 00-1.7 0L2.83 5.17A2 2 0 001.83 7v10a2 2 0 001 1.73l8.32 4.24a2 2 0 001.7 0l8.32-4.24a2 2 0 001-1.73V7a2 2 0 00-1-1.83z" stroke="#E2761B" strokeWidth="2" fill="none"/>
+                        </svg>
+                      </motion.div>
+                      <span>Connecting MetaMask...</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="28" height="28" viewBox="0 0 318.6 318.6" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M274.1 35.5l-99.5 73.9L193 65.8z" fill="#E2761B" stroke="#E2761B" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M44.4 35.5l98.7 74.6-17.5-44.3zm187.9 174.5l-26.5 40.6 56.7 15.6 16.3-55.3zm-204.4.9L44.1 266.2l56.7-15.6-26.5-40.6z" fill="#E4761B" stroke="#E4761B" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M97.9 209.3l-15.8 23.9 56.3 2.5-2-60.5zm118.8 0l-39.1-34.8-1.3 61.2 56.2-2.5zM100.8 250.6l34-16.6-29.3-22.9zm83 -16.6l34 16.6-4.7-39.5z" fill="#E4761B" stroke="#E4761B" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M217.8 250.6l-34-16.6 2.7 22.1-.3 9.3zm-117 0l31.5 14.8-.2-9.3 2.5-22.1z" fill="#D7C1B3" stroke="#D7C1B3" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M132.3 198.6l-28.2-8.3 19.9-9.1zm54 0l8.3-17.4 20 9.1z" fill="#233447" stroke="#233447" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M100.8 250.6l4.8-40.6-31.3.9zM213 210l4.8 40.6 26.5-39.7zM230.8 171.6l-56.2 2.5 5.2 28.9 8.3-17.4 20 9.1zM104.1 195.1l20-9.1 8.2 17.4 5.3-28.9-56.3-2.5z" fill="#CD6116" stroke="#CD6116" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M81.8 172l58.3 2.8-5.3 28.9zm154.6 0l-53.1 31.4 5.2-28.9zm-152.6 2.5l56.3 2.5-4.5 19.4-1-.5-19.9-9.1zm110.8 0l-30.8 12.3-20 9.1-.9.5-4.5-19.4z" fill="#E4751F" stroke="#E4751F" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M183.8 234l-2.5 22.1.3 2.5 21.7-16.9zm-83-16.6l-2.5 22.1 2.7 22.1.2-2.5 21.7-16.9z" fill="#F6851B" stroke="#F6851B" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                      <span>Sign in with MetaMask</span>
+                      {!hasMetaMask && <span className="text-xs text-amber-400/60 ml-1">(not detected)</span>}
+                    </>
+                  )}
+                </motion.button>
               </div>
 
               {/* Photon Waterfall Effect */}
-              {isAuthenticating && (
+              {(isAuthenticating || isMetaMaskConnecting) && (
                 <motion.div
                   className="mt-6 h-2 rounded-full overflow-hidden border border-amber-500/30"
                   initial={{ opacity: 0 }}
@@ -933,6 +1679,323 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   whileTap={{ scale: 0.95 }}
                 >
                   Got it!
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Node Download Modal */}
+      <AnimatePresence>
+        {showNodeModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[100] overflow-y-auto py-8"
+            onClick={() => setShowNodeModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-cyan-500/30 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+              style={{ boxShadow: '0 0 60px rgba(6, 182, 212, 0.25)' }}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-cyan-500/30 to-blue-500/30 border border-cyan-500/50 flex items-center justify-center">
+                    <svg viewBox="0 0 100 100" className="w-7 h-7" fill="none">
+                      <rect x="18" y="15" width="64" height="20" rx="4" fill="#06B6D4" opacity="0.9"/>
+                      <rect x="18" y="40" width="64" height="20" rx="4" fill="#0891B2" opacity="0.85"/>
+                      <rect x="18" y="65" width="64" height="20" rx="4" fill="#0E7490" opacity="0.8"/>
+                      <circle cx="30" cy="25" r="3" fill="#34D399"/>
+                      <circle cx="40" cy="25" r="3" fill="#34D399"/>
+                      <circle cx="30" cy="50" r="3" fill="#34D399"/>
+                      <circle cx="30" cy="75" r="3" fill="#34D399"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">
+                      Run a Full Node
+                    </h2>
+                    <p className="text-cyan-300/60 text-sm">Quantum-Resistant Validator Node</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowNodeModal(false)}
+                  className="p-2 hover:bg-cyan-500/20 rounded-lg transition-colors"
+                >
+                  <X className="w-6 h-6 text-cyan-400" />
+                </button>
+              </div>
+
+              {/* Feature highlights */}
+              <div className="grid grid-cols-3 gap-2 mb-5">
+                <div className="p-2 bg-cyan-500/10 border border-cyan-500/20 rounded-lg text-center">
+                  <div className="text-lg font-bold text-cyan-300">WarpSync</div>
+                  <div className="text-[10px] text-cyan-400/60">900K blocks in 5min</div>
+                </div>
+                <div className="p-2 bg-purple-500/10 border border-purple-500/20 rounded-lg text-center">
+                  <div className="text-lg font-bold text-purple-300">PQ-Crypto</div>
+                  <div className="text-[10px] text-purple-400/60">Dilithium5 + Kyber</div>
+                </div>
+                <div className="p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-center">
+                  <div className="text-lg font-bold text-emerald-300">DAG-BFT</div>
+                  <div className="text-[10px] text-emerald-400/60">Sub-second finality</div>
+                </div>
+              </div>
+
+              {/* Download Links */}
+              <div className="space-y-3">
+                {/* Linux x64 */}
+                <a
+                  href="/downloads/q-api-server-v6.0.4-beta"
+                  download="q-api-server"
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
+                >
+                  <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center shrink-0">
+                    <TerminalIcon className="w-5 h-5 text-cyan-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-cyan-100">Linux x86_64</div>
+                    <div className="text-xs text-cyan-300/50">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</div>
+                  </div>
+                  <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
+                </a>
+
+                {/* Windows x64 */}
+                <a
+                  href="/downloads/q-narwhalknight-windows-x64.zip"
+                  download="q-narwhalknight-windows-x64.zip"
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
+                >
+                  <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
+                    <Monitor className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-cyan-100">Windows x64</div>
+                    <div className="text-xs text-cyan-300/50">Windows 10/11 - All-in-one ZIP with DLLs</div>
+                  </div>
+                  <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
+                </a>
+
+                {/* macOS Build from Source */}
+                <div className="w-full p-4 bg-slate-800/60 border border-cyan-500/10 rounded-xl flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-lg bg-gray-500/20 flex items-center justify-center shrink-0">
+                    <Laptop className="w-5 h-5 text-gray-300" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-cyan-100">macOS (Intel & Apple Silicon)</div>
+                    <div className="text-xs text-cyan-300/50">Build from source - see Quick Start below</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* System Requirements */}
+              <div className="mt-4 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
+                <h3 className="text-sm font-bold text-cyan-300 mb-2">System Requirements</h3>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div className="text-cyan-400/70 font-semibold mb-1">Minimum</div>
+                    <div className="text-cyan-100/60">4 CPU cores, 8 GB RAM</div>
+                    <div className="text-cyan-100/60">50 GB SSD, 10 Mbps</div>
+                  </div>
+                  <div>
+                    <div className="text-emerald-400/70 font-semibold mb-1">Recommended</div>
+                    <div className="text-cyan-100/60">8+ cores, 32 GB RAM</div>
+                    <div className="text-cyan-100/60">500 GB NVMe, 100 Mbps</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Quick Start */}
+              <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
+                <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
+                <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
+{`wget https://quillon.xyz/downloads/q-api-server-v6.0.4-beta
+chmod +x q-api-server-v6.0.4-beta
+./q-api-server-v6.0.4-beta --port 8080`}
+                </code>
+                <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
+              </div>
+
+              {/* macOS Build */}
+              <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
+                <h3 className="text-sm font-bold text-cyan-300 mb-2">macOS Build from Source</h3>
+                <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
+{`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://code.quillon.xyz/repo.git && cd q-narwhalknight
+cargo build --release --package q-api-server
+./target/release/q-api-server --port 8080`}
+                </code>
+              </div>
+
+              {/* Close Button */}
+              <div className="mt-5 flex justify-center">
+                <motion.button
+                  onClick={() => setShowNodeModal(false)}
+                  className="px-8 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl text-white font-bold hover:shadow-[0_0_30px_rgba(6,182,212,0.5)] transition-all"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Close
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Miner Download Modal */}
+      <AnimatePresence>
+        {showMinerModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[100] overflow-y-auto py-8"
+            onClick={() => setShowMinerModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+              style={{ boxShadow: '0 0 60px rgba(212, 175, 55, 0.3)' }}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-amber-500/30 to-yellow-500/30 border border-amber-500/50 flex items-center justify-center">
+                    <Pickaxe className="w-7 h-7 text-amber-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold bg-gradient-to-r from-amber-400 to-yellow-500 bg-clip-text text-transparent">
+                      Download Miner
+                    </h2>
+                    <p className="text-amber-300/60 text-sm">Quantum-Resistant Solo & Pool Mining</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowMinerModal(false)}
+                  className="p-2 hover:bg-amber-500/20 rounded-lg transition-colors"
+                >
+                  <X className="w-6 h-6 text-amber-400" />
+                </button>
+              </div>
+
+              {/* Platform Downloads */}
+              <div className="space-y-3">
+                {/* Linux x64 */}
+                <motion.button
+                  onClick={() => handleDownloadMiner('linux')}
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-amber-500/20 hover:border-amber-500/40 rounded-xl transition-all flex items-center gap-4 group"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center shrink-0">
+                    <TerminalIcon className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-amber-100">Linux x86_64</div>
+                    <div className="text-xs text-amber-300/50">Ubuntu, Debian, Fedora, Arch</div>
+                  </div>
+                  <Download className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors" />
+                </motion.button>
+
+                {/* Linux ARM64 */}
+                <motion.button
+                  onClick={() => handleDownloadMiner('linux-arm64')}
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-amber-500/20 hover:border-amber-500/40 rounded-xl transition-all flex items-center gap-4 group"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center shrink-0">
+                    <TerminalIcon className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-amber-100">Linux ARM64</div>
+                    <div className="text-xs text-amber-300/50">Raspberry Pi, AWS Graviton</div>
+                  </div>
+                  <Download className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors" />
+                </motion.button>
+
+                {/* Windows */}
+                <motion.button
+                  onClick={() => handleDownloadMiner('windows')}
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-amber-500/20 hover:border-amber-500/40 rounded-xl transition-all flex items-center gap-4 group"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
+                    <Monitor className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-amber-100">Windows x64</div>
+                    <div className="text-xs text-amber-300/50">Windows 10/11</div>
+                  </div>
+                  <Download className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors" />
+                </motion.button>
+
+                {/* macOS Intel */}
+                <motion.button
+                  onClick={() => handleDownloadMiner('macos-intel')}
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-amber-500/20 hover:border-amber-500/40 rounded-xl transition-all flex items-center gap-4 group"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-gray-500/20 flex items-center justify-center shrink-0">
+                    <Laptop className="w-5 h-5 text-gray-300" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-amber-100">macOS Intel</div>
+                    <div className="text-xs text-amber-300/50">Intel-based Macs</div>
+                  </div>
+                  <Download className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors" />
+                </motion.button>
+
+                {/* macOS ARM (Apple Silicon) */}
+                <motion.button
+                  onClick={() => handleDownloadMiner('macos-arm')}
+                  className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-amber-500/20 hover:border-amber-500/40 rounded-xl transition-all flex items-center gap-4 group"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-gray-500/20 flex items-center justify-center shrink-0">
+                    <Laptop className="w-5 h-5 text-gray-300" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-amber-100">macOS Apple Silicon</div>
+                    <div className="text-xs text-amber-300/50">M1, M2, M3, M4 chips</div>
+                  </div>
+                  <Download className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors" />
+                </motion.button>
+              </div>
+
+              {/* Quick Start */}
+              <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
+                <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
+                <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
+{`wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+                </code>
+              </div>
+
+              {/* Close Button */}
+              <div className="mt-5 flex justify-center">
+                <motion.button
+                  onClick={() => setShowMinerModal(false)}
+                  className="px-8 py-3 bg-gradient-to-r from-amber-600 to-yellow-600 rounded-xl text-slate-900 font-bold hover:shadow-[0_0_30px_rgba(251,191,36,0.5)] transition-all"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Close
                 </motion.button>
               </div>
             </motion.div>

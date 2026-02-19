@@ -119,9 +119,9 @@ pub struct QuantumMiningEngine {
     pub pool: Option<PoolManager>,
 }
 
-/// Mining configuration for Phase 2.3
+/// Mining configuration for Phase 2.4
 #[derive(Debug, Clone)]
-pub struct Phase23Config {
+pub struct MainnetConfig {
     /// Mining algorithm (SHA-3-256)
     pub algorithm: MiningAlgorithm,
     
@@ -188,14 +188,14 @@ pub struct MiningStats {
     pub uptime: Duration,
 }
 
-impl Default for Phase23Config {
+impl Default for MainnetConfig {
     fn default() -> Self {
         Self {
             algorithm: MiningAlgorithm::QuantumSHA3,
             target_block_time: Duration::from_secs(30),
             initial_difficulty: 4, // Start with reasonable difficulty
             block_reward: 2_000_000_000, // 2.0 QNK (in smallest units)
-            quantum_enhancement: 0.7, // 70% quantum enhancement for Phase 2.3
+            quantum_enhancement: 0.7, // 70% quantum enhancement for Phase 2.4
             vdf_enabled: true,
             gpu_enabled: true,
         }
@@ -204,7 +204,7 @@ impl Default for Phase23Config {
 
 impl QuantumMiningEngine {
     /// Create new quantum mining engine
-    pub async fn new(miner_id: MinerId, config: Phase23Config) -> Result<Self> {
+    pub async fn new(miner_id: MinerId, config: MainnetConfig) -> Result<Self> {
         // Convert lib::MiningAlgorithm to block::MiningAlgorithm
         let block_algorithm = match config.algorithm {
             MiningAlgorithm::QuantumSHA3 => block::MiningAlgorithm::QuantumSHA3 {
@@ -225,7 +225,7 @@ impl QuantumMiningEngine {
             quantum_enhancement: config.quantum_enhancement,
             vdf_enabled: config.vdf_enabled,
             gpu_enabled: config.gpu_enabled,
-            cpu_threads: 4, // Default to 4 CPU threads (reasonable for most systems)
+            cpu_threads: num_cpus::get_physical().max(4), // v5.1.0: Auto-detect all physical cores (was hardcoded to 4)
             seed_refresh_interval: Duration::from_secs(300), // Refresh quantum seed every 5 minutes
             dilithium_secret_key: Some(dilithium_sk.as_bytes().to_vec()),
             dilithium_public_key: Some(dilithium_pk.as_bytes().to_vec()),
@@ -452,7 +452,7 @@ pub mod cli {
         let miner_id = generate_miner_id(&cli.miner_address)?;
         
         // Create mining configuration
-        let config = Phase23Config {
+        let config = MainnetConfig {
             quantum_enhancement: cli.quantum_enhancement,
             gpu_enabled: cli.gpu_enabled,
             ..Default::default()
@@ -505,15 +505,15 @@ mod tests {
     #[tokio::test]
     async fn test_mining_engine_creation() {
         let miner_id = [1u8; 20];
-        let config = Phase23Config::default();
+        let config = MainnetConfig::default();
 
         let engine = QuantumMiningEngine::new(miner_id, config).await;
         assert!(engine.is_ok());
     }
     
     #[test]
-    fn test_phase23_config_defaults() {
-        let config = Phase23Config::default();
+    fn test_mainnet_config_defaults() {
+        let config = MainnetConfig::default();
         
         assert_eq!(config.target_block_time, Duration::from_secs(30));
         assert_eq!(config.quantum_enhancement, 0.7);

@@ -1,20 +1,12 @@
 /**
  * Transport Layer Configuration for Browser P2P Node
  *
- * 🧅 MANDATORY TOR ROUTING - v3.6.0
- *
- * ALL browser P2P traffic is routed through Tor automatically.
- * Users don't need to opt-in - privacy is the default.
- *
  * Transport Strategy:
- * 1. WebSocket through Tor bridge (wss://quillon.xyz:9444) - ONLY transport to bootstrap
- * 2. Circuit Relay through Tor - Browser-to-browser via Tor relay
+ * 1. WebSocket Secure (wss://quillon.xyz:9443) → nginx → libp2p:9001/ws
+ * 2. Circuit Relay for browser-to-browser connections
  * 3. NO WebRTC - Disabled to prevent IP leaks (STUN reveals real IP)
  *
- * Architecture:
- * Browser → wss://quillon.xyz:9444/tor-bridge → Tor SOCKS5 → Tor Network → Bootstrap
- *
- * v3.6.0-browser: Mandatory Tor routing for all P2P traffic
+ * v3.6.0-browser: WebSocket + Circuit Relay transports
  * v3.5.4-browser: (REMOVED) WebRTC disabled - IP leak prevention
  * v3.5.3-browser: Updated for @libp2p/websockets v10.x API changes.
  */
@@ -136,9 +128,9 @@ export async function testTransportConnectivity(multiaddr: string): Promise<bool
       return false
     }
 
-    // Verify this is the Tor bridge endpoint (port 9444)
-    if (!multiaddr.includes('/tcp/9444/')) {
-      logTor('warn', 'Not a Tor bridge address (expected port 9444):', multiaddr)
+    // Verify this is a valid bootstrap endpoint (port 9443 or 9444)
+    if (!multiaddr.includes('/tcp/9443/') && !multiaddr.includes('/tcp/9444/')) {
+      logTor('warn', 'Not a valid bootstrap address (expected port 9443 or 9444):', multiaddr)
       return false
     }
 
@@ -199,8 +191,8 @@ export function getTransportStats() {
     },
     websocket: {
       enabled: true,
-      endpoint: 'wss://quillon.xyz:9444/tor-bridge',
-      description: 'WebSocket through Tor bridge (only transport to bootstrap)',
+      endpoint: 'wss://quillon.xyz:9443',
+      description: 'WebSocket Secure to libp2p bootstrap node',
     },
     webrtc: {
       enabled: false, // v3.6.0: DISABLED for privacy

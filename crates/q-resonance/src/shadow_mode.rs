@@ -563,6 +563,16 @@ impl ShadowModeCoordinator {
             "✅ Ready for migration to Resonance consensus!".to_string()
         }
     }
+
+    /// v6.1.2: Clean up old data to prevent unbounded memory growth
+    pub fn cleanup_old_rounds(&self, keep_rounds: u64) -> usize {
+        self.shadow.cleanup_old_rounds(keep_rounds)
+    }
+
+    /// v6.2.0: Get shadow coordinator round count for diagnostics
+    pub fn round_count(&self) -> usize {
+        self.shadow.round_count()
+    }
 }
 
 /// Migration report

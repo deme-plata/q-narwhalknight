@@ -709,15 +709,30 @@ impl MultiPeerDownloader {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(true); // ON by default in Warp Sync
 
+        // v6.0.5: RAM-aware defaults to prevent OOM on small nodes
+        let ram_mb = {
+            use sysinfo::System;
+            let mut sys = System::new();
+            sys.refresh_memory();
+            (sys.total_memory() / (1024 * 1024)) as usize
+        };
+        let (default_chunk_size, default_max_parallel) = match ram_mb {
+            0..=3999     => (1000u64, 2usize),   // micro: tiny batches
+            4000..=7999  => (2000, 4),            // small (Gamma 7.8GB): conservative
+            8000..=15999 => (5000, 8),            // medium: moderate
+            16000..=31999 => (5000, 16),          // large
+            _            => (5000, 32),           // xlarge: original defaults
+        };
+
         let chunk_size = std::env::var("Q_WARP_CHUNK_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(5000); // 5k blocks per chunk for fine-grained parallelism
+            .unwrap_or(default_chunk_size);
 
         let max_parallel = std::env::var("Q_WARP_MAX_PARALLEL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(32); // 32 concurrent downloads
+            .unwrap_or(default_max_parallel);
 
         info!("🚀 [WARP SYNC Phase 2] Multi-Peer Downloader initialized:");
         info!("   • Enabled: {}", enabled);

@@ -417,11 +417,11 @@ pub async fn mint_qnkusd(
         token_balances.insert(balance_key, new_balance);
 
         info!(
-            "💰 Updated QUGUSD balance for {}: {} → {} (minted: {})",
+            "💰 Updated QUGUSD balance for {}: {:.4} → {:.4} (minted: {:.4})",
             hex::encode(&borrower_bytes[..8]),
-            current_balance as f64 / 1e8,
-            new_balance as f64 / 1e8,
-            request.amount as f64 / 1e8
+            current_balance as f64 / 1e24,
+            new_balance as f64 / 1e24,
+            request.amount as f64 / 1e24
         );
 
         // Persist the balance update to storage
@@ -438,17 +438,17 @@ pub async fn mint_qnkusd(
     {
         let mut wallet_balances = state.wallet_balances.write().await;
         let current_qug = wallet_balances.get(&borrower_bytes).copied().unwrap_or(0);
-        let collateral_base_units = (request.collateral_amount * 1e8) as u128;
+        let collateral_base_units = (request.collateral_amount * 1e24) as u128;
 
         if current_qug >= collateral_base_units {
             let new_qug_balance = current_qug - collateral_base_units;
             wallet_balances.insert(borrower_bytes, new_qug_balance);
 
             info!(
-                "🔒 Locked {} QUG as collateral: {} → {}",
+                "🔒 Locked {} QUG as collateral: {:.4} → {:.4}",
                 request.collateral_amount,
-                current_qug as f64 / 1e8,
-                new_qug_balance as f64 / 1e8
+                current_qug as f64 / 1e24,
+                new_qug_balance as f64 / 1e24
             );
 
             // Persist the QUG balance update
@@ -464,9 +464,9 @@ pub async fn mint_qnkusd(
             }
         } else {
             error!(
-                "⚠️  Insufficient QUG balance for collateral lock: {} QUG required, {} available",
+                "⚠️  Insufficient QUG balance for collateral lock: {} QUG required, {:.4} available",
                 request.collateral_amount,
-                current_qug as f64 / 1e8
+                current_qug as f64 / 1e24
             );
         }
     }
@@ -725,6 +725,8 @@ pub struct LoanApplication {
     pub monthly_payment: f64,
     pub status: String, // "pending", "approved", "rejected"
     pub created_at: i64,
+    #[serde(default)]
+    pub amount_paid: u128, // Track total amount paid back (in base units)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -780,9 +782,9 @@ pub async fn approve_loan(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     info!(
-        "🏦 Approving loan {} for {} QUGUSD",
+        "🏦 Approving loan {} for {:.4} QUGUSD",
         loan_id,
-        loan.loan_amount as f64 / 1e8
+        loan.loan_amount as f64 / 1e24
     );
 
     // Parse borrower address
@@ -802,7 +804,7 @@ pub async fn approve_loan(
             StatusCode::NOT_FOUND
         })?;
 
-        let collateral_base_units = (loan.collateral_amount * 1e8) as u128;
+        let collateral_base_units = (loan.collateral_amount * 1e24) as u128;
 
         if *qug_balance < collateral_base_units {
             error!(
@@ -841,10 +843,10 @@ pub async fn approve_loan(
         token_balances.insert(balance_key, new_qugusd);
 
         info!(
-            "💰 Minted {} QUGUSD for borrower: {} → {}",
-            loan_amount_base_units as f64 / 1e8,
-            current_qugusd as f64 / 1e8,
-            new_qugusd as f64 / 1e8
+            "💰 Minted {:.4} QUGUSD for borrower: {:.4} → {:.4}",
+            loan_amount_base_units as f64 / 1e24,
+            current_qugusd as f64 / 1e24,
+            new_qugusd as f64 / 1e24
         );
 
         // Persist QUGUSD balance update
@@ -919,24 +921,126 @@ pub async fn approve_loan(
             "success": true,
             "loan": approved_loan,
             "collateral_locked": collateral_amount,
-            "qugusd_disbursed": loan_amount as f64 / 1e8,
+            "qugusd_disbursed": loan_amount as f64 / 1e24,
         }),
     )))
 }
 
 async fn get_loans_at_risk(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"loans": []}))))
+    let pending_loans = state.pending_loan_applications.read().await;
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
+    const LIQUIDATION_THRESHOLD: f64 = 1.2; // 120%
+
+    let at_risk: Vec<serde_json::Value> = pending_loans
+        .values()
+        .filter(|loan| loan.status == "approved")
+        .filter_map(|loan| {
+            let loan_amount_usd = loan.loan_amount as f64 / 1e24;
+            let collateral_value_usd = loan.collateral_amount * qug_price;
+            let current_ratio = if loan_amount_usd > 0.0 {
+                collateral_value_usd / loan_amount_usd
+            } else {
+                f64::MAX
+            };
+
+            if current_ratio < LIQUIDATION_THRESHOLD {
+                Some(serde_json::json!({
+                    "loan_id": loan.loan_id,
+                    "borrower_address": loan.borrower_address,
+                    "loan_amount_usd": loan_amount_usd,
+                    "collateral_amount_qug": loan.collateral_amount,
+                    "collateral_value_usd": collateral_value_usd,
+                    "current_ratio": current_ratio * 100.0,
+                    "liquidation_threshold": LIQUIDATION_THRESHOLD * 100.0,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let count = at_risk.len();
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "loans": at_risk,
+        "qug_price": qug_price,
+        "count": count,
+    }))))
 }
 
 pub async fn liquidate_loan(
-    State(_state): State<Arc<AppState>>,
-    Json(_request): Json<serde_json::Value>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"success": true}),
-    )))
+    let loan_id = request
+        .get("loan_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    info!("⚠️ Liquidating loan: {}", loan_id);
+
+    let mut pending_loans = state.pending_loan_applications.write().await;
+    let loan = pending_loans
+        .get_mut(loan_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if loan.status != "approved" {
+        error!("Cannot liquidate loan with status: {}", loan.status);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Verify loan is below liquidation threshold
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
+    let loan_amount_usd = loan.loan_amount as f64 / 1e24;
+    let collateral_value_usd = loan.collateral_amount * qug_price;
+    let current_ratio = if loan_amount_usd > 0.0 {
+        collateral_value_usd / loan_amount_usd
+    } else {
+        f64::MAX
+    };
+
+    const LIQUIDATION_THRESHOLD: f64 = 1.2;
+    if current_ratio >= LIQUIDATION_THRESHOLD {
+        return Ok(Json(ApiResponse::success(serde_json::json!({
+            "success": false,
+            "error": "Loan is not below liquidation threshold",
+            "current_ratio": current_ratio * 100.0,
+            "threshold": LIQUIDATION_THRESHOLD * 100.0,
+        }))));
+    }
+
+    // Seize collateral: collateral stays locked (not returned to borrower)
+    // Mark loan as liquidated
+    loan.status = "liquidated".to_string();
+    let collateral_seized = loan.collateral_amount;
+    let loan_clone = loan.clone();
+    drop(pending_loans);
+
+    // Persist updated loan
+    if let Ok(loan_bytes) = bincode::serialize(&loan_clone) {
+        if let Err(e) = state
+            .storage_engine
+            .save_loan_application(loan_id, &loan_bytes)
+            .await
+        {
+            error!("Failed to persist liquidated loan: {}", e);
+        }
+    }
+
+    info!(
+        "🔨 Loan {} liquidated: seized {:.4} QUG collateral (worth ${:.2})",
+        loan_id, collateral_seized, collateral_value_usd
+    );
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "success": true,
+        "loan_id": loan_id,
+        "collateral_seized_qug": collateral_seized,
+        "collateral_value_usd": collateral_value_usd,
+        "loan_amount_usd": loan_amount_usd,
+        "ratio_at_liquidation": current_ratio * 100.0,
+    }))))
 }
 
 pub async fn apply_loan(
@@ -944,8 +1048,8 @@ pub async fn apply_loan(
     Json(request): Json<ApplyLoanRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
-        "🏦 Loan application received for {} QUGUSD",
-        request.loan_amount as f64 / 1e8
+        "🏦 Loan application received for {:.4} QUGUSD",
+        request.loan_amount as f64 / 1e24
     );
 
     // 1. Parse and validate wallet address
@@ -960,7 +1064,7 @@ pub async fn apply_loan(
     // 2. Validate collateral availability
     let wallet_balances = state.wallet_balances.read().await;
     let current_qug_balance =
-        wallet_balances.get(&borrower_address).copied().unwrap_or(0) as f64 / 1e8;
+        wallet_balances.get(&borrower_address).copied().unwrap_or(0) as f64 / 1e24;
     drop(wallet_balances);
 
     if current_qug_balance < request.collateral_amount {
@@ -976,7 +1080,7 @@ pub async fn apply_loan(
     let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
     const MINIMUM_COLLATERAL_RATIO: f64 = 1.5; // 150%
 
-    let loan_amount_f64 = request.loan_amount as f64 / 1e8;
+    let loan_amount_f64 = request.loan_amount as f64 / 1e24;
     let collateral_ratio = (request.collateral_amount * qug_price) / loan_amount_f64;
 
     if collateral_ratio < MINIMUM_COLLATERAL_RATIO {
@@ -990,9 +1094,11 @@ pub async fn apply_loan(
 
     // Calculate interest rate
     let base_rate = 0.05; // 5% APR
-    let collateral_bonus = ((collateral_ratio - MINIMUM_COLLATERAL_RATIO) / 0.10) * -0.01;
-    let term_premium = (request.term_months as f64 / 6.0) * 0.005;
-    let interest_rate = (base_rate + collateral_bonus + term_premium).max(0.01);
+    // More collateral = lower rate: -0.5% per 50% above minimum, capped at -2%
+    let excess_ratio = (collateral_ratio - MINIMUM_COLLATERAL_RATIO).max(0.0);
+    let collateral_discount = (excess_ratio * 0.01).min(0.02); // Max 2% discount
+    let term_premium = (request.term_months as f64 / 6.0) * 0.005; // +0.5% per 6 months
+    let interest_rate = (base_rate - collateral_discount + term_premium).max(0.01); // Min 1% APR
 
     // 4. Calculate monthly payment
     let total_interest = loan_amount_f64 * interest_rate * (request.term_months as f64 / 12.0);
@@ -1012,6 +1118,7 @@ pub async fn apply_loan(
         monthly_payment,
         status: "pending".to_string(),
         created_at: chrono::Utc::now().timestamp(),
+        amount_paid: 0,
     };
 
     // 6. Serialize loan application for persistence and networking
@@ -1048,8 +1155,12 @@ pub async fn apply_loan(
         );
     }
 
-    // 9. Skip storing in pending_loan_applications - will be loaded from RocksDB on next GET request
-    // This avoids type mismatch issues from multiple crate compilations
+    // 9. Store loan in pending_loan_applications for immediate availability
+    {
+        let mut pending_loans = state.pending_loan_applications.write().await;
+        pending_loans.insert(loan_id.clone(), loan_application.clone());
+        info!("📋 Stored loan {} in pending_loan_applications ({} total)", loan_id, pending_loans.len());
+    }
 
     info!(
         "✅ Loan application {} created: {} QUGUSD @ {:.2}% APR for {} months",
@@ -1083,8 +1194,8 @@ pub async fn payback_loan(
     Json(request): Json<PaybackLoanRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
-        "💳 Loan payback received: {} QUGUSD for loan {}",
-        request.payment_amount as f64 / 1e8,
+        "💳 Loan payback received: {:.4} QUGUSD for loan {}",
+        request.payment_amount as f64 / 1e24,
         request.loan_id
     );
 
@@ -1123,19 +1234,23 @@ pub async fn payback_loan(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // 5. Calculate total amount owed (principal + interest)
-    let principal = loan.loan_amount as u64;
+    // 5. Calculate total amount owed (principal + interest) using u128
+    let principal = loan.loan_amount; // Keep as u128, no truncation
     let interest_rate = loan.interest_rate / 100.0;
-    let total_interest = (principal as f64) * interest_rate * (loan.term_months as f64 / 12.0);
-    let total_owed = principal + (total_interest as u64);
-    let payment_amount = request.payment_amount as u64;
+    let total_interest_f64 = (principal as f64) * interest_rate * (loan.term_months as f64 / 12.0);
+    let total_interest = total_interest_f64 as u128;
+    let total_owed = principal + total_interest;
+    let remaining_owed = total_owed.saturating_sub(loan.amount_paid); // Account for prior payments
+    let payment_amount = request.payment_amount;
 
     info!(
-        "📊 Loan payback details: Principal: {}, Interest: {:.2}, Total Owed: {}, Payment: {}",
-        principal as f64 / 1e8,
-        total_interest / 1e8,
-        total_owed as f64 / 1e8,
-        payment_amount as f64 / 1e8
+        "📊 Loan payback details: Principal: {:.4}, Interest: {:.4}, Total Owed: {:.4}, Already Paid: {:.4}, Remaining: {:.4}, Payment: {:.4}",
+        principal as f64 / 1e24,
+        total_interest as f64 / 1e24,
+        total_owed as f64 / 1e24,
+        loan.amount_paid as f64 / 1e24,
+        remaining_owed as f64 / 1e24,
+        payment_amount as f64 / 1e24
     );
 
     // 6. Burn QUGUSD from borrower's balance
@@ -1144,23 +1259,23 @@ pub async fn payback_loan(
         let balance_key = (borrower_address, q_types::QUGUSD_TOKEN_ADDRESS);
         let current_qugusd = token_balances.get(&balance_key).copied().unwrap_or(0);
 
-        if current_qugusd < payment_amount as u128 {
+        if current_qugusd < payment_amount {
             error!(
-                "Insufficient QUGUSD balance: have {}, need {}",
-                current_qugusd as f64 / 1e8,
-                payment_amount as f64 / 1e8
+                "Insufficient QUGUSD balance: have {:.4}, need {:.4}",
+                current_qugusd as f64 / 1e24,
+                payment_amount as f64 / 1e24
             );
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        let new_qugusd = current_qugusd - payment_amount as u128;
+        let new_qugusd = current_qugusd - payment_amount;
         token_balances.insert(balance_key, new_qugusd);
 
         info!(
-            "🔥 Burned {} QUGUSD from borrower: {} → {}",
-            payment_amount as f64 / 1e8,
-            current_qugusd as f64 / 1e8,
-            new_qugusd as f64 / 1e8
+            "🔥 Burned {:.4} QUGUSD from borrower: {:.4} → {:.4}",
+            payment_amount as f64 / 1e24,
+            current_qugusd as f64 / 1e24,
+            new_qugusd as f64 / 1e24
         );
 
         // Persist QUGUSD balance update
@@ -1173,10 +1288,13 @@ pub async fn payback_loan(
         }
     }
 
-    // 7. Calculate collateral to return (proportional to payment)
-    let payment_ratio = (payment_amount as f64) / (total_owed as f64);
-    let collateral_to_return = loan.collateral_amount * payment_ratio;
-    let collateral_to_return_base = (collateral_to_return * 1e8) as u128;
+    // 7. Calculate collateral to return (proportional to payment vs remaining)
+    let payment_ratio = ((payment_amount as f64) / (remaining_owed as f64).max(1.0)).min(1.0);
+    // Calculate remaining collateral (accounting for prior partial returns)
+    let prior_returned_ratio = if total_owed > 0 { (loan.amount_paid as f64) / (total_owed as f64) } else { 0.0 };
+    let remaining_collateral = loan.collateral_amount * (1.0 - prior_returned_ratio).max(0.0);
+    let collateral_to_return = remaining_collateral * payment_ratio;
+    let collateral_to_return_base = (collateral_to_return * 1e24) as u128;
 
     // 8. Return collateral to borrower
     {
@@ -1186,10 +1304,10 @@ pub async fn payback_loan(
         wallet_balances.insert(borrower_address, new_qug);
 
         info!(
-            "🔓 Returned {} QUG collateral to borrower: {} → {}",
+            "🔓 Returned {:.4} QUG collateral to borrower: {:.4} → {:.4}",
             collateral_to_return,
-            current_qug as f64 / 1e8,
-            new_qug as f64 / 1e8
+            current_qug as f64 / 1e24,
+            new_qug as f64 / 1e24
         );
 
         // Persist QUG balance update
@@ -1202,16 +1320,31 @@ pub async fn payback_loan(
         }
     }
 
-    // 9. Update loan status
-    let fully_paid = payment_amount >= total_owed;
+    // 9. Update loan status and track payment
+    loan.amount_paid += payment_amount;
+    let fully_paid = loan.amount_paid >= total_owed;
     if fully_paid {
         loan.status = "paid".to_string();
         info!("✅ Loan {} fully paid off!", request.loan_id);
     } else {
+        loan.status = "approved".to_string(); // Keep active for further payments
         info!(
-            "💰 Partial payment received: {:.2}% of total",
-            payment_ratio * 100.0
+            "💰 Partial payment received: {:.2}% of total ({:.4} / {:.4} QUGUSD paid)",
+            (loan.amount_paid as f64 / total_owed as f64) * 100.0,
+            loan.amount_paid as f64 / 1e24,
+            total_owed as f64 / 1e24
         );
+    }
+
+    // Persist updated loan to RocksDB
+    if let Ok(loan_bytes) = bincode::serialize(&loan.clone()) {
+        if let Err(e) = state
+            .storage_engine
+            .save_loan_application(&request.loan_id, &loan_bytes)
+            .await
+        {
+            error!("Failed to persist updated loan after payback: {}", e);
+        }
     }
 
     // 10. Create transaction record for payback
@@ -1222,7 +1355,7 @@ pub async fn payback_loan(
             .unwrap_or([0u8; 32]),
         from: borrower_address,
         to: [0u8; 32], // System address (loan burning)
-        amount: payment_amount as u128,
+        amount: payment_amount,
         fee: 0,
         nonce: 0,
         signature: vec![],
@@ -1252,13 +1385,16 @@ pub async fn payback_loan(
         error!("Failed to save loan payback transaction: {}", e);
     }
 
+    let final_remaining = if fully_paid { 0u128 } else { total_owed.saturating_sub(loan.amount_paid) };
+    let loan_status = loan.status.clone();
     let response = serde_json::json!({
         "success": true,
         "loan_id": request.loan_id,
-        "payment_amount": payment_amount as f64 / 1e8,
+        "payment_amount": payment_amount as f64 / 1e24,
         "collateral_returned": collateral_to_return,
-        "remaining_balance": if fully_paid { 0.0 } else { (total_owed - payment_amount) as f64 / 1e8 },
-        "status": loan.status,
+        "remaining_balance": final_remaining as f64 / 1e24,
+        "total_paid": loan.amount_paid as f64 / 1e24,
+        "status": loan_status,
         "fully_paid": fully_paid,
     });
 

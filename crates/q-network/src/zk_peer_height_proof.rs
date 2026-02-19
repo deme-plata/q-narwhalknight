@@ -61,7 +61,7 @@ pub struct PeerHeightWithProof {
     #[serde(default)]
     pub upgrade_capabilities: Vec<String>,
 
-    /// Network ID this node is on (e.g., "testnet-phase19")
+    /// Network ID this node is on (e.g., "mainnet")
     /// Must match for sync to proceed
     #[serde(default)]
     pub network_id: Option<String>,

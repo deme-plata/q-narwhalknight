@@ -90,13 +90,9 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
     const effectiveBalance = Math.max(actualBalance, currentBalance);
     console.log('Effective Balance:', effectiveBalance);
     
-    // TEMPORARY: Allow testing with zero balance (bypass validation)
-    // TODO: Remove this in production and require proper faucet tokens
     if (effectiveBalance <= 0) {
-      console.warn('⚠️ Zero balance detected - allowing transaction for testing purposes');
-      console.warn('⚠️ In production, this would require faucet tokens first');
-      setError('⚠️ Testing with zero balance - transaction will proceed but may fail at API level');
-      // Don't return - allow transaction to proceed for testing
+      setError('❌ Insufficient balance. You need QUG tokens to send transactions. Earn QUG through mining.');
+      return;
     } else if (totalRequired > effectiveBalance) {
       setError(`❌ Insufficient balance. Required: ${totalRequired.toFixed(8)} QUG (${amountNumber} + ${fee} fee), Available: ${effectiveBalance.toFixed(8)} QUG`);
       return;
@@ -183,6 +179,20 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
           setTxComplete(true);
           setShowFractal(false);
           setIsProcessing(false);
+
+          // v6.0.1: Optimistically update displayed balance after successful send
+          const sentAmount = parseFloat(amount);
+          const newBalance = Math.max(0, actualBalance - sentAmount);
+          setActualBalance(newBalance);
+
+          // Notify TopBar of balance change
+          window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+            detail: {
+              symbol: 'QUG',
+              balance: newBalance,
+              reason: 'transaction_sent'
+            }
+          }));
         }
       }
 
@@ -451,48 +461,16 @@ export default function TransactionScreen({ currentBalance = 0 }: TransactionScr
             </AnimatePresence>
           </div>
 
-          {/* Faucet Button (when balance is 0) */}
+          {/* Zero Balance Info */}
           {Math.max(actualBalance, currentBalance) <= 0 && (
             <div className="bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-xl p-4">
               <div className="flex items-center gap-3 mb-3">
                 <AlertTriangle className="w-5 h-5 text-quantum-yellow" />
                 <span className="text-quantum-yellow font-medium">No QUG Balance</span>
               </div>
-              <p className="text-sm text-gray-300 mb-4">
-                You need QUG tokens to send transactions. Request test tokens from the faucet.
+              <p className="text-sm text-gray-300">
+                You need QUG tokens to send transactions. Earn QUG by mining blocks with your node.
               </p>
-              <button
-                onClick={async () => {
-                  try {
-                    setError(null);
-                    const walletAddress = localStorage.getItem('walletAddress');
-                    if (!walletAddress) {
-                      setError('❌ No wallet address found. Please log in again.');
-                      return;
-                    }
-                    
-                    console.log('🚰 Requesting faucet tokens for:', walletAddress);
-                    const result = await qnkAPI.requestFaucet(walletAddress);
-                    console.log('Faucet result:', result);
-                    
-                    if (result.success) {
-                      setError('✅ Faucet request successful! Refreshing balance in 3 seconds...');
-                      setTimeout(() => {
-                        refreshBalance();
-                        setError(null);
-                      }, 3000);
-                    } else {
-                      setError(`❌ Faucet request failed: ${result.error}`);
-                    }
-                  } catch (error) {
-                    console.error('Faucet request failed:', error);
-                    setError(`❌ Faucet request failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-                  }
-                }}
-                className="w-full px-4 py-2 bg-quantum-yellow/20 border border-quantum-yellow/50 rounded-lg text-quantum-yellow hover:bg-quantum-yellow/30 transition-colors"
-              >
-                Request Test Tokens from Faucet
-              </button>
             </div>
           )}
         </div>

@@ -14,8 +14,10 @@ import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
-import AIWorkerDemo from './components/AIWorkerDemo';
 import AnimatedBorder from './components/AnimatedBorder';
+import DeployControlPanel from './components/DeployControlPanel';
+import NodeSettingsModal from './components/NodeSettingsModal';
+import OAuthConsentPage from './components/OAuthConsentPage';
 import './App.css';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
@@ -52,6 +54,31 @@ type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
+
+  // v7.0.0: NETWORK CHANGE DETECTION - Clear all cached data when switching networks
+  // This prevents stale testnet balances/tokens from showing up on mainnet
+  (() => {
+    const CURRENT_NETWORK = 'mainnet2026.2'; // Must match Q_NETWORK_ID
+    const lastNetwork = localStorage.getItem('lastNetworkId');
+    if (lastNetwork && lastNetwork !== CURRENT_NETWORK) {
+      console.warn(`🔄 [App] Network changed: ${lastNetwork} → ${CURRENT_NETWORK}. Clearing ALL cached data.`);
+      // Clear all balance/token caches
+      localStorage.removeItem('cachedBalance');
+      localStorage.removeItem('cachedQugusdBalance');
+      localStorage.removeItem('walletBalanceHistory');
+      localStorage.removeItem('dexLockedBalance');
+      localStorage.removeItem('dexCooldownUntil');
+      localStorage.removeItem('protectedTokenBalances');
+      localStorage.removeItem('customTokensCache');
+      localStorage.removeItem('customTokensCooldownUntil');
+      localStorage.removeItem('selectedToken');
+      localStorage.removeItem('dexSettings');
+      // Force re-login to fetch fresh data
+      localStorage.removeItem('authenticated');
+      localStorage.removeItem('authToken');
+    }
+    localStorage.setItem('lastNetworkId', CURRENT_NETWORK);
+  })();
 
   // v2.4.0: Performance mode state - disables heavy effects (DEFAULT: ON for better UX)
   const [performanceMode, setPerformanceMode] = useState(() => {
@@ -128,6 +155,9 @@ function App() {
   // Debounce balance updates to prevent flickering
   const [pendingBalanceUpdate, setPendingBalanceUpdate] = useState<number | null>(null);
 
+  // v5.6.0: Track server version for refresh banner after deploys
+  const [newVersionBanner, setNewVersionBanner] = useState<string | null>(null);
+
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
   // SSE balance updates from server can be stale and overwrite correct DEX swap balance
   const dexSwapInProgressRef = useRef(false);
@@ -154,6 +184,10 @@ function App() {
   // v2.9.24-beta: FAST balance updates for better UX when receiving coins
   // Balance INCREASES: Apply immediately (instant feedback when receiving)
   // Balance DECREASES: Small 50ms debounce to prevent flickering
+  // v6.0.3: Use ref for nodeData.balance to avoid circular dependency (fixes React Error #185)
+  const nodeDataBalanceRef = useRef(nodeData.balance);
+  nodeDataBalanceRef.current = nodeData.balance;
+
   useEffect(() => {
     if (pendingBalanceUpdate === null) return;
 
@@ -166,14 +200,15 @@ function App() {
       return;
     }
 
-    const isBalanceIncrease = pendingBalanceUpdate > nodeData.balance;
+    const currentBalance = nodeDataBalanceRef.current;
+    const isBalanceIncrease = pendingBalanceUpdate > currentBalance;
 
     // v2.9.24-beta: INSTANT updates for receiving coins (balance increases)
     if (isBalanceIncrease) {
       console.log('⚡ [BALANCE DEBUG] INSTANT balance increase (receiving coins):', {
-        oldBalance: nodeData.balance,
+        oldBalance: currentBalance,
         newBalance: pendingBalanceUpdate,
-        increase: pendingBalanceUpdate - nodeData.balance
+        increase: pendingBalanceUpdate - currentBalance
       });
       setNodeData(prev => ({ ...prev, balance: pendingBalanceUpdate }));
       safeCacheBalance(pendingBalanceUpdate);
@@ -184,7 +219,7 @@ function App() {
     // v2.9.24-beta: Fast 50ms debounce for balance decreases (sending coins)
     console.log('⏱️ [BALANCE DEBUG] Pending balance decrease queued:', {
       pendingValue: pendingBalanceUpdate,
-      currentValue: nodeData.balance,
+      currentValue: currentBalance,
       willUpdateIn: '50ms'
     });
 
@@ -198,7 +233,7 @@ function App() {
         return;
       }
       console.log('✅ [BALANCE DEBUG] Applying debounced balance update:', {
-        oldBalance: nodeData.balance,
+        oldBalance: nodeDataBalanceRef.current,
         newBalance: pendingBalanceUpdate,
         source: 'debounced-50ms'
       });
@@ -208,7 +243,7 @@ function App() {
     }, 50);  // v2.9.24-beta: Reduced from 300ms to 50ms for faster UX
 
     return () => clearTimeout(timer);
-  }, [pendingBalanceUpdate, nodeData.balance]);
+  }, [pendingBalanceUpdate]);
 
   // Fetch initial node data and set up SSE for real-time updates
   useEffect(() => {
@@ -217,6 +252,16 @@ function App() {
     console.log('🎬 App.tsx: Setting up authenticated SSE for real-time balance updates');
 
     let mounted = true;
+
+    // v5.1.1: Exponential backoff for SSE reconnection (3s → 6s → 12s → 24s → 30s cap)
+    let sseReconnectAttempts = 0;
+    const getReconnectDelay = () => {
+      const base = 3000;
+      const delay = Math.min(base * Math.pow(2, sseReconnectAttempts), 30000);
+      sseReconnectAttempts++;
+      return delay;
+    };
+    const resetReconnectBackoff = () => { sseReconnectAttempts = 0; };
 
     const fetchNodeStatus = async () => {
       // v2.3.31-beta: Check BOTH local ref AND global cooldown
@@ -439,6 +484,12 @@ function App() {
         const session = walletSession.getSession();
         if (!session || !session.privateKey) {
           console.error('❌ App.tsx: No wallet session found for SSE authentication');
+          // v5.5.2: Retry after delay instead of silently giving up
+          if (mounted) {
+            const reconnectDelay = getReconnectDelay();
+            console.log(`🔄 App.tsx: No session yet, retrying SSE in ${reconnectDelay/1000}s...`);
+            setTimeout(() => { if (mounted) setupAuthenticatedSSE(); }, reconnectDelay);
+          }
           return;
         }
 
@@ -470,6 +521,9 @@ function App() {
         }
 
         console.log('✅ App.tsx: Authenticated SSE connection established');
+        resetReconnectBackoff(); // v5.1.1: Reset backoff on successful connection
+        // v5.5.2: Dispatch event so DeployControlPanel knows SSE is connected
+        window.dispatchEvent(new Event('sse-connected'));
 
         // Process SSE stream using ReadableStream
         const reader = response.body.getReader();
@@ -572,8 +626,13 @@ function App() {
                     detail: {
                       symbol: 'QUG',
                       balance: balanceData.new_balance,
+                      oldBalance: balanceData.old_balance,
                       reason: balanceData.change_reason,
-                      rewardAmount
+                      rewardAmount,
+                      blockHeight: balanceData.block_height,
+                      blockHash: balanceData.block_hash,
+                      walletAddress: balanceData.wallet_address,
+                      timestamp: balanceData.timestamp,
                     }
                   }));
                 } else {
@@ -586,7 +645,12 @@ function App() {
                     detail: {
                       symbol: 'QUG',
                       balance: balanceData.new_balance,
-                      reason: balanceData.change_reason
+                      oldBalance: balanceData.old_balance,
+                      reason: balanceData.change_reason,
+                      blockHeight: balanceData.block_height,
+                      blockHash: balanceData.block_hash,
+                      walletAddress: balanceData.wallet_address,
+                      timestamp: balanceData.timestamp,
                     }
                   }));
                 }
@@ -678,9 +742,6 @@ function App() {
                 }
               }));
               console.log('📢 App.tsx: Dispatched token-price-updated event for DexScreen');
-            } else if (type === 'faucet-dispensed') {
-              console.log('🚰 App.tsx: Faucet dispensed - refreshing balance');
-              fetchNodeStatus();
             } else if (type === 'loan-approved') {
               // Handle loan approval from Quillon Bank CLI
               const loanData = parsedData.data || parsedData;
@@ -755,7 +816,11 @@ function App() {
                   detail: {
                     symbol: 'QUG',
                     balance: newBalance,
-                    reason: 'pending_mining_reward'
+                    oldBalance: currentBalance,
+                    reason: 'pending_mining_reward',
+                    rewardAmount: rewardQnk,
+                    walletAddress: eventHex,
+                    timestamp: new Date().toISOString(),
                   }
                 }));
                 console.log('📢 App.tsx: Dispatched wallet-balance-updated for pending mining reward');
@@ -773,6 +838,44 @@ function App() {
               window.dispatchEvent(new CustomEvent('mining-stats-updated', {
                 detail: statsData
               }));
+            } else if (type === 'server-version') {
+              // v5.6.0: Server version broadcast — show refresh banner if version changed
+              const versionData = parsedData.data || parsedData;
+              const serverVersion = versionData.version;
+              const cachedVersion = localStorage.getItem('serverVersion');
+              console.log(`📡 App.tsx: Server version event: v${serverVersion} (cached: ${cachedVersion})`);
+              if (cachedVersion && cachedVersion !== serverVersion) {
+                setNewVersionBanner(serverVersion);
+              }
+              localStorage.setItem('serverVersion', serverVersion);
+            } else if (type === 'email-received') {
+              // v7.3.4: Quillon Mail — new email received
+              const emailData = parsedData.data || parsedData;
+              console.log('📧 App.tsx: Email received:', emailData.subject);
+              window.dispatchEvent(new CustomEvent('email-received', { detail: emailData }));
+            } else if (type === 'email-sent') {
+              const emailData = parsedData.data || parsedData;
+              console.log('📧 App.tsx: Email sent:', emailData.subject);
+              window.dispatchEvent(new CustomEvent('email-sent', { detail: emailData }));
+            } else if (type === 'email-unread-count') {
+              const emailData = parsedData.data || parsedData;
+              console.log('📧 App.tsx: Unread count:', emailData.count);
+              window.dispatchEvent(new CustomEvent('email-unread-count', { detail: emailData }));
+            } else if (type === 'calendar-event-created') {
+              // v7.3.3: Calendar event created/updated
+              const calData = parsedData.data || parsedData;
+              console.log('📅 App.tsx: Calendar event created:', calData);
+              window.dispatchEvent(new CustomEvent('calendar-event-created', { detail: calData }));
+            } else if (type === 'calendar-reminder') {
+              // v7.3.3: Calendar reminder notification
+              const reminderData = parsedData.data || parsedData;
+              console.log('📅 App.tsx: Calendar reminder:', reminderData);
+              window.dispatchEvent(new CustomEvent('calendar-reminder', { detail: reminderData }));
+            } else if (type === 'scheduled-tx-executed') {
+              // v7.3.3: Scheduled transaction executed
+              const txData = parsedData.data || parsedData;
+              console.log('📅 App.tsx: Scheduled TX executed:', txData);
+              window.dispatchEvent(new CustomEvent('scheduled-tx-executed', { detail: txData }));
             } else {
               console.log(`📨 App.tsx: SSE event type '${type}' received:`, parsedData);
             }
@@ -807,14 +910,13 @@ function App() {
             console.error('❌ App.tsx: SSE stream read error:', error);
           } finally {
             reader.releaseLock();
+            // v5.5.2: Dispatch event so DeployControlPanel knows SSE disconnected
+            window.dispatchEvent(new Event('sse-disconnected'));
 
-            // 🚨 v1.0.41-beta: CRITICAL FIX - Auto-reconnect SSE when stream ends
-            // BUG: SSE connection was one-shot - when it ended (network hiccup, server restart),
-            // balance updates would stop permanently until page refresh
-            // FIX: Automatically reconnect after 3 seconds with exponential backoff
+            // v5.1.1: Auto-reconnect SSE with exponential backoff (3s → 6s → 12s → 24s → 30s cap)
             if (mounted) {
-              const reconnectDelay = 3000; // 3 seconds
-              console.log(`🔄 App.tsx: SSE disconnected, reconnecting in ${reconnectDelay/1000}s...`);
+              const reconnectDelay = getReconnectDelay();
+              console.log(`🔄 App.tsx: SSE disconnected, reconnecting in ${reconnectDelay/1000}s (attempt ${sseReconnectAttempts})...`);
               setTimeout(() => {
                 if (mounted) {
                   console.log('🔄 App.tsx: Attempting SSE reconnection...');
@@ -830,11 +932,13 @@ function App() {
 
       } catch (error) {
         console.error('❌ App.tsx: Failed to establish authenticated SSE connection:', error);
+        // v5.5.2: Dispatch event so DeployControlPanel knows SSE failed
+        window.dispatchEvent(new Event('sse-disconnected'));
 
-        // 🚨 v1.0.41-beta: Also reconnect on connection failure (not just stream end)
+        // v5.1.1: Reconnect on connection failure with exponential backoff
         if (mounted) {
-          const reconnectDelay = 5000; // 5 seconds on error
-          console.log(`🔄 App.tsx: SSE connection failed, retrying in ${reconnectDelay/1000}s...`);
+          const reconnectDelay = getReconnectDelay();
+          console.log(`🔄 App.tsx: SSE connection failed, retrying in ${reconnectDelay/1000}s (attempt ${sseReconnectAttempts})...`);
           setTimeout(() => {
             if (mounted) {
               console.log('🔄 App.tsx: Retrying SSE connection...');
@@ -865,7 +969,17 @@ function App() {
     localStorage.removeItem('walletSeed');
     localStorage.removeItem('walletAddress');
     localStorage.removeItem('walletData');
-    localStorage.removeItem('faucetTransactions');
+    localStorage.removeItem('walletPublicKey');
+    // Clear encrypted wallet keys and password hash
+    localStorage.removeItem('walletEncryptedKey');
+    localStorage.removeItem('walletEncryptedMnemonic');
+    localStorage.removeItem('walletPasswordHash');
+    localStorage.removeItem('walletEncryptedAegisKey');
+    localStorage.removeItem('walletAegisPublicKey');
+    localStorage.removeItem('walletEncryptedSQIsignKey');
+    localStorage.removeItem('walletSQIsignPublicKey');
+    localStorage.removeItem('walletEncryptedDilithium5Key');
+    localStorage.removeItem('walletDilithium5PublicKey');
     // v3.9.2-beta: Clear ALL balance/token caches to prevent stale data on new login
     localStorage.removeItem('cachedBalance');
     localStorage.removeItem('cachedQugusdBalance');
@@ -876,6 +990,8 @@ function App() {
     localStorage.removeItem('customTokensCooldownUntil');
     localStorage.removeItem('customTokensCache');
     localStorage.removeItem('authToken');
+    // Clear session storage
+    sessionStorage.removeItem('walletSession');
     // Reset the current screen to dashboard
     setCurrentScreen('dashboard');
     // Reset node data
@@ -889,6 +1005,26 @@ function App() {
     });
   };
 
+  // v7.3.3: Backward-compat — old bounty-dapp opened popup to #/connect-bounty.
+  // Now bounty uses OAuth2 redirect. Show message and auto-close stale popups.
+  if (window.location.hash === '#/connect-bounty') {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#0f172a', color: '#94a3b8', fontFamily: 'sans-serif', textAlign: 'center', padding: 32 }}>
+        <div>
+          <p style={{ fontSize: 18, marginBottom: 12 }}>Wallet connect has been upgraded to OAuth2.</p>
+          <p style={{ fontSize: 14 }}>Please refresh the bounty page and click "Connect Wallet" again.</p>
+          <button onClick={() => window.close()} style={{ marginTop: 20, padding: '8px 24px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer' }}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  // v7.3.0: OAuth2 consent page intercept — render standalone consent page
+  // when URL path is /oauth/consent (redirected from /api/v1/oauth2/authorize)
+  if (window.location.pathname === '/oauth/consent') {
+    return <OAuthConsentPage />;
+  }
+
   if (!authenticated) {
     console.log('🔓 Rendering LoginScreen');
     // v3.4.2-beta: Login page gets full quality - no frame, always show QuantumBackground
@@ -896,7 +1032,16 @@ function App() {
       <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-slate-950 via-blue-950 to-slate-900">
         {/* Always show QuantumBackground on login for best visual quality */}
         <QuantumBackground />
-        <LoginScreen onAuthenticate={() => setAuthenticated(true)} />
+        <LoginScreen onAuthenticate={() => {
+          // v6.3.0: Reset balance state on login to prevent stale cached values
+          // from a previous wallet showing in the new session
+          const cachedBal = localStorage.getItem('cachedBalance');
+          const freshBalance = cachedBal ? parseFloat(cachedBal) : 0;
+          const validFresh = (!isNaN(freshBalance) && isFinite(freshBalance) && freshBalance >= 0 && freshBalance <= 21_000_000) ? freshBalance : 0;
+          setNodeData(prev => ({ ...prev, balance: validFresh }));
+          setPendingBalanceUpdate(null);
+          setAuthenticated(true);
+        }} />
       </div>
     );
   }
@@ -926,6 +1071,23 @@ function App() {
         {/* v2.4.0: Skip QuantumBackground in performance mode for better frame rates */}
         {!performanceMode && <QuantumBackground />}
         <div className="relative z-10 flex flex-col min-h-full">
+          {/* v5.6.0: New version refresh banner */}
+          {newVersionBanner && (
+            <div
+              onClick={() => window.location.reload()}
+              className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 py-2 px-4 cursor-pointer"
+              style={{
+                background: 'linear-gradient(90deg, rgba(16, 185, 129, 0.95) 0%, rgba(52, 211, 153, 0.95) 100%)',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: 600,
+                textShadow: '0 1px 2px rgba(0,0,0,0.2)',
+              }}
+            >
+              New version v{newVersionBanner} available. Click to refresh.
+            </div>
+          )}
+
           {/* Global TopBar */}
           <TopBar
             currentBalance={nodeData.balance}
@@ -936,6 +1098,11 @@ function App() {
             qci={nodeData.qci}
             onNavigate={setCurrentScreen}
           />
+
+          {/* v5.1.1: Deploy Control Panel - master wallet + node admin */}
+          <DeployControlPanel />
+          {/* v7.3.0: Node Settings Modal - admin wallet OAuth2 + node info */}
+          <NodeSettingsModal />
 
           {/* Token Bar - Below TopBar */}
           <TokenBar onTokenClick={handleTokenClick} />
@@ -971,10 +1138,6 @@ function App() {
               {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
             </main>
 
-            {/* AI Worker Panel - Floating bottom-right */}
-            <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 1000 }}>
-              <AIWorkerDemo />
-            </div>
           </div>
         </div>
       </div>

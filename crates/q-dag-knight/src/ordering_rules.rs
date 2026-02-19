@@ -347,35 +347,47 @@ impl OrderingEngine {
     }
 
     /// Clean up old cached orderings
+    /// v6.1.1: Fixed deadlock - read guard on processed_rounds was held while
+    /// trying to acquire write guard on the same field. Now drops read guard first.
     pub async fn cleanup_cache(&self, keep_rounds: u64) {
-        let rounds = self.processed_rounds.read().await;
-        let max_round = rounds.keys().max().copied().unwrap_or(0);
-        let cutoff_round = max_round.saturating_sub(keep_rounds);
+        // Get max_round then DROP the read guard before any write locks
+        let (max_round, cutoff_round) = {
+            let rounds = self.processed_rounds.read().await;
+            let max_round = rounds.keys().max().copied().unwrap_or(0);
+            let cutoff_round = max_round.saturating_sub(keep_rounds);
+            (max_round, cutoff_round)
+        }; // Read guard dropped here
 
         // Clean up cache
         {
             let mut cache = self.ordering_cache.write().await;
+            let before = cache.len();
             cache.retain(|&round, _| round >= cutoff_round);
+            if before > cache.len() {
+                debug!("🧹 OrderingEngine: cleaned ordering_cache {} → {}", before, cache.len());
+            }
         }
 
-        // Clean up processed rounds
-        {
+        // Clean up processed rounds and collect vertices to keep
+        let vertices_to_keep: HashSet<VertexId> = {
             let mut processed = self.processed_rounds.write().await;
+            let before = processed.len();
             processed.retain(|&round, _| round >= cutoff_round);
-        }
+            if before > processed.len() {
+                debug!("🧹 OrderingEngine: cleaned processed_rounds {} → {}", before, processed.len());
+            }
+            // Collect vertices from retained rounds for causal_graph cleanup
+            processed.values().flat_map(|v| v.iter().copied()).collect()
+        }; // Write guard dropped here
 
-        // Clean up causal graph (keep vertices from recent rounds)
+        // Clean up causal graph (keep only vertices from recent rounds)
         {
             let mut graph = self.causal_graph.write().await;
-            let mut vertices_to_keep: HashSet<VertexId> = HashSet::new();
-
-            for (&round, vertices) in rounds.iter() {
-                if round >= cutoff_round {
-                    vertices_to_keep.extend(vertices);
-                }
-            }
-
+            let before = graph.len();
             graph.retain(|vertex_id, _| vertices_to_keep.contains(vertex_id));
+            if before > graph.len() {
+                debug!("🧹 OrderingEngine: cleaned causal_graph {} → {}", before, graph.len());
+            }
         }
 
         debug!(

@@ -79,6 +79,14 @@ pub struct UserConsent {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// v7.4.0: Peer JWT public key info for cross-node token verification
+#[derive(Clone, Debug)]
+pub struct PeerJwtKeyInfo {
+    pub ed25519_verifying_bytes: [u8; 32],
+    pub sqisign_public: Option<Vec<u8>>,
+    pub announced_at: DateTime<Utc>,
+}
+
 // ============================================================================
 // OAuth2 Storage
 // v4.0.5: Each field has its own RwLock for fine-grained locking.
@@ -92,6 +100,8 @@ pub struct OAuth2Storage {
     access_tokens: RwLock<HashMap<String, AccessToken>>,
     refresh_tokens: RwLock<HashMap<String, String>>, // refresh_token -> access_token
     user_consents: RwLock<HashMap<(String, String), UserConsent>>, // (wallet, client_id) -> consent
+    consent_hashes: RwLock<std::collections::HashSet<String>>, // v7.4.0: on-chain consent hashes
+    storage: Option<Arc<q_storage::StorageEngine>>, // v7.3.5: RocksDB persistence for clients
 }
 
 impl OAuth2Storage {
@@ -102,10 +112,78 @@ impl OAuth2Storage {
             access_tokens: RwLock::new(HashMap::new()),
             refresh_tokens: RwLock::new(HashMap::new()),
             user_consents: RwLock::new(HashMap::new()),
+            consent_hashes: RwLock::new(std::collections::HashSet::new()),
+            storage: None,
         }
     }
 
+    /// Create with RocksDB persistence — clients survive restarts
+    pub fn with_storage(storage: Arc<q_storage::StorageEngine>) -> Self {
+        Self {
+            clients: RwLock::new(HashMap::new()),
+            auth_codes: RwLock::new(HashMap::new()),
+            access_tokens: RwLock::new(HashMap::new()),
+            refresh_tokens: RwLock::new(HashMap::new()),
+            user_consents: RwLock::new(HashMap::new()),
+            consent_hashes: RwLock::new(std::collections::HashSet::new()),
+            storage: Some(storage),
+        }
+    }
+
+    /// Load all persisted OAuth2 clients from RocksDB on startup
+    pub async fn load_clients_from_disk(&self) {
+        let storage = match &self.storage {
+            Some(s) => s,
+            None => return,
+        };
+        match storage.db_get(q_storage::CF_MANIFEST, b"oauth2:clients_index").await {
+            Ok(Some(index_bytes)) => {
+                let index_str = String::from_utf8_lossy(&index_bytes);
+                let client_ids: Vec<&str> = index_str.split(',').filter(|s| !s.is_empty()).collect();
+                let mut clients = self.clients.write().await;
+                let mut loaded = 0usize;
+                for cid in &client_ids {
+                    let key = format!("oauth2:client:{}", cid);
+                    if let Ok(Some(data)) = storage.db_get(q_storage::CF_MANIFEST, key.as_bytes()).await {
+                        if let Ok(client) = serde_json::from_slice::<OAuth2Client>(&data) {
+                            clients.insert(client.client_id.clone(), client);
+                            loaded += 1;
+                        }
+                    }
+                }
+                if loaded > 0 {
+                    info!("🔐 Loaded {} OAuth2 clients from disk", loaded);
+                }
+            }
+            _ => {
+                debug!("No persisted OAuth2 clients found (first boot)");
+            }
+        }
+    }
+
+    /// Persist a single client + update the index
+    async fn persist_client(&self, client: &OAuth2Client) {
+        let storage = match &self.storage {
+            Some(s) => s,
+            None => return,
+        };
+        // Save client JSON
+        let key = format!("oauth2:client:{}", client.client_id);
+        if let Ok(json) = serde_json::to_vec(client) {
+            if let Err(e) = storage.db_put(q_storage::CF_MANIFEST, key.as_bytes(), &json).await {
+                warn!("Failed to persist OAuth2 client {}: {}", client.client_id, e);
+                return;
+            }
+        }
+        // Update index (comma-separated client IDs)
+        let clients = self.clients.read().await;
+        let index: String = clients.keys().cloned().collect::<Vec<_>>().join(",");
+        drop(clients);
+        let _ = storage.db_put(q_storage::CF_MANIFEST, b"oauth2:clients_index", index.as_bytes()).await;
+    }
+
     pub async fn register_client(&self, client: OAuth2Client) -> Result<(), String> {
+        self.persist_client(&client).await;
         let mut clients = self.clients.write().await;
         clients.insert(client.client_id.clone(), client);
         Ok(())
@@ -187,6 +265,66 @@ impl OAuth2Storage {
             .get(&(wallet_address.to_string(), client_id.to_string()))
             .cloned()
     }
+
+    /// Get all consents granted by a specific wallet
+    pub async fn get_consents_for_wallet(&self, wallet: &str) -> Vec<UserConsent> {
+        let consents = self.user_consents.read().await;
+        consents
+            .iter()
+            .filter(|((w, _), _)| w == wallet)
+            .map(|(_, c)| c.clone())
+            .collect()
+    }
+
+    /// Revoke a consent and all associated tokens for a wallet+client pair
+    pub async fn revoke_consent(&self, wallet: &str, client_id: &str) -> bool {
+        let key = (wallet.to_string(), client_id.to_string());
+        let mut consents = self.user_consents.write().await;
+        let removed = consents.remove(&key).is_some();
+        drop(consents);
+
+        // Also revoke all tokens for this wallet+client
+        let mut tokens = self.access_tokens.write().await;
+        let to_remove: Vec<String> = tokens
+            .iter()
+            .filter(|(_, t)| t.wallet_address == wallet && t.client_id == client_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &to_remove {
+            tokens.remove(k);
+        }
+        removed
+    }
+
+    /// Count registered OAuth2 clients
+    pub async fn client_count(&self) -> usize {
+        self.clients.read().await.len()
+    }
+
+    /// Count active (non-expired) access tokens
+    pub async fn active_token_count(&self) -> usize {
+        let now = Utc::now();
+        let tokens = self.access_tokens.read().await;
+        tokens.values().filter(|t| t.expires_at > now).count()
+    }
+
+    /// v7.4.0: Store an on-chain consent hash (from DAG transaction)
+    pub async fn store_consent_hash(&self, hash: String) {
+        let mut hashes = self.consent_hashes.write().await;
+        hashes.insert(hash);
+    }
+
+    /// v7.4.0: Remove an on-chain consent hash (consent revoked)
+    pub async fn revoke_consent_by_hash(&self, hash: &str) -> bool {
+        let mut hashes = self.consent_hashes.write().await;
+        hashes.remove(hash)
+    }
+
+    /// v7.4.0: Check if a consent hash exists on-chain
+    pub async fn has_consent_hash(&self, hash: &str) -> bool {
+        let hashes = self.consent_hashes.read().await;
+        hashes.contains(hash)
+    }
 }
 
 // ============================================================================
@@ -212,7 +350,8 @@ pub struct TokenRequest {
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
     pub client_id: String,
-    pub client_secret: String,
+    #[serde(default)]
+    pub client_secret: Option<String>, // v7.3.5: Optional for PKCE public clients
     pub code_verifier: Option<String>, // PKCE
     pub refresh_token: Option<String>,
 }
@@ -252,6 +391,12 @@ pub struct RegisterClientRequest {
     pub redirect_uris: Vec<String>,
     pub logo_url: Option<String>,
     pub kyber_public_key: Option<String>, // Base64-encoded Kyber1024 public key
+    #[serde(default)]
+    pub client_id: Option<String>,        // v7.3.5: Optional custom client_id
+    #[serde(default)]
+    pub client_secret: Option<String>,    // v7.3.5: Optional custom client_secret
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,      // v7.3.5: Optional custom scopes
 }
 
 /// Client registration response
@@ -274,11 +419,13 @@ fn generate_random_token(length: usize) -> String {
 }
 
 fn hash_code_challenge(verifier: &str, method: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     match method {
         "S256" => {
+            // RFC 7636 §4.2: BASE64URL(SHA256(code_verifier)) — URL-safe, no padding
             let mut hasher = Sha256::new();
             hasher.update(verifier.as_bytes());
-            BASE64.encode(hasher.finalize())
+            URL_SAFE_NO_PAD.encode(hasher.finalize())
         }
         "plain" => verifier.to_string(),
         _ => String::new(),
@@ -288,6 +435,170 @@ fn hash_code_challenge(verifier: &str, method: &str) -> String {
 fn verify_pkce_challenge(verifier: &str, challenge: &str, method: &str) -> bool {
     let computed_challenge = hash_code_challenge(verifier, method);
     computed_challenge == challenge
+}
+
+// ============================================================================
+// v7.4.0: JWT Signed Token System — Decentralized Cross-Node Verification
+// Any node can verify tokens issued by any other node using Ed25519 signatures.
+// Backward compatible: opaque HashMap lookup is tried first, then JWT verify.
+// ============================================================================
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+
+/// JWT Header (alg=EdDSA, kid=peer_id)
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtHeader {
+    alg: String,
+    kid: String,  // peer_id of the issuing node
+    typ: String,
+}
+
+/// JWT Payload — all claims needed to reconstruct an AccessToken
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtPayload {
+    pub sub: String,          // wallet address
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub iss: String,          // peer_id of issuing node
+    pub exp: i64,             // expiry (unix timestamp)
+    pub iat: i64,             // issued-at (unix timestamp)
+    pub jti: String,          // unique token id
+}
+
+/// Generate a JWT signed with the node's Ed25519 signing key.
+/// Format: base64url(header).base64url(payload).base64url(signature)
+pub fn generate_signed_token(
+    signing_key: &ed25519_dalek::SigningKey,
+    peer_id: &str,
+    wallet: &str,
+    client_id: &str,
+    scopes: &[String],
+    expiry_secs: i64,
+) -> String {
+    use ed25519_dalek::Signer;
+
+    let header = JwtHeader {
+        alg: "EdDSA".to_string(),
+        kid: peer_id.to_string(),
+        typ: "JWT".to_string(),
+    };
+    let now = Utc::now().timestamp();
+    let payload = JwtPayload {
+        sub: wallet.to_string(),
+        client_id: client_id.to_string(),
+        scopes: scopes.to_vec(),
+        iss: peer_id.to_string(),
+        exp: now + expiry_secs,
+        iat: now,
+        jti: generate_random_token(16),
+    };
+
+    let header_b64 = BASE64URL.encode(serde_json::to_vec(&header).unwrap_or_default());
+    let payload_b64 = BASE64URL.encode(serde_json::to_vec(&payload).unwrap_or_default());
+    let message = format!("{}.{}", header_b64, payload_b64);
+    let signature = signing_key.sign(message.as_bytes());
+    let sig_b64 = BASE64URL.encode(signature.to_bytes());
+
+    format!("{}.{}", message, sig_b64)
+}
+
+/// Verify a JWT token. Checks signature against local key or peer_jwt_keys DashMap.
+/// Returns the decoded payload on success.
+pub fn verify_signed_token(
+    token: &str,
+    local_key: &ed25519_dalek::SigningKey,
+    local_peer_id: &str,
+    peer_jwt_keys: &dashmap::DashMap<String, PeerJwtKeyInfo>,
+) -> Result<JwtPayload, String> {
+    use ed25519_dalek::Verifier;
+
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid JWT format".to_string());
+    }
+
+    // Decode header to get kid (issuing node's peer_id)
+    let header_bytes = BASE64URL.decode(parts[0]).map_err(|e| format!("Bad header: {}", e))?;
+    let header: JwtHeader = serde_json::from_slice(&header_bytes).map_err(|e| format!("Bad header JSON: {}", e))?;
+
+    if header.alg != "EdDSA" {
+        return Err(format!("Unsupported algorithm: {}", header.alg));
+    }
+
+    // Decode payload
+    let payload_bytes = BASE64URL.decode(parts[1]).map_err(|e| format!("Bad payload: {}", e))?;
+    let payload: JwtPayload = serde_json::from_slice(&payload_bytes).map_err(|e| format!("Bad payload JSON: {}", e))?;
+
+    // Check expiry
+    if payload.exp < Utc::now().timestamp() {
+        return Err("Token expired".to_string());
+    }
+
+    // Decode signature
+    let sig_bytes = BASE64URL.decode(parts[2]).map_err(|e| format!("Bad signature: {}", e))?;
+    let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
+        .map_err(|e| format!("Invalid signature bytes: {}", e))?;
+
+    // Build the signed message (header.payload)
+    let message = format!("{}.{}", parts[0], parts[1]);
+
+    // Resolve verifying key: local node or peer
+    if header.kid == local_peer_id {
+        let verifying_key = local_key.verifying_key();
+        verifying_key.verify(message.as_bytes(), &signature)
+            .map_err(|_| "Signature verification failed (local key)".to_string())?;
+    } else if let Some(peer_info) = peer_jwt_keys.get(&header.kid) {
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&peer_info.ed25519_verifying_bytes)
+            .map_err(|e| format!("Invalid peer key: {}", e))?;
+        verifying_key.verify(message.as_bytes(), &signature)
+            .map_err(|_| format!("Signature verification failed (peer {})", header.kid))?;
+    } else {
+        return Err(format!("Unknown issuer: {}", header.kid));
+    }
+
+    Ok(payload)
+}
+
+/// Resolve an access token: try opaque HashMap first (backward compat), then JWT verify.
+/// This is the single entry point for all token validation.
+pub async fn resolve_access_token(
+    token: &str,
+    storage: &OAuth2Storage,
+    local_key: &ed25519_dalek::SigningKey,
+    local_peer_id: &str,
+    peer_jwt_keys: &dashmap::DashMap<String, PeerJwtKeyInfo>,
+) -> Option<AccessToken> {
+    // 1. Try opaque lookup (fast path, backward compat with pre-JWT tokens)
+    if let Some(access_token) = storage.get_access_token(token).await {
+        if access_token.expires_at > Utc::now() {
+            return Some(access_token);
+        }
+    }
+
+    // 2. Try JWT verification (cross-node tokens)
+    match verify_signed_token(token, local_key, local_peer_id, peer_jwt_keys) {
+        Ok(payload) => {
+            Some(AccessToken {
+                token: token.to_string(),
+                client_id: payload.client_id,
+                wallet_address: payload.sub,
+                scopes: payload.scopes,
+                expires_at: chrono::DateTime::from_timestamp(payload.exp, 0)
+                    .unwrap_or_else(Utc::now),
+                refresh_token: None, // JWT tokens don't carry refresh tokens
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+/// Compute a SHA-256 consent hash for on-chain privacy: H(wallet|client_id|scopes_sorted)
+pub fn compute_consent_hash(wallet: &str, client_id: &str, scopes: &[String]) -> String {
+    let mut sorted_scopes = scopes.to_vec();
+    sorted_scopes.sort();
+    let input = format!("{}|{}|{}", wallet, client_id, sorted_scopes.join(","));
+    let hash = Sha256::digest(input.as_bytes());
+    hex::encode(hash)
 }
 
 // ============================================================================
@@ -304,9 +615,11 @@ pub async fn register_client(
 ) -> Result<Json<ApiResponse<RegisterClientResponse>>, StatusCode> {
     info!("🔐 Registering new OAuth2 client: {}", request.name);
 
-    // Generate client credentials
-    let client_id = format!("qnk_client_{}", generate_random_token(16));
-    let client_secret = generate_random_token(32);
+    // v7.3.5: Use custom client_id/secret if provided, otherwise generate
+    let client_id = request.client_id.clone()
+        .unwrap_or_else(|| format!("qnk_client_{}", generate_random_token(16)));
+    let client_secret = request.client_secret.clone()
+        .unwrap_or_else(|| generate_random_token(32));
 
     // Decode Kyber public key if provided
     let kyber_public_key = if let Some(ref key_b64) = request.kyber_public_key {
@@ -331,10 +644,13 @@ pub async fn register_client(
         description: request.description.clone().unwrap_or_default(),
         website: request.website,
         logo_url: request.logo_url,
-        scopes: vec!["read:balance".to_string(), "send:transaction".to_string()],
+        scopes: request.scopes.unwrap_or_else(|| vec!["read:balance".to_string(), "send:transaction".to_string()]),
         created_at: Utc::now(),
         kyber_public_key,
     };
+
+    // v7.4.0: Clone client before registration (needed for P2P broadcast)
+    let client_for_broadcast = client.clone();
 
     // v4.0.5: Direct access - no outer .write().await needed
     state
@@ -350,6 +666,54 @@ pub async fn register_client(
         "✅ Registered OAuth2 client: {} ({})",
         request.name, client_id
     );
+
+    // v7.4.0: Broadcast client registration to P2P (with hashed secret)
+    if let Some(ref cmd_tx) = state.libp2p_command_tx {
+        let peer_id = {
+            let info = state.libp2p_peer_info.read().await;
+            info.0.clone()
+        };
+        if !peer_id.is_empty() {
+            // Hash the client_secret before gossiping — raw secret never leaves this node
+            let mut broadcast_client = client_for_broadcast;
+            let mut hasher = Sha256::new();
+            hasher.update(broadcast_client.client_secret.as_bytes());
+            broadcast_client.client_secret = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+            let network_id = std::env::var("Q_NETWORK_ID")
+                .ok()
+                .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+            let timestamp = Utc::now().timestamp();
+            let sign_msg = format!("oauth2-client:{}:{}:{}", peer_id, broadcast_client.client_id, timestamp);
+
+            use ed25519_dalek::Signer;
+            let sig = state.node_signing_key.sign(sign_msg.as_bytes());
+
+            #[derive(serde::Serialize)]
+            struct OAuth2ClientAnnouncement {
+                client: OAuth2Client,
+                origin_peer_id: String,
+                timestamp: i64,
+                signature: Vec<u8>,
+            }
+
+            let announcement = OAuth2ClientAnnouncement {
+                client: broadcast_client,
+                origin_peer_id: peer_id,
+                timestamp,
+                signature: sig.to_bytes().to_vec(),
+            };
+
+            if let Ok(bytes) = serde_json::to_vec(&announcement) {
+                let _ = cmd_tx.send(q_network::NetworkCommand::PublishOAuth2Client {
+                    topic: network_id.oauth2_clients_topic(),
+                    client_bytes: bytes,
+                });
+                debug!("🔐 [OAUTH2] Broadcast client registration to P2P");
+            }
+        }
+    }
 
     Ok(Json(ApiResponse::success(RegisterClientResponse {
         client_id,
@@ -398,24 +762,31 @@ pub async fn authorize(
     }
 
     // v4.0.5: Use request origin for consent URL instead of hardcoded domain
-    let consent_url = format!(
+    let mut consent_url = format!(
         "/oauth/consent?client_id={}&redirect_uri={}&scope={}&state={}",
         params.client_id,
         urlencoding::encode(&params.redirect_uri),
         urlencoding::encode(&params.scope.as_deref().unwrap_or("read:balance")),
         urlencoding::encode(&params.state.as_deref().unwrap_or(""))
     );
+    if let Some(ref challenge) = params.code_challenge {
+        consent_url.push_str(&format!("&code_challenge={}", urlencoding::encode(challenge)));
+        if let Some(ref method) = params.code_challenge_method {
+            consent_url.push_str(&format!("&code_challenge_method={}", urlencoding::encode(method)));
+        }
+    }
 
     debug!("Redirecting to consent screen: {}", consent_url);
     Ok(Redirect::to(&consent_url))
 }
 
 /// POST /api/v1/oauth2/consent
-/// User grants or denies consent for client access
+/// User grants or denies consent for client access.
+/// v7.4.0: Returns consent_hash + consent_tx_data for on-chain recording.
 pub async fn handle_consent(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConsentRequest>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
         "🔐 Processing consent from wallet: {} for client: {}",
         request.wallet_address, request.client_id
@@ -437,12 +808,16 @@ pub async fn handle_consent(
 
     state.oauth2_storage.store_consent(consent).await;
 
+    // v7.4.0: Compute privacy-preserving consent hash for on-chain recording
+    let consent_hash = compute_consent_hash(&request.wallet_address, &request.client_id, &request.scopes);
+    state.oauth2_storage.store_consent_hash(consent_hash.clone()).await;
+
     // Generate authorization code
     let auth_code = generate_random_token(32);
     let code_record = AuthorizationCode {
         code: auth_code.clone(),
-        client_id: request.client_id,
-        wallet_address: request.wallet_address,
+        client_id: request.client_id.clone(),
+        wallet_address: request.wallet_address.clone(),
         redirect_uri: request.redirect_uri.unwrap_or_default(),
         scopes: request.scopes,
         expires_at: Utc::now() + Duration::seconds(AUTH_CODE_EXPIRY_SECONDS),
@@ -452,8 +827,20 @@ pub async fn handle_consent(
 
     state.oauth2_storage.store_auth_code(code_record).await;
 
-    info!("✅ Consent granted, authorization code generated");
-    Ok(Json(ApiResponse::success(auth_code)))
+    // v7.4.0: Return auth code + consent transaction data for frontend to sign
+    let consent_tx_data = serde_json::json!({
+        "consent_hash": consent_hash,
+        "action": "grant",
+        "version": 1,
+        "tx_type": "0xA0", // OAuth2ConsentGrant
+    });
+
+    info!("✅ Consent granted, authorization code generated (consent_hash: {}...)", &consent_hash[..consent_hash.len().min(16)]);
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "auth_code": auth_code,
+        "consent_hash": consent_hash,
+        "consent_tx_data": consent_tx_data,
+    }))))
 }
 
 /// POST /api/v1/oauth2/token
@@ -465,10 +852,21 @@ pub async fn token(
     info!("🔐 OAuth2 token request from client: {}", request.client_id);
 
     // Validate client credentials - direct access
+    // v7.3.5: PKCE public clients may omit client_secret (code_verifier proves possession)
     let client = match state.oauth2_storage.get_client(&request.client_id).await {
-        Some(c) if c.client_secret == request.client_secret => c,
-        _ => {
-            error!("Invalid client credentials");
+        Some(c) => {
+            let has_pkce = request.code_verifier.is_some();
+            let secret_matches = request.client_secret.as_ref().map_or(false, |s| *s == c.client_secret);
+            if !secret_matches && !has_pkce {
+                error!("Invalid client credentials and no PKCE verifier");
+                return Ok(Json(ApiResponse::error(
+                    "Invalid client credentials".to_string(),
+                )));
+            }
+            c
+        }
+        None => {
+            error!("Unknown client_id: {}", request.client_id);
             return Ok(Json(ApiResponse::error(
                 "Invalid client credentials".to_string(),
             )));
@@ -532,8 +930,33 @@ pub async fn token(
                 }
             }
 
-            // Generate access token
-            let access_token = generate_random_token(32);
+            // v7.4.0: Verify on-chain consent hasn't been revoked (cross-node safety)
+            let consent_hash = compute_consent_hash(
+                &auth_code.wallet_address,
+                &auth_code.client_id,
+                &auth_code.scopes,
+            );
+            if !state.oauth2_storage.has_consent_hash(&consent_hash).await {
+                // Consent may have been revoked on-chain between consent grant and token exchange
+                warn!("⚠️ On-chain consent hash not found for wallet {} / client {} (may have been revoked)",
+                    auth_code.wallet_address, auth_code.client_id);
+                // Non-blocking: log warning but still issue token (consent was just granted locally)
+                // On-chain confirmation is async — the DAG tx may not be mined yet
+            }
+
+            // v7.4.0: Generate JWT signed token (cross-node verifiable)
+            let peer_id = {
+                let info = state.libp2p_peer_info.read().await;
+                info.0.clone()
+            };
+            let access_token = generate_signed_token(
+                &state.node_signing_key,
+                &peer_id,
+                &auth_code.wallet_address,
+                &auth_code.client_id,
+                &auth_code.scopes,
+                TOKEN_EXPIRY_SECONDS,
+            );
             let refresh_token = generate_random_token(32);
 
             let token_record = AccessToken {
@@ -545,9 +968,10 @@ pub async fn token(
                 refresh_token: Some(refresh_token.clone()),
             };
 
+            // Store locally too for fast opaque lookup on this node
             state.oauth2_storage.store_access_token(token_record).await;
 
-            info!("✅ Access token generated");
+            info!("✅ JWT access token generated (issuer: {})", if peer_id.len() > 12 { &peer_id[..12] } else { &peer_id });
             Ok(Json(ApiResponse::success(TokenResponse {
                 access_token,
                 token_type: "Bearer".to_string(),
@@ -580,14 +1004,39 @@ pub async fn token(
                 )));
             }
 
+            // v7.4.0: Check if consent was revoked on-chain before refreshing
+            let consent_hash = compute_consent_hash(
+                &old_token.wallet_address,
+                &old_token.client_id,
+                &old_token.scopes,
+            );
+            if !state.oauth2_storage.has_consent_hash(&consent_hash).await {
+                error!("🔐 Consent revoked on-chain for wallet {} / client {} — refusing refresh",
+                    old_token.wallet_address, old_token.client_id);
+                return Ok(Json(ApiResponse::error(
+                    "Consent has been revoked".to_string(),
+                )));
+            }
+
             // Remove old token and refresh mapping
             state
                 .oauth2_storage
                 .remove_token_and_refresh(&old_token.token, refresh_token)
                 .await;
 
-            // Generate new access token and refresh token
-            let new_access_token = generate_random_token(32);
+            // v7.4.0: Generate new JWT access token on refresh
+            let peer_id = {
+                let info = state.libp2p_peer_info.read().await;
+                info.0.clone()
+            };
+            let new_access_token = generate_signed_token(
+                &state.node_signing_key,
+                &peer_id,
+                &old_token.wallet_address,
+                &old_token.client_id,
+                &old_token.scopes,
+                TOKEN_EXPIRY_SECONDS,
+            );
             let new_refresh_token = generate_random_token(32);
 
             let token_record = AccessToken {
@@ -601,7 +1050,7 @@ pub async fn token(
 
             state.oauth2_storage.store_access_token(token_record).await;
 
-            info!("✅ Access token refreshed successfully");
+            info!("✅ JWT access token refreshed successfully");
             Ok(Json(ApiResponse::success(TokenResponse {
                 access_token: new_access_token,
                 token_type: "Bearer".to_string(),
@@ -635,17 +1084,20 @@ pub async fn userinfo(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Validate access token - direct access
-    let access_token = state
-        .oauth2_storage
-        .get_access_token(token)
-        .await
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    // Check if expired
-    if access_token.expires_at < Utc::now() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    // v7.4.0: Resolve token via opaque lookup OR JWT verification (cross-node)
+    let peer_id = {
+        let info = state.libp2p_peer_info.read().await;
+        info.0.clone()
+    };
+    let access_token = resolve_access_token(
+        token,
+        &state.oauth2_storage,
+        &state.node_signing_key,
+        &peer_id,
+        &state.peer_jwt_keys,
+    )
+    .await
+    .ok_or(StatusCode::UNAUTHORIZED)?;
 
     info!(
         "✅ Userinfo request for wallet: {}",
@@ -667,7 +1119,7 @@ pub async fn userinfo(
                 let mut address = [0u8; 32];
                 address.copy_from_slice(&address_bytes);
                 if let Some(balance) = state.wallet_balances.read().await.get(&address).copied() {
-                    user_info["balance"] = serde_json::json!(balance);
+                    user_info["balance"] = serde_json::json!(balance.to_string());
                     user_info["balance_qug"] = serde_json::json!(balance as f64 / 1e24);
                 }
 
@@ -711,12 +1163,20 @@ pub async fn revoke(
 
     if let Some(auth) = auth_header {
         if let Some(bearer) = auth.strip_prefix("Bearer ") {
-            // Verify the caller's token is valid - direct access
-            let caller_token = state.oauth2_storage.get_access_token(bearer).await;
+            // v7.4.0: Resolve caller's token via opaque or JWT
+            let peer_id = {
+                let info = state.libp2p_peer_info.read().await;
+                info.0.clone()
+            };
+            let caller_token = resolve_access_token(
+                bearer, &state.oauth2_storage, &state.node_signing_key, &peer_id, &state.peer_jwt_keys,
+            ).await;
 
             if let Some(caller) = caller_token {
                 // Check the token being revoked belongs to the same wallet
-                let target_token = state.oauth2_storage.get_access_token(&request.token).await;
+                let target_token = resolve_access_token(
+                    &request.token, &state.oauth2_storage, &state.node_signing_key, &peer_id, &state.peer_jwt_keys,
+                ).await;
 
                 if let Some(target) = target_token {
                     if target.wallet_address != caller.wallet_address {

@@ -1,0 +1,170 @@
+import { Theme, Card } from "theme.slint";
+
+export struct TxRecord {
+    direction: string,
+    amount: string,
+    counterparty: string,
+    timestamp: string,
+    tx-hash: string,
+}
+
+export component HistoryScreen inherits Rectangle {
+    in property <[TxRecord]> transactions: [];
+    in property <bool> loading: false;
+
+    callback go-back();
+    callback refresh();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                Text {
+                    text: "<";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xl;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Transaction History";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Rectangle {
+                width: 70px;
+                border-radius: Theme.radius-sm;
+                background: refresh-touch.has-hover ? Theme.bg-hover : transparent;
+
+                refresh-touch := TouchArea {
+                    clicked => { root.refresh(); }
+                }
+
+                Text {
+                    text: "Refresh";
+                    color: Theme.accent-blue;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        if root.loading : Text {
+            text: "Loading...";
+            color: Theme.text-muted;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        if root.transactions.length == 0 && !root.loading : Text {
+            text: "No transactions yet";
+            color: Theme.text-muted;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        // Transaction list
+        Flickable {
+            viewport-height: root.transactions.length * 80px;
+
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+
+                for tx[i] in root.transactions : Card {
+                    height: 72px;
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-md;
+                        padding-right: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+
+                        // Direction indicator
+                        VerticalLayout {
+                            alignment: center;
+                            width: 36px;
+
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                border-radius: 18px;
+                                background: tx.direction == "Sent" ? Theme.accent-red.with-alpha(0.15) : Theme.accent-green.with-alpha(0.15);
+
+                                Text {
+                                    text: tx.direction == "Sent" ? "^" : "v";
+                                    color: tx.direction == "Sent" ? Theme.accent-red : Theme.accent-green;
+                                    font-size: Theme.font-lg;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Details
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+
+                            Text {
+                                text: tx.direction;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-md;
+                                font-weight: 500;
+                            }
+                            Text {
+                                text: tx.counterparty;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: tx.timestamp;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                        }
+
+                        // Amount
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 0;
+
+                            Text {
+                                text: tx.amount;
+                                color: tx.direction == "Sent" ? Theme.accent-red : Theme.accent-green;
+                                font-size: Theme.font-md;
+                                font-weight: 600;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

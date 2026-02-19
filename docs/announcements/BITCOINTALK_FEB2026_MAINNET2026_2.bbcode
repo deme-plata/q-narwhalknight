@@ -1,0 +1,320 @@
+[center]
+[size=28pt][color=#6B46C1][b]Q-NarwhalKnight[/b][/color][/size]
+[size=14pt][color=#805AD5]The Quantum-Ready Blockchain[/color][/size]
+
+[img]https://quillon.xyz/logo-256.png[/img]
+
+[size=12pt][b]Post-Quantum Native | Zero-Knowledge Privacy | Decentralized AI | DAG-Knight Consensus[/b][/size]
+
+[url=https://quillon.xyz][b]Website[/b][/url] | [url=https://quillon.xyz/whitepaper][b]Whitepaper[/b][/url] | [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Investor-Pitch-2026.pdf][b]Investor Pitch[/b][/url] | [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf][b]Technical Report[/b][/url]
+[/center]
+
+[hr]
+
+[center]
+[size=22pt][color=#10B981][b]MAINNET 2026.2 - CLEAN GENESIS[/b][/color][/size]
+[size=14pt][i]February 22, 2026 12:00 UTC - Fresh Start, Zero Contamination[/i][/size]
+[/center]
+
+[hr]
+
+[size=18pt][color=#6B46C1][b]Why Mainnet 2026.2?[/b][/color][/size]
+[hr]
+
+Fellow cypherpunks,
+
+Mainnet 2026.1 launched February 15 and proved the network works. Blocks were produced, miners connected, the DEX ran, AI inference functioned. But the transition from testnet wasn't clean enough. Data contamination from the testnet-to-mainnet migration caused:
+
+[list]
+[li]Emission controller state not properly rebuilt from genesis[/li]
+[li]Stale testnet balances persisting through the purge[/li]
+[li]Mining reward oscillation from incorrect correction factors[/li]
+[/list]
+
+Rather than patch around contaminated state, we made the engineering decision to do what Bitcoin would do: [b]start clean[/b]. Mainnet 2026.2 launches from a fresh data directory with new identity keys, new chain ID, and complete P2P isolation from the old network.
+
+[b]This is not a failure - it's quality engineering.[/b] We identified the contamination vectors, built isolation mechanisms, and are relaunching with zero legacy state.
+
+
+[size=18pt][color=#6B46C1][b]What Changed[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Parameter[/b][/td]
+[td][b]Mainnet 2026.1[/b][/td]
+[td][b]Mainnet 2026.2[/b][/td]
+[/tr]
+[tr]
+[td]Network ID[/td]
+[td]mainnet2026.1[/td]
+[td][color=#10B981][b]mainnet2026.2[/b][/color][/td]
+[/tr]
+[tr]
+[td]Chain ID[/td]
+[td]999[/td]
+[td][color=#10B981][b]1000[/b][/color][/td]
+[/tr]
+[tr]
+[td]Genesis[/td]
+[td]Feb 15, 2026[/td]
+[td][color=#10B981][b]Feb 22, 2026 12:00 UTC[/b][/color][/td]
+[/tr]
+[tr]
+[td]Data Directory[/td]
+[td]data-mainnet2026.1[/td]
+[td][color=#10B981][b]data-mainnet2026.2[/b][/color][/td]
+[/tr]
+[tr]
+[td]Identity Keys[/td]
+[td]Carried from testnet[/td]
+[td][color=#10B981][b]Freshly generated[/b][/color][/td]
+[/tr]
+[tr]
+[td]State Sync[/td]
+[td]No network_id validation[/td]
+[td][color=#10B981][b]network_id field validated[/b][/color][/td]
+[/tr]
+[tr]
+[td]Emission[/td]
+[td]2,625,000 QUG/year[/td]
+[td][color=#10B981][b]2,625,000 QUG/year (same)[/b][/color][/td]
+[/tr]
+[/table]
+
+[b]What stays the same:[/b] 21M max supply, 4-year halving, VDF mining, post-quantum crypto, DeFi stack, AI inference, privacy layer - all unchanged. Only the data is fresh.
+
+
+[size=18pt][color=#6B46C1][b]P2P Isolation: How We Prevent Contamination[/b][/color][/size]
+[hr]
+
+Three new isolation mechanisms ensure zero cross-network contamination:
+
+[b]1. Gossipsub Topic Isolation[/b]
+Old nodes subscribe to /qnk/mainnet2026.1/* topics. New nodes use /qnk/mainnet2026.2/*. They never see each other's messages.
+
+[b]2. Protocol Handshake Validation[/b]
+The libp2p handshake now validates network_id. Connections from mainnet2026.1 nodes are rejected before any data exchange.
+
+[b]3. HTTP State Sync network_id Field[/b]
+The FullStateSnapshot now includes a network_id field. Snapshots from different networks are rejected on receipt. Old binaries without this field are also rejected.
+
+
+[size=18pt][color=#6B46C1][b]Network Overview[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Metric[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Consensus Protocol[/td]
+[td]DAG-Knight + Narwhal Mempool + Bullshark Finality[/td]
+[/tr]
+[tr]
+[td]Transaction Finality[/td]
+[td]< 3 seconds[/td]
+[/tr]
+[tr]
+[td]Throughput (measured)[/td]
+[td]2,800+ TPS[/td]
+[/tr]
+[tr]
+[td]Codebase Size[/td]
+[td]500,000+ LOC Rust (83 crates)[/td]
+[/tr]
+[tr]
+[td]Test Suite[/td]
+[td]4,000+ automated tests (incl. mainnet safety)[/td]
+[/tr]
+[tr]
+[td]Total Supply (hard cap)[/td]
+[td]21,000,000 QUG[/td]
+[/tr]
+[tr]
+[td]Era 0 Annual Emission[/td]
+[td]2,625,000 QUG/year (adaptive)[/td]
+[/tr]
+[tr]
+[td]Mining[/td]
+[td]SHA-3 + VDF (consumer hardware, ASIC-resistant)[/td]
+[/tr]
+[tr]
+[td]Development Fee[/td]
+[td]0.5% of mining rewards only[/td]
+[/tr]
+[/table]
+
+[b]Emission model:[/b] The adaptive emission controller targets 2,625,000 QUG/year in Era 0 (the first 4 years), regardless of block production rate. Faster blocks produce smaller rewards. Slower blocks produce larger rewards. The daily target is constant. First halving occurs 4 years after genesis.
+
+[b]Fair launch.[/b] No premine. No ICO. No VC allocation. VDF mining levels the playing field.
+
+
+[size=18pt][color=#6B46C1][b]What Makes Q-NarwhalKnight Different[/b][/color][/size]
+[hr]
+
+[b][color=#EF4444]Post-Quantum Security at Every Layer[/color][/b]
+
+Every major blockchain today relies on cryptography that Shor's algorithm can break. Q-NarwhalKnight uses post-quantum algorithms natively:
+
+[table]
+[tr]
+[td][b]Layer[/b][/td]
+[td][b]Algorithm[/b][/td]
+[td][b]Security[/b][/td]
+[/tr]
+[tr]
+[td]Transaction Signing[/td]
+[td]Dilithium5[/td]
+[td]NIST Level 5 (lattice-based)[/td]
+[/tr]
+[tr]
+[td]Key Exchange[/td]
+[td]Kyber1024[/td]
+[td]NIST Level 5 (lattice-based)[/td]
+[/tr]
+[tr]
+[td]Symmetric Encryption[/td]
+[td]AEGIS-256[/td]
+[td]AES-based AEAD[/td]
+[/tr]
+[tr]
+[td]Ring Signatures[/td]
+[td]Module-LWE[/td]
+[td]Lattice-based unlinkability[/td]
+[/tr]
+[tr]
+[td]Threshold Signing[/td]
+[td]FROST[/td]
+[td]Schnorr-based multi-party[/td]
+[/tr]
+[/table]
+
+
+[b][color=#10B981]Complete DeFi Ecosystem (Live at Genesis)[/color][/b]
+
+[list]
+[li][b]Quantum DEX:[/b] Constant-product AMM with cross-decimal support, real-time price oracle[/li]
+[li][b]QUGUSD Stablecoin:[/b] Collateral-backed stablecoin pegged via AMM pool reserves[/li]
+[li][b]Quillon Bank:[/b] Decentralized lending with AI credit assessment[/li]
+[li][b]QNK10 Index Fund:[/b] Diversified basket of top network tokens[/li]
+[li][b]Custom Tokens:[/b] Deploy your own tokens with custom parameters[/li]
+[li][b]Governance DAO:[/b] Mining-weighted voting with reputation system[/li]
+[/list]
+
+
+[b][color=#8B5CF6]Full Privacy Stack[/color][/b]
+
+[list]
+[li]CLSAG ring signatures (sender privacy)[/li]
+[li]Stealth addresses (recipient privacy)[/li]
+[li]Bulletproofs++ range proofs (amount privacy)[/li]
+[li]Chaumian mixing pools (transaction graph)[/li]
+[li]Tor with dedicated circuits (network privacy)[/li]
+[li]Dandelion++ protocol (propagation privacy)[/li]
+[li]ZK-STARKs (validity proofs)[/li]
+[/list]
+
+
+[b][color=#F59E0B]Decentralized AI Inference[/color][/b]
+
+[list]
+[li]Mistral-7B and BitNet b1.58 running natively on validator hardware[/li]
+[li]All inference encrypted with AEGIS-256[/li]
+[li]ZK proofs of computation correctness[/li]
+[li]Zero reliance on external APIs[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]How to Get Involved[/b][/color][/size]
+[hr]
+
+[b]Run a Node:[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-v7.3.0
+chmod +x q-api-server-v7.3.0
+./q-api-server-v7.3.0 --port 8080[/code]
+
+[b]Mine QUG:[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --mode solo --wallet YOUR_WALLET --threads 4[/code]
+
+[b]Use the Wallet:[/b] Visit [url=https://quillon.xyz]quillon.xyz[/url] for the full web wallet with DEX, token deployment, AI chat, and more.
+
+[b]Important:[/b] If you ran mainnet2026.1, simply download the new binary. It automatically uses a fresh data directory (data-mainnet2026.2). Your old data remains untouched but is no longer used. Old binaries cannot connect to the new network.
+
+
+[size=18pt][color=#6B46C1][b]Roadmap[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Date[/b][/td]
+[td][b]Milestone[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]Q1 2026[/td]
+[td]Testnet live with mining, DEX, AI, P2P sync[/td]
+[td][color=#10B981][b]COMPLETE[/b][/color][/td]
+[/tr]
+[tr]
+[td]Feb 8, 2026[/td]
+[td]Decentralization hardening[/td]
+[td][color=#10B981][b]COMPLETE[/b][/color][/td]
+[/tr]
+[tr]
+[td]Feb 15, 2026[/td]
+[td]Mainnet 2026.1 launch[/td]
+[td][color=#10B981][b]COMPLETE[/b][/color][/td]
+[/tr]
+[tr]
+[td][color=#10B981][b]Feb 22, 2026[/b][/color][/td]
+[td][color=#10B981][b]Mainnet 2026.2 - Clean Genesis[/b][/color][/td]
+[td][color=#F59E0B][b]LAUNCH DAY[/b][/color][/td]
+[/tr]
+[tr]
+[td]Feb 22, 2030[/td]
+[td]First halving (Era 0 → Era 1)[/td]
+[td]Scheduled[/td]
+[/tr]
+[tr]
+[td]Q1 2027[/td]
+[td]Enterprise SDK, sovereign chain toolkit[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]Q2 2027[/td]
+[td]Cross-chain bridges (Bitcoin, Ethereum), mobile wallet[/td]
+[td]Planned[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]Downloads[/b][/color][/size]
+[hr]
+
+[b]Node Binary (Linux x86_64):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-v7.3.0 && chmod +x q-api-server-v7.3.0[/code]
+
+[b]Miner Binary:[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64[/code]
+
+[b]Investor Pitch:[/b] [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Investor-Pitch-2026.pdf]Q-NarwhalKnight-Investor-Pitch-2026.pdf[/url]
+[b]Technical Report:[/b] [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf]Q-NarwhalKnight-Project-Report.pdf[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+[b]Source Code:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+
+
+[hr]
+
+[center]
+[size=14pt][color=#6B46C1][i]"Physical laws should have mathematical beauty." - Paul Dirac[/i][/color][/size]
+
+[size=16pt][b][color=#10B981]February 22, 2026 12:00 UTC. Clean genesis. Zero contamination.[/color][/b][/size]
+[/center]
+
+[hr]
+
+[size=10pt][color=#94A3B8][i]Disclaimer: This post is for informational purposes only and does not constitute financial advice. Cryptocurrency investments carry significant risk. Past performance is not indicative of future results. Conduct your own research before participating.[/i][/color][/size]

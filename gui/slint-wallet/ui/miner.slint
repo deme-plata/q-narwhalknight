@@ -1,0 +1,220 @@
+import { Theme, QButton, Card } from "theme.slint";
+
+export component MinerScreen inherits Rectangle {
+    in property <bool> mining: false;
+    in property <string> hashrate: "0";
+    in property <string> blocks-found: "0";
+    in property <string> difficulty: "0";
+    in property <string> miner-address: "";
+    in property <string> reward-per-block: "0";
+
+    callback toggle-mining();
+    callback go-back();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                Text {
+                    text: "<";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xl;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Miner";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        // Mining status
+        Card {
+            height: 140px;
+
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                // Status indicator
+                Rectangle {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: root.mining ? Theme.accent-green.with-alpha(0.2) : Theme.bg-hover;
+                    animate background { duration: 300ms; }
+
+                    Rectangle {
+                        x: 14px;
+                        y: 14px;
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 10px;
+                        background: root.mining ? Theme.accent-green : Theme.text-muted;
+                        animate background { duration: 300ms; }
+                    }
+                }
+
+                Text {
+                    text: root.mining ? "Mining Active" : "Miner Stopped";
+                    color: root.mining ? Theme.accent-green : Theme.text-muted;
+                    font-size: Theme.font-lg;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Stats grid
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+
+            Card {
+                horizontal-stretch: 1;
+                height: 80px;
+
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    alignment: center;
+
+                    Text {
+                        text: "Hashrate";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.hashrate;
+                        color: Theme.accent-cyan;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "H/s";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            Card {
+                horizontal-stretch: 1;
+                height: 80px;
+
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    alignment: center;
+
+                    Text {
+                        text: "Blocks Found";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.blocks-found;
+                        color: Theme.accent-yellow;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Difficulty & Reward
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Difficulty Target";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.difficulty;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                        max-width: 200px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Reward per Block";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.reward-per-block + " QUG";
+                        color: Theme.accent-green;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Mining Address";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.miner-address;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                        max-width: 200px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Spacer
+        Rectangle { vertical-stretch: 1; }
+
+        // Toggle button
+        QButton {
+            label: root.mining ? "Stop Mining" : "Start Mining";
+            button-color: root.mining ? Theme.accent-red : Theme.accent-green;
+            clicked => { root.toggle-mining(); }
+        }
+    }
+}

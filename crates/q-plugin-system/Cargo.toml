@@ -25,8 +25,7 @@ hex = "0.4"
 sha3 = "0.10"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 
-# Database
-rocksdb = { workspace = true }
+# Database (platform-specific - RocksDB on Linux, sled on Windows)
 
 # Logging
 tracing = "0.1"
@@ -41,6 +40,12 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 q-vm = { path = "../q-vm" }
 q-narwhal-core = { path = "../q-narwhal-core" }
 q-types = { path = "../q-types" }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sled = "0.34"
 
 [dev-dependencies]
 tokio-test = "0.4"

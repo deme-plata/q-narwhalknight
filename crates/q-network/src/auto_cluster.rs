@@ -154,7 +154,7 @@ impl Default for AutoClusterConfig {
             bind_address: "0.0.0.0".to_string(),
             api_port: 8080,
             p2p_port: 9001,
-            network_id: "testnet-phase19".to_string(),
+            network_id: "mainnet2026.2".to_string(),
             max_peers: 100,
             heartbeat_interval: HEARTBEAT_INTERVAL,
             peer_timeout: PEER_TIMEOUT,

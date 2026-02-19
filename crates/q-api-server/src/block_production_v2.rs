@@ -110,20 +110,40 @@ async fn production_loop(
             app.highest_network_height.store(cur_h, Ordering::SeqCst);
         }
 
-        // v3.2.10-beta: DECENTRALIZED MINING FIX
-        // Previous threshold (gap > 10) prevented remote nodes from EVER producing blocks
-        // because the bootstrap node was always "ahead" by the time they caught up.
+        // v7.1.4: MINING QUEUE DRAIN FIX
+        // Previous threshold (gap > 3) was too strict — Beta is consistently 4-6 blocks behind
+        // due to P2P block arrival timing, causing production to happen only ~1/min instead of
+        // every 2 seconds. Combined with max_solutions_per_block=100, this created a massive
+        // solution queue backlog where new miners' rewards were delayed by HOURS.
         //
         // New thresholds:
         // - gap > 1000: Emergency brake - node is severely behind, don't produce
-        // - gap > 3: Minor lag - still allow production (was 10, now 3)
+        // - gap > 50: Moderate lag - pause production to prioritize sync
+        // - gap <= 50: Normal — produce blocks to drain the solution queue
         //
-        // This allows multiple nodes to produce blocks concurrently, enabling
-        // true decentralized mining where any node can include miner's solutions.
-        if net_h > 0 {
+        // v7.3.7: Bug #29 fix — ignore peer heights BEFORE genesis timestamp.
+        // A rogue pre-launch node can announce height 311,755 on mainnet2026.2 before Feb 22,
+        // causing gap > 1000 and disabling production permanently on canary nodes.
+        // If we haven't reached genesis yet, peer heights are meaningless — skip the gap check.
+        let pre_genesis = {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let genesis_ts = q_storage::balance_consensus::active_genesis_timestamp();
+            now < genesis_ts
+        };
+        if !pre_genesis && net_h > 0 {
             let gap = net_h.saturating_sub(cur_h);
             if gap > 1000 { if iter % 30 == 0 { warn!("🚫 Production DISABLED: {} behind (local={}, net={})", gap, cur_h, net_h); } continue; }
-            if gap > 3 { if iter % 30 == 0 { debug!("⏸️  Syncing {} behind (threshold=3)", gap); } continue; }
+            if gap > 50 { if iter % 30 == 0 { debug!("⏸️  Syncing {} behind (threshold=50)", gap); } continue; }
+        } else if pre_genesis && net_h > 0 {
+            let gap = net_h.saturating_sub(cur_h);
+            if gap > 1000 {
+                if iter % 30 == 0 {
+                    let genesis_ts = q_storage::balance_consensus::active_genesis_timestamp();
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                    warn!("🕐 [PRE-GENESIS] Ignoring rogue peer height {} (gap={}) — genesis in {}s",
+                          net_h, gap, genesis_ts.saturating_sub(now));
+                }
+            }
         }
 
         ph.store(ProductionPhase::BeforeShouldProduce as u8, Ordering::SeqCst);
@@ -297,6 +317,30 @@ async fn production_loop(
                 Err(_) => { error!("🚨 save_qblock TIMEOUT"); continue; }
             }
             ph.store(ProductionPhase::AfterSaveBlocks as u8, Ordering::SeqCst);
+
+            // v7.1.1: Advance producer height after block save.
+            // Without this, the v2 loop never advances the producer's internal height,
+            // which breaks should_produce_block() and last_produced_height tracking.
+            if let Err(e) = app.block_producer_pool.sync_from_storage(&app.storage_engine).await {
+                error!("❌ [BLOCK_PROD_V2] Failed to sync producers after block save: {}", e);
+            }
+
+            // Update current_height_atomic so mining API and sync logic have accurate height
+            let cur = app.current_height_atomic.load(Ordering::SeqCst);
+            if blk.header.height > cur {
+                app.current_height_atomic.store(blk.header.height, Ordering::SeqCst);
+            }
+
+            // v7.1.4 FIX: Also update node_status.current_height for Explorer/status API
+            // Previously this was only updated by sync code (gossipsub block reception),
+            // so bootstrap nodes that produce blocks locally showed "current height: 0"
+            // in the Explorer UI and status API.
+            {
+                let mut status = app.node_status.write().await;
+                if blk.header.height > status.current_height {
+                    status.current_height = blk.header.height;
+                }
+            }
 
             ph.store(ProductionPhase::BeforeBroadcast as u8, Ordering::SeqCst);
             let block_hash = blk.calculate_hash();

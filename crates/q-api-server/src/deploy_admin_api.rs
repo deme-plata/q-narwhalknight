@@ -1,0 +1,1305 @@
+//! v5.7.0: Deploy Admin API - CCC Convergence-Aware Rolling Deployments
+//!
+//! Integrates the K-Kristensen Convergence Readiness framework from the
+//! "Cosmic Arcology Mission" paper into the 3-server HA deployment pipeline.
+//!
+//! The deployment pipeline maps to Penrose's Conformal Cyclic Cosmology phases:
+//!   - Isolation (k: 0.0-0.5) → Alpha canary evolving independently
+//!   - Convergence (k: 0.5-0.7) → Gamma verifying, syncing with Beta
+//!   - Aeon Transition (k: 0.7-0.9) → Beta deploying (conformal boundary crossing)
+//!   - Harmony (k: 0.9-1.0) → All servers unified, same version, synced
+//!
+//! K-Kristensen formula: k = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20
+//!   G = Genetic Stability (version consistency)
+//!   Q = Quantum Coherence (height synchronization)
+//!   T = Thermodynamic Efficiency (uptime ratio)
+//!   I = Information Density (sync completeness)
+//!   R = Network Resilience (peer connectivity)
+//!
+//! Endpoints:
+//! - GET  /api/v1/admin/deploy/status       - All servers' status
+//! - GET  /api/v1/admin/deploy/convergence  - CCC phase + K-parameter + readiness
+//! - POST /api/v1/admin/deploy/verify       - Trigger verification on Gamma
+//! - GET  /api/v1/admin/deploy/progress     - SSE stream of verification progress
+//! - POST /api/v1/admin/deploy/promote      - Rolling upgrade: Gamma→Beta
+//! - POST /api/v1/admin/deploy/rollback     - Rollback to previous binary
+
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Json,
+    },
+};
+use futures_util::stream::Stream;
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{error, info, warn};
+
+use crate::aegis_auth_middleware::FOUNDER_WALLET;
+use crate::handlers::ApiResponse;
+use crate::AppState;
+
+/// Server configuration
+const ALPHA_URL: &str = "http://161.35.219.10:8080";
+const GAMMA_URL: &str = "http://109.205.176.60:8080";
+const DELTA_URL: &str = "http://5.79.79.158:8080";
+const GAMMA_IP: &str = "109.205.176.60";
+
+/// Status of a single server node
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeDeployStatus {
+    pub name: String,
+    pub url: String,
+    pub online: bool,
+    pub version: String,
+    pub height: u64,
+    pub network_height: u64,
+    pub peers: usize,
+    pub uptime_secs: u64,
+    pub status: String, // "ready", "syncing", "starting", "offline"
+}
+
+/// Combined deploy status for all servers
+#[derive(Debug, Clone, Serialize)]
+pub struct DeployStatus {
+    pub alpha: NodeDeployStatus,
+    pub beta: NodeDeployStatus,
+    pub gamma: NodeDeployStatus,
+    pub delta: NodeDeployStatus,
+    pub height_delta: i64,
+    pub versions_match: bool,
+}
+
+/// Verification progress event
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyProgressEvent {
+    pub step: String,
+    pub status: String, // "running", "passed", "failed"
+    pub message: String,
+    pub timestamp: u64,
+}
+
+/// Shared verification state for SSE streaming
+pub struct DeployState {
+    pub verification_running: bool,
+    pub verification_events: Vec<VerifyProgressEvent>,
+    pub last_result: Option<crate::upgrade_verifier::VerificationResult>,
+    /// v5.6.0: Prevents concurrent pipeline executions
+    pub pipeline_running: bool,
+}
+
+impl DeployState {
+    pub fn new() -> Self {
+        Self {
+            verification_running: false,
+            verification_events: Vec::new(),
+            last_result: None,
+            pipeline_running: false,
+        }
+    }
+}
+
+/// Extract wallet address from request headers (same pattern as other admin APIs)
+fn extract_wallet_from_headers(headers: &HeaderMap) -> Option<String> {
+    // Try X-Wallet-Auth header first
+    if let Some(auth) = headers.get("x-wallet-auth") {
+        if let Ok(auth_str) = auth.to_str() {
+            // Format: "wallet_address:signature" or just "wallet_address"
+            let wallet = auth_str.split(':').next().unwrap_or("");
+            let clean = wallet.replace("qnk", "").replace("qug", "");
+            if clean.len() == 64 {
+                return Some(clean);
+            }
+        }
+    }
+
+    // Try Authorization header
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+            let clean = token.replace("qnk", "").replace("qug", "");
+            if clean.len() == 64 {
+                return Some(clean);
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if the requesting wallet is the admin wallet (configurable via --admin-wallet)
+fn is_master_wallet(headers: &HeaderMap, state: &AppState) -> bool {
+    match extract_wallet_from_headers(headers) {
+        Some(wallet) => wallet == state.admin_wallet,
+        None => false,
+    }
+}
+
+/// GET /api/v1/admin/deploy/status
+/// Returns status of both Beta and Gamma servers
+pub async fn deploy_status(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DeployStatus>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Get Beta (local) status directly from AppState
+    let beta_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let beta_network_height = state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let beta_peers = state
+        .libp2p_peer_count
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let beta_uptime = state.start_time.elapsed().as_secs();
+    let beta_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let beta_status = if beta_height == 0 {
+        "starting"
+    } else if beta_network_height > 0 && beta_height + 10 < beta_network_height {
+        "syncing"
+    } else {
+        "ready"
+    };
+
+    let beta = NodeDeployStatus {
+        name: "Server Beta".to_string(),
+        url: "https://quillon.xyz".to_string(),
+        online: true,
+        version: beta_version.clone(),
+        height: beta_height,
+        network_height: beta_network_height,
+        peers: beta_peers,
+        uptime_secs: beta_uptime,
+        status: beta_status.to_string(),
+    };
+
+    // Get Alpha, Gamma, and Delta status via HTTP (parallel)
+    let (alpha, gamma, delta) = tokio::join!(
+        fetch_node_status("Server Alpha", ALPHA_URL),
+        fetch_node_status("Server Gamma", GAMMA_URL),
+        fetch_node_status("Server Delta", DELTA_URL),
+    );
+
+    let height_delta = beta.height as i64 - gamma.height as i64;
+    let versions_match = beta.version == gamma.version
+        && (alpha.version == beta.version || !alpha.online);
+
+    Ok(Json(ApiResponse::success(DeployStatus {
+        alpha,
+        beta,
+        gamma,
+        delta,
+        height_delta,
+        versions_match,
+    })))
+}
+
+/// Fetch status from a remote node
+async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    let url = format!("{}/api/v1/health", base_url);
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(Deserialize)]
+            struct HealthResp {
+                data: Option<HealthData>,
+            }
+            #[derive(Deserialize)]
+            struct HealthData {
+                status: Option<String>,
+                height: Option<u64>,
+                network_height: Option<u64>,
+                peers: Option<usize>,
+                version: Option<String>,
+                uptime_secs: Option<u64>,
+            }
+
+            match resp.json::<HealthResp>().await {
+                Ok(health) => {
+                    if let Some(data) = health.data {
+                        NodeDeployStatus {
+                            name: name.to_string(),
+                            url: base_url.to_string(),
+                            online: true,
+                            version: data.version.unwrap_or_else(|| "unknown".to_string()),
+                            height: data.height.unwrap_or(0),
+                            network_height: data.network_height.unwrap_or(0),
+                            peers: data.peers.unwrap_or(0),
+                            uptime_secs: data.uptime_secs.unwrap_or(0),
+                            status: data.status.unwrap_or_else(|| "ready".to_string()),
+                        }
+                    } else {
+                        // Legacy health endpoint returns "OK"
+                        NodeDeployStatus {
+                            name: name.to_string(),
+                            url: base_url.to_string(),
+                            online: true,
+                            version: "unknown".to_string(),
+                            height: 0,
+                            network_height: 0,
+                            peers: 0,
+                            uptime_secs: 0,
+                            status: "ready".to_string(),
+                        }
+                    }
+                }
+                Err(_) => NodeDeployStatus {
+                    name: name.to_string(),
+                    url: base_url.to_string(),
+                    online: true,
+                    version: "unknown (legacy)".to_string(),
+                    height: 0,
+                    network_height: 0,
+                    peers: 0,
+                    uptime_secs: 0,
+                    status: "ready".to_string(),
+                },
+            }
+        }
+        _ => NodeDeployStatus {
+            name: name.to_string(),
+            url: base_url.to_string(),
+            online: false,
+            version: String::new(),
+            height: 0,
+            network_height: 0,
+            peers: 0,
+            uptime_secs: 0,
+            status: "offline".to_string(),
+        },
+    }
+}
+
+/// POST /api/v1/admin/deploy/verify
+/// Triggers verification on Gamma (runs upgrade_verifier checks against Beta as reference)
+pub async fn deploy_verify(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check if Gamma is reachable
+    let gamma_status = fetch_node_status("Gamma", GAMMA_URL).await;
+    if !gamma_status.online {
+        return Ok(Json(ApiResponse::success(
+            "Gamma node is offline - cannot verify".to_string(),
+        )));
+    }
+
+    // Run verification checks against Gamma from Beta's perspective
+    let deploy_state = state.deploy_state.clone();
+
+    {
+        let mut ds = deploy_state.write().await;
+        if ds.verification_running {
+            return Ok(Json(ApiResponse::success(
+                "Verification already in progress".to_string(),
+            )));
+        }
+        ds.verification_running = true;
+        ds.verification_events.clear();
+    }
+
+    let storage = state.storage_engine.clone();
+    let ds_clone = deploy_state.clone();
+
+    // Run verification in background
+    tokio::spawn(async move {
+        let config = crate::upgrade_verifier::VerifyConfig {
+            reference_url: GAMMA_URL.to_string(),
+            verify_only: false,
+            max_height_delta: 10,
+            sync_timeout_secs: 120,
+        };
+
+        let result = crate::upgrade_verifier::run_upgrade_verification(&config, &storage, 8080).await;
+
+        let mut ds = ds_clone.write().await;
+        ds.verification_running = false;
+
+        // Push result events
+        for check in &result.checks {
+            ds.verification_events.push(VerifyProgressEvent {
+                step: check.name.clone(),
+                status: if check.passed {
+                    "passed".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                message: check.message.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            });
+        }
+
+        // Final result
+        ds.verification_events.push(VerifyProgressEvent {
+            step: "RESULT".to_string(),
+            status: if result.passed {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
+            message: format!(
+                "Verification {} in {:.1}s",
+                if result.passed { "PASSED" } else { "FAILED" },
+                result.total_duration_ms as f64 / 1000.0
+            ),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+
+        ds.last_result = Some(result);
+    });
+
+    Ok(Json(ApiResponse::success(
+        "Verification started - monitor via /api/v1/admin/deploy/progress".to_string(),
+    )))
+}
+
+/// GET /api/v1/admin/deploy/progress (SSE)
+/// Streams verification/pipeline progress events.
+/// NOTE: Auth dropped here because EventSource cannot send custom headers.
+/// The POST trigger endpoints still require auth. This only streams log lines.
+pub async fn deploy_progress(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let deploy_state = state.deploy_state.clone();
+
+    let stream = async_stream::stream! {
+        let mut sent_count = 0;
+
+        loop {
+            let (events, running, pipeline) = {
+                let ds = deploy_state.read().await;
+                (ds.verification_events.clone(), ds.verification_running, ds.pipeline_running)
+            };
+
+            // Send new events
+            while sent_count < events.len() {
+                let event = &events[sent_count];
+                let json = serde_json::to_string(event).unwrap_or_default();
+                yield Ok(Event::default()
+                    .event("verify-progress")
+                    .data(json));
+                sent_count += 1;
+            }
+
+            // If nothing is running and all events sent, we're done
+            if !running && !pipeline && sent_count >= events.len() && sent_count > 0 {
+                yield Ok(Event::default()
+                    .event("verify-complete")
+                    .data("done"));
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Strip ANSI color codes from script output
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Parse a pipeline output line into a step name
+fn parse_pipeline_step(line: &str) -> &str {
+    let lower = line.to_lowercase();
+    if lower.contains("alpha") || lower.contains("canary") {
+        "alpha-canary"
+    } else if lower.contains("gamma") && (lower.contains("verify") || lower.contains("deploy") || lower.contains("scp") || lower.contains("restart")) {
+        "gamma-verify"
+    } else if lower.contains("soak") || lower.contains("wait") || lower.contains("health check") {
+        "soak-test"
+    } else if lower.contains("beta") && (lower.contains("deploy") || lower.contains("upgrade") || lower.contains("restart")) {
+        "beta-deploy"
+    } else if lower.contains("restore") || lower.contains("weight") || lower.contains("primary") {
+        "restore"
+    } else if lower.contains("rollback") {
+        "rollback"
+    } else {
+        "pipeline"
+    }
+}
+
+/// Push a progress event into deploy_state
+async fn push_event(deploy_state: &Arc<RwLock<DeployState>>, step: &str, status: &str, message: String) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut ds = deploy_state.write().await;
+    ds.verification_events.push(VerifyProgressEvent {
+        step: step.to_string(),
+        status: status.to_string(),
+        message,
+        timestamp: ts,
+    });
+}
+
+/// v5.6.0: Spawn ha-deploy.sh (or rollback) and stream output to deploy_state
+async fn spawn_deploy_script(
+    deploy_state: Arc<RwLock<DeployState>>,
+    command_arg: &str,
+    broadcaster: Arc<crate::streaming::EventBroadcaster>,
+) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let is_full = command_arg == "full";
+    let script_path = "/opt/orobit/shared/q-narwhalknight/scripts/ha-deploy.sh";
+
+    info!("🚀 [DEPLOY] Spawning pipeline: ha-deploy.sh {}", command_arg);
+    push_event(&deploy_state, "pipeline", "running",
+        format!("Starting pipeline: ha-deploy.sh {}", command_arg)).await;
+
+    let child = if is_full {
+        // Pipe "y" to auto-confirm
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!("echo 'y' | {} {}", script_path, command_arg))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    } else {
+        Command::new(script_path)
+            .arg(command_arg)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    };
+
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            error!("🚨 [DEPLOY] Failed to spawn ha-deploy.sh: {}", e);
+            push_event(&deploy_state, "pipeline", "failed",
+                format!("Failed to spawn script: {}", e)).await;
+            let mut ds = deploy_state.write().await;
+            ds.pipeline_running = false;
+            return;
+        }
+    };
+
+    // Read stdout line by line
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let clean = strip_ansi(&line);
+            if clean.trim().is_empty() {
+                continue;
+            }
+            let step = parse_pipeline_step(&clean);
+            info!("🔧 [DEPLOY] [{}] {}", step, clean);
+            push_event(&deploy_state, step, "running", clean.clone()).await;
+        }
+    }
+
+    // Wait for process exit
+    let exit_status = child.wait().await;
+    let (success, code) = match &exit_status {
+        Ok(status) => (status.success(), status.code().unwrap_or(-1)),
+        Err(_) => (false, -1),
+    };
+
+    if success {
+        info!("✅ [DEPLOY] Pipeline completed successfully");
+        push_event(&deploy_state, "RESULT", "passed",
+            "Pipeline completed successfully".to_string()).await;
+
+        // Spawn post-deploy health monitor
+        if is_full {
+            spawn_post_deploy_monitor(deploy_state.clone(), broadcaster.clone()).await;
+        }
+    } else {
+        error!("🚨 [DEPLOY] Pipeline failed with exit code {}", code);
+        push_event(&deploy_state, "RESULT", "failed",
+            format!("Pipeline failed (exit code {})", code)).await;
+    }
+
+    let mut ds = deploy_state.write().await;
+    ds.pipeline_running = false;
+}
+
+/// v5.6.0: Post-deploy health monitor — checks local /health every 30s for 5 minutes.
+/// Triggers auto-rollback on height regression, stall, or consecutive failures.
+async fn spawn_post_deploy_monitor(
+    deploy_state: Arc<RwLock<DeployState>>,
+    broadcaster: Arc<crate::streaming::EventBroadcaster>,
+) {
+    info!("🩺 [DEPLOY] Starting post-deploy health monitor (5 min, 30s interval)");
+
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+
+        let mut prev_height: Option<u64> = None;
+        let mut last_height_change = std::time::Instant::now();
+        let mut consecutive_failures: u32 = 0;
+        let monitor_end = std::time::Instant::now() + std::time::Duration::from_secs(300);
+
+        while std::time::Instant::now() < monitor_end {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            #[derive(serde::Deserialize)]
+            struct HealthResp {
+                data: Option<HealthData>,
+            }
+            #[derive(serde::Deserialize)]
+            struct HealthData {
+                height: Option<u64>,
+            }
+
+            match client.get("http://127.0.0.1:8080/api/v1/health").send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    consecutive_failures = 0;
+                    if let Ok(health) = resp.json::<HealthResp>().await {
+                        let height = health.data.and_then(|d| d.height).unwrap_or(0);
+
+                        // Check height regression
+                        if let Some(prev) = prev_height {
+                            if height < prev {
+                                let reason = format!(
+                                    "Height regression detected: {} → {} (lost {} blocks)",
+                                    prev, height, prev - height
+                                );
+                                warn!("🚨 [DEPLOY MONITOR] {}", reason);
+                                trigger_auto_rollback(&deploy_state, &broadcaster, &reason).await;
+                                return;
+                            }
+                            if height > prev {
+                                last_height_change = std::time::Instant::now();
+                            }
+                        } else {
+                            last_height_change = std::time::Instant::now();
+                        }
+
+                        prev_height = Some(height);
+
+                        // Check stall (no height change for 2 minutes)
+                        if last_height_change.elapsed() > std::time::Duration::from_secs(120) {
+                            let reason = format!(
+                                "Block production stalled for 2+ minutes at height {}",
+                                height
+                            );
+                            warn!("🚨 [DEPLOY MONITOR] {}", reason);
+                            trigger_auto_rollback(&deploy_state, &broadcaster, &reason).await;
+                            return;
+                        }
+                    }
+                }
+                _ => {
+                    consecutive_failures += 1;
+                    warn!(
+                        "🚨 [DEPLOY MONITOR] Health check failed ({}/3 consecutive)",
+                        consecutive_failures
+                    );
+                    if consecutive_failures >= 3 {
+                        let reason = "3 consecutive health check failures".to_string();
+                        trigger_auto_rollback(&deploy_state, &broadcaster, &reason).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        info!("🩺 [DEPLOY] Post-deploy health monitor completed — no issues detected");
+        push_event(&deploy_state, "health-monitor", "passed",
+            "5-minute post-deploy monitoring passed".to_string()).await;
+    });
+}
+
+/// Trigger auto-rollback and notify clients
+async fn trigger_auto_rollback(
+    deploy_state: &Arc<RwLock<DeployState>>,
+    broadcaster: &Arc<crate::streaming::EventBroadcaster>,
+    reason: &str,
+) {
+    error!("🚨 [AUTO-ROLLBACK] Triggering rollback: {}", reason);
+    push_event(deploy_state, "auto-rollback", "failed",
+        format!("Auto-rollback triggered: {}", reason)).await;
+
+    // Broadcast security alert to all clients
+    let _ = broadcaster.broadcast(crate::streaming::StreamEvent::SecurityAlert {
+        alert_type: "auto-rollback".to_string(),
+        description: format!("Automatic rollback triggered: {}", reason),
+        risk_level: 0.9,
+        timestamp: chrono::Utc::now(),
+    }).await;
+
+    // Execute rollback — this will kill the current process (old binary restarts via systemctl)
+    let script_path = "/opt/orobit/shared/q-narwhalknight/scripts/ha-deploy.sh";
+    match tokio::process::Command::new(script_path)
+        .arg("rollback")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let _ = child.wait().await;
+            info!("🔄 [AUTO-ROLLBACK] Rollback script finished");
+        }
+        Err(e) => {
+            error!("🚨 [AUTO-ROLLBACK] Failed to spawn rollback: {}", e);
+        }
+    }
+}
+
+/// POST /api/v1/admin/deploy/promote
+/// v5.6.0: Actually executes `echo 'y' | ./scripts/ha-deploy.sh full`
+pub async fn deploy_promote(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Prevent concurrent pipelines
+    {
+        let mut ds = state.deploy_state.write().await;
+        if ds.pipeline_running {
+            return Ok(Json(ApiResponse::success(
+                "Pipeline already running — check /api/v1/admin/deploy/progress".to_string(),
+            )));
+        }
+        ds.pipeline_running = true;
+        ds.verification_events.clear();
+    }
+
+    let deploy_state = state.deploy_state.clone();
+    let broadcaster = state.event_broadcaster.clone();
+
+    tokio::spawn(async move {
+        spawn_deploy_script(deploy_state, "full", broadcaster).await;
+    });
+
+    Ok(Json(ApiResponse::success(
+        "Rolling upgrade started — monitor via /api/v1/admin/deploy/progress".to_string(),
+    )))
+}
+
+/// POST /api/v1/admin/deploy/rollback
+/// v5.6.0: Actually executes `./scripts/ha-deploy.sh rollback`
+pub async fn deploy_rollback(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Prevent concurrent pipelines
+    {
+        let mut ds = state.deploy_state.write().await;
+        if ds.pipeline_running {
+            return Ok(Json(ApiResponse::success(
+                "Pipeline already running — cannot rollback concurrently".to_string(),
+            )));
+        }
+        ds.pipeline_running = true;
+        ds.verification_events.clear();
+    }
+
+    let deploy_state = state.deploy_state.clone();
+    let broadcaster = state.event_broadcaster.clone();
+
+    tokio::spawn(async move {
+        spawn_deploy_script(deploy_state, "rollback", broadcaster).await;
+    });
+
+    Ok(Json(ApiResponse::success(
+        "Rollback started — monitor via /api/v1/admin/deploy/progress".to_string(),
+    )))
+}
+
+// ============================================================================
+// CCC CONVERGENCE READINESS SYSTEM (Cosmic Arcology Mission v2.4.0)
+// ============================================================================
+
+/// K-Kristensen convergence readiness metrics for a single node
+/// Based on the K-formula: k = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeKMetrics {
+    pub name: String,
+    /// G: Genetic Stability — version consistency (1.0 = matches reference)
+    pub genetic_stability: f64,
+    /// Q: Quantum Coherence — height sync ratio (local_height / network_height)
+    pub quantum_coherence: f64,
+    /// T: Thermodynamic Efficiency — uptime health (uptime / expected)
+    pub thermodynamic_efficiency: f64,
+    /// I: Information Density — sync completeness (height / max_height)
+    pub information_density: f64,
+    /// R: Network Resilience — peer connectivity (peers / expected_peers)
+    pub network_resilience: f64,
+    /// Computed K-Kristensen parameter
+    pub k_parameter: f64,
+}
+
+/// Convergence outcome prediction (from paper Table 3)
+#[derive(Debug, Clone, Serialize)]
+pub enum ConvergenceOutcome {
+    /// k > 0.9: Peaceful merger with synergy bonus
+    Communion { synergy_bonus: f64 },
+    /// 0.7 < k <= 0.9: Safe limited contact
+    Observation { interaction_distance: f64 },
+    /// 0.5 < k <= 0.7: Resource equilibrium
+    Competition { equilibrium: String },
+    /// 0.3 < k <= 0.5: Potential casualties
+    Conflict { risk: f64 },
+    /// k <= 0.3: Dominant entity prevails
+    Absorption { dominant: String },
+}
+
+/// CCC Cosmic Phase for the deployment pipeline
+#[derive(Debug, Clone, Serialize)]
+pub enum DeployCosmicPhase {
+    /// Universe expanding — Alpha canary evolving independently
+    Isolation {
+        canary_version: String,
+        isolation_duration_secs: u64,
+        expansion_rate: f64,
+    },
+    /// Universe contracting — Gamma verifying, syncing with Beta
+    Convergence {
+        merging_servers: Vec<String>,
+        contraction_rate: f64,
+        blocks_to_unity: u64,
+    },
+    /// Conformal boundary — Beta deploying new binary
+    AeonTransition {
+        entropy_state: f64,
+        old_version: String,
+        new_version: String,
+        hawking_points: Vec<u64>, // Block heights as consensus anchors
+    },
+    /// All servers unified and synchronized
+    Harmony {
+        collective_k: f64,
+        harmony_duration_secs: u64,
+        version: String,
+    },
+}
+
+/// Full convergence status response
+#[derive(Debug, Clone, Serialize)]
+pub struct ConvergenceStatus {
+    /// Current cosmic phase of the deployment pipeline
+    pub cosmic_phase: DeployCosmicPhase,
+    /// Per-node K-Kristensen metrics
+    pub nodes: Vec<NodeKMetrics>,
+    /// Collective K-parameter across all online nodes
+    pub collective_k: f64,
+    /// Predicted convergence outcome
+    pub predicted_outcome: ConvergenceOutcome,
+    /// Is it safe to deploy? (based on K-threshold from paper Section 8.3)
+    pub convergence_safe: bool,
+    /// The Cosmic Gardener's advice
+    pub gardener_wisdom: String,
+    /// Phase transition ETA (seconds until next phase, if applicable)
+    pub phase_transition_eta: Option<u64>,
+}
+
+/// Calculate K-Kristensen parameter from the 5 component metrics
+/// Formula: k = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20
+fn calculate_k_parameter(g: f64, q: f64, t: f64, i: f64, r: f64) -> f64 {
+    let g = g.clamp(0.001, 1.0); // Avoid zero (log domain)
+    let q = q.clamp(0.001, 1.0);
+    let t = t.clamp(0.001, 1.0);
+    let i = i.clamp(0.001, 1.0);
+    let r = r.clamp(0.001, 1.0);
+
+    g.powf(0.25) * q.powf(0.20) * t.powf(0.20) * i.powf(0.15) * r.powf(0.20)
+}
+
+/// Calculate node K-metrics from NodeDeployStatus
+fn node_to_k_metrics(
+    node: &NodeDeployStatus,
+    reference_version: &str,
+    max_height: u64,
+    expected_peers: usize,
+) -> NodeKMetrics {
+    if !node.online {
+        return NodeKMetrics {
+            name: node.name.clone(),
+            genetic_stability: 0.0,
+            quantum_coherence: 0.0,
+            thermodynamic_efficiency: 0.0,
+            information_density: 0.0,
+            network_resilience: 0.0,
+            k_parameter: 0.0,
+        };
+    }
+
+    // G: Genetic Stability — version match with reference
+    let g = if node.version == reference_version { 1.0 } else { 0.3 };
+
+    // Q: Quantum Coherence — how close is this node's height to network height
+    let q = if node.network_height > 0 {
+        let ratio = node.height as f64 / node.network_height as f64;
+        ratio.min(1.0)
+    } else if node.height > 0 {
+        0.8 // Has blocks but no network height info
+    } else {
+        0.1
+    };
+
+    // T: Thermodynamic Efficiency — uptime ratio (target: 1 hour minimum for stability)
+    let t = if node.uptime_secs > 3600 {
+        1.0
+    } else if node.uptime_secs > 300 {
+        node.uptime_secs as f64 / 3600.0
+    } else {
+        0.1 // Just started
+    };
+
+    // I: Information Density — sync completeness relative to highest known block
+    let i = if max_height > 0 {
+        (node.height as f64 / max_height as f64).min(1.0)
+    } else {
+        0.5
+    };
+
+    // R: Network Resilience — peer count relative to expected
+    let expected = expected_peers.max(1) as f64;
+    let r = (node.peers as f64 / expected).min(1.0);
+
+    let k = calculate_k_parameter(g, q, t, i, r);
+
+    NodeKMetrics {
+        name: node.name.clone(),
+        genetic_stability: g,
+        quantum_coherence: q,
+        thermodynamic_efficiency: t,
+        information_density: i,
+        network_resilience: r,
+        k_parameter: k,
+    }
+}
+
+/// Predict convergence outcome from collective K (paper Table 3)
+fn predict_outcome(k: f64) -> ConvergenceOutcome {
+    if k > 0.9 {
+        ConvergenceOutcome::Communion {
+            synergy_bonus: (k - 0.9) * 10.0, // 0.0 to 1.0 bonus
+        }
+    } else if k > 0.7 {
+        ConvergenceOutcome::Observation {
+            interaction_distance: (1.0 - k) * 100.0,
+        }
+    } else if k > 0.5 {
+        ConvergenceOutcome::Competition {
+            equilibrium: "nash_equilibrium".to_string(),
+        }
+    } else if k > 0.3 {
+        ConvergenceOutcome::Conflict {
+            risk: 1.0 - k,
+        }
+    } else {
+        ConvergenceOutcome::Absorption {
+            dominant: "rollback_required".to_string(),
+        }
+    }
+}
+
+/// Determine the cosmic phase based on current deploy pipeline state
+fn determine_cosmic_phase(
+    status: &DeployStatus,
+    pipeline_running: bool,
+    verification_running: bool,
+) -> DeployCosmicPhase {
+    // If pipeline is actively running, we're in Aeon Transition
+    if pipeline_running {
+        return DeployCosmicPhase::AeonTransition {
+            entropy_state: 0.5, // Mid-transition
+            old_version: status.beta.version.clone(),
+            new_version: if status.gamma.version != status.beta.version {
+                status.gamma.version.clone()
+            } else {
+                "deploying...".to_string()
+            },
+            hawking_points: vec![status.beta.height, status.gamma.height],
+        };
+    }
+
+    // If verification is running, we're in Convergence
+    if verification_running {
+        return DeployCosmicPhase::Convergence {
+            merging_servers: vec!["Gamma".to_string(), "Beta".to_string()],
+            contraction_rate: 0.7,
+            blocks_to_unity: status.height_delta.unsigned_abs(),
+        };
+    }
+
+    // If versions differ, Alpha is in Isolation (canary diverged)
+    if !status.versions_match {
+        let canary_ver = if status.alpha.online && status.alpha.version != status.beta.version {
+            status.alpha.version.clone()
+        } else if status.gamma.online && status.gamma.version != status.beta.version {
+            status.gamma.version.clone()
+        } else {
+            "diverged".to_string()
+        };
+
+        return DeployCosmicPhase::Isolation {
+            canary_version: canary_ver,
+            isolation_duration_secs: 0, // Unknown without tracking start time
+            expansion_rate: 0.01,
+        };
+    }
+
+    // All versions match, heights close — Harmony!
+    let collective_k = if status.beta.online && status.gamma.online {
+        let height_sync = if status.beta.height > 0 && status.gamma.height > 0 {
+            let min_h = status.beta.height.min(status.gamma.height) as f64;
+            let max_h = status.beta.height.max(status.gamma.height) as f64;
+            (min_h / max_h).min(1.0)
+        } else {
+            0.5
+        };
+        height_sync
+    } else {
+        0.5
+    };
+
+    DeployCosmicPhase::Harmony {
+        collective_k,
+        harmony_duration_secs: status.beta.uptime_secs.min(status.gamma.uptime_secs),
+        version: status.beta.version.clone(),
+    }
+}
+
+/// The Cosmic Gardener's wisdom based on K-parameter (inspired by Section 10.3)
+fn gardener_wisdom(k: f64, phase: &DeployCosmicPhase) -> String {
+    match phase {
+        DeployCosmicPhase::Isolation { .. } => {
+            if k < 0.3 {
+                "The seeds need more time in their garden pots. Let the canary mature before transplanting.".to_string()
+            } else {
+                "The canary grows strong in isolation. When ready, it will guide the flock.".to_string()
+            }
+        }
+        DeployCosmicPhase::Convergence { .. } => {
+            if k > 0.7 {
+                "The roots are strong enough to intertwine. Convergence may proceed safely.".to_string()
+            } else {
+                "Caution: the plants are still fragile. Verify thoroughly before merging.".to_string()
+            }
+        }
+        DeployCosmicPhase::AeonTransition { .. } => {
+            "The conformal boundary is being crossed. A new aeon begins — old rules give way to new.".to_string()
+        }
+        DeployCosmicPhase::Harmony { collective_k, .. } => {
+            if *collective_k > 0.95 {
+                "Perfect harmony. The cosmic garden flourishes in unified consensus.".to_string()
+            } else {
+                format!("Harmony achieved (k={:.3}). The garden tends itself, but the gardener watches.", collective_k)
+            }
+        }
+    }
+}
+
+/// GET /api/v1/admin/deploy/convergence
+/// Returns CCC convergence phase, K-parameters, and readiness assessment.
+pub async fn deploy_convergence(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<ConvergenceStatus>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Gather status from all nodes (same as deploy_status)
+    let beta_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let beta_network_height = state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let beta_peers = state
+        .libp2p_peer_count
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let beta_uptime = state.start_time.elapsed().as_secs();
+    let beta_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let beta_status_str = if beta_height == 0 {
+        "starting"
+    } else if beta_network_height > 0 && beta_height + 10 < beta_network_height {
+        "syncing"
+    } else {
+        "ready"
+    };
+
+    let beta = NodeDeployStatus {
+        name: "Server Beta".to_string(),
+        url: "https://quillon.xyz".to_string(),
+        online: true,
+        version: beta_version.clone(),
+        height: beta_height,
+        network_height: beta_network_height,
+        peers: beta_peers,
+        uptime_secs: beta_uptime,
+        status: beta_status_str.to_string(),
+    };
+
+    let (alpha, gamma, delta) = tokio::join!(
+        fetch_node_status("Server Alpha", ALPHA_URL),
+        fetch_node_status("Server Gamma", GAMMA_URL),
+        fetch_node_status("Server Delta", DELTA_URL),
+    );
+
+    let height_delta = beta.height as i64 - gamma.height as i64;
+    let versions_match = beta.version == gamma.version
+        && (alpha.version == beta.version || !alpha.online);
+
+    let deploy_status = DeployStatus {
+        alpha: alpha.clone(),
+        beta: beta.clone(),
+        gamma: gamma.clone(),
+        delta: delta.clone(),
+        height_delta,
+        versions_match,
+    };
+
+    // Calculate K-Kristensen for each node
+    let max_height = [beta.height, gamma.height, alpha.height, delta.height]
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(1);
+    let expected_peers = 4usize; // 4-server network
+
+    let k_alpha = node_to_k_metrics(&alpha, &beta_version, max_height, expected_peers);
+    let k_beta = node_to_k_metrics(&beta, &beta_version, max_height, expected_peers);
+    let k_gamma = node_to_k_metrics(&gamma, &beta_version, max_height, expected_peers);
+    let k_delta = node_to_k_metrics(&delta, &beta_version, max_height, expected_peers);
+
+    // Collective K: average of online nodes (paper Section 4.1)
+    let online_nodes: Vec<&NodeKMetrics> = [&k_alpha, &k_beta, &k_gamma, &k_delta]
+        .iter()
+        .filter(|n| n.k_parameter > 0.0)
+        .copied()
+        .collect();
+
+    let collective_k = if online_nodes.is_empty() {
+        0.0
+    } else {
+        online_nodes.iter().map(|n| n.k_parameter).sum::<f64>() / online_nodes.len() as f64
+    };
+
+    // Check pipeline state
+    let (pipeline_running, verification_running) = {
+        let ds = state.deploy_state.read().await;
+        (ds.pipeline_running, ds.verification_running)
+    };
+
+    // Determine cosmic phase
+    let cosmic_phase = determine_cosmic_phase(&deploy_status, pipeline_running, verification_running);
+
+    // Predict outcome
+    let predicted_outcome = predict_outcome(collective_k);
+
+    // Convergence safety check (paper Section 8.3)
+    // Safe if min(local_k, remote_k) predicts Communion or Observation with k >= threshold
+    let convergence_safe = collective_k > 0.7;
+
+    // Phase transition ETA
+    let phase_transition_eta = match &cosmic_phase {
+        DeployCosmicPhase::Isolation { .. } => Some(300), // ~5 min to verify
+        DeployCosmicPhase::Convergence { blocks_to_unity, .. } => {
+            Some(blocks_to_unity * 3) // ~3s per block sync
+        }
+        DeployCosmicPhase::AeonTransition { .. } => Some(60), // ~1 min deploy
+        DeployCosmicPhase::Harmony { .. } => None, // Stable
+    };
+
+    let wisdom = gardener_wisdom(collective_k, &cosmic_phase);
+
+    Ok(Json(ApiResponse::success(ConvergenceStatus {
+        cosmic_phase,
+        nodes: vec![k_alpha, k_beta, k_gamma, k_delta],
+        collective_k,
+        predicted_outcome,
+        convergence_safe,
+        gardener_wisdom: wisdom,
+        phase_transition_eta,
+    })))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEV FEE ADMIN API (v7.1.5)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dev fee status response
+#[derive(Debug, Clone, Serialize)]
+pub struct DevFeeStatus {
+    /// Current dev fee in basis points (100 = 1%)
+    pub fee_bps: u64,
+    /// Fee as percentage string
+    pub fee_percent: String,
+    /// Founder wallet address
+    pub founder_wallet: String,
+    /// Founder wallet QUG balance (display units)
+    pub founder_balance_qug: f64,
+    /// Total dev fees collected this session (from consensus stats)
+    pub total_dev_fees_collected: f64,
+    /// Total mining rewards this session
+    pub total_mining_rewards: f64,
+    /// Actual fee ratio (dev_fees / total_rewards) — for verification
+    pub actual_fee_ratio: f64,
+    /// Expected fee ratio based on current bps setting
+    pub expected_fee_ratio: f64,
+    /// Whether actual matches expected (within 0.1% tolerance)
+    pub fee_verified: bool,
+    /// Blocks processed
+    pub blocks_processed: u64,
+    /// Today's dev fee in QUG
+    pub today_dev_fee_qug: f64,
+    /// Today's expected dev fee based on emission target
+    pub today_expected_dev_fee_qug: f64,
+}
+
+/// Dev fee config update request
+#[derive(Debug, Clone, Deserialize)]
+pub struct DevFeeConfigRequest {
+    /// New fee in basis points (0-1000, i.e. 0%-10%)
+    pub fee_bps: u64,
+}
+
+/// GET /api/v1/admin/dev-fee
+/// Returns dev fee verification: actual collected vs expected, balance, health
+pub async fn admin_dev_fee_status(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DevFeeStatus>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let fee_bps = state.dev_fee_bps.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Get founder wallet balance
+    const FOUNDER_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    let founder_balance = {
+        let balances = state.wallet_balances.read().await;
+        let mut addr = [0u8; 32];
+        if let Ok(bytes) = hex::decode(FOUNDER_HEX) {
+            if bytes.len() == 32 {
+                addr.copy_from_slice(&bytes);
+            }
+        }
+        balances.get(&addr).copied().unwrap_or(0) as f64 / 1_000_000_000_000_000_000_000_000.0
+    };
+
+    // Get consensus stats
+    let stats = state.balance_consensus_engine.get_stats().await;
+    let total_dev_fees = stats.total_dev_fees as f64 / 1_000_000_000_000_000_000_000_000.0;
+    let total_rewards = stats.total_rewards as f64 / 1_000_000_000_000_000_000_000_000.0;
+
+    // Calculate actual vs expected ratio
+    let actual_ratio = if total_rewards + total_dev_fees > 0.0 {
+        total_dev_fees / (total_rewards + total_dev_fees)
+    } else {
+        0.0
+    };
+    let expected_ratio = fee_bps as f64 / 10_000.0;
+    let fee_verified = (actual_ratio - expected_ratio).abs() < 0.001; // 0.1% tolerance
+
+    // Today's emission target → expected dev fee
+    let (today_dev_fee, today_expected) = match state.balance_consensus_engine.get_emission_summary().await {
+        Ok(emission_summary) => {
+            let today_emitted = emission_summary.today_emitted as f64 / 1_000_000_000_000_000_000_000_000.0;
+            let today_exp = emission_summary.daily_target as f64 / 1_000_000_000_000_000_000_000_000.0 * expected_ratio;
+            (today_emitted * expected_ratio, today_exp)
+        }
+        Err(_) => (0.0, 0.0),
+    };
+
+    Ok(Json(ApiResponse::success(DevFeeStatus {
+        fee_bps,
+        fee_percent: format!("{:.2}%", fee_bps as f64 / 100.0),
+        founder_wallet: format!("qnk{}", FOUNDER_HEX),
+        founder_balance_qug: founder_balance,
+        total_dev_fees_collected: total_dev_fees,
+        total_mining_rewards: total_rewards,
+        actual_fee_ratio: actual_ratio,
+        expected_fee_ratio: expected_ratio,
+        fee_verified,
+        blocks_processed: stats.blocks_processed,
+        today_dev_fee_qug: today_dev_fee,
+        today_expected_dev_fee_qug: today_expected,
+    })))
+}
+
+/// POST /api/v1/admin/dev-fee/config
+/// Update the dev fee percentage (master wallet only)
+pub async fn admin_dev_fee_config(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DevFeeConfigRequest>,
+) -> Result<Json<ApiResponse<DevFeeStatus>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Validate: 0-1000 bps (0% to 10% max)
+    if req.fee_bps > 1000 {
+        return Ok(Json(ApiResponse::error(
+            "Dev fee must be 0-1000 basis points (0%-10%)".to_string(),
+        )));
+    }
+
+    let old_bps = state.dev_fee_bps.swap(req.fee_bps, std::sync::atomic::Ordering::SeqCst);
+    info!(
+        "💰 [ADMIN] Dev fee updated: {} bps ({:.2}%) → {} bps ({:.2}%)",
+        old_bps, old_bps as f64 / 100.0,
+        req.fee_bps, req.fee_bps as f64 / 100.0
+    );
+
+    // Return updated status
+    admin_dev_fee_status(headers, State(state)).await
+}

@@ -1,0 +1,184 @@
+import { Theme } from "theme.slint";
+import { LoginScreen } from "login.slint";
+import { DashboardScreen, TokenInfo } from "dashboard.slint";
+import { ReceiveScreen } from "receive.slint";
+import { SendScreen } from "send.slint";
+import { HistoryScreen, TxRecord } from "history.slint";
+import { MinerScreen } from "miner.slint";
+import { SyncBar } from "sync_bar.slint";
+import { NavButton } from "theme.slint";
+
+export { TokenInfo, TxRecord }
+
+export component AppWindow inherits Window {
+    title: "Q-NarwhalKnight Wallet";
+    min-width: 420px;
+    min-height: 680px;
+    preferred-width: 460px;
+    preferred-height: 780px;
+    background: Theme.bg-primary;
+
+    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive
+    in-out property <int> active-screen: 0;
+
+    // Login properties
+    in-out property <string> login-error: "";
+    in-out property <string> generated-mnemonic: "";
+    in-out property <bool> show-create-view: false;
+    in-out property <string> server-url: "https://quillon.xyz";
+
+    // Dashboard properties
+    in property <string> wallet-address: "";
+    in property <string> qug-balance: "0.00";
+    in property <string> qug-value-usd: "$0.00";
+    in property <[TokenInfo]> tokens: [];
+
+    // Send properties
+    in property <string> send-balance-display: "0.00 QUG";
+    in-out property <string> send-status: "";
+    in property <bool> sending: false;
+
+    // History properties
+    in property <[TxRecord]> transactions: [];
+    in property <bool> history-loading: false;
+
+    // Miner properties
+    in property <bool> mining: false;
+    in property <string> hashrate: "0";
+    in property <string> blocks-found: "0";
+    in property <string> difficulty: "N/A";
+    in property <string> reward-per-block: "0";
+
+    // Receive / QR code properties
+    in property <image> qr-code-image;
+
+    // Sync bar properties
+    in property <bool> connected: false;
+    in property <string> current-height: "0";
+    in property <string> network-height: "0";
+    in property <float> sync-percent: 0;
+
+    // Callbacks
+    callback create-wallet();
+    callback import-wallet(string);
+    callback confirm-created();
+    callback send-transaction(string, string, string);
+    callback refresh-history();
+    callback toggle-mining();
+    callback copy-address();
+
+    VerticalLayout {
+        // Main content area
+        Rectangle {
+            vertical-stretch: 1;
+
+            if root.active-screen == 0 : LoginScreen {
+                error-message: root.login-error;
+                generated-mnemonic: root.generated-mnemonic;
+                show-create-view <=> root.show-create-view;
+                server-url <=> root.server-url;
+
+                create-wallet => { root.create-wallet(); }
+                import-wallet(m) => { root.import-wallet(m); }
+                confirm-created => { root.confirm-created(); }
+            }
+
+            if root.active-screen == 1 : DashboardScreen {
+                address: root.wallet-address;
+                qug-balance: root.qug-balance;
+                qug-value-usd: root.qug-value-usd;
+                tokens: root.tokens;
+
+                navigate(screen) => { root.active-screen = screen; }
+                copy-address => { root.copy-address(); }
+            }
+
+            if root.active-screen == 2 : SendScreen {
+                balance-display: root.send-balance-display;
+                status-message <=> root.send-status;
+                sending: root.sending;
+
+                send-transaction => {
+                    root.send-transaction(self.recipient, self.amount, self.memo);
+                }
+                go-back => { root.active-screen = 1; }
+            }
+
+            if root.active-screen == 3 : HistoryScreen {
+                transactions: root.transactions;
+                loading: root.history-loading;
+
+                go-back => { root.active-screen = 1; }
+                refresh => { root.refresh-history(); }
+            }
+
+            if root.active-screen == 4 : MinerScreen {
+                mining: root.mining;
+                hashrate: root.hashrate;
+                blocks-found: root.blocks-found;
+                difficulty: root.difficulty;
+                reward-per-block: root.reward-per-block;
+                miner-address: root.wallet-address;
+
+                toggle-mining => { root.toggle-mining(); }
+                go-back => { root.active-screen = 1; }
+            }
+
+            if root.active-screen == 5 : ReceiveScreen {
+                qr-code-image: root.qr-code-image;
+                address: root.wallet-address;
+                qug-balance: root.qug-balance;
+
+                copy-address => { root.copy-address(); }
+                go-back => { root.active-screen = 1; }
+            }
+        }
+
+        // Bottom nav bar (only shown when logged in)
+        if root.active-screen > 0 : HorizontalLayout {
+            height: 44px;
+            padding-left: Theme.spacing-sm;
+            padding-right: Theme.spacing-sm;
+            spacing: Theme.spacing-xs;
+
+            NavButton {
+                label: "Home";
+                active: root.active-screen == 1;
+                horizontal-stretch: 1;
+                clicked => { root.active-screen = 1; }
+            }
+            NavButton {
+                label: "Receive";
+                active: root.active-screen == 5;
+                horizontal-stretch: 1;
+                clicked => { root.active-screen = 5; }
+            }
+            NavButton {
+                label: "Send";
+                active: root.active-screen == 2;
+                horizontal-stretch: 1;
+                clicked => { root.active-screen = 2; }
+            }
+            NavButton {
+                label: "History";
+                active: root.active-screen == 3;
+                horizontal-stretch: 1;
+                clicked => { root.active-screen = 3; }
+            }
+            NavButton {
+                label: "Miner";
+                active: root.active-screen == 4;
+                horizontal-stretch: 1;
+                clicked => { root.active-screen = 4; }
+            }
+        }
+
+        // Sync bar at bottom (only shown when logged in)
+        if root.active-screen > 0 : SyncBar {
+            connected: root.connected;
+            current-height: root.current-height;
+            network-height: root.network-height;
+            sync-percent: root.sync-percent;
+        }
+    }
+}

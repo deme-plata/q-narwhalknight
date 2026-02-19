@@ -271,6 +271,7 @@ pub use async_engine::AsyncStorageEngine;
 pub use balance_consensus::{
     BalanceConsensusEngine, BalanceConsensusError, BalanceStorage, BalanceUpdate,
     ChangeReason, ConsensusStats, GENESIS_TIMESTAMP, DEV_FEE_PERCENT, FOUNDER_WALLET,
+    active_genesis_timestamp,
 };
 pub use block_writer::BlockWriter;
 #[cfg(not(target_os = "windows"))]
@@ -294,7 +295,7 @@ pub use pruning::{AdaptivePruningEngine, PruningConfig, PruningMode, PruningStat
 pub use snapshot::SnapshotManager;
 pub use sync::{SyncProtocol, SyncRequest, SyncResponse};
 pub use transaction::{QTransaction, TransactionState};
-pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics};
+pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics, EnhancedPeerRegistry, PeerHeightRecord};
 pub use ml_batch_optimizer::{SyncFeatures, BatchOutcome, BatchSizePredictor, BatchOptimizerConfig};
 // TEMPORARILY DISABLED: Circular dependency with q-api-server
 // pub use turbo_sync_peer_bridge::{TurboSyncPeerBridge, PeerHeightEntry, run_periodic_sync, run_enhanced_periodic_sync};
@@ -499,6 +500,31 @@ pub const CF_WALLET_SWAP_INDEX: &str = "cf_wallet_swap_index";
 /// Value format: [price:f64 LE][block_height:u64 LE] = 16 bytes
 pub const CF_PRICE_HISTORY: &str = "cf_price_history";
 
+// ========== v7.3.1: Block Storage Optimization ==========
+/// Quantum metadata stored separately from block body for lazy loading
+pub const CF_QUANTUM_METADATA: &str = "quantum_metadata";
+
+// ========== v7.3.2: Quillon Mail ==========
+/// Email messages: key = email_id, value = EmailMessage (JSON)
+pub const CF_EMAILS: &str = "cf_emails";
+/// Inbox index: key = "wallet_hex:inverted_timestamp:email_id", value = email_id
+pub const CF_EMAILS_BY_WALLET: &str = "cf_emails_by_wallet";
+/// Folder index: key = "wallet_hex:folder:inverted_timestamp:email_id", value = email_id
+pub const CF_EMAILS_BY_FOLDER: &str = "cf_emails_by_folder";
+/// Email contacts: key = "wallet_hex:contact_wallet_hex", value = ContactInfo (JSON)
+pub const CF_EMAIL_CONTACTS: &str = "cf_email_contacts";
+/// Outbound SMTP queue: key = outbound_id, value = OutboundEmail (JSON)
+pub const CF_EMAIL_OUTBOUND: &str = "cf_email_outbound";
+
+/// Calendar events: key = event_id, value = CalendarEvent (JSON)
+pub const CF_CALENDAR_EVENTS: &str = "cf_calendar_events";
+/// Calendar date index: key = "wallet_hex:YYYYMMDD:event_id", value = event_id
+pub const CF_CALENDAR_BY_DATE: &str = "cf_calendar_by_date";
+/// Scheduled transaction index: key = "wallet_hex:timestamp:event_id", value = event_id
+pub const CF_CALENDAR_SCHEDULED_TX: &str = "cf_calendar_scheduled_tx";
+/// Community events shared via P2P: key = event_id, value = CalendarEvent (JSON)
+pub const CF_CALENDAR_COMMUNITY: &str = "cf_calendar_community";
+
 /// All column families for state sync (for database initialization)
 pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_TOKEN_BALANCES,
@@ -534,6 +560,15 @@ pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_WALLET_TX_INDEX,      // v3.5.8-beta: Wallet-indexed transaction history
     CF_WALLET_SWAP_INDEX,    // v3.5.8-beta: Wallet-indexed swap history
     CF_PRICE_HISTORY,        // v3.6.0-beta: Consensus-verified price history
+    CF_EMAILS,               // v7.3.2: Quillon Mail messages
+    CF_EMAILS_BY_WALLET,     // v7.3.2: Quillon Mail wallet inbox index
+    CF_EMAILS_BY_FOLDER,     // v7.3.2: Quillon Mail folder index
+    CF_EMAIL_CONTACTS,       // v7.3.2: Quillon Mail contacts
+    CF_EMAIL_OUTBOUND,       // v7.3.2: Quillon Mail SMTP outbound queue
+    CF_CALENDAR_EVENTS,      // v7.3.3: Blockchain Calendar events
+    CF_CALENDAR_BY_DATE,     // v7.3.3: Blockchain Calendar date index
+    CF_CALENDAR_SCHEDULED_TX, // v7.3.3: Blockchain Calendar scheduled transactions
+    CF_CALENDAR_COMMUNITY,   // v7.3.3: Blockchain Calendar community events
 ];
 
 /// Storage configuration
@@ -721,6 +756,12 @@ impl QStorage {
     /// ```
     pub fn get_kv(&self) -> Arc<dyn KVStore> {
         self.hot_db.clone()
+    }
+
+    /// v6.1.1: Get RocksDB memory usage for OOM diagnostics
+    /// Returns (memtable_mb, table_readers_mb, block_cache_mb) for the hot database
+    pub fn get_rocksdb_memory_mb(&self) -> (f64, f64, f64) {
+        self.hot_db_concrete.get_memory_usage_mb()
     }
 
     /// Begin atomic transaction
@@ -942,6 +983,17 @@ impl QStorage {
     /// ✅ v1.0.3.5-beta: Updates height cache after successful write
     /// 🚨 v1.1.9-beta: Uses global write lock to prevent concurrent write races
     pub async fn save_qblock(&self, block: &q_types::block::QBlock) -> Result<()> {
+        // v7.1.3: Reject pre-genesis blocks (testnet contamination via P2P)
+        // v7.3.4: Use network-aware genesis timestamp (mainnet2026.1.1 uses rehearsal timestamp)
+        {
+            let genesis_ts = crate::balance_consensus::active_genesis_timestamp();
+            if block.header.timestamp > 0 && block.header.timestamp < genesis_ts {
+                warn!("🧹 [GENESIS FILTER] Rejecting pre-genesis block height={} timestamp={} (genesis={})",
+                      block.header.height, block.header.timestamp, genesis_ts);
+                return Ok(()); // Silently skip — not an error, just stale data
+            }
+        }
+
         // 🚨 v1.1.9: GLOBAL WRITE LOCK - Prevents race conditions with batch writes
         // All three write paths must share this lock to prevent pointer corruption
         let _global_guard = self.global_write_lock.lock().await;
@@ -983,6 +1035,17 @@ impl QStorage {
     /// The canonical chain pointer (`qblock:height:{height}`) is NOT modified.
     /// DAG ordering is used for transaction sequencing, not fork-choice.
     pub async fn save_dag_layer_block(&self, block: &q_types::block::QBlock) -> Result<()> {
+        // v7.1.3: Reject pre-genesis blocks
+        // v7.3.4: Use network-aware genesis timestamp
+        {
+            let genesis_ts = crate::balance_consensus::active_genesis_timestamp();
+            if block.header.timestamp > 0 && block.header.timestamp < genesis_ts {
+                warn!("🧹 [GENESIS FILTER] Rejecting pre-genesis DAG block height={} timestamp={}",
+                      block.header.height, block.header.timestamp);
+                return Ok(());
+            }
+        }
+
         let _global_guard = self.global_write_lock.lock().await;
 
         let block_height = block.header.height;
@@ -1008,7 +1071,7 @@ impl QStorage {
         self.hot_db.write_batch_turbo(batch).await
             .context("Failed to write DAG layer block to database")?;
 
-        info!("🌐 [DAG LAYER] Stored block at height {} from proposer {} (hash: {}...)",
+        debug!("🌐 [DAG] Stored block h={} proposer={} hash={}",
               block_height, proposer_hex, hex::encode(&block_hash[..8]));
 
         Ok(())
@@ -1087,37 +1150,113 @@ impl QStorage {
             return Ok(());
         }
 
+        // v7.3.7: Bug #28 fix — filter pre-genesis blocks from turbo batch writes
+        // save_qblock() had this filter but save_qblocks_batch_turbo() did NOT,
+        // allowing rogue pre-launch nodes' blocks through the batch write path.
+        let genesis_ts = crate::balance_consensus::active_genesis_timestamp();
+        let blocks: Vec<q_types::block::QBlock> = blocks.iter()
+            .filter(|b| {
+                if b.header.timestamp > 0 && b.header.timestamp < genesis_ts {
+                    warn!("🧹 [GENESIS FILTER] Rejecting pre-genesis block height={} ts={} (genesis={}) in turbo batch",
+                          b.header.height, b.header.timestamp, genesis_ts);
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        let blocks = blocks.as_slice();
+
         let num_blocks = blocks.len();
 
         // 🚀 v1.4.2-beta: PHASE 1 - Lock-free batch preparation (parallel, CPU-bound)
         // All hash computation and serialization happens OUTSIDE the lock
         let prep_start = std::time::Instant::now();
 
-        let block_data_parallel: Vec<(u64, [u8; 32], Vec<u8>, usize)> = blocks
+        // v7.3.1: Parallel serialization with storage optimization
+        // Each block is split into: slim block (compressed) + quantum_metadata + transactions
+        let block_data_parallel: Vec<(u64, [u8; 32], Vec<u8>, Vec<u8>, Vec<u8>, usize, bool)> = blocks
             .par_iter()
             .map(|block| {
                 let block_hash = block.calculate_hash();
-                let block_data = bincode::serialize(block).unwrap_or_default();
                 let solutions = block.mining_solutions.len();
-                (block.header.height, block_hash, block_data, solutions)
+
+                // Serialize quantum_metadata separately
+                let qm_data = bincode::serialize(&block.quantum_metadata).unwrap_or_default();
+
+                // Serialize transactions separately
+                let has_txs = !block.transactions.is_empty();
+                let tx_data = if has_txs {
+                    bincode::serialize(&block.transactions).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Create slim block (no quantum_metadata/transactions)
+                let mut slim = block.clone();
+                slim.transactions = Vec::new();
+                slim.quantum_metadata = q_types::block::QuantumMetadata {
+                    vertex_coordinates: q_types::block::HypergraphCoordinates {
+                        temporal: 0.0, spatial: Vec::new(), energetic: 0.0, entropic: 0.0,
+                        metadata: std::collections::HashMap::new(),
+                    },
+                    k_parameter: 0.0, energy: 0.0,
+                    energy_components: q_types::block::EnergyComponents {
+                        coupling: 0.0, potential: 0.0, ordering: 0.0,
+                        fault_tolerance: 0.0, temporal: 0.0, finality: 0.0,
+                    },
+                    spectral_signatures: Vec::new(),
+                    wavefunction_phase: 0.0, entropy_variance: 0.0,
+                    byzantine_scores: std::collections::HashMap::new(),
+                };
+
+                // v7.3.5: Store as QRAW (no app-level compression) — RocksDB handles compression
+                let slim_bytes = bincode::serialize(&slim).unwrap_or_default();
+                let block_data = match precompressed_storage::PrecompressedBlock::compress(
+                    &slim_bytes, precompressed_storage::CompressionAlgorithm::None
+                ) {
+                    Ok(compressed) => compressed.to_bytes(),
+                    Err(_) => slim_bytes, // Fallback to uncompressed on error
+                };
+
+                (block.header.height, block_hash, block_data, qm_data, tx_data, solutions, has_txs)
             })
             .collect();
 
         // Pre-build the batch (memory only, no I/O)
-        let mut batch = Vec::with_capacity(num_blocks * 2);
+        // v7.3.1: 4 entries per block max (slim block + hash ref + quantum_metadata + transactions)
+        let mut batch = Vec::with_capacity(num_blocks * 4);
         let mut total_mining_solutions = 0;
         let mut heights: Vec<u64> = Vec::with_capacity(num_blocks);
 
-        for (height, block_hash, block_data, solutions) in block_data_parallel {
+        for (height, block_hash, block_data, qm_data, tx_data, solutions, has_txs) in block_data_parallel {
             if block_data.is_empty() {
                 continue;
             }
 
+            // Compressed slim block
             let height_key = format!("qblock:height:{}", height);
             batch.push((CF_BLOCKS, height_key.into_bytes(), block_data));
 
+            // Hash → height reference
             let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
             batch.push((CF_BLOCKS, hash_key.into_bytes(), height.to_be_bytes().to_vec()));
+
+            // Quantum metadata (separate CF for lazy loading)
+            if !qm_data.is_empty() {
+                let qm_key = format!("qm:{}", height);
+                batch.push((CF_QUANTUM_METADATA, qm_key.into_bytes(), qm_data));
+            }
+
+            // Transaction bodies (separate CF)
+            if has_txs && !tx_data.is_empty() {
+                let tx_key = format!("block_txs:{}", height);
+                batch.push((CF_TRANSACTIONS, tx_key.into_bytes(), tx_data));
+            }
 
             heights.push(height);
             total_mining_solutions += solutions;
@@ -1155,7 +1294,17 @@ impl QStorage {
         // Update height pointer if we extended the chain
         if new_contiguous_height > contiguous_height {
             let latest_height_bytes = new_contiguous_height.to_be_bytes().to_vec();
-            batch.push((CF_BLOCKS, b"qblock:latest".to_vec(), latest_height_bytes));
+            batch.push((CF_BLOCKS, b"qblock:latest".to_vec(), latest_height_bytes.clone()));
+            // Also persist verified contiguous checkpoint for fast recovery on restart
+            batch.push((CF_BLOCKS, b"qblock:contiguous_verified".to_vec(), latest_height_bytes));
+        }
+
+        // v7.2.8: ALWAYS persist the highest block stored (tip), even if not contiguous.
+        // This prevents the "Swiss cheese reset" bug where height drops from 310K to 35K
+        // on restart because qblock:latest only tracks contiguous height.
+        // We always write the max — RocksDB is idempotent and the batch is already being written.
+        if let Some(&max_stored) = heights.last() {
+            batch.push((CF_BLOCKS, b"qblock:tip_height".to_vec(), max_stored.to_be_bytes().to_vec()));
         }
 
         // Atomic batch write to RocksDB
@@ -1298,25 +1447,52 @@ impl QStorage {
         info!("🚀 BATCH SAVE: Saving {} blocks to database (rejected {} orphans)...",
               num_blocks, rejected_count);
 
-        // 🚀 v1.0.93-beta: PARALLEL hash computation + serialization
-        // BEFORE: Sequential for-loop, ~50ms for 500 blocks (0.1ms per block)
-        // AFTER:  Parallel rayon, ~5ms for 500 blocks (10x faster)
-        //
-        // This is the #1 bottleneck identified in sync performance analysis.
-        // Each block.calculate_hash() + bincode::serialize() takes ~0.1ms.
-        // With 500 blocks per pack, that's 50ms of CPU time that can be parallelized.
-
+        // 🚀 v7.3.1: PARALLEL hash computation + serialization with storage optimization
+        // Each block is split: slim block (Lz4 compressed) + quantum_metadata + transactions
         let parallel_start = std::time::Instant::now();
 
-        // Pre-compute all hashes and serializations in parallel
-        let block_data_parallel: Vec<(u64, [u8; 32], Vec<u8>, usize)> = valid_blocks
+        // Pre-compute all hashes, serialize+compress in parallel
+        let block_data_parallel: Vec<(u64, [u8; 32], Vec<u8>, Vec<u8>, Vec<u8>, usize, bool)> = valid_blocks
             .par_iter()
             .map(|block| {
                 let block_hash = block.calculate_hash();
-                let block_data = bincode::serialize(*block)
-                    .unwrap_or_default(); // Handle error gracefully
                 let solutions = block.mining_solutions.len();
-                (block.header.height, block_hash, block_data, solutions)
+
+                // Serialize quantum_metadata + transactions separately
+                let qm_data = bincode::serialize(&block.quantum_metadata).unwrap_or_default();
+                let has_txs = !block.transactions.is_empty();
+                let tx_data = if has_txs {
+                    bincode::serialize(&block.transactions).unwrap_or_default()
+                } else { Vec::new() };
+
+                // Create slim block clone
+                let mut slim = (*block).clone();
+                slim.transactions = Vec::new();
+                slim.quantum_metadata = q_types::block::QuantumMetadata {
+                    vertex_coordinates: q_types::block::HypergraphCoordinates {
+                        temporal: 0.0, spatial: Vec::new(), energetic: 0.0, entropic: 0.0,
+                        metadata: std::collections::HashMap::new(),
+                    },
+                    k_parameter: 0.0, energy: 0.0,
+                    energy_components: q_types::block::EnergyComponents {
+                        coupling: 0.0, potential: 0.0, ordering: 0.0,
+                        fault_tolerance: 0.0, temporal: 0.0, finality: 0.0,
+                    },
+                    spectral_signatures: Vec::new(),
+                    wavefunction_phase: 0.0, entropy_variance: 0.0,
+                    byzantine_scores: std::collections::HashMap::new(),
+                };
+
+                // v7.3.5: Store as QRAW (no app-level compression) — RocksDB handles compression
+                let slim_bytes = bincode::serialize(&slim).unwrap_or_default();
+                let block_data = match precompressed_storage::PrecompressedBlock::compress(
+                    &slim_bytes, precompressed_storage::CompressionAlgorithm::None
+                ) {
+                    Ok(compressed) => compressed.to_bytes(),
+                    Err(_) => slim_bytes,
+                };
+
+                (block.header.height, block_hash, block_data, qm_data, tx_data, solutions, has_txs)
             })
             .collect();
 
@@ -1325,24 +1501,36 @@ impl QStorage {
                num_blocks, parallel_duration,
                parallel_duration.as_micros() as f64 / num_blocks as f64);
 
-        // Build batch from parallel results (fast, just memory ops)
-        let mut batch = Vec::with_capacity(num_blocks * 2);
+        // Build batch from parallel results (memory only, no I/O)
+        // v7.3.1: up to 4 entries per block
+        let mut batch = Vec::with_capacity(num_blocks * 4);
         let mut total_mining_solutions = 0;
 
-        for (height, block_hash, block_data, solutions) in block_data_parallel {
+        for (height, block_hash, block_data, qm_data, tx_data, solutions, has_txs) in block_data_parallel {
             if block_data.is_empty() {
                 warn!("⚠️  Skipping block {} - serialization failed", height);
                 continue;
             }
 
-            // Store by height: qblock:height:{height} (PRIMARY - full block data)
+            // Compressed slim block
             let height_key = format!("qblock:height:{}", height);
             batch.push((CF_BLOCKS, height_key.into_bytes(), block_data));
 
-            // 🚀 v1.3.5-beta: Store hash→height reference only (8 bytes, not full block!)
-            // Saves 50% storage - lookup is hash→height→block (two-step)
+            // Hash → height reference (8 bytes)
             let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
             batch.push((CF_BLOCKS, hash_key.into_bytes(), height.to_be_bytes().to_vec()));
+
+            // Quantum metadata (separate CF)
+            if !qm_data.is_empty() {
+                let qm_key = format!("qm:{}", height);
+                batch.push((CF_QUANTUM_METADATA, qm_key.into_bytes(), qm_data));
+            }
+
+            // Transaction bodies (separate CF)
+            if has_txs && !tx_data.is_empty() {
+                let tx_key = format!("block_txs:{}", height);
+                batch.push((CF_TRANSACTIONS, tx_key.into_bytes(), tx_data));
+            }
 
             total_mining_solutions += solutions;
         }
@@ -1581,15 +1769,63 @@ impl QStorage {
 
         match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await? {
             Some(block_data) => {
-                // v1.0.80-beta: Try current format first, then legacy format
-                // This handles blocks stored before v1.0.60 which didn't have tx_type field
-                match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
-                    Ok(block) => Ok(Some(block)),
-                    Err(e) => {
-                        warn!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing (backwards compatibility)", height, e);
-                        Ok(None)
+                // v7.3.1: Detect compressed format vs legacy raw bincode
+                let mut block = if precompressed_storage::is_precompressed(&block_data) {
+                    // NEW FORMAT: compressed slim block → decompress → deserialize
+                    let compressed = precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                        .context("Failed to parse compressed block header")?;
+                    // v7.3.5: Diagnostic logging for LZ4 decompression failures
+                    let raw_bytes = match compressed.decompress() {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            warn!("⚠️  Failed to deserialize block at height {}: LZ4 decompression failed", height);
+                            warn!("   block_data.len()={}, header: {:02x?}, algo={:?}, original_size={}, compressed_data.len()={}",
+                                  block_data.len(),
+                                  &block_data[..std::cmp::min(20, block_data.len())],
+                                  compressed.algorithm,
+                                  compressed.original_size,
+                                  compressed.data.len());
+                            return Err(e).context("Failed to decompress block");
+                        }
+                    };
+                    match q_types::legacy::deserialize_qblock_with_fallback(&raw_bytes) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("⚠️  Failed to deserialize decompressed QBlock at height {}: {}", height, e);
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    // LEGACY FORMAT: raw bincode (pre-v7.3.1)
+                    match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing", height, e);
+                            return Ok(None);
+                        }
+                    }
+                };
+
+                // v7.3.1: Reconstruct full block from separate CFs if needed
+                // Fetch quantum_metadata from CF_QUANTUM_METADATA
+                let qm_key = format!("qm:{}", height);
+                if let Ok(Some(qm_data)) = self.hot_db.get(CF_QUANTUM_METADATA, qm_key.as_bytes()).await {
+                    if let Ok(qm) = bincode::deserialize::<q_types::block::QuantumMetadata>(&qm_data) {
+                        block.quantum_metadata = qm;
                     }
                 }
+
+                // Fetch transactions from CF_TRANSACTIONS
+                if block.transactions.is_empty() {
+                    let tx_key = format!("block_txs:{}", height);
+                    if let Ok(Some(tx_data)) = self.hot_db.get(CF_TRANSACTIONS, tx_key.as_bytes()).await {
+                        if let Ok(txs) = bincode::deserialize::<Vec<q_types::Transaction>>(&tx_data) {
+                            block.transactions = txs;
+                        }
+                    }
+                }
+
+                Ok(Some(block))
             }
             None => Ok(None),
         }
@@ -1718,13 +1954,52 @@ impl QStorage {
         // Use RocksDB multi_get for batch fetching
         let results = self.hot_db.multi_get(CF_BLOCKS, &keys).await?;
 
+        // v7.3.1: Also batch-fetch quantum_metadata and transactions for reconstructing blocks
+        let qm_keys: Vec<Vec<u8>> = (start_height..=end_height)
+            .map(|h| format!("qm:{}", h).into_bytes())
+            .collect();
+        let tx_keys: Vec<Vec<u8>> = (start_height..=end_height)
+            .map(|h| format!("block_txs:{}", h).into_bytes())
+            .collect();
+
+        let qm_results = self.hot_db.multi_get(CF_QUANTUM_METADATA, &qm_keys).await.unwrap_or_default();
+        let tx_results = self.hot_db.multi_get(CF_TRANSACTIONS, &tx_keys).await.unwrap_or_default();
+
         let mut blocks = Vec::with_capacity(keys.len());
         let mut missing_count = 0usize;
 
         for (idx, result) in results.into_iter().enumerate() {
             if let Some(block_data) = result {
-                match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
-                    Ok(block) => blocks.push(block),
+                // v7.3.1: Detect compressed vs legacy format
+                let deserialize_result = if precompressed_storage::is_precompressed(&block_data) {
+                    // Compressed slim block
+                    precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                        .and_then(|c| c.decompress().map_err(|e| e.into()))
+                        .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                            .map_err(|e| anyhow::anyhow!("{}", e)))
+                } else {
+                    // Legacy raw bincode
+                    q_types::legacy::deserialize_qblock_with_fallback(&block_data)
+                        .map_err(|e| anyhow::anyhow!("{}", e))
+                };
+
+                match deserialize_result {
+                    Ok(mut block) => {
+                        // Reconstruct from separate CFs if available
+                        if let Some(Some(qm_data)) = qm_results.get(idx) {
+                            if let Ok(qm) = bincode::deserialize::<q_types::block::QuantumMetadata>(qm_data) {
+                                block.quantum_metadata = qm;
+                            }
+                        }
+                        if block.transactions.is_empty() {
+                            if let Some(Some(tx_data)) = tx_results.get(idx) {
+                                if let Ok(txs) = bincode::deserialize::<Vec<q_types::Transaction>>(tx_data) {
+                                    block.transactions = txs;
+                                }
+                            }
+                        }
+                        blocks.push(block);
+                    }
                     Err(e) => {
                         let height = start_height + idx as u64;
                         warn!("⚠️  Failed to deserialize block at height {}: {}", height, e);
@@ -1960,6 +2235,62 @@ impl QStorage {
         self.height_cache.update(height).await;
     }
 
+    /// v7.2.8: Persist the "safe floor" — the minimum height we KNOW the node was operating at.
+    /// Called periodically (every 15s) from the balance sync task.
+    /// On restart, scan_highest_contiguous_block_internal() will NEVER return below this floor.
+    ///
+    /// v7.3.10: Also reads qblock:tip_height (the turbo sync tip) and saves the MAX of the two.
+    /// This ensures safe_floor tracks the true tip height (not just contiguous height) during
+    /// turbo sync. Critical for "resume from height" correctness after OOM-kill.
+    ///
+    /// v7.3.10: Uses put_sync() (fsync) instead of put() to survive hard kills (OOM-kill).
+    pub async fn save_safe_floor(&self, height: u64) -> Result<()> {
+        if height == 0 {
+            return Ok(());
+        }
+
+        // v7.3.10: Also read the turbo tip height — during turbo sync the contiguous height
+        // (height_cache) can be 2502 while the turbo tip is 5431. We want safe_floor = 5431
+        // so that on restart we resume from 5431, not fall back to genesis scan.
+        let turbo_tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                u64::from_be_bytes(arr)
+            }
+            _ => 0,
+        };
+        let effective_height = std::cmp::max(height, turbo_tip);
+
+        // Only persist if higher than current floor (monotonically increasing)
+        let current_floor = self.get_safe_floor().await;
+        if effective_height > current_floor {
+            // v7.3.10: Use put_sync() (fsync=true) so safe_floor survives OOM-kill / hard power loss.
+            // The old put() only wrote to OS page cache — if the process was SIGKILL'd, the
+            // OS page cache survives, but under memory pressure the kernel can evict dirty pages
+            // without flushing them. put_sync() forces the data to disk before returning.
+            self.hot_db
+                .put_sync(CF_BLOCKS, b"qblock:safe_floor", &effective_height.to_be_bytes())
+                .await
+                .context("Failed to persist safe_floor")?;
+            debug!("🛡️ [SAFE FLOOR] Persisted safe_floor={} (contiguous={}, turbo_tip={})",
+                   effective_height, height, turbo_tip);
+        }
+        Ok(())
+    }
+
+    /// Read the persisted safe floor height. Returns 0 if not set.
+    pub async fn get_safe_floor(&self) -> u64 {
+        match self.hot_db.get(CF_BLOCKS, b"qblock:safe_floor").await {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                u64::from_be_bytes(arr)
+            }
+            _ => 0,
+        }
+    }
+
     /// INTERNAL: Scan database for highest height (called ONLY on cache initialization)
     /// This is the slow path that used to be called 180 times per minute!
     async fn scan_highest_contiguous_block_internal(&self) -> Result<u64> {
@@ -1969,8 +2300,17 @@ impl QStorage {
         // 🔍 v0.9.16-beta: ENHANCED DEBUGGING for height reset diagnosis
         warn!("🔍🔍🔍 [HEIGHT DEBUG] Starting scan_highest_contiguous_block_internal() [SLOW PATH]");
 
+        // v7.2.8: Read safe floor FIRST — this is our absolute minimum return value
+        let safe_floor = self.get_safe_floor().await;
+        if safe_floor > 0 {
+            warn!("🛡️ [SAFE FLOOR] Persisted safe_floor = {} — will NEVER return below this", safe_floor);
+        }
+
         let latest_result = self.get_latest_qblock_height().await?;
         let mut latest = latest_result.unwrap_or(0);
+
+        // Save original pointer height for fast recovery path (before probes modify `latest`)
+        let pointer_height_for_fast_recovery = latest;
 
         warn!("🔍 [HEIGHT DEBUG] qblock:latest pointer returned: {:?} (unwrapped to: {})",
               latest_result, latest);
@@ -2056,6 +2396,156 @@ impl QStorage {
 
         info!("🔍 [v1.1.0] Highest EXISTING block: {} (found in {} iterations)", highest_existing, iterations);
 
+        // === 🔍 HIGH PROBE SCAN (v7.2.9 — Swiss cheese binary search fix) ===
+        //
+        // PROBLEM: Binary search on Swiss cheese storage converges to the LOWER
+        // contiguous segment. Example: blocks at 0-35200 and 305000-310456.
+        // Binary search with high=35200 converges to 35200, missing 310456.
+        //
+        // FIX: Probe at intervals above `highest_existing` to discover blocks
+        // above gaps. Only runs on startup, so ~50 extra reads are negligible.
+        {
+            let mut probed_tip = highest_existing;
+            // Probe from 50K up to 2M at 25K intervals (max 80 reads)
+            let mut probe_h = ((highest_existing / 25_000) + 1) * 25_000; // next 25K boundary
+            while probe_h <= 2_000_000 {
+                if self.get_qblock_by_height(probe_h).await?.is_some() {
+                    // Found blocks above the gap! Refine with binary search.
+                    let mut lo = probe_h;
+                    let mut hi = probe_h + 50_000;
+                    let mut best = probe_h;
+                    let mut iters = 0;
+                    while lo <= hi && iters < 50 {
+                        let mid = (lo + hi) / 2;
+                        iters += 1;
+                        if self.get_qblock_by_height(mid).await?.is_some() {
+                            best = mid;
+                            lo = mid + 1;
+                        } else {
+                            if mid == 0 { break; }
+                            hi = mid - 1;
+                        }
+                    }
+                    probed_tip = best;
+                    // Continue probing above in case there are more segments
+                    probe_h = ((best / 25_000) + 1) * 25_000;
+                } else {
+                    probe_h += 25_000;
+                }
+            }
+
+            if probed_tip > highest_existing {
+                info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                info!("🔍 [HIGH PROBE v7.2.9] Found blocks ABOVE gap: binary_search={} → probed_tip={}",
+                      highest_existing, probed_tip);
+                info!("   Swiss cheese storage detected. Using probed tip as recovery target.");
+                info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                highest_existing = probed_tip;
+            }
+        }
+
+        // === 🚀 FAST RECOVERY PATH (v7.2.8 — "Swiss cheese" fix) ===
+        //
+        // CRITICAL FIX: Old code scanned from the `qblock:latest` pointer, which only
+        // tracks CONTIGUOUS height. With turbo sync, the pointer can be 35,200 while
+        // blocks exist up to 310,456. On restart the node would drop to 35,200.
+        //
+        // NEW APPROACH: Scan backwards from `highest_existing` (found by binary search).
+        // If we find ≥100 contiguous blocks at the tip, return that height immediately.
+        // Old gaps below the tip are harmless — turbo sync fills them in background.
+        //
+        // Also check `qblock:tip_height` (persisted by save_qblocks_batch_turbo) as
+        // an additional hint for the upper bound.
+
+        // Read persisted tip height (may be higher than binary search found)
+        let persisted_tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                u64::from_be_bytes(arr)
+            }
+            _ => 0,
+        };
+
+        // Use the highest known height from all sources
+        // v7.3.10: include safe_floor in the max so we never recover below the last durable checkpoint
+        let recovery_target = std::cmp::max(
+            highest_existing,
+            std::cmp::max(pointer_height_for_fast_recovery,
+                std::cmp::max(persisted_tip, safe_floor))
+        );
+
+        info!("🔍 [FAST RECOVERY v7.2.8] Sources: pointer={}, binary_search={}, persisted_tip={}, safe_floor={}. Target={}",
+              pointer_height_for_fast_recovery, highest_existing, persisted_tip, safe_floor, recovery_target);
+
+        if recovery_target > 1000 {
+            // If binary search didn't find the actual tip (it can miss non-contiguous blocks),
+            // verify the persisted tip actually exists
+            let verified_target = if recovery_target > highest_existing {
+                if self.get_qblock_by_height(recovery_target).await?.is_some() {
+                    recovery_target
+                } else {
+                    highest_existing
+                }
+            } else {
+                recovery_target
+            };
+
+            if verified_target > 1000 {
+                const FAST_RECOVERY_DEPTH: u64 = 1000;
+                let scan_start = verified_target.saturating_sub(FAST_RECOVERY_DEPTH);
+
+                // Scan BACKWARDS from the tip to find the highest contiguous run
+                let mut gap_found_at: Option<u64> = None;
+                for h in (scan_start..=verified_target).rev() {
+                    if self.get_qblock_by_height(h).await?.is_none() {
+                        gap_found_at = Some(h);
+                        break;
+                    }
+                }
+
+                let contiguous_run = match gap_found_at {
+                    Some(gap_h) => verified_target - gap_h,  // contiguous from gap_h+1 to verified_target
+                    None => verified_target - scan_start + 1, // all FAST_RECOVERY_DEPTH blocks exist
+                };
+
+                if contiguous_run >= 100 {
+                    // At least 100 contiguous blocks at the tip — safe to use
+                    let contiguous_from = gap_found_at.map(|g| g + 1).unwrap_or(scan_start);
+                    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    info!("🚀 [FAST RECOVERY v7.2.8] {} contiguous blocks at tip ({}-{})",
+                          contiguous_run, contiguous_from, verified_target);
+                    info!("   Pointer was at {}. Old gaps below tip are harmless.", pointer_height_for_fast_recovery);
+                    info!("   Skipping full genesis scan. Gaps will be filled in background.");
+                    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    return Ok(verified_target);
+                } else if contiguous_run > 0 && verified_target > 1_000 {
+                    // v7.2.9: Chain is mature — NEVER fall through to genesis scan.
+                    // Even a small contiguous run at a high tip is vastly better than
+                    // scanning from genesis and potentially regressing to a low gap.
+                    // Gaps below the tip will be filled by turbo sync in background.
+                    //
+                    // v7.3.10: Lowered threshold from 10,000 → 1,000.
+                    // Bug: at height 5431 (< 10K), if contiguous_run < 100, we fell through to
+                    // genesis scan → returned 2502 instead of 5431. Now any node with > 1000
+                    // blocks uses the tip as recovery point (gaps filled by background turbo sync).
+                    let contiguous_from = gap_found_at.map(|g| g + 1).unwrap_or(scan_start);
+                    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    info!("🛡️ [FAST RECOVERY v7.3.10] {} contiguous blocks at mature tip ({}-{})",
+                          contiguous_run, contiguous_from, verified_target);
+                    info!("   Chain has > 1K blocks. NOT falling through to genesis scan.");
+                    info!("   Gaps below tip will be filled by turbo sync in background.");
+                    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    return Ok(verified_target);
+                } else {
+                    // Truly fragmented AND chain is young (tip <= 1K) — fall through
+                    warn!("⚠️  [FAST RECOVERY v7.3.10] Only {} contiguous blocks at tip {} — too fragmented",
+                          contiguous_run, verified_target);
+                    warn!("   Chain is young (tip <= 1K). Falling back to full scan.");
+                }
+            }
+        }
+
         // Now find the FIRST gap by scanning from 0 upward
         // Use batched sampling for efficiency on large chains
         let mut highest_contiguous = 0u64;
@@ -2113,12 +2603,31 @@ impl QStorage {
             return Ok(0);
         };
 
+        // === CHECKPOINT ACCELERATION (v1.0.2) ===
+        // Read the last verified contiguous height from DB to skip re-scanning
+        // already-verified ranges. This makes even the fallback scan fast.
+        let verified_checkpoint = match self.hot_db.get(CF_BLOCKS, b"qblock:contiguous_verified").await {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                let h = u64::from_be_bytes(arr);
+                if h >= start_height && h <= highest_existing {
+                    info!("🚀 [CHECKPOINT] Resuming gap scan from verified height {} (skipping {} blocks)",
+                          h, h - start_height);
+                    h
+                } else {
+                    start_height
+                }
+            }
+            _ => start_height,
+        };
+
         // Efficient gap detection: sample at intervals, then linear scan when gap suspected
         let sample_interval: u64 = 1000; // Check every 1000 blocks first
-        let mut last_verified = start_height;
+        let mut last_verified = verified_checkpoint;
 
         // Phase 1: Coarse sampling to find approximate gap location
-        let mut sample_height = start_height;
+        let mut sample_height = verified_checkpoint;
         while sample_height <= highest_existing {
             if self.get_qblock_by_height(sample_height).await?.is_some() {
                 last_verified = sample_height;
@@ -2189,6 +2698,24 @@ impl QStorage {
             first_gap_found
         );
 
+        // v7.2.9: Apply safe_floor as absolute minimum — prevents catastrophic height regression
+        // The safe_floor is persisted every 15s during normal operation, so it represents
+        // a height the node was KNOWN to be operating at before the crash.
+        if highest_contiguous < safe_floor && safe_floor > 0 {
+            // Verify the block at safe_floor actually exists before trusting it
+            if self.get_qblock_by_height(safe_floor).await?.is_some() {
+                warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                warn!("🛡️ [SAFE FLOOR v7.2.9] Scan found contiguous={} but safe_floor={}",
+                      highest_contiguous, safe_floor);
+                warn!("   Overriding with safe_floor to prevent height regression.");
+                warn!("   (Safe floor was last persisted during normal operation before crash)");
+                warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                return Ok(safe_floor);
+            } else {
+                warn!("⚠️ [SAFE FLOOR v7.2.9] safe_floor={} but block doesn't exist! Ignoring.", safe_floor);
+            }
+        }
+
         warn!("🔍 [HEIGHT DEBUG] FINAL RESULT: Returning height {}", highest_contiguous);
 
         Ok(highest_contiguous)
@@ -2209,8 +2736,17 @@ impl QStorage {
 
             // Check if block exists
             if let Some(block_data) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await? {
-                // v1.0.80-beta: Try both current and legacy formats before marking corrupt
-                if q_types::legacy::deserialize_qblock_with_fallback(&block_data).is_err() {
+                // v7.3.1: Handle both compressed and legacy formats before marking corrupt
+                let is_valid = if precompressed_storage::is_precompressed(&block_data) {
+                    precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                        .and_then(|c| c.decompress().map_err(|e| e.into()))
+                        .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                            .map_err(|e| anyhow::anyhow!("{}", e)))
+                        .is_ok()
+                } else {
+                    q_types::legacy::deserialize_qblock_with_fallback(&block_data).is_ok()
+                };
+                if !is_valid {
                     // Truly corrupt block found - delete it
                     warn!("🗑️  Deleting corrupt block at height {} (backwards compatibility)", check_height);
                     self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
@@ -2396,7 +2932,12 @@ impl QStorage {
             self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height_bytes).await
                 .context("Failed to correct height pointer")?;
 
-            info!("✅ [HEIGHT RECOVERY] Height pointer corrected to {}", actual_height);
+            // 🛡️ v7.2.3: CRITICAL - Also force-set the height cache downward
+            // Without this, the monotonic cache stays at the old (wrong) height
+            // and the node announces blocks it doesn't have to the P2P network
+            self.height_cache.force_set(actual_height).await;
+
+            info!("✅ [HEIGHT RECOVERY] Height pointer AND cache corrected to {}", actual_height);
             Ok(actual_height)
         }
     }
@@ -3012,6 +3553,14 @@ impl QStorage {
             hex::encode(token_address),
             amount
         );
+        Ok(())
+    }
+
+    /// Delete a token balance from persistent storage
+    /// v7.2.12: Used by startup cleanup to purge stale testnet token balances from RocksDB
+    pub async fn delete_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> Result<()> {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+        self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
         Ok(())
     }
 
@@ -3694,8 +4243,16 @@ impl QStorage {
                               blocks_scanned, total_entries, pct, block_tx_count);
                     }
 
+                    // v7.3.1: Handle compressed format for indexing
+                    let raw_data = if precompressed_storage::is_precompressed(&block_data) {
+                        precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                            .and_then(|c| c.decompress().map_err(|e| e.into()))
+                            .unwrap_or(block_data.clone())
+                    } else {
+                        block_data.clone()
+                    };
                     // Try to deserialize as QBlock
-                    if let Ok(block) = bincode::deserialize::<q_types::QBlock>(&block_data) {
+                    if let Ok(block) = bincode::deserialize::<q_types::QBlock>(&raw_data) {
                         for tx in &block.transactions {
                             // Skip if already indexed from CF_TRANSACTIONS
                             if seen_tx_ids.contains(&tx.id) {
@@ -3864,6 +4421,388 @@ impl QStorage {
         Ok(())
     }
 
+    /// Delete all entries with a given prefix from CF_MANIFEST
+    pub async fn delete_by_prefix(&self, prefix: &[u8]) -> Result<usize> {
+        let entries = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await?;
+        let count = entries.len();
+        for (key, _) in &entries {
+            self.hot_db.delete(CF_MANIFEST, key).await?;
+        }
+        Ok(count)
+    }
+
+    /// Purge all DEX pools, contracts, token balances, and related state
+    /// Used for phase transitions to clear stale data
+    pub async fn purge_dex_and_contracts(&self) -> Result<(usize, usize, usize, usize, usize)> {
+        let contracts = self.delete_by_prefix(b"contract_").await?;
+        let pools = self.delete_by_prefix(b"liquidity_pool:").await?;
+        let token_balances = self.delete_by_prefix(b"token_balance_").await?;
+        let stakes = self.delete_by_prefix(b"stake_position_").await?;
+        // Clear collateral vault
+        let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
+        // Clear swap history
+        let swaps = self.delete_by_prefix(b"swap_history_").await?;
+        // Clear price history
+        let _ = self.delete_by_prefix(b"price_history_").await;
+
+        info!("🧹 Phase purge complete: {} contracts, {} pools, {} token_balances, {} stakes, {} swaps deleted",
+              contracts, pools, token_balances, stakes, swaps);
+
+        Ok((contracts, pools, token_balances, stakes, swaps))
+    }
+
+    /// Purge ALL phase data including wallet balances (for full phase transitions)
+    /// This is more aggressive than purge_dex_and_contracts - it also resets QUG balances
+    pub async fn purge_all_phase_data(&self) -> Result<(usize, usize, usize, usize, usize, usize)> {
+        let contracts = self.delete_by_prefix(b"contract_").await?;
+        let pools = self.delete_by_prefix(b"liquidity_pool:").await?;
+        let token_balances = self.delete_by_prefix(b"token_balance_").await?;
+        let stakes = self.delete_by_prefix(b"stake_position_").await?;
+        let wallet_balances = self.delete_by_prefix(b"wallet_balance_").await?;
+        // Clear collateral vault
+        let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
+        // Clear swap history
+        let swaps = self.delete_by_prefix(b"swap_history_").await?;
+        // Clear price history
+        let _ = self.delete_by_prefix(b"price_history_").await;
+        // Clear total minted supply
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+
+        info!("🧹 FULL phase purge: {} contracts, {} pools, {} token_balances, {} wallet_balances, {} stakes, {} swaps deleted",
+              contracts, pools, token_balances, wallet_balances, stakes, swaps);
+
+        Ok((contracts, pools, token_balances, wallet_balances, stakes, swaps))
+    }
+
+    /// v7.1.3: Purge ALL pre-genesis data at startup (mainnet2026.1 clean transition)
+    /// Checks if stored blocks predate GENESIS_TIMESTAMP and if so, removes:
+    /// - All wallet balances (accumulated from pre-genesis mining)
+    /// - All token balances (testnet swap credits)
+    /// - All blocks with timestamp < GENESIS_TIMESTAMP
+    /// - Total minted supply counter
+    /// - Emission controller state
+    /// This ensures a clean state for the new genesis epoch.
+    pub async fn purge_pre_genesis_data(&self) -> Result<bool> {
+        // v7.3.4: Use network-aware genesis timestamp
+        let genesis_timestamp: u64 = crate::balance_consensus::active_genesis_timestamp();
+
+        // Check if any stored blocks predate genesis by scanning the first few entries
+        let mut has_pre_genesis = false;
+        if let Ok(entries) = self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+            for (key, value) in entries.iter().take(20) {
+                let key_str = String::from_utf8_lossy(key);
+                if key_str == "qblock:latest" || key_str.starts_with("qblock:hash:") {
+                    continue;
+                }
+                // v7.3.1: Handle compressed format
+                let raw_value = if precompressed_storage::is_precompressed(value) {
+                    precompressed_storage::PrecompressedBlock::from_bytes(value)
+                        .and_then(|c| c.decompress().map_err(|e| e.into()))
+                        .unwrap_or_else(|_| value.to_vec())
+                } else {
+                    value.to_vec()
+                };
+                // Try QBlock deserialization (the primary block format)
+                if let Ok(block) = bincode::deserialize::<q_types::block::QBlock>(&raw_value) {
+                    if block.header.timestamp > 0 && block.header.timestamp < genesis_timestamp {
+                        info!("🧹 [GENESIS FILTER] Found pre-genesis block h={} ts={} (genesis={})",
+                              block.header.height, block.header.timestamp, genesis_timestamp);
+                        has_pre_genesis = true;
+                    }
+                    break; // Found a valid block, decision made
+                }
+            }
+
+            // Also check: wallet balances exist but no blocks (partial purge leftover)
+            if !has_pre_genesis && entries.is_empty() {
+                let balances = self.hot_db.scan_prefix(CF_MANIFEST, b"wallet_balance_").await.unwrap_or_default();
+                if !balances.is_empty() {
+                    info!("🧹 [GENESIS FILTER] Found {} wallet balances but no blocks — purging orphaned balances", balances.len());
+                    has_pre_genesis = true;
+                }
+            }
+        };
+
+        if !has_pre_genesis {
+            info!("✅ [GENESIS FILTER] No pre-genesis data detected — skipping purge");
+            return Ok(false);
+        }
+
+        // Purge all stale data
+        let wallet_balances = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let token_balances = self.delete_by_prefix(b"token_balance_").await.unwrap_or(0);
+        let contracts = self.delete_by_prefix(b"contract_").await.unwrap_or(0);
+        let pools = self.delete_by_prefix(b"liquidity_pool:").await.unwrap_or(0);
+        let stakes = self.delete_by_prefix(b"stake_position_").await.unwrap_or(0);
+        let swaps = self.delete_by_prefix(b"swap_history_").await.unwrap_or(0);
+        let _ = self.delete_by_prefix(b"price_history_").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"emission_controller_state").await;
+
+        // Purge pre-genesis blocks from CF_BLOCKS
+        let mut blocks_deleted = 0usize;
+        if let Ok(entries) = self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+            for (key, value) in &entries {
+                let key_str = String::from_utf8_lossy(key);
+                // Skip metadata keys
+                if key_str == "qblock:latest" || key_str.starts_with("qblock:hash:") {
+                    continue;
+                }
+                // v7.3.1: Handle compressed format
+                let raw_val = if precompressed_storage::is_precompressed(value) {
+                    precompressed_storage::PrecompressedBlock::from_bytes(value)
+                        .and_then(|c| c.decompress().map_err(|e| e.into()))
+                        .unwrap_or_else(|_| value.to_vec())
+                } else {
+                    value.to_vec()
+                };
+                // Try to deserialize and check timestamp
+                if let Ok(block) = bincode::deserialize::<q_types::block::QBlock>(&raw_val) {
+                    if block.header.timestamp < genesis_timestamp {
+                        let _ = self.hot_db.delete(CF_BLOCKS, key).await;
+                        blocks_deleted += 1;
+                    }
+                } else {
+                    // Can't deserialize — delete it (corrupted or incompatible format)
+                    let _ = self.hot_db.delete(CF_BLOCKS, key).await;
+                    blocks_deleted += 1;
+                }
+            }
+        }
+
+        // Reset height pointer
+        if blocks_deleted > 0 {
+            let _ = self.hot_db.delete(CF_BLOCKS, b"qblock:latest").await;
+            self.height_cache.update(0).await;
+        }
+
+        info!("🧹 [GENESIS FILTER] Pre-genesis purge complete:");
+        info!("   {} wallet balances deleted", wallet_balances);
+        info!("   {} token balances deleted", token_balances);
+        info!("   {} contracts deleted", contracts);
+        info!("   {} liquidity pools deleted", pools);
+        info!("   {} blocks deleted", blocks_deleted);
+        info!("   {} stakes deleted", stakes);
+        info!("   {} swaps deleted", swaps);
+        info!("   Emission controller state reset");
+        info!("   Total supply counter reset");
+
+        Ok(true)
+    }
+
+    /// v7.2.5: Safe version that purges testnet BALANCES only — never deletes blocks.
+    /// Uses a one-time migration flag so it runs exactly once, then never again.
+    /// This prevents height drops while still cleaning up stale testnet wallet data.
+    pub async fn purge_pre_genesis_balances_only(&self) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_genesis_balance_purge_v725_done";
+
+        // Check if we already ran this migration
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done, skip
+        }
+
+        info!("🧹 [GENESIS FILTER v7.2.5] Running one-time testnet balance purge (blocks PRESERVED)...");
+
+        // Purge stale balances and state — but NEVER touch blocks or height pointer
+        let wallet_balances = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let token_balances = self.delete_by_prefix(b"token_balance_").await.unwrap_or(0);
+        let contracts = self.delete_by_prefix(b"contract_").await.unwrap_or(0);
+        let pools = self.delete_by_prefix(b"liquidity_pool:").await.unwrap_or(0);
+        let stakes = self.delete_by_prefix(b"stake_position_").await.unwrap_or(0);
+        let swaps = self.delete_by_prefix(b"swap_history_").await.unwrap_or(0);
+        let _ = self.delete_by_prefix(b"price_history_").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"emission_controller_state").await;
+
+        // Set the migration flag so this never runs again
+        let _ = self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await;
+
+        info!("🧹 [GENESIS FILTER v7.2.5] Balance-only purge complete (blocks PRESERVED):");
+        info!("   {} wallet balances deleted", wallet_balances);
+        info!("   {} token balances deleted", token_balances);
+        info!("   {} contracts deleted", contracts);
+        info!("   {} liquidity pools deleted", pools);
+        info!("   {} stakes deleted", stakes);
+        info!("   {} swaps deleted", swaps);
+        info!("   Migration flag set — will not run again on next restart");
+
+        Ok(true)
+    }
+
+    /// v7.2.6: Second purge for ALL nodes — clears testnet balances that were
+    /// re-synced via P2P from nodes that didn't run the v7.2.5 purge.
+    /// Also resets emission controller state so it starts fresh from genesis.
+    pub async fn purge_testnet_balances_v726(&self) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_genesis_balance_purge_v726_done";
+
+        // Check if we already ran this migration
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done, skip
+        }
+
+        info!("🧹 [GENESIS FILTER v7.2.6] Running testnet balance purge on ALL nodes (blocks PRESERVED)...");
+
+        // Purge ALL balance-related state
+        let wallet_balances = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let token_balances = self.delete_by_prefix(b"token_balance_").await.unwrap_or(0);
+        let contracts = self.delete_by_prefix(b"contract_").await.unwrap_or(0);
+        let pools = self.delete_by_prefix(b"liquidity_pool:").await.unwrap_or(0);
+        let stakes = self.delete_by_prefix(b"stake_position_").await.unwrap_or(0);
+        let swaps = self.delete_by_prefix(b"swap_history_").await.unwrap_or(0);
+        let _ = self.delete_by_prefix(b"price_history_").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"emission_controller_state").await;
+
+        // Set the migration flag so this never runs again
+        let _ = self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await;
+
+        info!("🧹 [GENESIS FILTER v7.2.6] Purge complete (blocks PRESERVED):");
+        info!("   {} wallet balances deleted", wallet_balances);
+        info!("   {} token balances deleted", token_balances);
+        info!("   {} contracts deleted", contracts);
+        info!("   {} liquidity pools deleted", pools);
+        info!("   {} stakes deleted", stakes);
+        info!("   {} swaps deleted", swaps);
+        info!("   Emission controller state reset — will rebuild from blocks");
+
+        Ok(true)
+    }
+
+    /// v7.2.12: Third purge — deletes ALL wallet balances, total_minted_supply,
+    /// and emission_controller_state from RocksDB. This runs once (migration flag).
+    /// After this, `rebuild_balances_from_chain()` must be called to reconstruct
+    /// correct balances from mainnet blocks only.
+    pub async fn purge_testnet_wallets_v7212(&self) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_wallet_purge_v7212_done";
+
+        // Check if we already ran this migration
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        info!("🧹 [GENESIS FILTER v7.2.12] Purging ALL testnet wallet balances from RocksDB...");
+
+        let wallet_balances = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        let _ = self.hot_db.delete(CF_MANIFEST, b"emission_controller_state").await;
+
+        // Set the migration flag
+        let _ = self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await;
+
+        info!("🧹 [GENESIS FILTER v7.2.12] Purged {} wallet balances + total_supply + emission_state", wallet_balances);
+        info!("   Migration flag set — will not run again on next restart");
+
+        Ok(true)
+    }
+
+    /// v7.2.12: Rebuild wallet balances by scanning the blockchain.
+    /// Iterates blocks 1..tip, skips blocks with timestamp < GENESIS_TIMESTAMP,
+    /// and reconstructs balances from balance_updates embedded in blocks.
+    /// For blocks without balance_updates, extracts coinbase from mining_solutions.
+    /// Returns the rebuilt balances HashMap and total supply.
+    pub async fn rebuild_balances_from_chain(&self) -> Result<(HashMap<[u8; 32], u128>, u128)> {
+        // v7.3.4: Use network-aware genesis timestamp
+        let genesis_timestamp: u64 = crate::balance_consensus::active_genesis_timestamp();
+
+        let tip = self.height_cache.cached();
+        if tip == 0 {
+            info!("🔄 [REBUILD] No blocks in chain (tip=0), starting with empty balances");
+            return Ok((HashMap::new(), 0));
+        }
+
+        info!("🔄 [REBUILD v7.2.12] Rebuilding wallet balances from chain (blocks 1..{})...", tip);
+
+        let mut balances: HashMap<[u8; 32], u128> = HashMap::new();
+        let mut blocks_scanned = 0u64;
+        let mut blocks_skipped = 0u64;
+        let mut balance_updates_applied = 0u64;
+
+        for height in 1..=tip {
+            let height_key = format!("qblock:height:{}", height);
+            let block_data = match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue, // Gap in chain — skip
+                Err(_) => continue,
+            };
+
+            // v7.3.1: Handle compressed format
+            let block: q_types::block::QBlock = if precompressed_storage::is_precompressed(&block_data) {
+                match precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+                {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            } else {
+                match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            };
+
+            // Skip pre-genesis (testnet) blocks
+            if block.header.timestamp > 0 && block.header.timestamp < genesis_timestamp {
+                blocks_skipped += 1;
+                continue;
+            }
+
+            blocks_scanned += 1;
+
+            // Primary: Apply balance_updates embedded in blocks (deterministic).
+            // Each BalanceUpdate records the final balance (new_balance) for an address
+            // after this block's changes. Taking the latest value per address is correct.
+            if !block.balance_updates.is_empty() {
+                for bu in &block.balance_updates {
+                    if bu.address != [0u8; 32] {
+                        balances.insert(bu.address, bu.new_balance);
+                        balance_updates_applied += 1;
+                    }
+                }
+            } else {
+                // Fallback for early blocks without balance_updates:
+                // Mining solutions represent coinbase rewards. Use the emission
+                // controller's static halving schedule for approximate reward.
+                for solution in &block.mining_solutions {
+                    if solution.miner_address != [0u8; 32] {
+                        let reward = crate::emission_controller::static_block_reward_for_timestamp(
+                            block.header.timestamp,
+                        );
+                        let entry = balances.entry(solution.miner_address).or_insert(0);
+                        *entry = entry.saturating_add(reward);
+                        balance_updates_applied += 1;
+                    }
+                }
+            }
+
+            // Progress log every 50,000 blocks
+            if height % 50_000 == 0 {
+                info!("🔄 [REBUILD] Progress: {}/{} blocks scanned, {} wallets so far", height, tip, balances.len());
+            }
+        }
+
+        // Compute total supply from final balances
+        let total_supply: u128 = balances.values().sum();
+
+        // Persist rebuilt balances to RocksDB
+        if !balances.is_empty() {
+            self.save_wallet_balances(&balances).await?;
+            self.save_total_supply(total_supply).await?;
+        }
+
+        info!("✅ [REBUILD v7.2.12] Rebuilt {} wallet balances from chain", balances.len());
+        info!("   Blocks scanned: {}, skipped (pre-genesis): {}, balance updates applied: {}",
+              blocks_scanned, blocks_skipped, balance_updates_applied);
+        info!("   Total supply: {} QUG ({} base units)",
+              total_supply / 1_000_000_000_000_000_000_000_000u128, total_supply);
+
+        Ok((balances, total_supply))
+    }
+
     // ============================================================================
     // AI Chat Attachment Storage - v0.9.9-beta
     // ============================================================================
@@ -4000,6 +4939,35 @@ impl QStorage {
         Ok(())
     }
 
+    // ============================================================================
+    // Emission Controller State Persistence (v7.1.0)
+    // ============================================================================
+
+    /// Save emission controller state to RocksDB so it survives restarts
+    pub async fn save_emission_state(&self, state_bytes: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, b"emission_controller_state", state_bytes).await?;
+        debug!("💰 Saved emission controller state ({} bytes)", state_bytes.len());
+        Ok(())
+    }
+
+    /// Load emission controller state from RocksDB
+    pub async fn load_emission_state(&self) -> Result<Option<Vec<u8>>> {
+        match self.hot_db.get(CF_MANIFEST, b"emission_controller_state").await {
+            Ok(Some(data)) => {
+                info!("💰 Loaded emission controller state ({} bytes)", data.len());
+                Ok(Some(data))
+            }
+            Ok(None) => {
+                info!("💰 No saved emission controller state found (first boot or fresh DB)");
+                Ok(None)
+            }
+            Err(e) => {
+                warn!("Failed to load emission controller state: {}", e);
+                Ok(None)
+            }
+        }
+    }
+
     /// Save benchmark timestamp for IP rate limiting
     /// Key format: benchmark_ip:{ip_address}
     pub async fn save_benchmark_timestamp(&self, ip_address: &str, timestamp: u64) -> Result<()> {
@@ -4126,6 +5094,36 @@ impl QStorage {
         Ok(())
     }
 
+    /// Atomically transfer USD between two wallets using a single batch write.
+    /// This prevents the scenario where debit succeeds but credit fails.
+    pub async fn transfer_usd_atomic(&self, from_wallet: &str, to_wallet: &str, amount_cents: u64) -> Result<(u64, u64)> {
+        let from_key = format!("usd_balance:{}", from_wallet);
+        let to_key = format!("usd_balance:{}", to_wallet);
+
+        // Read current balances
+        let from_balance = self.get_usd_balance(from_wallet).await?;
+        let to_balance = self.get_usd_balance(to_wallet).await?;
+
+        if from_balance < amount_cents {
+            anyhow::bail!("Insufficient balance: have {} cents, need {}", from_balance, amount_cents);
+        }
+
+        let new_from = from_balance - amount_cents;
+        let new_to = to_balance.saturating_add(amount_cents);
+
+        // Write both balances in a single atomic batch
+        let ops = vec![
+            (CF_MANIFEST, from_key.into_bytes(), new_from.to_le_bytes().to_vec()),
+            (CF_MANIFEST, to_key.into_bytes(), new_to.to_le_bytes().to_vec()),
+        ];
+        self.hot_db.write_batch(ops).await?;
+
+        info!("💵 Atomic transfer: {} cents from {} (new: {}) to {} (new: {})",
+            amount_cents, from_wallet, new_from, to_wallet, new_to);
+
+        Ok((new_from, new_to))
+    }
+
     /// Set USD balance for a wallet directly (amount in cents)
     /// This is used for admin operations or migrations
     pub async fn set_usd_balance(&self, wallet_address: &str, balance_cents: u64) -> Result<()> {
@@ -4169,6 +5167,23 @@ impl QStorage {
         }
 
         Ok(balances)
+    }
+
+    /// Check if a payment intent has already been processed (idempotency)
+    pub async fn is_payment_processed(&self, payment_intent_id: &str) -> Result<bool> {
+        let key = format!("processed_payment:{}", payment_intent_id);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
+    }
+
+    /// Mark a payment intent as processed (idempotency)
+    pub async fn mark_payment_processed(&self, payment_intent_id: &str, wallet_address: &str, amount_cents: u64) -> Result<()> {
+        let key = format!("processed_payment:{}", payment_intent_id);
+        let value = format!("{}:{}", wallet_address, amount_cents);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), value.as_bytes()).await?;
+        Ok(())
     }
 
     /// Save password hash to persistent storage (bcrypt hash)
@@ -4905,10 +5920,12 @@ impl QStorage {
     /// storage.sync_wal().await?;  // Disk durability ✅
     /// ```
     pub async fn sync_wal(&self) -> Result<()> {
-        // Note: rust-rocksdb doesn't expose sync_wal() method directly
-        // However, our write_batch already uses set_sync(true) which forces WAL fsync
-        // This method serves as an explicit verification/documentation point
-        debug!("💾 [v0.9.98-beta] Explicit WAL sync point");
+        // v7.3.10: Fixed — now actually delegates to hot_db.sync_wal() which calls flush_wal(true).
+        // Previously this was a no-op (debug log only) which meant turbo batch writes in WAL
+        // were never durably flushed between balance sync cycles.
+        self.hot_db.sync_wal().await
+            .context("Failed to sync WAL to disk")?;
+        debug!("💾 [WAL SYNC] WAL flushed to disk (durability guarantee)");
         Ok(())
     }
 
@@ -4982,6 +5999,231 @@ impl QStorage {
 
         self.hot_db.put(CF_UPDATES, update_id.as_bytes(), &timestamp.to_be_bytes()).await
             .context("Failed to mark update as processed")
+    }
+
+    // ========== v7.2.0: Atomic Swap (BTC Bridge) Persistence ==========
+
+    /// Save an atomic swap proposal to persistent storage
+    /// Key format: atomic_swap:{swap_id}
+    pub async fn save_atomic_swap(&self, swap_id: &str, swap_data: &[u8]) -> Result<()> {
+        let key = format!("atomic_swap:{}", swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_data).await?;
+        info!("⚛️ Saved atomic swap: {}", swap_id);
+        Ok(())
+    }
+
+    /// Get an atomic swap by ID
+    pub async fn get_atomic_swap(&self, swap_id: &str) -> Result<Option<Vec<u8>>> {
+        let key = format!("atomic_swap:{}", swap_id);
+        self.hot_db.get(CF_MANIFEST, key.as_bytes()).await
+    }
+
+    /// Save wallet-to-swap index for listing swaps by wallet
+    /// Key format: atomic_swap_idx:{wallet}:{swap_id}
+    pub async fn index_atomic_swap_by_wallet(&self, wallet: &str, swap_id: &str) -> Result<()> {
+        let key = format!("atomic_swap_idx:{}:{}", wallet, swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_id.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// List all atomic swap IDs for a given wallet address
+    pub async fn list_atomic_swaps_by_wallet(&self, wallet: &str) -> Result<Vec<String>> {
+        let prefix = format!("atomic_swap_idx:{}:", wallet);
+        let mut swap_ids = Vec::new();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix.as_bytes()).await {
+            Ok(entries) => {
+                for (_key_bytes, value) in entries {
+                    if let Ok(swap_id) = String::from_utf8(value) {
+                        swap_ids.push(swap_id);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan atomic swaps for wallet {}: {}", wallet, e);
+            }
+        }
+        Ok(swap_ids)
+    }
+
+    /// Delete an atomic swap (for cleanup of completed/expired swaps)
+    pub async fn delete_atomic_swap(&self, swap_id: &str) -> Result<()> {
+        let key = format!("atomic_swap:{}", swap_id);
+        self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
+        debug!("🗑️ Deleted atomic swap: {}", swap_id);
+        Ok(())
+    }
+
+    // ═══ Zcash Shielded Swap Storage (v7.2.2) ═══
+
+    /// Save a Zcash shielded swap to persistent storage
+    pub async fn save_zcash_swap(&self, swap_id: &str, swap_data: &[u8]) -> Result<()> {
+        let key = format!("zcash_swap:{}", swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_data).await?;
+        info!("🛡️ Saved Zcash swap: {}", swap_id);
+        Ok(())
+    }
+
+    /// Get a Zcash swap by ID
+    pub async fn get_zcash_swap(&self, swap_id: &str) -> Result<Option<Vec<u8>>> {
+        let key = format!("zcash_swap:{}", swap_id);
+        self.hot_db.get(CF_MANIFEST, key.as_bytes()).await
+    }
+
+    /// Save wallet-to-zcash-swap index
+    pub async fn index_zcash_swap_by_wallet(&self, wallet: &str, swap_id: &str) -> Result<()> {
+        let key = format!("zcash_swap_idx:{}:{}", wallet, swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_id.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// List all Zcash swap IDs for a given wallet
+    pub async fn list_zcash_swaps_by_wallet(&self, wallet: &str) -> Result<Vec<String>> {
+        let prefix = format!("zcash_swap_idx:{}:", wallet);
+        let mut swap_ids = Vec::new();
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix.as_bytes()).await {
+            Ok(entries) => {
+                for (_key_bytes, value) in entries {
+                    if let Ok(swap_id) = String::from_utf8(value) {
+                        swap_ids.push(swap_id);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan Zcash swaps for wallet {}: {}", wallet, e);
+            }
+        }
+        Ok(swap_ids)
+    }
+
+    /// Save a user's Zcash z-address
+    pub async fn save_zcash_z_address(&self, wallet: &str, z_address: &str) -> Result<()> {
+        let key = format!("zcash_z_address:{}", wallet);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), z_address.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Get a user's Zcash z-address
+    pub async fn get_zcash_z_address(&self, wallet: &str) -> Result<Option<String>> {
+        let key = format!("zcash_z_address:{}", wallet);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) => Ok(String::from_utf8(data).ok()),
+            None => Ok(None),
+        }
+    }
+
+    /// Save/update Zcash shielded balance (in zatoshis)
+    pub async fn save_zcash_balance(&self, wallet: &str, balance_zat: u64) -> Result<()> {
+        let key = format!("zcash_balance:{}", wallet);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), balance_zat.to_string().as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Get Zcash shielded balance (in zatoshis)
+    pub async fn get_zcash_balance(&self, wallet: &str) -> Result<u64> {
+        let key = format!("zcash_balance:{}", wallet);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) => {
+                let s = String::from_utf8(data).unwrap_or_default();
+                Ok(s.parse::<u64>().unwrap_or(0))
+            }
+            None => Ok(0),
+        }
+    }
+
+    // ═══ Iron Fish Swap Storage (v7.2.4) ═══
+
+    pub async fn save_ironfish_swap(&self, swap_id: &str, swap_data: &[u8]) -> Result<()> {
+        let key = format!("ironfish_swap:{}", swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_data).await?;
+        info!("🐟 Saved Iron Fish swap: {}", swap_id);
+        Ok(())
+    }
+
+    pub async fn get_ironfish_swap(&self, swap_id: &str) -> Result<Option<Vec<u8>>> {
+        let key = format!("ironfish_swap:{}", swap_id);
+        self.hot_db.get(CF_MANIFEST, key.as_bytes()).await
+    }
+
+    pub async fn index_ironfish_swap_by_wallet(&self, wallet: &str, swap_id: &str) -> Result<()> {
+        let key = format!("ironfish_swap_idx:{}:{}", wallet, swap_id);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), swap_id.as_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn list_ironfish_swaps_by_wallet(&self, wallet: &str) -> Result<Vec<String>> {
+        let prefix = format!("ironfish_swap_idx:{}:", wallet);
+        let mut swap_ids = Vec::new();
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix.as_bytes()).await {
+            Ok(entries) => {
+                for (_key_bytes, value) in entries {
+                    if let Ok(swap_id) = String::from_utf8(value) {
+                        swap_ids.push(swap_id);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan Iron Fish swaps for wallet {}: {}", wallet, e);
+            }
+        }
+        Ok(swap_ids)
+    }
+
+    pub async fn save_ironfish_address(&self, wallet: &str, iron_address: &str) -> Result<()> {
+        let key = format!("ironfish_address:{}", wallet);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), iron_address.as_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn get_ironfish_address(&self, wallet: &str) -> Result<Option<String>> {
+        let key = format!("ironfish_address:{}", wallet);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) => Ok(String::from_utf8(data).ok()),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_ironfish_balance(&self, wallet: &str, balance_ore: u64) -> Result<()> {
+        let key = format!("ironfish_balance:{}", wallet);
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), balance_ore.to_string().as_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn get_ironfish_balance(&self, wallet: &str) -> Result<u64> {
+        let key = format!("ironfish_balance:{}", wallet);
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(data) => {
+                let s = String::from_utf8(data).unwrap_or_default();
+                Ok(s.parse::<u64>().unwrap_or(0))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Load all active atomic swaps from storage
+    pub async fn load_all_atomic_swaps(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let prefix = b"atomic_swap:";
+        let mut swaps = Vec::new();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key_bytes, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key_bytes) {
+                        // Skip index entries (atomic_swap_idx:)
+                        if key_str.starts_with("atomic_swap_idx:") {
+                            continue;
+                        }
+                        let swap_id = key_str.trim_start_matches("atomic_swap:");
+                        swaps.push((swap_id.to_string(), value));
+                    }
+                }
+                info!("⚛️ Loaded {} atomic swaps from storage", swaps.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan atomic swaps: {}", e);
+            }
+        }
+        Ok(swaps)
     }
 }
 
@@ -5591,6 +6833,512 @@ impl QStorage {
         let votes: Vec<Vec<u8>> = all_pairs.into_iter().map(|(_, v)| v).collect();
         debug!("📜 Loaded {} votes for proposal {}", votes.len(), proposal_id);
         Ok(votes)
+    }
+
+    // ========================================================================
+    // v7.3.2: Quillon Mail Storage
+    // ========================================================================
+
+    /// Save an email message to storage
+    pub async fn save_email(&self, email: &q_types::EmailMessage) -> Result<()> {
+        let email_bytes = serde_json::to_vec(email)?;
+        self.hot_db.put(CF_EMAILS, email.id.as_bytes(), &email_bytes).await?;
+
+        // Index by wallet (for inbox/sent lookups)
+        let inverted_ts = u64::MAX - email.timestamp;
+        let wallet_hex = if email.folder == "sent" {
+            hex::encode(email.from_wallet)
+        } else if let Some(ref to_wallet) = email.to_wallet {
+            hex::encode(to_wallet)
+        } else {
+            hex::encode(email.from_wallet)
+        };
+
+        // Wallet index key: "wallet_hex:inverted_timestamp:email_id"
+        let wallet_key = format!("{}:{:020}:{}", wallet_hex, inverted_ts, email.id);
+        self.hot_db.put(CF_EMAILS_BY_WALLET, wallet_key.as_bytes(), email.id.as_bytes()).await?;
+
+        // Folder index key: "wallet_hex:folder:inverted_timestamp:email_id"
+        let folder_key = format!("{}:{}:{:020}:{}", wallet_hex, email.folder, inverted_ts, email.id);
+        self.hot_db.put(CF_EMAILS_BY_FOLDER, folder_key.as_bytes(), email.id.as_bytes()).await?;
+
+        debug!("📧 Saved email {} in folder '{}' for wallet {}", email.id, email.folder, &wallet_hex[..8]);
+        Ok(())
+    }
+
+    /// Get an email by ID
+    pub async fn get_email(&self, email_id: &str) -> Result<Option<q_types::EmailMessage>> {
+        match self.hot_db.get(CF_EMAILS, email_id.as_bytes()).await? {
+            Some(bytes) => {
+                let email: q_types::EmailMessage = serde_json::from_slice(&bytes)?;
+                Ok(Some(email))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get emails for a wallet in a specific folder with pagination
+    pub async fn get_inbox(&self, wallet: &[u8; 32], folder: &str, limit: usize, offset: usize) -> Result<Vec<q_types::EmailMessage>> {
+        let wallet_hex = hex::encode(wallet);
+        let prefix = format!("{}:{}:", wallet_hex, folder);
+        let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_FOLDER, prefix.as_bytes()).await?;
+
+        let mut emails = Vec::new();
+        for (i, (_, email_id_bytes)) in entries.into_iter().enumerate() {
+            if i < offset { continue; }
+            if emails.len() >= limit { break; }
+
+            if let Ok(email_id) = String::from_utf8(email_id_bytes) {
+                if let Some(email) = self.get_email(&email_id).await? {
+                    emails.push(email);
+                }
+            }
+        }
+
+        debug!("📬 Loaded {} emails for wallet {}... folder={}", emails.len(), &wallet_hex[..8], folder);
+        Ok(emails)
+    }
+
+    /// Delete an email and its index entries
+    pub async fn delete_email(&self, email_id: &str) -> Result<()> {
+        if let Some(email) = self.get_email(email_id).await? {
+            let inverted_ts = u64::MAX - email.timestamp;
+            let wallet_hex = if email.folder == "sent" {
+                hex::encode(email.from_wallet)
+            } else if let Some(ref to_wallet) = email.to_wallet {
+                hex::encode(to_wallet)
+            } else {
+                hex::encode(email.from_wallet)
+            };
+
+            let wallet_key = format!("{}:{:020}:{}", wallet_hex, inverted_ts, email.id);
+            let folder_key = format!("{}:{}:{:020}:{}", wallet_hex, email.folder, inverted_ts, email.id);
+
+            self.hot_db.delete(CF_EMAILS_BY_WALLET, wallet_key.as_bytes()).await?;
+            self.hot_db.delete(CF_EMAILS_BY_FOLDER, folder_key.as_bytes()).await?;
+            self.hot_db.delete(CF_EMAILS, email_id.as_bytes()).await?;
+
+            debug!("🗑️ Deleted email {}", email_id);
+        }
+        Ok(())
+    }
+
+    /// Mark an email as read
+    pub async fn mark_email_read(&self, email_id: &str) -> Result<()> {
+        if let Some(mut email) = self.get_email(email_id).await? {
+            email.read = true;
+            let email_bytes = serde_json::to_vec(&email)?;
+            self.hot_db.put(CF_EMAILS, email_id.as_bytes(), &email_bytes).await?;
+            debug!("📖 Marked email {} as read", email_id);
+        }
+        Ok(())
+    }
+
+    /// Get unread count for a wallet
+    pub async fn get_unread_count(&self, wallet: &[u8; 32]) -> Result<u64> {
+        let wallet_hex = hex::encode(wallet);
+        let prefix = format!("{}:inbox:", wallet_hex);
+        let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_FOLDER, prefix.as_bytes()).await?;
+
+        let mut count = 0u64;
+        for (_, email_id_bytes) in entries {
+            if let Ok(email_id) = String::from_utf8(email_id_bytes) {
+                if let Some(email) = self.get_email(&email_id).await? {
+                    if !email.read {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Save an outbound email for SMTP delivery
+    pub async fn save_outbound_email(&self, msg: &q_types::OutboundEmail) -> Result<()> {
+        let msg_bytes = serde_json::to_vec(msg)?;
+        self.hot_db.put(CF_EMAIL_OUTBOUND, msg.id.as_bytes(), &msg_bytes).await?;
+        debug!("📤 Queued outbound email {} to {}", msg.id, msg.to_email);
+        Ok(())
+    }
+
+    /// Claim pending outbound emails for delivery
+    pub async fn claim_outbound_emails(&self, limit: usize) -> Result<Vec<q_types::OutboundEmail>> {
+        let all = self.hot_db.scan_all(CF_EMAIL_OUTBOUND).await?;
+        let mut claimed = Vec::new();
+
+        for (key, value) in all {
+            if claimed.len() >= limit { break; }
+            if let Ok(mut msg) = serde_json::from_slice::<q_types::OutboundEmail>(&value) {
+                if msg.status == q_types::OutboundStatus::Pending || msg.status == q_types::OutboundStatus::Retrying {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if let Some(next_retry) = msg.next_retry_at {
+                        if now < next_retry { continue; }
+                    }
+                    msg.status = q_types::OutboundStatus::Processing;
+                    let msg_bytes = serde_json::to_vec(&msg)?;
+                    self.hot_db.put(CF_EMAIL_OUTBOUND, &key, &msg_bytes).await?;
+                    claimed.push(msg);
+                }
+            }
+        }
+
+        debug!("📤 Claimed {} outbound emails for delivery", claimed.len());
+        Ok(claimed)
+    }
+
+    /// Mark outbound email as delivered
+    pub async fn mark_outbound_delivered(&self, id: &str) -> Result<()> {
+        if let Some(bytes) = self.hot_db.get(CF_EMAIL_OUTBOUND, id.as_bytes()).await? {
+            if let Ok(mut msg) = serde_json::from_slice::<q_types::OutboundEmail>(&bytes) {
+                msg.status = q_types::OutboundStatus::Delivered;
+                let msg_bytes = serde_json::to_vec(&msg)?;
+                self.hot_db.put(CF_EMAIL_OUTBOUND, id.as_bytes(), &msg_bytes).await?;
+                debug!("✅ Outbound email {} delivered", id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark outbound email as failed with error and retry scheduling
+    pub async fn mark_outbound_failed(&self, id: &str, error: &str) -> Result<()> {
+        if let Some(bytes) = self.hot_db.get(CF_EMAIL_OUTBOUND, id.as_bytes()).await? {
+            if let Ok(mut msg) = serde_json::from_slice::<q_types::OutboundEmail>(&bytes) {
+                msg.retry_count += 1;
+                msg.last_error = Some(error.to_string());
+
+                if msg.retry_count >= 5 {
+                    msg.status = q_types::OutboundStatus::Failed;
+                    debug!("❌ Outbound email {} permanently failed after {} retries: {}", id, msg.retry_count, error);
+                } else {
+                    msg.status = q_types::OutboundStatus::Retrying;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    // Exponential backoff: 5m, 15m, 1h, 4h, 24h
+                    let delays = [300, 900, 3600, 14400, 86400];
+                    let delay = delays.get(msg.retry_count as usize - 1).copied().unwrap_or(86400);
+                    msg.next_retry_at = Some(now + delay);
+                    debug!("🔄 Outbound email {} retry #{} scheduled in {}s: {}", id, msg.retry_count, delay, error);
+                }
+
+                let msg_bytes = serde_json::to_vec(&msg)?;
+                self.hot_db.put(CF_EMAIL_OUTBOUND, id.as_bytes(), &msg_bytes).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Save email contact
+    pub async fn save_email_contact(&self, owner: &[u8; 32], contact: &q_types::EmailContact) -> Result<()> {
+        let key = format!("{}:{}", hex::encode(owner), hex::encode(contact.wallet_address));
+        let value = serde_json::to_vec(contact)?;
+        self.hot_db.put(CF_EMAIL_CONTACTS, key.as_bytes(), &value).await?;
+        Ok(())
+    }
+
+    /// Get all email contacts for a wallet
+    pub async fn get_email_contacts(&self, owner: &[u8; 32]) -> Result<Vec<q_types::EmailContact>> {
+        let prefix = format!("{}:", hex::encode(owner));
+        let entries = self.hot_db.scan_prefix(CF_EMAIL_CONTACTS, prefix.as_bytes()).await?;
+
+        let mut contacts = Vec::new();
+        for (_, value) in entries {
+            if let Ok(contact) = serde_json::from_slice::<q_types::EmailContact>(&value) {
+                contacts.push(contact);
+            }
+        }
+        Ok(contacts)
+    }
+
+    /// Search emails by subject or body text
+    pub async fn search_emails(&self, wallet: &[u8; 32], query: &str, limit: usize) -> Result<Vec<q_types::EmailMessage>> {
+        let wallet_hex = hex::encode(wallet);
+        let prefix = format!("{}:", wallet_hex);
+        let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_WALLET, prefix.as_bytes()).await?;
+
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for (_, email_id_bytes) in entries {
+            if results.len() >= limit { break; }
+            if let Ok(email_id) = String::from_utf8(email_id_bytes) {
+                if let Some(email) = self.get_email(&email_id).await? {
+                    if email.subject.to_lowercase().contains(&query_lower)
+                        || email.body.to_lowercase().contains(&query_lower) {
+                        results.push(email);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    // ========================================================================
+    // Email Settings Storage (v7.3.3)
+    // ========================================================================
+
+    /// Save email settings for a wallet (stored in CF_EMAILS with "settings:" prefix)
+    pub async fn save_email_settings(&self, wallet_hex: &str, settings_json: &[u8]) -> Result<()> {
+        let key = format!("settings:{}", wallet_hex);
+        self.hot_db.put(CF_EMAILS, key.as_bytes(), settings_json).await?;
+        Ok(())
+    }
+
+    /// Get email settings for a wallet
+    pub async fn get_email_settings(&self, wallet_hex: &str) -> Result<Option<serde_json::Value>> {
+        let key = format!("settings:{}", wallet_hex);
+        match self.hot_db.get(CF_EMAILS, key.as_bytes()).await? {
+            Some(data) => {
+                let val: serde_json::Value = serde_json::from_slice(&data)?;
+                Ok(Some(val))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Save email alias → wallet mapping (stored in CF_EMAILS with "alias:" prefix)
+    pub async fn save_email_alias(&self, alias: &str, wallet_hex: &str) -> Result<()> {
+        let key = format!("alias:{}", alias);
+        self.hot_db.put(CF_EMAILS, key.as_bytes(), wallet_hex.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Resolve email alias to wallet hex
+    pub async fn get_email_alias_wallet(&self, alias: &str) -> Result<Option<String>> {
+        let key = format!("alias:{}", alias);
+        match self.hot_db.get(CF_EMAILS, key.as_bytes()).await? {
+            Some(data) => Ok(Some(String::from_utf8_lossy(&data).to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Remove email alias mapping
+    pub async fn delete_email_alias(&self, alias: &str) -> Result<()> {
+        let key = format!("alias:{}", alias);
+        self.hot_db.delete(CF_EMAILS, key.as_bytes()).await?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Calendar Storage Methods (v7.3.3)
+    // ========================================================================
+
+    /// Save a calendar event with date index
+    pub async fn save_calendar_event(&self, event: &q_types::CalendarEvent) -> Result<()> {
+        let event_bytes = serde_json::to_vec(event)?;
+        self.hot_db.put(CF_CALENDAR_EVENTS, event.id.as_bytes(), &event_bytes).await?;
+
+        // Index by date for range queries
+        let wallet_hex = hex::encode(event.wallet);
+        let date_str = {
+            let dt = chrono::DateTime::from_timestamp(event.start_time as i64, 0)
+                .unwrap_or_else(|| chrono::Utc::now());
+            dt.format("%Y%m%d").to_string()
+        };
+        let date_key = format!("{}:{}:{}", wallet_hex, date_str, event.id);
+        self.hot_db.put(CF_CALENDAR_BY_DATE, date_key.as_bytes(), event.id.as_bytes()).await?;
+
+        // If it has a scheduled transaction, index for the executor
+        if event.scheduled_tx.is_some() && !event.cancelled {
+            let sched_key = format!("{}:{:020}:{}", wallet_hex, event.start_time, event.id);
+            self.hot_db.put(CF_CALENDAR_SCHEDULED_TX, sched_key.as_bytes(), event.id.as_bytes()).await?;
+        }
+
+        debug!("📅 Saved calendar event {} '{}'", event.id, event.title);
+        Ok(())
+    }
+
+    /// Get a single calendar event by ID
+    pub async fn get_calendar_event(&self, event_id: &str) -> Result<Option<q_types::CalendarEvent>> {
+        match self.hot_db.get(CF_CALENDAR_EVENTS, event_id.as_bytes()).await? {
+            Some(bytes) => {
+                let event: q_types::CalendarEvent = serde_json::from_slice(&bytes)?;
+                Ok(Some(event))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get calendar events for a wallet within a date range (YYYYMMDD strings)
+    pub async fn get_calendar_events_by_date_range(
+        &self, wallet: &[u8; 32], start_date: &str, end_date: &str,
+    ) -> Result<Vec<q_types::CalendarEvent>> {
+        let wallet_hex = hex::encode(wallet);
+        let start_prefix = format!("{}:{}", wallet_hex, start_date);
+        let end_prefix = format!("{}:{}~", wallet_hex, end_date); // ~ is after 9 in ASCII
+
+        let entries = self.hot_db.scan_prefix(CF_CALENDAR_BY_DATE, format!("{}:", wallet_hex).as_bytes()).await?;
+        let mut events = Vec::new();
+
+        for (key, event_id_bytes) in entries {
+            if let Ok(key_str) = String::from_utf8(key) {
+                if key_str >= start_prefix && key_str <= end_prefix {
+                    if let Ok(event_id) = String::from_utf8(event_id_bytes) {
+                        if let Some(event) = self.get_calendar_event(&event_id).await? {
+                            if !event.cancelled {
+                                events.push(event);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        events.sort_by_key(|e| e.start_time);
+        Ok(events)
+    }
+
+    /// Update a calendar event
+    pub async fn update_calendar_event(&self, event: &q_types::CalendarEvent) -> Result<()> {
+        self.save_calendar_event(event).await
+    }
+
+    /// Soft-delete a calendar event (marks as cancelled)
+    pub async fn delete_calendar_event(&self, event_id: &str) -> Result<()> {
+        if let Some(mut event) = self.get_calendar_event(event_id).await? {
+            event.cancelled = true;
+            event.updated_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            let event_bytes = serde_json::to_vec(&event)?;
+            self.hot_db.put(CF_CALENDAR_EVENTS, event_id.as_bytes(), &event_bytes).await?;
+
+            // Remove from scheduled tx index if present
+            if event.scheduled_tx.is_some() {
+                let wallet_hex = hex::encode(event.wallet);
+                let sched_key = format!("{}:{:020}:{}", wallet_hex, event.start_time, event.id);
+                let _ = self.hot_db.delete(CF_CALENDAR_SCHEDULED_TX, sched_key.as_bytes()).await;
+            }
+            debug!("📅 Deleted calendar event {}", event_id);
+        }
+        Ok(())
+    }
+
+    /// Get pending scheduled transactions (not executed, start_time <= now)
+    pub async fn get_pending_scheduled_transactions(&self) -> Result<Vec<q_types::CalendarEvent>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let entries = self.hot_db.scan_all(CF_CALENDAR_SCHEDULED_TX).await?;
+        let mut pending = Vec::new();
+
+        for (_, event_id_bytes) in entries {
+            if let Ok(event_id) = String::from_utf8(event_id_bytes) {
+                if let Some(event) = self.get_calendar_event(&event_id).await? {
+                    if event.cancelled { continue; }
+                    if let Some(ref tx) = event.scheduled_tx {
+                        if !tx.executed && event.start_time <= now {
+                            pending.push(event);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Mark a scheduled transaction as executed
+    pub async fn mark_scheduled_tx_executed(&self, event_id: &str, tx_hash: &str) -> Result<()> {
+        if let Some(mut event) = self.get_calendar_event(event_id).await? {
+            if let Some(ref mut tx) = event.scheduled_tx {
+                tx.executed = true;
+                tx.tx_hash = Some(tx_hash.to_string());
+            }
+            event.updated_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            let event_bytes = serde_json::to_vec(&event)?;
+            self.hot_db.put(CF_CALENDAR_EVENTS, event_id.as_bytes(), &event_bytes).await?;
+
+            // Remove from pending index
+            let wallet_hex = hex::encode(event.wallet);
+            let sched_key = format!("{}:{:020}:{}", wallet_hex, event.start_time, event.id);
+            let _ = self.hot_db.delete(CF_CALENDAR_SCHEDULED_TX, sched_key.as_bytes()).await;
+
+            debug!("📅 Scheduled TX for event {} executed: {}", event_id, tx_hash);
+        }
+        Ok(())
+    }
+
+    /// Mark a scheduled transaction as failed
+    pub async fn mark_scheduled_tx_failed(&self, event_id: &str, error: &str) -> Result<()> {
+        if let Some(mut event) = self.get_calendar_event(event_id).await? {
+            if let Some(ref mut tx) = event.scheduled_tx {
+                tx.error = Some(error.to_string());
+            }
+            event.updated_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            let event_bytes = serde_json::to_vec(&event)?;
+            self.hot_db.put(CF_CALENDAR_EVENTS, event_id.as_bytes(), &event_bytes).await?;
+            debug!("📅 Scheduled TX for event {} failed: {}", event_id, error);
+        }
+        Ok(())
+    }
+
+    /// Save a community event shared via P2P
+    pub async fn save_community_event(&self, event: &q_types::CalendarEvent) -> Result<()> {
+        let event_bytes = serde_json::to_vec(event)?;
+        self.hot_db.put(CF_CALENDAR_COMMUNITY, event.id.as_bytes(), &event_bytes).await?;
+        debug!("📅 Saved community event {} '{}'", event.id, event.title);
+        Ok(())
+    }
+
+    /// Get all community events (shared via P2P)
+    pub async fn get_community_events(&self, limit: usize) -> Result<Vec<q_types::CalendarEvent>> {
+        let entries = self.hot_db.scan_all(CF_CALENDAR_COMMUNITY).await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut events = Vec::new();
+        for (_, value) in entries {
+            if events.len() >= limit { break; }
+            if let Ok(event) = serde_json::from_slice::<q_types::CalendarEvent>(&value) {
+                if !event.cancelled && event.start_time + 86400 * 30 > now {
+                    events.push(event);
+                }
+            }
+        }
+        events.sort_by_key(|e| e.start_time);
+        Ok(events)
+    }
+
+    /// Count how many events a wallet has shared today (spam limit)
+    pub async fn count_shared_events_today(&self, wallet: &[u8; 32]) -> Result<u32> {
+        let entries = self.hot_db.scan_all(CF_CALENDAR_COMMUNITY).await?;
+        let today_start = {
+            let now = chrono::Utc::now();
+            now.date_naive().and_hms_opt(0, 0, 0)
+                .map(|dt| dt.and_utc().timestamp() as u64)
+                .unwrap_or(0)
+        };
+
+        let mut count = 0u32;
+        for (_, value) in entries {
+            if let Ok(event) = serde_json::from_slice::<q_types::CalendarEvent>(&value) {
+                if event.wallet == *wallet && event.created_at >= today_start {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
     }
 }
 

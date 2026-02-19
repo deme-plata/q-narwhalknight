@@ -12,10 +12,10 @@ export default function Leaderboard() {
     <div className="space-y-8">
       <div className="text-center">
         <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-blue-400 to-cyan-400 mb-4">
-          Testnet Leaderboard
+          Bounty Leaderboard
         </h1>
         <p className="text-slate-300 text-lg">
-          Top contributors in the Q-NarwhalKnight testnet bounty campaign
+          Top contributors in the Q-NarwhalKnight mainnet bounty campaign
         </p>
       </div>
 
@@ -62,7 +62,10 @@ export default function Leaderboard() {
                     </td>
                     <td className="px-6 py-4">
                       <code className="text-sm text-slate-300 font-mono">
-                        {`0x${entry.testnet_address.slice(0, 8)}...${entry.testnet_address.slice(-6)}`}
+                        {typeof entry.testnet_address === 'string'
+                          ? `${entry.testnet_address.slice(0, 10)}...${entry.testnet_address.slice(-6)}`
+                          : `qnk${(entry.testnet_address as number[]).map(b => b.toString(16).padStart(2,'0')).join('').slice(0,6)}...`
+                        }
                       </code>
                     </td>
                     <td className="px-6 py-4">

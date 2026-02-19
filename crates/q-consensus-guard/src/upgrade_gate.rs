@@ -51,6 +51,12 @@ pub enum Upgrade {
     /// Phase 6: Smart contracts V2
     SmartContractsV2 = 6,
 
+    /// Phase 7: State root computation in block headers
+    StateRootV1 = 7,
+
+    /// Phase 8: Block evidence required for P2P balance updates
+    BlockEvidenceRequired = 8,
+
     // Add more as needed - NEVER REMOVE OR REORDER
 }
 
@@ -65,6 +71,8 @@ impl Upgrade {
             Upgrade::DAGConsensusV2 => "DAGConsensusV2",
             Upgrade::PrivacyLayer => "PrivacyLayer",
             Upgrade::SmartContractsV2 => "SmartContractsV2",
+            Upgrade::StateRootV1 => "StateRootV1",
+            Upgrade::BlockEvidenceRequired => "BlockEvidenceRequired",
         }
     }
 }
@@ -107,6 +115,22 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "2.0.0".to_string(),
     });
 
+    // State root computation - not yet scheduled for mainnet
+    upgrades.insert(Upgrade::StateRootV1, UpgradeConfig {
+        activation_height: u64::MAX,
+        description: "Compute real state root in block headers".to_string(),
+        mandatory: false,
+        min_version: "5.1.0".to_string(),
+    });
+
+    // Block evidence required - not yet scheduled for mainnet
+    upgrades.insert(Upgrade::BlockEvidenceRequired, UpgradeConfig {
+        activation_height: u64::MAX,
+        description: "Require block hash evidence for P2P balance updates".to_string(),
+        mandatory: false,
+        min_version: "5.1.0".to_string(),
+    });
+
     // Add more upgrades here as they are scheduled
 
     upgrades
@@ -129,6 +153,22 @@ pub static TESTNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         description: "Enable Dilithium post-quantum signatures".to_string(),
         mandatory: false,
         min_version: "2.0.0".to_string(),
+    });
+
+    // State root computation - activate immediately on testnet for testing
+    upgrades.insert(Upgrade::StateRootV1, UpgradeConfig {
+        activation_height: 0,
+        description: "Compute real state root in block headers".to_string(),
+        mandatory: false,
+        min_version: "5.1.0".to_string(),
+    });
+
+    // Block evidence required for P2P balance updates - activate immediately on testnet
+    upgrades.insert(Upgrade::BlockEvidenceRequired, UpgradeConfig {
+        activation_height: 0,
+        description: "Require block hash evidence for P2P balance updates".to_string(),
+        mandatory: false,
+        min_version: "5.1.0".to_string(),
     });
 
     upgrades

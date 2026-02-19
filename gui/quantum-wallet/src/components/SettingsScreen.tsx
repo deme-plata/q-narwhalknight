@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code, Trash2, RefreshCw, AlertCircle, Server, ArrowDownToLine } from 'lucide-react';
+import { qnkAPI } from '../services/api';
 
 interface SettingsScreenProps {
   onLogout?: () => void;
@@ -65,6 +66,7 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
   const tabs = [
     { id: 'crypto', label: 'Crypto Agility', icon: Shield },
     { id: 'security', label: 'Security', icon: Lock },
+    { id: 'node', label: 'Node Admin', icon: Server },
     { id: 'paas', label: 'Privacy-as-a-Service', icon: Cloud },
     { id: 'oauth2', label: 'OAuth2 Settings', icon: Code },
     { id: 'visuals', label: 'Quantum Visuals', icon: Palette },
@@ -470,6 +472,11 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
           </div>
         )}
 
+        {/* Node Admin Tab */}
+        {activeTab === 'node' && (
+          <NodeAdminTab />
+        )}
+
         {/* Privacy-as-a-Service Tab */}
         {activeTab === 'paas' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -716,145 +723,7 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
 
         {/* OAuth2 Settings Tab */}
         {activeTab === 'oauth2' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
-              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
-                <Code className="w-6 h-6 text-quantum-purple" />
-                OAuth2 Applications
-              </h3>
-
-              <p className="text-gray-400 mb-6">
-                Manage third-party applications that have access to your wallet via OAuth2.
-              </p>
-
-              <div className="space-y-3">
-                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/20">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-lg flex items-center justify-center">
-                        <Code className="w-5 h-5 text-white" />
-                      </div>
-                      <div>
-                        <div className="font-semibold text-white">Quillon API Docs</div>
-                        <div className="text-xs text-gray-400">Last accessed: 2 hours ago</div>
-                      </div>
-                    </div>
-                    <motion.button
-                      className="px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-all"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Revoke
-                    </motion.button>
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    Permissions: Read balance, View transactions
-                  </div>
-                </div>
-
-                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/20">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-gradient-to-br from-quantum-green to-quantum-cyan rounded-lg flex items-center justify-center">
-                        <Shield className="w-5 h-5 text-white" />
-                      </div>
-                      <div>
-                        <div className="font-semibold text-white">Privacy Service</div>
-                        <div className="text-xs text-gray-400">Last accessed: 5 minutes ago</div>
-                      </div>
-                    </div>
-                    <motion.button
-                      className="px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-all"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Revoke
-                    </motion.button>
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    Permissions: Mix transactions, Generate stealth addresses
-                  </div>
-                </div>
-              </div>
-
-              <motion.button
-                className="w-full mt-6 py-3 px-4 bg-gradient-to-r from-quantum-purple/20 to-quantum-cyan/20 border border-quantum-purple/30 rounded-xl text-white font-semibold hover:border-quantum-purple/60 transition-all flex items-center justify-center gap-2"
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <Code className="w-5 h-5" />
-                Register New Application
-              </motion.button>
-            </div>
-
-            <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
-              <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
-                <Shield className="w-6 h-6 text-quantum-cyan" />
-                Security & Permissions
-              </h3>
-
-              <div className="space-y-4">
-                <div className="p-4 bg-quantum-dark/30 rounded-xl">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium">OAuth2 Flow</span>
-                    <span className="text-quantum-green font-semibold">PKCE</span>
-                  </div>
-                  <p className="text-sm text-gray-400">
-                    Authorization Code + PKCE for maximum security
-                  </p>
-                </div>
-
-                <div className="p-4 bg-quantum-dark/30 rounded-xl">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium">Token Lifetime</span>
-                    <span className="text-quantum-cyan font-semibold">1 hour</span>
-                  </div>
-                  <p className="text-sm text-gray-400">
-                    Access tokens expire after 1 hour for security
-                  </p>
-                </div>
-
-                <div className="p-4 bg-quantum-dark/30 rounded-xl">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium">Refresh Tokens</span>
-                    <span className="text-quantum-green font-semibold">Enabled</span>
-                  </div>
-                  <p className="text-sm text-gray-400">
-                    Refresh tokens valid for 30 days
-                  </p>
-                </div>
-
-                <div className="p-4 bg-quantum-dark/30 rounded-xl">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium">Allowed Scopes</span>
-                  </div>
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    <span className="px-2 py-1 bg-quantum-cyan/20 border border-quantum-cyan/30 rounded text-xs text-quantum-cyan">balance:read</span>
-                    <span className="px-2 py-1 bg-quantum-purple/20 border border-quantum-purple/30 rounded text-xs text-quantum-purple">transactions:read</span>
-                    <span className="px-2 py-1 bg-quantum-green/20 border border-quantum-green/30 rounded text-xs text-quantum-green">privacy:mix</span>
-                    <span className="px-2 py-1 bg-quantum-pink/20 border border-quantum-pink/30 rounded text-xs text-quantum-pink">privacy:tor</span>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-quantum-yellow/10 border border-quantum-yellow/30 rounded-xl">
-                  <div className="flex items-center gap-2 mb-2">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-quantum-yellow">
-                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                      <line x1="12" y1="9" x2="12" y2="13"></line>
-                      <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                    </svg>
-                    <span className="font-semibold text-quantum-yellow">Security Best Practices</span>
-                  </div>
-                  <ul className="text-sm text-gray-400 space-y-1">
-                    <li>• Review application permissions regularly</li>
-                    <li>• Revoke access for unused applications</li>
-                    <li>• Never share OAuth2 tokens</li>
-                    <li>• Check redirect URIs before approving</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-          </div>
+          <OAuth2SettingsTab />
         )}
 
         {/* Quantum Visuals Tab */}
@@ -1634,6 +1503,620 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
           </motion.button>
         </motion.div>
       )}
+    </div>
+  );
+}
+
+// ── OAuth2 Settings Tab (real API data, no mock) ──────────────────────────────
+
+interface ConsentEntry {
+  client_id: string;
+  scopes: string[];
+  granted_at: string;
+}
+
+function OAuth2SettingsTab() {
+  const [consents, setConsents] = useState<ConsentEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const walletAddr = localStorage.getItem('walletAddress') || '';
+
+  const headers: Record<string, string> = {
+    'X-Wallet-Auth': walletAddr,
+    'Authorization': `Bearer ${walletAddr}`,
+    'Content-Type': 'application/json',
+  };
+
+  const fetchConsents = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await fetch('/api/v1/oauth2/my-consents', { headers });
+      if (res.status === 401) {
+        setConsents([]);
+        return;
+      }
+      if (res.ok) {
+        const data = await res.json();
+        setConsents(Array.isArray(data) ? data : []);
+      }
+    } catch {
+      setError('Failed to load OAuth2 consents');
+    } finally {
+      setLoading(false);
+    }
+  }, [walletAddr]);
+
+  useEffect(() => {
+    fetchConsents();
+  }, [fetchConsents]);
+
+  const handleRevoke = async (clientId: string) => {
+    setRevoking(clientId);
+    try {
+      const res = await fetch('/api/v1/oauth2/my-consents/revoke', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ client_id: clientId }),
+      });
+      if (res.ok) {
+        setConsents(prev => prev.filter(c => c.client_id !== clientId));
+      }
+    } catch { /* ignore */ }
+    setRevoking(null);
+  };
+
+  const scopeLabel = (scope: string) => {
+    const labels: Record<string, string> = {
+      'read:balance': 'Read Balance',
+      'read:transactions': 'View Transactions',
+      'send:transaction': 'Send Transactions',
+      'read:profile': 'View Profile',
+    };
+    return labels[scope] || scope;
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      {/* Left: Connected Applications */}
+      <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-xl font-semibold flex items-center gap-3">
+            <Code className="w-6 h-6 text-quantum-purple" />
+            Connected Applications
+          </h3>
+          <motion.button
+            onClick={() => { setLoading(true); fetchConsents(); }}
+            className="p-2 rounded-lg hover:bg-white/5 transition-colors"
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            title="Refresh"
+          >
+            <RefreshCw className={`w-4 h-4 text-gray-400 ${loading ? 'animate-spin' : ''}`} />
+          </motion.button>
+        </div>
+
+        <p className="text-gray-400 mb-6 text-sm">
+          Third-party applications that have been granted access to your wallet via OAuth2.
+        </p>
+
+        {error && (
+          <div className="p-3 mb-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2 text-sm text-red-400">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <RefreshCw className="w-5 h-5 text-quantum-purple animate-spin" />
+            <span className="ml-2 text-gray-400 text-sm">Loading consents...</span>
+          </div>
+        ) : consents.length === 0 ? (
+          <div className="text-center py-12">
+            <div className="w-16 h-16 mx-auto mb-4 bg-quantum-dark/40 rounded-2xl border border-quantum-purple/20 flex items-center justify-center">
+              <Shield className="w-8 h-8 text-gray-600" />
+            </div>
+            <p className="text-gray-400 font-medium">No connected applications</p>
+            <p className="text-gray-500 text-sm mt-1">
+              When you authorize third-party apps via OAuth2, they will appear here.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <AnimatePresence>
+              {consents.map((consent, i) => (
+                <motion.div
+                  key={consent.client_id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -20, height: 0 }}
+                  transition={{ delay: i * 0.05 }}
+                  className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/20"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan/30 to-quantum-purple/30 rounded-lg flex items-center justify-center border border-quantum-purple/20">
+                        <Globe className="w-5 h-5 text-quantum-cyan" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white text-sm">{consent.client_id}</div>
+                        <div className="text-xs text-gray-500">
+                          Granted: {new Date(consent.granted_at).toLocaleDateString()}
+                        </div>
+                      </div>
+                    </div>
+                    <motion.button
+                      onClick={() => handleRevoke(consent.client_id)}
+                      disabled={revoking === consent.client_id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-xs font-medium hover:bg-red-500/20 disabled:opacity-50 transition-all"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      {revoking === consent.client_id ? (
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3 h-3" />
+                      )}
+                      Revoke
+                    </motion.button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {consent.scopes.map(scope => (
+                      <span
+                        key={scope}
+                        className="px-2 py-0.5 bg-quantum-purple/15 border border-quantum-purple/20 rounded text-xs text-quantum-purple"
+                      >
+                        {scopeLabel(scope)}
+                      </span>
+                    ))}
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+      </div>
+
+      {/* Right: Security & Permissions info */}
+      <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+        <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+          <Shield className="w-6 h-6 text-quantum-cyan" />
+          Security & Permissions
+        </h3>
+
+        <div className="space-y-4">
+          <div className="p-4 bg-quantum-dark/30 rounded-xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium">OAuth2 Flow</span>
+              <span className="text-quantum-green font-semibold">PKCE</span>
+            </div>
+            <p className="text-sm text-gray-400">
+              Authorization Code + PKCE for maximum security
+            </p>
+          </div>
+
+          <div className="p-4 bg-quantum-dark/30 rounded-xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium">Token Lifetime</span>
+              <span className="text-quantum-cyan font-semibold">1 hour</span>
+            </div>
+            <p className="text-sm text-gray-400">
+              Access tokens expire after 1 hour for security
+            </p>
+          </div>
+
+          <div className="p-4 bg-quantum-dark/30 rounded-xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium">Refresh Tokens</span>
+              <span className="text-quantum-green font-semibold">30 days</span>
+            </div>
+            <p className="text-sm text-gray-400">
+              Refresh tokens auto-rotate on each use
+            </p>
+          </div>
+
+          <div className="p-4 bg-quantum-dark/30 rounded-xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium">Available Scopes</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-2">
+              <span className="px-2 py-1 bg-quantum-cyan/20 border border-quantum-cyan/30 rounded text-xs text-quantum-cyan">read:balance</span>
+              <span className="px-2 py-1 bg-quantum-purple/20 border border-quantum-purple/30 rounded text-xs text-quantum-purple">read:transactions</span>
+              <span className="px-2 py-1 bg-red-500/20 border border-red-500/30 rounded text-xs text-red-400">send:transaction</span>
+              <span className="px-2 py-1 bg-quantum-green/20 border border-quantum-green/30 rounded text-xs text-quantum-green">read:profile</span>
+            </div>
+          </div>
+
+          <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-amber-400" />
+              <span className="font-semibold text-amber-400 text-sm">Security Tips</span>
+            </div>
+            <ul className="text-sm text-gray-400 space-y-1">
+              <li>• Review connected applications regularly</li>
+              <li>• Revoke access for apps you no longer use</li>
+              <li>• Never share OAuth2 tokens or auth codes</li>
+              <li>• Verify redirect URIs before authorizing</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Node Admin Tab ──────────────────────────────────────────────────────────
+
+function NodeAdminTab() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [nodeInfo, setNodeInfo] = useState<{
+    version: string;
+    uptime_secs: number;
+    height: number;
+    network_height: number;
+    peers: number;
+    network_id: string;
+    mining_healthy: boolean;
+  } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<{
+    current_version: string;
+    latest_version: string | null;
+    update_available: boolean;
+    download_url: string | null;
+  } | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [operatorFees, setOperatorFees] = useState<{
+    node_operator_fee_promille: number;
+    node_operator_fee_percent: string;
+    dex_protocol_fee_bps: number;
+    dex_protocol_fee_percent: string;
+    admin_wallet: string;
+    admin_wallet_balance_qug: number;
+    founder_wallet_balance_qug: number;
+  } | null>(null);
+  const [isMaster, setIsMaster] = useState(false);
+  const [savingFees, setSavingFees] = useState(false);
+  const [feePromille, setFeePromille] = useState(0);
+  const [feeBps, setFeeBps] = useState(5);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const adminCheck = await qnkAPI.isAdmin();
+        setIsAdmin(adminCheck.is_admin);
+        if (!adminCheck.is_admin) {
+          setLoading(false);
+          return;
+        }
+        // Fetch node info
+        const info = await qnkAPI.getNodeInfo();
+        if (info.data) setNodeInfo(info.data);
+        // Try fetching operator fees (master wallet only — 403 = not master)
+        try {
+          const fees = await qnkAPI.getOperatorFees();
+          if (fees.data) {
+            setOperatorFees(fees.data);
+            setIsMaster(true);
+            setFeePromille(fees.data.node_operator_fee_promille);
+            setFeeBps(fees.data.dex_protocol_fee_bps);
+          }
+        } catch {
+          setIsMaster(false);
+        }
+      } catch {
+        // Not admin or network error
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const res = await qnkAPI.checkNodeUpdate();
+      if (res.data) setUpdateInfo(res.data);
+    } catch { /* ignore */ }
+    setCheckingUpdate(false);
+  };
+
+  const handleSaveFees = async () => {
+    setSavingFees(true);
+    try {
+      const res = await qnkAPI.updateOperatorFees({
+        node_operator_fee_promille: feePromille,
+        dex_protocol_fee_bps: feeBps,
+      });
+      if (res.data) {
+        setOperatorFees(res.data);
+      }
+    } catch { /* ignore */ }
+    setSavingFees(false);
+  };
+
+  const formatUptime = (secs: number) => {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <RefreshCw className="w-6 h-6 text-quantum-purple animate-spin" />
+        <span className="ml-3 text-gray-400">Loading node info...</span>
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="grid grid-cols-1 gap-8">
+        <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8 text-center">
+          <Server className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-white mb-2">Node Admin</h3>
+          <p className="text-gray-400 max-w-md mx-auto">
+            Node administration settings are only available to the node operator.
+            Set Q_ADMIN_WALLET in your node configuration to enable this panel.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      {/* Left: Node Status */}
+      <div className="space-y-6">
+        <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+          <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+            <Server className="w-6 h-6 text-quantum-cyan" />
+            Node Status
+          </h3>
+
+          {nodeInfo ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Version</span>
+                <span className="text-white font-mono font-semibold">v{nodeInfo.version}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Uptime</span>
+                <span className="text-white font-semibold">{formatUptime(nodeInfo.uptime_secs)}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Block Height</span>
+                <span className="text-white font-mono">{nodeInfo.height.toLocaleString()}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Network Height</span>
+                <span className="text-white font-mono">{nodeInfo.network_height.toLocaleString()}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Peers</span>
+                <span className="text-white font-semibold">{nodeInfo.peers}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Network</span>
+                <span className="text-quantum-cyan font-semibold">{nodeInfo.network_id}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Mining</span>
+                <span className={nodeInfo.mining_healthy ? 'text-quantum-green font-semibold' : 'text-red-400 font-semibold'}>
+                  {nodeInfo.mining_healthy ? 'Healthy' : 'Inactive'}
+                </span>
+              </div>
+              {nodeInfo.height < nodeInfo.network_height - 5 && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-sm text-amber-400">
+                  Syncing... {((nodeInfo.height / nodeInfo.network_height) * 100).toFixed(1)}% ({(nodeInfo.network_height - nodeInfo.height).toLocaleString()} blocks behind)
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-gray-400">Unable to fetch node status</p>
+          )}
+        </div>
+
+        {/* Update Check */}
+        <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+          <h3 className="text-xl font-semibold mb-4 flex items-center gap-3">
+            <ArrowDownToLine className="w-6 h-6 text-quantum-green" />
+            Software Updates
+          </h3>
+
+          <motion.button
+            onClick={handleCheckUpdate}
+            disabled={checkingUpdate}
+            className="w-full py-3 px-4 bg-quantum-dark/30 border border-quantum-purple/30 rounded-xl text-white font-medium hover:border-quantum-cyan/60 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+            whileHover={{ scale: 1.01 }}
+            whileTap={{ scale: 0.99 }}
+          >
+            {checkingUpdate ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Check for Updates
+          </motion.button>
+
+          {updateInfo && (
+            <div className="mt-4 space-y-3">
+              <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                <span className="text-gray-400">Current</span>
+                <span className="text-white font-mono">v{updateInfo.current_version}</span>
+              </div>
+              {updateInfo.latest_version && (
+                <div className="flex items-center justify-between p-3 bg-quantum-dark/30 rounded-xl">
+                  <span className="text-gray-400">Latest</span>
+                  <span className="text-quantum-cyan font-mono">v{updateInfo.latest_version}</span>
+                </div>
+              )}
+              {updateInfo.update_available ? (
+                <div className="p-4 bg-quantum-green/10 border border-quantum-green/30 rounded-xl">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Zap className="w-4 h-4 text-quantum-green" />
+                    <span className="font-semibold text-quantum-green">Update Available</span>
+                  </div>
+                  <p className="text-sm text-gray-400 mb-3">
+                    Version v{updateInfo.latest_version} is available. Download and replace your node binary.
+                  </p>
+                  {updateInfo.download_url && (
+                    <a
+                      href={updateInfo.download_url}
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-green/20 border border-quantum-green/40 rounded-lg text-quantum-green text-sm font-medium hover:bg-quantum-green/30 transition-all"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Download className="w-4 h-4" />
+                      Download v{updateInfo.latest_version}
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3 bg-quantum-dark/30 rounded-xl text-sm text-quantum-green flex items-center gap-2">
+                  <Shield className="w-4 h-4" />
+                  You are running the latest version
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right: Operator Fee Settings (master wallet only) */}
+      <div className="space-y-6">
+        {isMaster && operatorFees ? (
+          <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+            <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+              <Zap className="w-6 h-6 text-quantum-yellow" />
+              Fee Configuration
+              <span className="text-xs px-2 py-0.5 bg-quantum-yellow/20 text-quantum-yellow rounded-full">Master</span>
+            </h3>
+
+            <div className="space-y-5">
+              {/* Node Operator Fee */}
+              <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <span className="font-medium text-white">Node Operator Fee</span>
+                    <p className="text-xs text-gray-400 mt-1">Share of collected fees routed to admin wallet</p>
+                  </div>
+                  <span className="text-quantum-cyan font-mono font-semibold">{(feePromille / 10).toFixed(1)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={500}
+                  step={10}
+                  value={feePromille}
+                  onChange={(e) => setFeePromille(Number(e.target.value))}
+                  className="w-full accent-quantum-cyan"
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>0%</span>
+                  <span>{feePromille} promille</span>
+                  <span>50%</span>
+                </div>
+              </div>
+
+              {/* DEX Protocol Fee */}
+              <div className="p-4 bg-quantum-dark/30 rounded-xl">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <span className="font-medium text-white">DEX Protocol Fee</span>
+                    <p className="text-xs text-gray-400 mt-1">Fee extracted from each swap (in basis points)</p>
+                  </div>
+                  <span className="text-quantum-cyan font-mono font-semibold">{(feeBps / 100).toFixed(2)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={10}
+                  step={1}
+                  value={feeBps}
+                  onChange={(e) => setFeeBps(Number(e.target.value))}
+                  className="w-full accent-quantum-cyan"
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>0 bps</span>
+                  <span>{feeBps} bps</span>
+                  <span>10 bps (0.1%)</span>
+                </div>
+              </div>
+
+              {/* Wallet Balances */}
+              <div className="p-4 bg-quantum-dark/30 rounded-xl space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-sm">Admin Wallet</span>
+                  <span className="text-white font-mono text-sm">{operatorFees.admin_wallet}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-sm">Admin Balance</span>
+                  <span className="text-quantum-green font-mono text-sm">{operatorFees.admin_wallet_balance_qug.toFixed(4)} QUG</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400 text-sm">Founder Balance</span>
+                  <span className="text-quantum-cyan font-mono text-sm">{operatorFees.founder_wallet_balance_qug.toFixed(4)} QUG</span>
+                </div>
+              </div>
+
+              {/* Save Button */}
+              <motion.button
+                onClick={handleSaveFees}
+                disabled={savingFees}
+                className="w-full py-3 px-4 bg-gradient-to-r from-quantum-purple to-quantum-cyan rounded-xl text-white font-semibold hover:shadow-lg hover:shadow-quantum-purple/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+              >
+                {savingFees ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                Save Fee Settings
+              </motion.button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+            <h3 className="text-xl font-semibold mb-4 flex items-center gap-3">
+              <Shield className="w-6 h-6 text-quantum-cyan" />
+              Admin Wallet
+            </h3>
+            <p className="text-gray-400 text-sm">
+              You are connected as the node admin. Fee configuration is only available to the master (founder) wallet.
+            </p>
+          </div>
+        )}
+
+        {/* Admin Info Card */}
+        <div className="bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8">
+          <h3 className="text-xl font-semibold mb-4 flex items-center gap-3">
+            <Info className="w-6 h-6 text-quantum-cyan" />
+            Configuration
+          </h3>
+          <div className="space-y-3 text-sm">
+            <div className="p-3 bg-quantum-dark/30 rounded-xl">
+              <span className="text-gray-400">Admin wallet is set via </span>
+              <code className="text-quantum-cyan">Q_ADMIN_WALLET</code>
+              <span className="text-gray-400"> env var at node startup.</span>
+            </div>
+            <div className="p-3 bg-quantum-dark/30 rounded-xl">
+              <span className="text-gray-400">Operator fee is set via </span>
+              <code className="text-quantum-cyan">Q_NODE_OPERATOR_FEE_PROMILLE</code>
+              <span className="text-gray-400"> env var (0-500).</span>
+            </div>
+            <div className="p-3 bg-quantum-dark/30 rounded-xl">
+              <span className="text-gray-400">DEX protocol fee is set via </span>
+              <code className="text-quantum-cyan">Q_DEX_PROTOCOL_FEE_BPS</code>
+              <span className="text-gray-400"> env var (0-10).</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

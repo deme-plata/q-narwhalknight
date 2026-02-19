@@ -378,7 +378,7 @@ mod tests {
         let mock_forward = |_tokens: &[u32]| -> Result<Tensor> {
             // Return constant logits favoring token 42
             let logits = vec![0.1; 1000];
-            Tensor::from_vec(logits, &[1000], &Device::Cpu)
+            Tensor::from_vec(logits, &[1000], &Device::Cpu).map_err(|e| anyhow::anyhow!("{}", e))
         };
 
         // In a real test, we'd need an actual tokenizer

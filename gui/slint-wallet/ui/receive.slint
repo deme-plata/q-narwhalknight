@@ -1,0 +1,167 @@
+import { Theme, Card, QButton } from "theme.slint";
+
+export component ReceiveScreen inherits Rectangle {
+    in property <image> qr-code-image;
+    in property <string> address: "";
+    in property <string> qug-balance: "0.00";
+
+    callback copy-address();
+    callback go-back();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header with back button
+        HorizontalLayout {
+            height: 32px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 60px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                Text {
+                    text: "< Back";
+                    color: Theme.accent-blue;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Receive";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                horizontal-alignment: center;
+            }
+
+            // Spacer to balance the back button
+            Rectangle { width: 60px; }
+        }
+
+        // QR Code Card
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                alignment: center;
+                spacing: Theme.spacing-md;
+
+                Text {
+                    text: "Scan to send QUG";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-md;
+                    horizontal-alignment: center;
+                }
+
+                // QR Code image centered with white background
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 248px;
+                        height: 248px;
+                        border-radius: Theme.radius-md;
+                        background: white;
+
+                        Image {
+                            source: root.qr-code-image;
+                            width: 240px;
+                            height: 240px;
+                            image-fit: contain;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "QUG Balance: " + root.qug-balance;
+                    color: Theme.accent-green;
+                    font-size: Theme.font-lg;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Address Card
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Your Wallet Address";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
+                }
+
+                // Full address (selectable-looking, monospace feel)
+                Rectangle {
+                    height: 48px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-primary;
+
+                    Text {
+                        text: root.address;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Copy button
+                QButton {
+                    label: "Copy Address";
+                    clicked => { root.copy-address(); }
+                }
+            }
+        }
+
+        // Instructions
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-xs;
+
+                Text {
+                    text: "How to receive QUG";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "1. Share your QR code or wallet address";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "2. The sender scans or pastes your address";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "3. Funds appear after network confirmation";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

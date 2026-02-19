@@ -359,7 +359,7 @@ export default function QuantumMixerVisualization({
       </div>
 
       {/* 3D Canvas - Takes remaining space, but leaves room for progress section */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden relative" style={{ maxHeight: '60vh' }}>
         <Canvas camera={{ position: [0, 4, 8], fov: 50 }}>
           <OrbitControls
             enableZoom={true}
@@ -372,7 +372,7 @@ export default function QuantumMixerVisualization({
       </div>
 
       {/* Progress Section - Bottom - More Compact */}
-      <div className="flex-shrink-0 p-2">
+      <div className="flex-shrink-0 p-2 relative z-10">
         <div className="bg-slate-800/80 backdrop-blur-lg rounded-xl p-3 border border-purple-500/30">
           {/* Overall Progress */}
           <div className="mb-3">

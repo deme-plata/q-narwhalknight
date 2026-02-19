@@ -145,8 +145,8 @@ interface LibP2PProviderProps {
  *
  * v3.4.2-browser: Browser P2P ENABLED
  * - Connects to Server Beta via WebSocket (wss://quillon.xyz:9443)
- * - Uses correct PeerID: 12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx
- * - Network: testnet-phase19
+ * - Uses correct PeerID: 12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc
+ * - Network: mainnet2026.2
  *
  * @param props - Provider props
  */

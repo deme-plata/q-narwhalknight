@@ -438,6 +438,21 @@ impl VertexCreator {
             .cloned()
             .collect()
     }
+
+    /// Clean up old vertices beyond retention policy
+    pub async fn cleanup_old_vertices(&self, keep_rounds: u64) -> usize {
+        let current_round = *self.current_round.read().await;
+        let cutoff = current_round.saturating_sub(keep_rounds);
+
+        let mut store = self.vertex_store.write().await;
+        let before = store.len();
+        store.retain(|_, v| v.round >= cutoff);
+        let removed = before - store.len();
+        if removed > 0 {
+            debug!("🧹 VertexCreator: cleaned {} old vertices (keeping rounds >= {})", removed, cutoff);
+        }
+        removed
+    }
 }
 
 // Helper functions for VertexId operations

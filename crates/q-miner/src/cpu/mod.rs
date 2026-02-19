@@ -226,7 +226,7 @@ pub struct CpuInfo {
 }
 
 pub fn detect_cpu_capabilities() -> CpuInfo {
-    let logical_threads = num_cpus::get();
+    let mut logical_threads = num_cpus::get();
     let physical_cores = num_cpus::get_physical();
 
     // ✅ P0 FIX: Enhanced CPU detection for high-core-count systems (AMD EPYC 9654, etc.)
@@ -242,6 +242,24 @@ pub fn detect_cpu_capabilities() -> CpuInfo {
 
     #[cfg(not(target_os = "linux"))]
     let proc_cpuinfo_threads: Option<usize> = None;
+
+    // 🛡️ v5.1.1: Windows >64 core detection using GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)
+    // Standard APIs (GetSystemInfo, num_cpus) only see 64 cores within one processor group.
+    // High-core-count CPUs like EPYC 9654 (192 threads) span multiple processor groups.
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetActiveProcessorCount(GroupNumber: u16) -> u32;
+        }
+        // ALL_PROCESSOR_GROUPS = 0xFFFF
+        let win_total = unsafe { GetActiveProcessorCount(0xFFFF) } as usize;
+        if win_total > logical_threads {
+            warn!("🔧 Windows processor groups: num_cpus sees {} but GetActiveProcessorCount(ALL) sees {}",
+                  logical_threads, win_total);
+            warn!("   Upgrading thread count to {} for full multi-socket utilization", win_total);
+            logical_threads = win_total;
+        }
+    }
 
     // ⚠️ P0 FIX: Warn if detection appears capped at common limits
     if logical_threads == 64 || logical_threads == 128 || logical_threads == 256 {
@@ -273,7 +291,7 @@ pub fn detect_cpu_capabilities() -> CpuInfo {
 
         // Check if this is AMD EPYC 9654
         let is_epyc_9654 = brand.contains("AuthenticAMD") &&
-            proc_cpuinfo_threads.unwrap_or(0) >= 96;
+            (proc_cpuinfo_threads.unwrap_or(0) >= 96 || logical_threads >= 96);
 
         if is_epyc_9654 && logical_threads < 96 {
             warn!("🔴 AMD EPYC 9654 DETECTED but only {} threads visible!", logical_threads);

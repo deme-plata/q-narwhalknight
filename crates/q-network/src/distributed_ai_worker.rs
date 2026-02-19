@@ -254,9 +254,7 @@ impl DistributedAIWorker {
                 )
                 .await?;
             }
-            _ => {
-                // Other message types handled by coordinator
-            }
+            _ => { /* v6.0.0: Decentralized AI messages handled by dedicated protocol */ }
         }
 
         Ok(())

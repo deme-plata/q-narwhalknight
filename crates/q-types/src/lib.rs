@@ -101,6 +101,20 @@ pub mod u128_serde {
             }
         }
 
+        // v5.1.1: Handle f64 for JSON compatibility (JavaScript sends large numbers as floats)
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v < 0.0 {
+                Err(E::custom("negative value cannot be u128"))
+            } else if v > u128::MAX as f64 {
+                Err(E::custom("value too large for u128"))
+            } else {
+                Ok(v as u128)
+            }
+        }
+
         // v3.2.7: Handle bytes for Bincode compatibility (16 bytes = u128)
         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
         where
@@ -121,18 +135,15 @@ pub mod u128_serde {
     where
         D: Deserializer<'de>,
     {
-        // v3.4.1: CRITICAL FIX - Use deserialize_str for bincode compatibility
-        // ROOT CAUSE: deserialize_any is NOT supported by bincode, causing
-        // "Bincode does not support the serde::Deserializer::deserialize_any method"
-        // errors when reading blocks with transactions from the database.
-        //
-        // Since serialize() uses serialize_str() (line 42), we must use deserialize_str()
-        // for consistency. The visitor handles conversion from string to u128.
-        //
-        // BREAKING CHANGE: Old data serialized differently will fail. However,
-        // the string format has been used since v3.2.7, so this should be compatible
-        // with all recent data.
-        deserializer.deserialize_str(U128Visitor)
+        // v3.4.1: Use deserialize_str for bincode (binary) formats.
+        // v5.1.1: Use deserialize_any for JSON (human-readable) formats so that
+        //         numbers, floats, and strings all work from HTTP API requests.
+        //         Bincode does NOT support deserialize_any, so we must check.
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(U128Visitor)
+        } else {
+            deserializer.deserialize_str(U128Visitor)
+        }
     }
 }
 
@@ -311,6 +322,12 @@ pub mod validator_backup;
 /// Enables cross-node token discovery via gossipsub /contract-deployments topic
 #[doc = "Ed25519 signed token announcements for decentralized token registry"]
 pub mod token_announcement;
+
+/// v5.3.0: P2P State Sync Protocol (Gossipsub Request/Response)
+/// Solves the "missed gossipsub" problem: nodes can request full state snapshots
+/// from peers for contracts, pools, balances that were broadcast while offline.
+#[doc = "Ed25519 signed state sync requests and responses for P2P state recovery"]
+pub mod state_sync;
 
 /// v3.4.2-beta: Unified ZK Transaction Validator
 /// Integrates STARK, Bulletproofs, and LatticeGuard for full privacy
@@ -566,6 +583,79 @@ pub const VAULT_TOKEN_ADDRESS: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+/// FORGE RWA token constants (v5.1.0)
+/// Physical mining machine token - 1 token = 1 physical Quillon Forge unit
+/// Whole units only (0 decimals), owned by BANK_MASTER_ACCOUNT
+pub const FORGE_DECIMALS: u8 = 0;
+pub const FORGE_TOKEN_ADDRESS: [u8; 32] = [
+    0x46, 0x4F, 0x52, 0x47, 0x45, 0x00, 0x00, 0x00, // "FORGE" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+// ============================================================================
+// Wrapped Bridge Token Constants (v7.2.5)
+// Cross-chain bridge tokens: mint on deposit, burn on withdrawal
+// ============================================================================
+
+/// Wrapped Bitcoin (wBTC) - 1:1 backed by BTC locked in bridge
+/// 8 decimals (matches Bitcoin satoshis: 1 BTC = 100,000,000 sat)
+pub const WBTC_DECIMALS: u8 = 8;
+pub const WBTC_TOKEN_ADDRESS: [u8; 32] = [
+    0x77, 0x42, 0x54, 0x43, 0x00, 0x00, 0x00, 0x00, // "wBTC" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Wrapped Zcash (wZEC) - 1:1 backed by ZEC locked in shielded bridge
+/// 8 decimals (matches Zcash zatoshis: 1 ZEC = 100,000,000 zat)
+pub const WZEC_DECIMALS: u8 = 8;
+pub const WZEC_TOKEN_ADDRESS: [u8; 32] = [
+    0x77, 0x5A, 0x45, 0x43, 0x00, 0x00, 0x00, 0x00, // "wZEC" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Wrapped Iron Fish (wIRON) - 1:1 backed by IRON locked in privacy bridge
+/// 8 decimals (matches Iron Fish ore: 1 IRON = 100,000,000 ore)
+pub const WIRON_DECIMALS: u8 = 8;
+pub const WIRON_TOKEN_ADDRESS: [u8; 32] = [
+    0x77, 0x49, 0x52, 0x4F, 0x4E, 0x00, 0x00, 0x00, // "wIRON" in ASCII + zeros (5 chars)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Wrapped Ethereum (wETH) - 1:1 backed by ETH locked in HTLC bridge
+/// 18 decimals (matches Ethereum wei: 1 ETH = 1,000,000,000,000,000,000 wei)
+pub const WETH_DECIMALS: u8 = 18;
+pub const WETH_TOKEN_ADDRESS: [u8; 32] = [
+    0x77, 0x45, 0x54, 0x48, 0x00, 0x00, 0x00, 0x00, // "wETH" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// All bridge token addresses for easy iteration
+pub const BRIDGE_TOKEN_ADDRESSES: [[u8; 32]; 4] = [
+    WBTC_TOKEN_ADDRESS,
+    WZEC_TOKEN_ADDRESS,
+    WIRON_TOKEN_ADDRESS,
+    WETH_TOKEN_ADDRESS,
+];
+
+/// Bridge token metadata
+pub fn bridge_token_info(addr: &[u8; 32]) -> Option<(&'static str, &'static str, u8)> {
+    if addr == &WBTC_TOKEN_ADDRESS { Some(("Wrapped Bitcoin", "wBTC", WBTC_DECIMALS)) }
+    else if addr == &WZEC_TOKEN_ADDRESS { Some(("Wrapped Zcash", "wZEC", WZEC_DECIMALS)) }
+    else if addr == &WIRON_TOKEN_ADDRESS { Some(("Wrapped Iron Fish", "wIRON", WIRON_DECIMALS)) }
+    else if addr == &WETH_TOKEN_ADDRESS { Some(("Wrapped Ethereum", "wETH", WETH_DECIMALS)) }
+    else { None }
+}
 
 // ============================================================================
 // Fee System Constants (v1.4.5-beta, v3.4.0-beta: 10x reduction)
@@ -1104,6 +1194,24 @@ pub enum TransactionType {
     /// zk-STARK shielded transfer
     ShieldedTransfer = 0x83,
 
+    // ========== Cross-Chain / Atomic Swap Operations (0x90-0x9F) ==========
+    /// Initiate atomic swap HTLC on QNK side
+    AtomicSwapInitiate = 0x90,
+    /// Claim atomic swap by revealing secret
+    AtomicSwapClaim = 0x91,
+    /// Refund atomic swap after timeout
+    AtomicSwapRefund = 0x92,
+    /// Lock QUG/QUGUSD in escrow for atomic swap
+    AtomicSwapLock = 0x93,
+
+    // ========== OAuth2 / Identity Operations (0xA0-0xAF) ==========
+    /// On-chain consent grant (privacy-preserving hash)
+    OAuth2ConsentGrant = 0xA0,
+    /// On-chain consent revocation
+    OAuth2ConsentRevoke = 0xA1,
+    /// Client registration audit trail (optional)
+    OAuth2ClientRegister = 0xA2,
+
     // ========== System Operations (0xF0-0xFF) ==========
     /// System parameter update (via governance)
     SystemParamUpdate = 0xF0,
@@ -1174,6 +1282,13 @@ impl TransactionType {
             0x81 => TransactionType::StealthCreate,
             0x82 => TransactionType::RingTransfer,
             0x83 => TransactionType::ShieldedTransfer,
+            0x90 => TransactionType::AtomicSwapInitiate,
+            0x91 => TransactionType::AtomicSwapClaim,
+            0x92 => TransactionType::AtomicSwapRefund,
+            0x93 => TransactionType::AtomicSwapLock,
+            0xA0 => TransactionType::OAuth2ConsentGrant,
+            0xA1 => TransactionType::OAuth2ConsentRevoke,
+            0xA2 => TransactionType::OAuth2ClientRegister,
             0xF0 => TransactionType::SystemParamUpdate,
             0xF1 => TransactionType::EmergencyPause,
             0xF2 => TransactionType::EmergencyResume,
@@ -1365,6 +1480,17 @@ impl TransactionType {
             TransactionType::StealthCreate => 20,    // Generate stealth address
             TransactionType::RingTransfer => 25,     // Ring signature computation
             TransactionType::ShieldedTransfer => 30, // Full ZK-STARK proof
+
+            // Cross-chain atomic swaps
+            TransactionType::AtomicSwapInitiate => 20,  // HTLC creation
+            TransactionType::AtomicSwapClaim => 15,     // Secret reveal + claim
+            TransactionType::AtomicSwapRefund => 15,    // Timeout refund
+            TransactionType::AtomicSwapLock => 10,      // Escrow lock
+
+            // v7.4.0: OAuth2 / Identity operations
+            TransactionType::OAuth2ConsentGrant => 2,    // Consent hash on-chain
+            TransactionType::OAuth2ConsentRevoke => 2,   // Consent revocation
+            TransactionType::OAuth2ClientRegister => 5,  // Client audit trail
         }
     }
 
@@ -1429,6 +1555,15 @@ impl TransactionType {
             TransactionType::StealthCreate => "Stealth Create",
             TransactionType::RingTransfer => "Ring Transfer",
             TransactionType::ShieldedTransfer => "Shielded Transfer",
+            // Cross-chain atomic swaps
+            TransactionType::AtomicSwapInitiate => "Atomic Swap Initiate",
+            TransactionType::AtomicSwapClaim => "Atomic Swap Claim",
+            TransactionType::AtomicSwapRefund => "Atomic Swap Refund",
+            TransactionType::AtomicSwapLock => "Atomic Swap Lock",
+            // v7.4.0: OAuth2 / Identity operations
+            TransactionType::OAuth2ConsentGrant => "OAuth2 Consent Grant",
+            TransactionType::OAuth2ConsentRevoke => "OAuth2 Consent Revoke",
+            TransactionType::OAuth2ClientRegister => "OAuth2 Client Register",
         }
     }
 }
@@ -3545,8 +3680,65 @@ pub enum NetworkId {
     #[serde(rename = "testnet-phase19")]
     TestnetPhase19,
 
-    /// Mainnet (Launch: TBD - After Phase 19 testing complete)
+    /// Phase 20: Emission Analytics & Fresh Start (v6.3.0-beta) - February 2026
+    /// - Fresh database (data-mine20)
+    /// - ✅ Emission analytics API with daily tracking
+    /// - ✅ Economic security floor & attack cost metrics
+    /// - ✅ Genesis date: February 14, 2026
+    /// - ✅ Browser js-libp2p phase config updated (Checklist #21)
+    #[serde(rename = "testnet-phase20")]
+    TestnetPhase20,
+
+    /// Phase 21: Phase Data Purge & Clean Transition (v6.4.0-beta) - February 2026 (DEPRECATED)
+    /// - Fresh database (data-mine21)
+    /// - ✅ Admin purge endpoint for stale DEX/contract/token data
+    /// - ✅ Clean phase transition with no stale state carryover
+    /// - ✅ Genesis date: February 15, 2026
+    /// - ✅ Browser js-libp2p phase config updated (Checklist #21)
+    #[serde(rename = "testnet-phase21")]
+    TestnetPhase21,
+
+    /// Phase 22: Full Transition Test & Auto-Purge (v6.5.0-beta) - February 2026
+    /// - Fresh database (data-mine22)
+    /// - ✅ Automated full purge on phase transition (wallet_balances + token_balances + contracts)
+    /// - ✅ State sync network_id filtering
+    /// - ✅ Genesis date: February 16, 2026
+    /// - ✅ Complete transition checklist verified (Bugs #1-17)
+    #[serde(rename = "testnet-phase22")]
+    TestnetPhase22,
+
+    /// Phase 23: Stable Production Network (v6.6.0-beta) - February 2026
+    /// - Fresh database (data-mine23)
+    /// - Stable production network with all prior fixes
+    #[serde(rename = "testnet-phase23")]
+    TestnetPhase23,
+
+    /// Phase 24: Final Pre-Mainnet (v7.0.0-beta) - February 2026
+    /// - Last testnet phase before mainnet launch (1 hour duration)
+    /// - Fresh database (data-mine24)
+    /// - Final validation of all systems before mainnet
+    #[serde(rename = "testnet-phase24")]
+    TestnetPhase24,
+
+    /// Mainnet (Launch: TBD - After Phase 24 testing complete)
     Mainnet,
+
+    /// Mainnet 2026: Fresh mainnet launch (February 2026)
+    #[serde(rename = "mainnet2026")]
+    Mainnet2026,
+
+    /// Mainnet 2026.1: Clean relaunch with emission fix + data isolation (February 15, 2026)
+    #[serde(rename = "mainnet2026.1")]
+    Mainnet2026_1,
+
+    /// Mainnet 2026.1.1: 4-day rehearsal chain (Feb 18-22, 2026)
+    /// Automatic: binary defaults to this before Feb 22 12:00 UTC
+    #[serde(rename = "mainnet2026.1.1")]
+    Mainnet2026_1_1,
+
+    /// Mainnet 2026.2: Fresh directory relaunch with zero contamination (February 22, 2026)
+    #[serde(rename = "mainnet2026.2")]
+    Mainnet2026_2,
 }
 
 impl NetworkId {
@@ -3567,8 +3759,17 @@ impl NetworkId {
             NetworkId::TestnetPhase16 => "testnet-phase16", // ✅ Phase 16: P2P Sync Priority Fix (DEPRECATED)
             NetworkId::TestnetPhase17 => "testnet-phase17", // ✅ Phase 17: u128 Migration Fresh Sync (DEPRECATED)
             NetworkId::TestnetPhase18 => "testnet-phase18", // ✅ Phase 18: Native u128 Serialization Fix (DEPRECATED)
-            NetworkId::TestnetPhase19 => "testnet-phase19", // ✅ Phase 19: AsyncStorageEngine Key Format Fix
+            NetworkId::TestnetPhase19 => "testnet-phase19", // ✅ Phase 19: AsyncStorageEngine Key Format Fix (DEPRECATED)
+            NetworkId::TestnetPhase20 => "testnet-phase20", // ✅ Phase 20: Emission Analytics & Fresh Start (DEPRECATED)
+            NetworkId::TestnetPhase21 => "testnet-phase21", // ✅ Phase 21: Phase Data Purge & Clean Transition (DEPRECATED)
+            NetworkId::TestnetPhase22 => "testnet-phase22", // ✅ Phase 22: Full Transition Test & Auto-Purge (DEPRECATED)
+            NetworkId::TestnetPhase23 => "testnet-phase23", // ✅ Phase 23: Stable Production Network (DEPRECATED)
+            NetworkId::TestnetPhase24 => "testnet-phase24", // ✅ Phase 24: Final Pre-Mainnet
             NetworkId::Mainnet => "mainnet",
+            NetworkId::Mainnet2026 => "mainnet2026",
+            NetworkId::Mainnet2026_1 => "mainnet2026.1",
+            NetworkId::Mainnet2026_1_1 => "mainnet2026.1.1",
+            NetworkId::Mainnet2026_2 => "mainnet2026.2",
         }
     }
 
@@ -3589,8 +3790,17 @@ impl NetworkId {
             NetworkId::TestnetPhase16 => "Q-NarwhalKnight Testnet Phase 16 - P2P Sync Priority Fix (DEPRECATED)", // ✅ Phase 16 (DEPRECATED)
             NetworkId::TestnetPhase17 => "Q-NarwhalKnight Testnet Phase 17 - u128 Migration (DEPRECATED)", // ✅ Phase 17 (DEPRECATED)
             NetworkId::TestnetPhase18 => "Q-NarwhalKnight Testnet Phase 18 - Native u128 Serialization Fix (DEPRECATED)", // ✅ Phase 18 (DEPRECATED)
-            NetworkId::TestnetPhase19 => "Q-NarwhalKnight Testnet Phase 19 - AsyncStorageEngine Key Format Fix (v3.2.14-beta)", // ✅ Phase 19 - CURRENT
+            NetworkId::TestnetPhase19 => "Q-NarwhalKnight Testnet Phase 19 - AsyncStorageEngine Key Format Fix (DEPRECATED)", // ✅ Phase 19 (DEPRECATED)
+            NetworkId::TestnetPhase20 => "Q-NarwhalKnight Testnet Phase 20 - Emission Analytics & Fresh Start (DEPRECATED)", // ✅ Phase 20 (DEPRECATED)
+            NetworkId::TestnetPhase21 => "Q-NarwhalKnight Testnet Phase 21 - Phase Data Purge & Clean Transition (v6.4.0-beta, DEPRECATED)", // ✅ Phase 21 (DEPRECATED)
+            NetworkId::TestnetPhase22 => "Q-NarwhalKnight Testnet Phase 22 - Full Transition Test & Auto-Purge (v6.5.0-beta, DEPRECATED)", // ✅ Phase 22 (DEPRECATED)
+            NetworkId::TestnetPhase23 => "Q-NarwhalKnight Testnet Phase 23 - Stable Production Network (v6.6.0-beta, DEPRECATED)", // ✅ Phase 23 (DEPRECATED)
+            NetworkId::TestnetPhase24 => "Q-NarwhalKnight Testnet Phase 24 (Final Pre-Mainnet)", // ✅ Phase 24 - CURRENT
             NetworkId::Mainnet => "Q-NarwhalKnight Mainnet",
+            NetworkId::Mainnet2026 => "Q-NarwhalKnight Mainnet 2026",
+            NetworkId::Mainnet2026_1 => "Q-NarwhalKnight Mainnet 2026.1",
+            NetworkId::Mainnet2026_1_1 => "Q-NarwhalKnight Mainnet 2026.1.1 (Rehearsal)",
+            NetworkId::Mainnet2026_2 => "Q-NarwhalKnight Mainnet 2026.2",
         }
     }
 
@@ -3611,8 +3821,17 @@ impl NetworkId {
             NetworkId::TestnetPhase16 => 8080, // ✅ Phase 16: P2P Sync Priority Fix (DEPRECATED)
             NetworkId::TestnetPhase17 => 8080, // ✅ Phase 17: u128 Migration Fresh Sync (DEPRECATED)
             NetworkId::TestnetPhase18 => 8080, // ✅ Phase 18: Native u128 Serialization Fix (DEPRECATED)
-            NetworkId::TestnetPhase19 => 8080, // ✅ Phase 19: AsyncStorageEngine Key Format Fix
-            NetworkId::Mainnet => 8081,
+            NetworkId::TestnetPhase19 => 8080, // ✅ Phase 19: AsyncStorageEngine Key Format Fix (DEPRECATED)
+            NetworkId::TestnetPhase20 => 8080, // ✅ Phase 20: Emission Analytics & Fresh Start (DEPRECATED)
+            NetworkId::TestnetPhase21 => 8080, // ✅ Phase 21: Phase Data Purge & Clean Transition (DEPRECATED)
+            NetworkId::TestnetPhase22 => 8080, // ✅ Phase 22: Full Transition Test & Auto-Purge (DEPRECATED)
+            NetworkId::TestnetPhase23 => 8080, // ✅ Phase 23: Stable Production Network (DEPRECATED)
+            NetworkId::TestnetPhase24 => 8080, // ✅ Phase 24: Final Pre-Mainnet
+            NetworkId::Mainnet => 8080,
+            NetworkId::Mainnet2026 => 8080,
+            NetworkId::Mainnet2026_1 => 8080,
+            NetworkId::Mainnet2026_1_1 => 8080,
+            NetworkId::Mainnet2026_2 => 8080,
         }
     }
 
@@ -3633,8 +3852,17 @@ impl NetworkId {
             NetworkId::TestnetPhase16 => 9001, // ✅ Phase 16: P2P Sync Priority Fix (DEPRECATED)
             NetworkId::TestnetPhase17 => 9001, // ✅ Phase 17: u128 Migration Fresh Sync (DEPRECATED)
             NetworkId::TestnetPhase18 => 9001, // ✅ Phase 18: Native u128 Serialization Fix (DEPRECATED)
-            NetworkId::TestnetPhase19 => 9001, // ✅ Phase 19: AsyncStorageEngine Key Format Fix
-            NetworkId::Mainnet => 9002,
+            NetworkId::TestnetPhase19 => 9001, // ✅ Phase 19: AsyncStorageEngine Key Format Fix (DEPRECATED)
+            NetworkId::TestnetPhase20 => 9001, // ✅ Phase 20: Emission Analytics & Fresh Start (DEPRECATED)
+            NetworkId::TestnetPhase21 => 9001, // ✅ Phase 21: Phase Data Purge & Clean Transition (DEPRECATED)
+            NetworkId::TestnetPhase22 => 9001, // ✅ Phase 22: Full Transition Test & Auto-Purge (DEPRECATED)
+            NetworkId::TestnetPhase23 => 9001, // ✅ Phase 23: Stable Production Network (DEPRECATED)
+            NetworkId::TestnetPhase24 => 9001, // ✅ Phase 24: Final Pre-Mainnet
+            NetworkId::Mainnet => 9001,
+            NetworkId::Mainnet2026 => 9001,
+            NetworkId::Mainnet2026_1 => 9001,
+            NetworkId::Mainnet2026_1_1 => 9001,
+            NetworkId::Mainnet2026_2 => 9001,
         }
     }
 
@@ -3816,6 +4044,41 @@ impl NetworkId {
     pub fn browser_peers_topic(&self) -> String {
         format!("{}/browser-peers", self.gossipsub_topic_prefix())
     }
+
+    /// v5.3.0: State sync request topic
+    /// Nodes broadcast requests for full state snapshots (contracts, pools, balances)
+    /// Topic: /qnk/{network}/state-sync-requests
+    pub fn state_sync_requests_topic(&self) -> String {
+        format!("{}/state-sync-requests", self.gossipsub_topic_prefix())
+    }
+
+    /// v5.3.0: State sync response topic
+    /// Peers respond with signed state data on this topic
+    /// Topic: /qnk/{network}/state-sync-responses
+    pub fn state_sync_responses_topic(&self) -> String {
+        format!("{}/state-sync-responses", self.gossipsub_topic_prefix())
+    }
+
+    /// v7.3.1: Bridge attestation topic
+    /// Multi-sig bridge validation: committee members broadcast attestation requests/responses
+    /// Topic: /qnk/{network}/bridge-attestations
+    pub fn bridge_attestations_topic(&self) -> String {
+        format!("{}/bridge-attestations", self.gossipsub_topic_prefix())
+    }
+
+    /// v7.4.0: OAuth2 client registration sync topic
+    /// Nodes broadcast registered OAuth2 clients (with hashed secrets) for cross-node auth
+    /// Topic: /qnk/{network}/oauth2-clients
+    pub fn oauth2_clients_topic(&self) -> String {
+        format!("{}/oauth2-clients", self.gossipsub_topic_prefix())
+    }
+
+    /// v7.4.0: OAuth2 JWT public key announcement topic
+    /// Nodes announce their Ed25519 verifying key so other nodes can verify JWTs
+    /// Topic: /qnk/{network}/oauth2-pubkeys
+    pub fn oauth2_pubkeys_topic(&self) -> String {
+        format!("{}/oauth2-pubkeys", self.gossipsub_topic_prefix())
+    }
 }
 
 impl std::str::FromStr for NetworkId {
@@ -3837,8 +4100,17 @@ impl std::str::FromStr for NetworkId {
             "testnet-phase16" => Ok(NetworkId::TestnetPhase16), // ✅ Phase 16 parser (DEPRECATED)
             "testnet-phase17" => Ok(NetworkId::TestnetPhase17), // ✅ Phase 17 parser (DEPRECATED)
             "testnet-phase18" => Ok(NetworkId::TestnetPhase18), // ✅ Phase 18 parser (DEPRECATED)
-            "testnet-phase19" => Ok(NetworkId::TestnetPhase19), // ✅ CRITICAL: Phase 19 parser added (Bug #1 fix)
+            "testnet-phase19" => Ok(NetworkId::TestnetPhase19), // ✅ Phase 19 parser (DEPRECATED)
+            "testnet-phase20" => Ok(NetworkId::TestnetPhase20), // ✅ Phase 20 parser (DEPRECATED)
+            "testnet-phase21" => Ok(NetworkId::TestnetPhase21), // ✅ Phase 21 parser (DEPRECATED)
+            "testnet-phase22" => Ok(NetworkId::TestnetPhase22), // ✅ Phase 22 parser (DEPRECATED)
+            "testnet-phase23" => Ok(NetworkId::TestnetPhase23), // ✅ Phase 23 parser (DEPRECATED)
+            "testnet-phase24" => Ok(NetworkId::TestnetPhase24), // ✅ CRITICAL: Phase 24 parser added (Bug #1 fix)
             "mainnet" => Ok(NetworkId::Mainnet),
+            "mainnet2026" | "mainnet-2026" => Ok(NetworkId::Mainnet2026),
+            "mainnet2026.1" | "mainnet-2026.1" | "mainnet-2026-1" | "mainnet2026_1" => Ok(NetworkId::Mainnet2026_1),
+            "mainnet2026.1.1" | "mainnet-2026.1.1" | "mainnet-2026-1-1" | "mainnet2026_1_1" => Ok(NetworkId::Mainnet2026_1_1),
+            "mainnet2026.2" | "mainnet-2026.2" | "mainnet-2026-2" | "mainnet2026_2" => Ok(NetworkId::Mainnet2026_2),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
     }
@@ -3846,8 +4118,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        // ✅ v3.2.14-beta: Default to Phase 19 (AsyncStorageEngine Key Format Fix)
-        NetworkId::TestnetPhase19
+        // ✅ v7.3.0: MAINNET 2026.2 - Fresh directory relaunch with zero contamination
+        NetworkId::Mainnet2026_2
     }
 }
 
@@ -3880,61 +4152,40 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Create testnet configuration
+    /// Create testnet configuration (now redirects to mainnet for v7.0.0 launch)
     pub fn testnet() -> Self {
-        Self {
-            // ✅ v3.2.14-beta: Phase 19 - AsyncStorageEngine Key Format Fix (fresh database: data-mine19)
-            // ✅ CRITICAL: NetworkConfig updated to Phase 19 (Bug #3 fix)
-            network_id: NetworkId::TestnetPhase19,
-            genesis_hash: [
-                // Testnet genesis hash (October 2025)
-                0x74, 0x65, 0x73, 0x74, 0x6e, 0x65, 0x74, 0x2d,  // "testnet-"
-                0x6f, 0x63, 0x74, 0x32, 0x30, 0x32, 0x35, 0x00,  // "oct2025"
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
-            launch_time: DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            version: "v0.9.90-beta-testnet".to_string(),
-            chain_id: 2025, // Q-NarwhalKnight unique chain ID (year of launch)
-            api_port: 8080,
-            p2p_port: 9001,
-            // v2.3.1-beta: Bootstrap with FULL peer ID for reliable out-of-box connectivity
-            // No HTTP fetch needed - works immediately without any environment variables
-            bootstrap_peers: vec![
-                // Server Beta (production bootstrap node) - hardcoded peer ID for reliability
-                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWNgqKiWQTn7cVuUJ7Se9HQXZtocx8VEf7v382eNAQDoDk".to_string(),
-            ],
-        }
+        // v7.0.0: Mainnet launch - testnet() now returns mainnet config
+        Self::mainnet()
     }
 
     /// Create mainnet configuration
     pub fn mainnet() -> Self {
         Self {
-            network_id: NetworkId::Mainnet,
+            network_id: NetworkId::Mainnet2026_2,
             genesis_hash: [
-                // Mainnet genesis hash (December 2025)
-                0x6d, 0x61, 0x69, 0x6e, 0x6e, 0x65, 0x74, 0x2d,  // "mainnet-"
-                0x64, 0x65, 0x63, 0x32, 0x30, 0x32, 0x35, 0x00,  // "dec2025"
+                // Mainnet 2026.2 genesis hash (SHA3-256 prefix of "mainnet2026.2")
+                0x6d, 0x61, 0x69, 0x6e, 0x6e, 0x65, 0x74, 0x32,  // "mainnet2"
+                0x30, 0x32, 0x36, 0x2e, 0x32, 0x00, 0x00, 0x00,  // "026.2\0\0\0"
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
-            launch_time: DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z")
+            launch_time: DateTime::parse_from_rfc3339("2026-02-22T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            version: "v1.0.0-mainnet".to_string(),
-            chain_id: 999, // Mainnet chain ID
-            api_port: 8081,
-            p2p_port: 9002,
+            version: "v7.3.0-mainnet2026.2".to_string(),
+            chain_id: 1000, // Mainnet 2026.2 chain ID
+            api_port: 8080,
+            p2p_port: 9001,
             // Multiple bootstrap nodes for redundancy
-            // Format: /ip4/<IP>/tcp/<P2P_PORT>/p2p/<PEER_ID>
-            // If peer ID is omitted, it will be fetched automatically from http://<IP>:18081/api/v1/peer-id
             bootstrap_peers: vec![
-                // Primary bootstrap node (185.182.185.227) - automatic peer ID discovery
-                "/ip4/185.182.185.227/tcp/9002".to_string(),
-                // Secondary bootstrap node (161.35.219.10) - automatic peer ID discovery
-                "/ip4/161.35.219.10/tcp/9002".to_string(),
+                // Primary bootstrap node - Server Beta (185.182.185.227)
+                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc".to_string(),
+                // Backup bootstrap node - Server Gamma (109.205.176.60)
+                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv".to_string(),
+                // Tertiary bootstrap node - Server Delta (5.79.79.158)
+                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ".to_string(),
+                // Quaternary bootstrap node - Server Alpha (161.35.219.10)
+                "/ip4/161.35.219.10/tcp/9001/p2p/12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY".to_string(),
             ],
         }
     }
@@ -3956,8 +4207,17 @@ impl NetworkConfig {
             NetworkId::TestnetPhase16 => Self::testnet(), // Phase 16 (DEPRECATED)
             NetworkId::TestnetPhase17 => Self::testnet(), // Phase 17 (DEPRECATED)
             NetworkId::TestnetPhase18 => Self::testnet(), // Phase 18 (DEPRECATED)
-            NetworkId::TestnetPhase19 => Self::testnet(), // ✅ Phase 19 (AsyncStorageEngine Key Format Fix - v3.2.14-beta)
+            NetworkId::TestnetPhase19 => Self::testnet(), // Phase 19 (DEPRECATED)
+            NetworkId::TestnetPhase20 => Self::testnet(), // ✅ Phase 20 (DEPRECATED)
+            NetworkId::TestnetPhase21 => Self::testnet(), // ✅ Phase 21 (DEPRECATED)
+            NetworkId::TestnetPhase22 => Self::testnet(), // ✅ Phase 22 (DEPRECATED)
+            NetworkId::TestnetPhase23 => Self::testnet(), // ✅ Phase 23 (DEPRECATED)
+            NetworkId::TestnetPhase24 => Self::testnet(), // ✅ Phase 24 (Final Pre-Mainnet - v7.0.0-beta)
             NetworkId::Mainnet => Self::mainnet(),
+            NetworkId::Mainnet2026 => Self::mainnet(),
+            NetworkId::Mainnet2026_1 => Self::mainnet(),
+            NetworkId::Mainnet2026_1_1 => Self::mainnet(),
+            NetworkId::Mainnet2026_2 => Self::mainnet(),
         }
     }
 
@@ -4186,22 +4446,250 @@ pub struct WorkerStats {
     pub last_block_time: i64,
 }
 
+// ============================================================================
+// Quillon Mail: Decentralized Email Types
+// ============================================================================
+
+/// Email message stored in the mailbox
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EmailMessage {
+    pub id: String,
+    pub from_wallet: [u8; 32],
+    #[serde(default)]
+    pub from_email: Option<String>,
+    #[serde(default)]
+    pub to_wallet: Option<[u8; 32]>,
+    #[serde(default)]
+    pub to_email: Option<String>,
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub body_html: Option<String>,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub signature: Vec<u8>,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub read: bool,
+    #[serde(default = "default_folder")]
+    pub folder: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub crypto_transfer: Option<CryptoTransfer>,
+    #[serde(default = "default_delivery_method")]
+    pub delivery_method: DeliveryMethod,
+}
+
+fn default_folder() -> String {
+    "inbox".to_string()
+}
+
+fn default_delivery_method() -> DeliveryMethod {
+    DeliveryMethod::P2PGossipsub
+}
+
+/// Crypto transfer attached to an email
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CryptoTransfer {
+    pub token_type: String,
+    pub amount: u128,
+    pub tx_hash: [u8; 32],
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// How the email was delivered
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum DeliveryMethod {
+    P2PGossipsub,
+    SmtpOutbound,
+    SmtpInbound,
+}
+
+impl Default for DeliveryMethod {
+    fn default() -> Self {
+        DeliveryMethod::P2PGossipsub
+    }
+}
+
+/// Outbound email queued for SMTP delivery
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OutboundEmail {
+    pub id: String,
+    pub from_wallet: [u8; 32],
+    pub from_email: String,
+    pub to_email: String,
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub body_html: Option<String>,
+    pub timestamp: u64,
+    pub status: OutboundStatus,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub next_retry_at: Option<u64>,
+    #[serde(default)]
+    pub email_id: Option<String>,
+}
+
+/// Outbound email delivery status
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum OutboundStatus {
+    Pending,
+    Processing,
+    Delivered,
+    Failed,
+    Retrying,
+}
+
+impl Default for OutboundStatus {
+    fn default() -> Self {
+        OutboundStatus::Pending
+    }
+}
+
+/// Email contact info
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EmailContact {
+    pub wallet_address: [u8; 32],
+    pub display_name: Option<String>,
+    pub email_address: Option<String>,
+    pub last_contacted: u64,
+    pub message_count: u64,
+}
+
+// ============================================================================
+// Decentralized Blockchain Calendar Types
+// ============================================================================
+
+/// Calendar event type categories
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CalendarEventType {
+    Personal,
+    ScheduledTransaction,
+    VestingUnlock,
+    GovernanceVote,
+    NetworkMilestone,
+    CommunityEvent,
+    PriceAlert,
+}
+
+impl Default for CalendarEventType {
+    fn default() -> Self {
+        CalendarEventType::Personal
+    }
+}
+
+impl std::fmt::Display for CalendarEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CalendarEventType::Personal => write!(f, "personal"),
+            CalendarEventType::ScheduledTransaction => write!(f, "scheduled_tx"),
+            CalendarEventType::VestingUnlock => write!(f, "vesting_unlock"),
+            CalendarEventType::GovernanceVote => write!(f, "governance_vote"),
+            CalendarEventType::NetworkMilestone => write!(f, "network_milestone"),
+            CalendarEventType::CommunityEvent => write!(f, "community_event"),
+            CalendarEventType::PriceAlert => write!(f, "price_alert"),
+        }
+    }
+}
+
+/// Recurrence frequency for repeating events
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RecurrenceFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+/// Recurrence rule for repeating events
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecurrenceRule {
+    pub frequency: RecurrenceFrequency,
+    #[serde(default = "default_recurrence_interval")]
+    pub interval: u32,
+    #[serde(default)]
+    pub until: Option<u64>,
+    #[serde(default)]
+    pub count: Option<u32>,
+}
+
+fn default_recurrence_interval() -> u32 {
+    1
+}
+
+/// Scheduled transaction attached to a calendar event
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ScheduledTransaction {
+    pub to_wallet: String,
+    pub token: String,
+    pub amount: String,
+    #[serde(default)]
+    pub executed: bool,
+    #[serde(default)]
+    pub tx_hash: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// A calendar event stored on-chain and synced via P2P
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub wallet: [u8; 32],
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub event_type: CalendarEventType,
+    pub start_time: u64,
+    #[serde(default)]
+    pub end_time: Option<u64>,
+    #[serde(default)]
+    pub all_day: bool,
+    #[serde(default)]
+    pub recurring: Option<RecurrenceRule>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub reminder_minutes: Option<Vec<u32>>,
+    #[serde(default)]
+    pub scheduled_tx: Option<ScheduledTransaction>,
+    #[serde(default)]
+    pub shared: bool,
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: Option<u64>,
+    #[serde(default)]
+    pub source_peer: Option<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
 #[cfg(test)]
 mod network_separation_tests {
     use super::*;
 
     #[test]
     fn test_network_id_string_conversion() {
-        // Test NetworkId to string conversion (Phase 4 uses "testnet-phase5")
-        assert_eq!(NetworkId::Testnet.as_str(), "testnet-phase5");
+        // Test NetworkId to string conversion
+        assert_eq!(NetworkId::TestnetPhase5.as_str(), "testnet-phase5");
         assert_eq!(NetworkId::Mainnet.as_str(), "mainnet");
 
         // Test string parsing (still accepts "testnet" for backwards compatibility)
-        assert_eq!("testnet".parse::<NetworkId>().unwrap(), NetworkId::Testnet);
+        assert_eq!("testnet".parse::<NetworkId>().unwrap(), NetworkId::TestnetPhase5);
         assert_eq!("mainnet".parse::<NetworkId>().unwrap(), NetworkId::Mainnet);
 
         // Test case-insensitive parsing (to_lowercase is used)
-        assert_eq!("TESTNET".parse::<NetworkId>().unwrap(), NetworkId::Testnet);
+        assert_eq!("TESTNET".parse::<NetworkId>().unwrap(), NetworkId::TestnetPhase5);
         assert_eq!("Mainnet".parse::<NetworkId>().unwrap(), NetworkId::Mainnet);
 
         // Test invalid string parsing
@@ -4211,13 +4699,12 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_id_display() {
-        assert_eq!(NetworkId::Testnet.display_name(), "Q-NarwhalKnight Testnet");
         assert_eq!(NetworkId::Mainnet.display_name(), "Q-NarwhalKnight Mainnet");
     }
 
     #[test]
     fn test_gossipsub_topic_generation() {
-        let testnet = NetworkId::Testnet;
+        let testnet = NetworkId::TestnetPhase5;
         let mainnet = NetworkId::Mainnet;
 
         // Test topic prefix generation
@@ -4243,83 +4730,42 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_config_testnet() {
+        // v7.3.0: testnet() now returns mainnet2026.2 config
         let config = NetworkConfig::testnet();
-
-        // Verify network ID
-        assert_eq!(config.network_id, NetworkId::Testnet);
-
-        // Verify chain ID (2025 = year of launch)
-        assert_eq!(config.chain_id, 2025);
-
-        // Verify ports
+        assert_eq!(config.network_id, NetworkId::Mainnet2026_2);
+        assert_eq!(config.chain_id, 1000);
         assert_eq!(config.api_port, 8080);
         assert_eq!(config.p2p_port, 9001);
-
-        // Verify version
-        assert_eq!(config.version, "v0.5.7-beta-testnet");
-
-        // Verify genesis hash starts with "testnet-"
-        assert_eq!(&config.genesis_hash[..8], b"testnet-");
-
-        // Verify launch time (October 23, 2025)
-        let expected = DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z").unwrap();
-        assert_eq!(config.launch_time, expected.with_timezone(&Utc));
+        assert_eq!(config.version, "v7.3.0-mainnet2026.2");
+        assert_eq!(&config.genesis_hash[..8], b"mainnet2");
     }
 
     #[test]
     fn test_network_config_mainnet() {
         let config = NetworkConfig::mainnet();
-
-        // Verify network ID
-        assert_eq!(config.network_id, NetworkId::Mainnet);
-
-        // Verify chain ID
-        assert_eq!(config.chain_id, 999);
-
-        // Verify ports
-        assert_eq!(config.api_port, 8081);
-        assert_eq!(config.p2p_port, 9002);
-
-        // Verify version
-        assert_eq!(config.version, "v1.0.0-mainnet");
-
-        // Verify genesis hash starts with "mainnet-"
-        assert_eq!(&config.genesis_hash[..8], b"mainnet-");
-
-        // Verify launch time (December 15, 2025)
-        let expected = DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z").unwrap();
+        assert_eq!(config.network_id, NetworkId::Mainnet2026_2);
+        assert_eq!(config.chain_id, 1000);
+        assert_eq!(config.api_port, 8080);
+        assert_eq!(config.p2p_port, 9001);
+        assert_eq!(config.version, "v7.3.0-mainnet2026.2");
+        assert_eq!(&config.genesis_hash[..8], b"mainnet2");
+        let expected = DateTime::parse_from_rfc3339("2026-02-22T12:00:00Z").unwrap();
         assert_eq!(config.launch_time, expected.with_timezone(&Utc));
     }
 
     #[test]
     fn test_network_config_uniqueness() {
+        // v7.3.0: testnet() now returns mainnet2026.2 config, so they're equal
         let testnet = NetworkConfig::testnet();
         let mainnet = NetworkConfig::mainnet();
-
-        // Genesis hashes must be different
-        assert_ne!(testnet.genesis_hash, mainnet.genesis_hash);
-
-        // Chain IDs must be different
-        assert_ne!(testnet.chain_id, mainnet.chain_id);
-
-        // Ports must be different
-        assert_ne!(testnet.api_port, mainnet.api_port);
-        assert_ne!(testnet.p2p_port, mainnet.p2p_port);
-
-        // Network IDs must be different
-        assert_ne!(testnet.network_id, mainnet.network_id);
+        assert_eq!(testnet.genesis_hash, mainnet.genesis_hash);
+        assert_eq!(testnet.network_id, mainnet.network_id);
     }
 
     #[test]
     fn test_network_config_from_network_id() {
-        let testnet = NetworkConfig::from_network_id(NetworkId::Testnet);
-        let mainnet = NetworkConfig::from_network_id(NetworkId::Mainnet);
-
-        assert_eq!(testnet.network_id, NetworkId::Testnet);
-        assert_eq!(mainnet.network_id, NetworkId::Mainnet);
-
-        // Should match direct constructors
-        assert_eq!(testnet.genesis_hash, NetworkConfig::testnet().genesis_hash);
+        let mainnet = NetworkConfig::from_network_id(NetworkId::Mainnet2026_2);
+        assert_eq!(mainnet.network_id, NetworkId::Mainnet2026_2);
         assert_eq!(mainnet.genesis_hash, NetworkConfig::mainnet().genesis_hash);
     }
 
@@ -4332,9 +4778,9 @@ mod network_separation_tests {
         assert!(testnet.verify_message_network(&testnet.genesis_hash));
         assert!(mainnet.verify_message_network(&mainnet.genesis_hash));
 
-        // Cross-network should fail
-        assert!(!testnet.verify_message_network(&mainnet.genesis_hash));
-        assert!(!mainnet.verify_message_network(&testnet.genesis_hash));
+        // v7.0.0: testnet == mainnet, so cross-verification passes
+        assert!(testnet.verify_message_network(&mainnet.genesis_hash));
+        assert!(mainnet.verify_message_network(&testnet.genesis_hash));
 
         // Random hash should fail
         let random_hash = [0xff; 32];
@@ -4364,35 +4810,33 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_message_verification() {
-        let testnet = NetworkConfig::testnet();
         let mainnet = NetworkConfig::mainnet();
 
-        // Create message for testnet
-        let testnet_msg = NetworkMessage::new(&testnet, 42u64);
+        // Create message for mainnet
+        let msg = NetworkMessage::new(&mainnet, 42u64);
 
         // Should verify on same network
-        assert!(testnet_msg.verify_network(&testnet));
+        assert!(msg.verify_network(&mainnet));
 
-        // Should fail on different network
-        assert!(!testnet_msg.verify_network(&mainnet));
+        // Should fail on modified network
+        let mut fake = mainnet.clone();
+        fake.genesis_hash[0] ^= 0xff;
+        assert!(!msg.verify_network(&fake));
     }
 
     #[test]
     fn test_network_message_cross_network_rejection() {
-        let testnet = NetworkConfig::testnet();
+        // v7.0.0: testnet() == mainnet(), so test with a modified config
         let mainnet = NetworkConfig::mainnet();
-
-        // Create messages for each network
-        let testnet_msg = NetworkMessage::new(&testnet, vec![1, 2, 3]);
         let mainnet_msg = NetworkMessage::new(&mainnet, vec![1, 2, 3]);
 
-        // Testnet message should only verify on testnet
-        assert!(testnet_msg.verify_network(&testnet));
-        assert!(!testnet_msg.verify_network(&mainnet));
-
-        // Mainnet message should only verify on mainnet
+        // Mainnet message should verify on mainnet
         assert!(mainnet_msg.verify_network(&mainnet));
-        assert!(!mainnet_msg.verify_network(&testnet));
+
+        // Should fail with different genesis hash
+        let mut other = mainnet.clone();
+        other.genesis_hash = [0xAA; 32];
+        assert!(!mainnet_msg.verify_network(&other));
     }
 
     #[test]
@@ -4418,8 +4862,8 @@ mod network_separation_tests {
         // Message should verify initially
         assert!(message.verify_network(&testnet));
 
-        // Modify chain ID
-        message.chain_id = 999;
+        // Modify chain ID to something different
+        message.chain_id = 12345;
 
         // Should now fail verification
         assert!(!message.verify_network(&testnet));
@@ -4430,19 +4874,17 @@ mod network_separation_tests {
         let testnet = NetworkConfig::testnet();
         let mainnet = NetworkConfig::mainnet();
 
-        // Testnet launch time (October 23, 2025) is in the past (relative to test date)
-        // Note: This test assumes we're running after Oct 23, 2025
-        // For now we just verify the launch times are set correctly
+        // v7.0.0: Both testnet and mainnet launch at Feb 15, 2026 12:00 UTC
         assert_eq!(
             testnet.launch_time,
-            DateTime::parse_from_rfc3339("2025-10-23T00:00:00Z")
+            DateTime::parse_from_rfc3339("2026-02-15T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc)
         );
 
         assert_eq!(
             mainnet.launch_time,
-            DateTime::parse_from_rfc3339("2025-12-15T00:00:00Z")
+            DateTime::parse_from_rfc3339("2026-02-15T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc)
         );
@@ -4453,17 +4895,20 @@ mod network_separation_tests {
         let testnet = NetworkConfig::testnet();
         let mainnet = NetworkConfig::mainnet();
 
-        // v2.3.1-beta: Testnet has bootstrap peer with full peer ID for out-of-box experience
-        assert!(!testnet.bootstrap_peers.is_empty(), "Testnet should have bootstrap peers for out-of-box connectivity");
-        assert_eq!(testnet.bootstrap_peers.len(), 1, "Testnet should have 1 bootstrap peer");
-        assert!(testnet.bootstrap_peers[0].contains("185.182.185.227"), "Bootstrap peer should be Server Beta");
-        assert!(testnet.bootstrap_peers[0].contains("12D3KooWNgqKiWQTn7cVuUJ7Se9HQXZtocx8VEf7v382eNAQDoDk"), "Bootstrap should include peer ID");
+        // v7.0.0: Both testnet and mainnet use same config with peer IDs
+        assert!(!testnet.bootstrap_peers.is_empty(), "Should have bootstrap peers for out-of-box connectivity");
+        assert_eq!(testnet.bootstrap_peers.len(), 3, "Should have 3 bootstrap peers");
+        assert!(testnet.bootstrap_peers[0].contains("185.182.185.227"), "First bootstrap peer should be Server Beta");
+        assert!(testnet.bootstrap_peers[0].contains("12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc"), "Bootstrap should include Beta peer ID");
+        assert!(testnet.bootstrap_peers[1].contains("109.205.176.60"), "Second bootstrap peer should be Server Gamma");
+        assert!(testnet.bootstrap_peers[1].contains("12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv"), "Bootstrap should include Gamma peer ID");
+        assert!(testnet.bootstrap_peers[2].contains("5.79.79.158"), "Third bootstrap peer should be Server Delta");
+        assert!(testnet.bootstrap_peers[2].contains("12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ"), "Bootstrap should include Delta peer ID");
+        assert!(testnet.bootstrap_peers[3].contains("161.35.219.10"), "Fourth bootstrap peer should be Server Alpha");
+        assert!(testnet.bootstrap_peers[3].contains("12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY"), "Bootstrap should include Alpha peer ID");
 
-        // Mainnet has bootstrap peers configured
-        assert!(!mainnet.bootstrap_peers.is_empty(), "Mainnet should have bootstrap peers");
-        assert_eq!(mainnet.bootstrap_peers.len(), 2, "Mainnet should have 2 bootstrap peers");
-        assert!(mainnet.bootstrap_peers[0].contains("185.182.185.227"), "First bootstrap peer should be 185.182.185.227");
-        assert!(mainnet.bootstrap_peers[1].contains("161.35.219.10"), "Second bootstrap peer should be 161.35.219.10");
+        // Mainnet == testnet in v7.0.0
+        assert_eq!(mainnet.bootstrap_peers, testnet.bootstrap_peers);
     }
 
     #[test]
@@ -4486,7 +4931,7 @@ mod network_separation_tests {
 
     #[test]
     fn test_topic_namespace_isolation() {
-        let testnet_id = NetworkId::Testnet;
+        let testnet_id = NetworkId::TestnetPhase5;
         let mainnet_id = NetworkId::Mainnet;
 
         // Generate all topic types for both networks

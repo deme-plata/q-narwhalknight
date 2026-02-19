@@ -4,6 +4,7 @@
 //! It routes messages to appropriate handlers based on message type.
 
 use crate::types::{AIMessage, InferenceRequest, InferenceResponse, TensorData};
+use crate::rpc_worker::{RpcWorkerInfo, WorkerStatus};
 use anyhow::{anyhow, Result};
 use libp2p::gossipsub::Message as GossipsubMessage;
 use serde_json;
@@ -25,6 +26,10 @@ pub struct AIGossipsubHandler {
 
     /// Active inference requests being tracked
     active_requests: Arc<RwLock<HashMap<String, InferenceRequestState>>>,
+
+    /// v5.1.0: Registry of available RPC workers discovered via gossipsub
+    /// Key: peer_id, Value: RpcWorkerInfo
+    rpc_workers: Arc<RwLock<HashMap<String, RpcWorkerInfo>>>,
 
     /// Statistics for monitoring
     stats: Arc<RwLock<AIHandlerStats>>,
@@ -69,6 +74,7 @@ impl AIGossipsubHandler {
             inference_tx: None,
             layer_output_tx: None,
             active_requests: Arc::new(RwLock::new(HashMap::new())),
+            rpc_workers: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(AIHandlerStats::default())),
         }
     }
@@ -115,6 +121,12 @@ impl AIGossipsubHandler {
             }
             AIMessage::Heartbeat { node_id, timestamp } => {
                 self.handle_heartbeat(node_id, timestamp).await
+            }
+            AIMessage::RpcWorkerAvailable(info) => {
+                self.handle_rpc_worker_available(info).await
+            }
+            AIMessage::RpcWorkerStopped { peer_id } => {
+                self.handle_rpc_worker_stopped(peer_id).await
             }
         }
     }
@@ -248,6 +260,65 @@ impl AIGossipsubHandler {
         Ok(())
     }
 
+    /// v5.1.0: Handle RPC worker availability announcement
+    async fn handle_rpc_worker_available(&self, info: RpcWorkerInfo) -> Result<()> {
+        info!("🖥️ RPC worker available: {}:{} (peer: {}, {}GB mem, status: {:?})",
+              info.host, info.port, info.peer_id, info.available_memory_gb, info.status);
+
+        {
+            let mut stats = self.stats.write().await;
+            stats.total_capability_announcements += 1;
+        }
+
+        // Add/update worker in registry
+        self.rpc_workers.write().await.insert(info.peer_id.clone(), info);
+
+        Ok(())
+    }
+
+    /// v5.1.0: Handle RPC worker stopped notification
+    async fn handle_rpc_worker_stopped(&self, peer_id: String) -> Result<()> {
+        info!("🛑 RPC worker stopped: peer {}", peer_id);
+
+        // Remove from registry
+        self.rpc_workers.write().await.remove(&peer_id);
+
+        Ok(())
+    }
+
+    /// v5.1.0: Get all known RPC workers (ready or busy)
+    pub async fn get_rpc_workers(&self) -> Vec<RpcWorkerInfo> {
+        self.rpc_workers.read().await.values().cloned().collect()
+    }
+
+    /// v5.1.0: Get ready RPC workers for building --rpc argument
+    pub async fn get_ready_rpc_workers(&self) -> Vec<RpcWorkerInfo> {
+        self.rpc_workers.read().await
+            .values()
+            .filter(|w| matches!(w.status, WorkerStatus::Ready | WorkerStatus::Busy))
+            .cloned()
+            .collect()
+    }
+
+    /// v5.1.0: Build the `--rpc` argument string for llama.cpp model loading
+    /// Returns "host1:port1,host2:port2" or None if no workers available
+    pub async fn build_rpc_arg(&self) -> Option<String> {
+        let workers = self.get_ready_rpc_workers().await;
+        if workers.is_empty() {
+            None
+        } else {
+            Some(workers.iter()
+                .map(|w| format!("{}:{}", w.host, w.port))
+                .collect::<Vec<_>>()
+                .join(","))
+        }
+    }
+
+    /// v5.1.0: Get shared reference to RPC worker registry
+    pub fn rpc_workers_ref(&self) -> Arc<RwLock<HashMap<String, RpcWorkerInfo>>> {
+        Arc::clone(&self.rpc_workers)
+    }
+
     /// Get current handler statistics
     pub async fn get_stats(&self) -> AIHandlerStats {
         self.stats.read().await.clone()
@@ -287,6 +358,9 @@ mod tests {
             temperature: Some(0.7),
             model: "mistral-7b-instruct-v0.3".to_string(),
             timestamp: None,
+            deterministic_seed: None,
+            required_model_hash: None,
+            max_price_per_token: None,
         };
 
         // Handle request (without coordinator channel)
@@ -313,6 +387,9 @@ mod tests {
             temperature: None,
             model: "test-model".to_string(),
             timestamp: None,
+            deterministic_seed: None,
+            required_model_hash: None,
+            max_price_per_token: None,
         };
 
         handler.handle_inference_request(request).await.unwrap();

@@ -25,6 +25,40 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 use uuid::Uuid;
 
+/// Parse an address flexibly - supports hex, qnk-prefixed, or arbitrary strings
+fn parse_address_flexible(addr: &str) -> Result<[u8; 32], String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return Err("Address cannot be empty".to_string());
+    }
+
+    // Try qnk prefix
+    let hex_str = if addr.starts_with("qnk") {
+        &addr[3..]
+    } else {
+        addr
+    };
+
+    // Try hex decode
+    if let Ok(bytes) = hex::decode(hex_str) {
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            return Ok(arr);
+        }
+    }
+
+    // Fallback: hash the address string to produce a deterministic 32-byte ID
+    // This allows any wallet format to register
+    use sha3::{Digest, Sha3_256};
+    let mut hasher = Sha3_256::new();
+    hasher.update(addr.as_bytes());
+    let result = hasher.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&result);
+    Ok(arr)
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Q-NarwhalKnight Testnet Bounty API Server")]
 struct Args {
@@ -37,11 +71,35 @@ struct Args {
     db_path: String,
 }
 
+/// Master wallet that has admin access to bounty management
+const ADMIN_WALLETS: &[&str] = &[
+    "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723",
+];
+
 /// Application state shared across handlers
 #[derive(Clone)]
 struct AppState {
     storage: Arc<BountyStorage>,
     scoring_engine: Arc<parking_lot::Mutex<ScoringEngine>>,
+}
+
+/// Extract and verify admin wallet from request headers
+fn verify_admin_wallet(headers: &axum::http::HeaderMap) -> Result<String, (StatusCode, String)> {
+    let wallet = headers
+        .get("X-Wallet-Auth")
+        .or_else(|| headers.get("Authorization"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_start_matches("Bearer ").trim().to_string())
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing wallet auth header".to_string()))?;
+
+    // Strip qnk/qug prefix for comparison
+    let clean = wallet.replace("qnk", "").replace("qug", "");
+
+    if !ADMIN_WALLETS.iter().any(|&w| w == clean) {
+        return Err((StatusCode::FORBIDDEN, "Not authorized as bounty admin".to_string()));
+    }
+
+    Ok(clean)
 }
 
 // ============================================================================
@@ -57,6 +115,7 @@ struct RegisterRequest {
 #[derive(Debug, Serialize)]
 struct RegisterResponse {
     user_id: String,
+    token: String,
     message: String,
 }
 
@@ -83,7 +142,9 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Deserialize)]
 struct BugReportRequest {
-    github_issue_url: String,
+    user_id: Option<String>,
+    #[serde(alias = "github_issue_url")]
+    issue_url: String,
     severity: String, // "Critical", "High", "Medium", "Low"
     description: String,
 }
@@ -97,9 +158,10 @@ struct BugReportResponse {
 
 #[derive(Debug, Deserialize)]
 struct SocialVerifyRequest {
-    platform: String, // "twitter", "github", "discord"
+    user_id: Option<String>,
+    platform: String, // "twitter", "code_quillon", "discord"
     activity_url: String,
-    activity_type: String, // "Tweet", "Thread", "Article", etc.
+    activity_type: String, // "Tweet", "Thread", "Article", "MergeRequest", "CodeIssue", etc.
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,46 +229,25 @@ async fn health_check() -> impl IntoResponse {
     })
 }
 
-/// Register a new testnet user
+/// Register a new user
 async fn register_user(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Parse testnet address (strip "qnk" prefix if present)
-    let testnet_addr_str = if req.testnet_address.starts_with("qnk") {
-        &req.testnet_address[3..]
-    } else {
-        &req.testnet_address
-    };
+    // Parse address - support multiple formats:
+    // 1. "qnk" + 64 hex chars
+    // 2. 64 hex chars
+    // 3. Any string (hashed to 32 bytes for non-hex addresses)
+    let testnet_address = parse_address_flexible(&req.testnet_address)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let testnet_addr = hex::decode(testnet_addr_str)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid testnet address format. Must be hex-encoded 64 characters (optionally prefixed with 'qnk')".to_string()))?;
-
-    if testnet_addr.len() != 32 {
-        return Err((StatusCode::BAD_REQUEST, "Testnet address must be 32 bytes (64 hex characters)".to_string()));
-    }
-
-    let mut testnet_address = [0u8; 32];
-    testnet_address.copy_from_slice(&testnet_addr);
-
-    // Parse optional mainnet address (strip "qnk" prefix if present)
     let mainnet_address = if let Some(ref addr) = req.mainnet_address {
-        let mainnet_addr_str = if addr.starts_with("qnk") {
-            &addr[3..]
+        if addr.trim().is_empty() {
+            None
         } else {
-            addr
-        };
-
-        let mainnet_addr = hex::decode(mainnet_addr_str)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid mainnet address format. Must be hex-encoded 64 characters (optionally prefixed with 'qnk')".to_string()))?;
-
-        if mainnet_addr.len() != 32 {
-            return Err((StatusCode::BAD_REQUEST, "Mainnet address must be 32 bytes (64 hex characters)".to_string()));
+            Some(parse_address_flexible(addr)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?)
         }
-
-        let mut addr_array = [0u8; 32];
-        addr_array.copy_from_slice(&mainnet_addr);
-        Some(addr_array)
     } else {
         None
     };
@@ -233,13 +274,18 @@ async fn register_user(
 
     info!("✅ User registered or retrieved: {:?}", user_id);
 
+    // Generate JWT token so user can submit bug reports and social activities
+    let token = auth::generate_token(&hex::encode(testnet_address), &user_id.to_string())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Token generation failed: {}", e)))?;
+
     Ok(Json(RegisterResponse {
         user_id: user_id.to_string(),
+        token,
         message: "Registration successful".to_string(),
     }))
 }
 
-/// Get user score
+/// Get user score — recalculates from stored activities on every read
 async fn get_user_score(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -251,6 +297,29 @@ async fn get_user_score(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    // Query activities to calculate live score
+    let bug_reports = state.storage.get_user_bug_reports(&uuid).await.unwrap_or_default();
+    let social_activities = state.storage.get_user_social_activities(&uuid).await.unwrap_or_default();
+
+    // Calculate scores from activities (0.5x for unverified/submitted, full for verified/fixed)
+    let bug_score: f64 = bug_reports.iter().map(|b| {
+        use q_bounty_protocol::BugStatus;
+        match b.status {
+            BugStatus::Verified | BugStatus::Fixed => b.severity.score_multiplier(),
+            BugStatus::Duplicate | BugStatus::Invalid => 0.0,
+            _ => b.severity.score_multiplier() * 0.5,
+        }
+    }).sum();
+    let social_score: f64 = social_activities.iter().map(|s| s.engagement_score).sum();
+
+    let category_scores = CategoryScores {
+        bug_reports: bug_score,
+        social: social_score,
+        ..user.category_scores.clone()
+    };
+
+    let total_score = category_scores.calculate_total() * user.early_multiplier * user.consistency_bonus;
+
     let tier_str = match user.tier {
         BountyTier::Pioneer => "Pioneer",
         BountyTier::Contributor => "Contributor",
@@ -260,10 +329,10 @@ async fn get_user_score(
 
     Ok(Json(ScoreResponse {
         user_id: user.user_id.to_string(),
-        total_score: user.total_score,
+        total_score,
         rank: user.rank,
         tier: tier_str.to_string(),
-        category_scores: user.category_scores,
+        category_scores,
         early_multiplier: user.early_multiplier,
         consistency_bonus: user.consistency_bonus,
     }))
@@ -277,21 +346,47 @@ async fn get_leaderboard(
     let leaderboard = state.storage.get_leaderboard(params.limit).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    Ok(Json(leaderboard))
+    // Convert [u8; 32] addresses to "qnk..." hex strings for frontend
+    let entries: Vec<serde_json::Value> = leaderboard.iter().map(|e| {
+        let tier_str = match e.tier {
+            BountyTier::Pioneer => "Pioneer",
+            BountyTier::Contributor => "Contributor",
+            BountyTier::Participant => "Participant",
+            BountyTier::Supporter => "Supporter",
+        };
+        serde_json::json!({
+            "rank": e.rank,
+            "testnet_address": format!("qnk{}", hex::encode(e.testnet_address)),
+            "total_score": e.total_score,
+            "tier": tier_str,
+            "category_scores": e.category_scores,
+        })
+    }).collect();
+
+    Ok(Json(entries))
 }
 
 /// Submit a bug report
 async fn submit_bug_report(
     State(state): State<AppState>,
-    auth_user: auth::AuthenticatedUser,
+    auth_user: Option<auth::AuthenticatedUser>,
     Json(req): Json<BugReportRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use q_bounty_protocol::{BugReport, BugSeverity, BugStatus};
 
-    let user_id = Uuid::parse_str(&auth_user.user_id)
+    // Accept user_id from JWT token OR from request body
+    let user_id_str = if let Some(ref auth) = auth_user {
+        auth.user_id.clone()
+    } else if let Some(ref uid) = req.user_id {
+        uid.clone()
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "Missing user_id in request body or Authorization header".to_string()));
+    };
+
+    let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID format".to_string()))?;
 
-    info!("🔐 Authenticated bug report submission from user: {}", auth_user);
+    info!("🐛 Bug report submission from user: {}", user_id_str);
 
     // Parse severity
     let severity = match req.severity.to_lowercase().as_str() {
@@ -305,7 +400,7 @@ async fn submit_bug_report(
     // Create bug report
     let bug_report = BugReport {
         user_id,
-        github_issue_url: req.github_issue_url.clone(),
+        issue_url: req.issue_url.clone(),
         severity,
         status: BugStatus::Submitted,
         bounty_awarded: 0, // Will be calculated after verification
@@ -329,7 +424,22 @@ async fn submit_bug_report(
     // Calculate points (base points, will be increased after verification)
     let points = severity.score_multiplier();
 
-    info!("🐛 Bug report submitted by user {:?}: {:?} severity", user_id, severity);
+    // Update user score immediately after storing the bug report
+    if let Ok(all_bugs) = state.storage.get_user_bug_reports(&user_id).await {
+        let social = state.storage.get_user_social_activities(&user_id).await.unwrap_or_default();
+        let bug_score: f64 = all_bugs.iter().map(|b| b.severity.score_multiplier() * 0.5).sum();
+        let social_score: f64 = social.iter().map(|s| s.engagement_score).sum();
+        let cat_scores = q_bounty_protocol::CategoryScores {
+            bug_reports: bug_score,
+            social: social_score,
+            ..user.category_scores.clone()
+        };
+        let _ = state.storage.update_user_score(
+            &user_id, cat_scores, user.early_multiplier, user.consistency_bonus,
+        ).await;
+    }
+
+    info!("🐛 Bug report submitted by user {:?}: {:?} severity, {} pts", user_id, severity, points);
 
     Ok(Json(BugReportResponse {
         report_id: format!("{}-{}", user_id, chrono::Utc::now().timestamp_millis()),
@@ -341,20 +451,29 @@ async fn submit_bug_report(
 /// Verify social media activity
 async fn verify_social_activity(
     State(state): State<AppState>,
-    auth_user: auth::AuthenticatedUser,
+    auth_user: Option<auth::AuthenticatedUser>,
     Json(req): Json<SocialVerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use q_bounty_protocol::{SocialActivity, SocialPlatform, SocialActivityType};
 
-    info!("🔐 Authenticated social activity submission from user: {}", auth_user);
+    // Accept user_id from JWT token OR from request body
+    let user_id_str = if let Some(ref auth) = auth_user {
+        auth.user_id.clone()
+    } else if let Some(ref uid) = req.user_id {
+        uid.clone()
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "Missing user_id in request body or Authorization header".to_string()));
+    };
 
-    let user_id = Uuid::parse_str(&auth_user.user_id)
+    info!("📱 Social activity submission from user: {}", user_id_str);
+
+    let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID format".to_string()))?;
 
     // Parse platform
     let platform = match req.platform.to_lowercase().as_str() {
         "twitter" => SocialPlatform::Twitter,
-        "github" => SocialPlatform::GitHub,
+        "code_quillon" | "codequillon" | "github" => SocialPlatform::CodeQuillon,
         "discord" => SocialPlatform::Discord,
         "medium" => SocialPlatform::Medium,
         "youtube" => SocialPlatform::YouTube,
@@ -368,8 +487,8 @@ async fn verify_social_activity(
         "Article" => SocialActivityType::Article,
         "Video" => SocialActivityType::Video,
         "DiscordMessage" => SocialActivityType::DiscordMessage,
-        "GitHubPR" => SocialActivityType::GitHubPR,
-        "GitHubIssue" => SocialActivityType::GitHubIssue,
+        "MergeRequest" | "GitHubPR" => SocialActivityType::MergeRequest,
+        "CodeIssue" | "GitHubIssue" => SocialActivityType::CodeIssue,
         _ => return Err((StatusCode::BAD_REQUEST, "Invalid activity type".to_string())),
     };
 
@@ -387,6 +506,24 @@ async fn verify_social_activity(
     // Store social activity
     state.storage.record_social_activity(&social_activity).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store social activity: {}", e)))?;
+
+    // Update user score with new social activity
+    let user = state.storage.get_user(&user_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    if let Some(user) = user {
+        let bugs = state.storage.get_user_bug_reports(&user_id).await.unwrap_or_default();
+        let all_social = state.storage.get_user_social_activities(&user_id).await.unwrap_or_default();
+        let bug_score: f64 = bugs.iter().map(|b| b.severity.score_multiplier() * 0.5).sum();
+        let social_score: f64 = all_social.iter().map(|s| s.engagement_score).sum();
+        let cat_scores = q_bounty_protocol::CategoryScores {
+            bug_reports: bug_score,
+            social: social_score,
+            ..user.category_scores.clone()
+        };
+        let _ = state.storage.update_user_score(
+            &user_id, cat_scores, user.early_multiplier, user.consistency_bonus,
+        ).await;
+    }
 
     info!("📱 Social activity submitted by user {:?}: {:?} on {:?}", user_id, activity_type, platform);
 
@@ -566,6 +703,204 @@ async fn list_campaigns(
 }
 
 // ============================================================================
+// ADMIN HANDLERS (for Node Admin panel)
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+struct AdminBugReport {
+    user_id: String,
+    issue_url: String,
+    severity: String,
+    status: String,
+    description: String,
+    timestamp: i64,
+    points: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminSocialActivity {
+    user_id: String,
+    platform: String,
+    activity_type: String,
+    content_url: String,
+    engagement_score: f64,
+    verified: bool,
+    timestamp: i64,
+}
+
+/// List all bug reports (admin)
+async fn admin_list_bug_reports(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let reports = state.storage.get_all_bug_reports().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list bug reports: {}", e)))?;
+
+    let admin_reports: Vec<AdminBugReport> = reports.into_iter().map(|r| {
+        let severity_str = match r.severity {
+            q_bounty_protocol::BugSeverity::Critical => "Critical",
+            q_bounty_protocol::BugSeverity::High => "High",
+            q_bounty_protocol::BugSeverity::Medium => "Medium",
+            q_bounty_protocol::BugSeverity::Low => "Low",
+        };
+        let status_str = match r.status {
+            q_bounty_protocol::BugStatus::Submitted => "Submitted",
+            q_bounty_protocol::BugStatus::UnderReview => "UnderReview",
+            q_bounty_protocol::BugStatus::Verified => "Verified",
+            q_bounty_protocol::BugStatus::Duplicate => "Duplicate",
+            q_bounty_protocol::BugStatus::Invalid => "Invalid",
+            q_bounty_protocol::BugStatus::Fixed => "Fixed",
+        };
+        AdminBugReport {
+            user_id: r.user_id.to_string(),
+            issue_url: r.issue_url,
+            severity: severity_str.to_string(),
+            status: status_str.to_string(),
+            description: r.description,
+            timestamp: r.timestamp,
+            points: r.severity.score_multiplier(),
+        }
+    }).collect();
+
+    Ok(Json(admin_reports))
+}
+
+/// List all social activities (admin)
+async fn admin_list_social_activities(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let activities = state.storage.get_all_social_activities().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list social activities: {}", e)))?;
+
+    let admin_activities: Vec<AdminSocialActivity> = activities.into_iter().map(|a| {
+        let platform_str = match a.platform {
+            q_bounty_protocol::SocialPlatform::Twitter => "Twitter",
+            q_bounty_protocol::SocialPlatform::CodeQuillon => "CodeQuillon",
+            q_bounty_protocol::SocialPlatform::Discord => "Discord",
+            q_bounty_protocol::SocialPlatform::Medium => "Medium",
+            q_bounty_protocol::SocialPlatform::YouTube => "YouTube",
+        };
+        let type_str = match a.activity_type {
+            q_bounty_protocol::SocialActivityType::Tweet => "Tweet",
+            q_bounty_protocol::SocialActivityType::Thread => "Thread",
+            q_bounty_protocol::SocialActivityType::Article => "Article",
+            q_bounty_protocol::SocialActivityType::Video => "Video",
+            q_bounty_protocol::SocialActivityType::DiscordMessage => "DiscordMessage",
+            q_bounty_protocol::SocialActivityType::MergeRequest => "MergeRequest",
+            q_bounty_protocol::SocialActivityType::CodeIssue => "CodeIssue",
+        };
+        AdminSocialActivity {
+            user_id: a.user_id.to_string(),
+            platform: platform_str.to_string(),
+            activity_type: type_str.to_string(),
+            content_url: a.content_url,
+            engagement_score: a.engagement_score,
+            verified: a.verified,
+            timestamp: a.timestamp,
+        }
+    }).collect();
+
+    Ok(Json(admin_activities))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApproveBugRequest {
+    user_id: String,
+    timestamp: i64,
+    status: String, // "Verified", "Duplicate", "Invalid", "Fixed"
+}
+
+/// Approve/reject a bug report (admin)
+async fn admin_update_bug_report(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    Json(req): Json<ApproveBugRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    use q_bounty_protocol::BugStatus;
+
+    let user_id = Uuid::parse_str(&req.user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let status = match req.status.as_str() {
+        "Submitted" => BugStatus::Submitted,
+        "UnderReview" => BugStatus::UnderReview,
+        "Verified" => BugStatus::Verified,
+        "Duplicate" => BugStatus::Duplicate,
+        "Invalid" => BugStatus::Invalid,
+        "Fixed" => BugStatus::Fixed,
+        _ => return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string())),
+    };
+
+    state.storage.update_bug_report_status(&user_id, req.timestamp, status).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update: {}", e)))?;
+
+    info!("🔧 Admin updated bug report {}/{} → {}", req.user_id, req.timestamp, req.status);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("Bug report updated to {}", req.status)
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApproveSocialRequest {
+    user_id: String,
+    platform: u8,
+    timestamp: i64,
+    verified: bool,
+}
+
+/// Approve/reject a social activity (admin)
+async fn admin_update_social_activity(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    Json(req): Json<ApproveSocialRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let user_id = Uuid::parse_str(&req.user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    state.storage.update_social_activity_status(&user_id, req.platform, req.timestamp, req.verified).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update: {}", e)))?;
+
+    info!("🔧 Admin updated social activity {}/{}/{} → verified={}", req.user_id, req.platform, req.timestamp, req.verified);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("Social activity verified={}", req.verified)
+    })))
+}
+
+/// Get admin stats summary
+async fn admin_stats(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let users = state.storage.get_all_users().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let bugs = state.storage.get_all_bug_reports().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let socials = state.storage.get_all_social_activities().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+
+    let pending_bugs = bugs.iter().filter(|b| matches!(b.status, q_bounty_protocol::BugStatus::Submitted)).count();
+    let pending_socials = socials.iter().filter(|s| !s.verified).count();
+
+    Ok(Json(serde_json::json!({
+        "total_users": users.len(),
+        "total_bug_reports": bugs.len(),
+        "pending_bug_reports": pending_bugs,
+        "total_social_activities": socials.len(),
+        "pending_social_activities": pending_socials,
+    })))
+}
+
+// ============================================================================
 // MAIN SERVER
 // ============================================================================
 
@@ -622,6 +957,12 @@ async fn main() -> anyhow::Result<()> {
         // Campaign management (for mainnet future campaigns)
         .route("/v1/admin/campaign/create", post(create_campaign))
         .route("/v1/campaigns", get(list_campaigns))
+        // Admin endpoints (for Node Admin bounty tab)
+        .route("/v1/admin/stats", get(admin_stats))
+        .route("/v1/admin/bug-reports", get(admin_list_bug_reports))
+        .route("/v1/admin/social-activities", get(admin_list_social_activities))
+        .route("/v1/admin/bug-report/update", post(admin_update_bug_report))
+        .route("/v1/admin/social-activity/update", post(admin_update_social_activity))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -645,6 +986,11 @@ async fn main() -> anyhow::Result<()> {
     info!("  POST /v1/testnet/social-activity");
     info!("  POST /v1/admin/campaign/create (Admin - Future campaigns)");
     info!("  GET  /v1/campaigns (List all campaigns)");
+    info!("  GET  /v1/admin/stats (Admin - Overview stats)");
+    info!("  GET  /v1/admin/bug-reports (Admin - List all bug reports)");
+    info!("  GET  /v1/admin/social-activities (Admin - List all social activities)");
+    info!("  POST /v1/admin/bug-report/update (Admin - Update bug report status)");
+    info!("  POST /v1/admin/social-activity/update (Admin - Update social activity)");
 
     axum::serve(listener, app).await?;
 

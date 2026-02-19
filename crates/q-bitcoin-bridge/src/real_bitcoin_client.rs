@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use url::Url;
+// url crate removed - using string-based URL handling instead
 
 /// Bitcoin network configuration
 #[derive(Debug, Clone)]

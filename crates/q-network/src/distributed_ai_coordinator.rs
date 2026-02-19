@@ -19,6 +19,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 // 🚀 v2.3.16-beta: Import real inference engines for golden standard distributed AI
 use q_ai_inference::{DistributedMistralEngine, MistralRsEngine};
+// v5.1.0: Unified inference engine trait (supports llama-cpp-2 + mistral.rs)
+use q_ai_inference::InferenceEngine;
+// v5.1.0: RPC worker manager for pipeline parallelism via llama.cpp RPC
+use q_ai_inference::rpc_worker::{RpcWorkerManager, RpcWorkerInfo, WorkerStatus};
+// v5.1.0: Proof of inference for compute verification and QUG rewards
+use q_ai_inference::proof_of_inference::{ProofOfInferenceVerifier, InferenceProof, ProofConfig};
 // ⚡ v2.4.0: Tensor parallelism for true Nx speedup (not just throughput)
 use q_ai_inference::{TensorParallelEngine, TensorParallelConfig, TensorParallelStats};
 // ⚡ v2.6.0: Weight shard manager for loading GGUF shards
@@ -75,7 +81,13 @@ pub struct DistributedAICoordinator {
     /// This is the HIGH-PERFORMANCE engine using mistral.rs for single-node/fallback inference.
     /// Provides 5-15 tok/s on CPU, much faster than layer-by-layer pipeline.
     /// Stored as Arc so it can be shared with chat_api.
+    /// DEPRECATED in v5.1.0: Use `inference_engine` field instead.
     pub mistralrs_engine: Arc<RwLock<Option<Arc<MistralRsEngine>>>>,
+
+    /// v5.1.0: Unified inference engine (supports llama-cpp-2 + mistral.rs backends)
+    /// This replaces mistralrs_engine as the primary inference path.
+    /// When set, coordinate_inference_smart uses this instead of mistralrs_engine.
+    pub inference_engine: Arc<RwLock<Option<Arc<dyn InferenceEngine>>>>,
 
     /// ⚡ v2.4.0: TENSOR PARALLELISM - True Nx speedup across multiple nodes
     /// Unlike data parallelism (handles more requests) or pipeline parallelism (sequential),
@@ -89,6 +101,15 @@ pub struct DistributedAICoordinator {
     /// 🔐 v2.5.1-beta: Encryption for P2P AI messages (privacy-enhanced)
     /// Uses XChaCha20-Poly1305 AEAD with network-derived shared secret
     pub message_encryption: Arc<RwLock<Option<AIMessageEncryption>>>,
+
+    /// v5.1.0: RPC worker manager for llama.cpp pipeline parallelism
+    /// Manages local rpc-server subprocesses and tracks remote RPC workers
+    /// discovered via gossipsub. Used to build `--rpc host1:port,host2:port` args.
+    pub rpc_worker_manager: Arc<RwLock<RpcWorkerManager>>,
+
+    /// v5.1.0: Proof-of-inference verifier for compute integrity and QUG rewards
+    /// Workers submit Merkle proofs of generated tokens, validators challenge randomly.
+    pub proof_verifier: Arc<ProofOfInferenceVerifier>,
 
     /// ⚡ v2.6.0: Ring All-Reduce coordinator for TRUE tensor parallelism
     /// This is the KEY component that enables combining partial tensor results
@@ -355,6 +376,9 @@ impl DistributedAICoordinator {
             circuit_breaker,
             local_engine: Arc::new(RwLock::new(None)), // v2.3.16-beta: For pipeline parallelism
             mistralrs_engine: Arc::new(RwLock::new(None)), // v2.3.16-beta: For data parallelism (HIGH PERF)
+            inference_engine: Arc::new(RwLock::new(None)), // v5.1.0: Unified inference engine (llama-cpp-2 / mistral.rs)
+            rpc_worker_manager: Arc::new(RwLock::new(RpcWorkerManager::new(None))), // v5.1.0: RPC worker manager
+            proof_verifier: Arc::new(ProofOfInferenceVerifier::new(ProofConfig::default())), // v5.1.0: Proof of inference
             tensor_parallel_engine: Arc::new(RwLock::new(None)), // v2.4.0: For tensor parallelism
             inference_mode: Arc::new(RwLock::new(InferenceMode::DataParallel)), // Default to data parallel
             message_encryption: Arc::new(RwLock::new(None)), // v2.5.1-beta: Privacy encryption (initialized on first P2P connection)
@@ -507,6 +531,92 @@ impl DistributedAICoordinator {
         info!("🚀 [GOLDEN STANDARD] MistralRs engine set - HIGH-PERFORMANCE data parallelism enabled!");
     }
 
+    /// v5.1.0: Set unified inference engine (supports llama-cpp-2 + mistral.rs)
+    /// This is the preferred method for setting the inference engine.
+    /// When set, coordinate_inference_smart uses this instead of mistralrs_engine.
+    pub async fn set_inference_engine(&self, engine: Arc<dyn InferenceEngine>) {
+        info!("🦙 Setting inference engine: {}", engine.engine_name());
+        let mut lock = self.inference_engine.write().await;
+        *lock = Some(engine);
+        info!("✅ Inference engine set - ready for distributed coordination!");
+    }
+
+    /// v5.1.0: Register a remote RPC worker (discovered via gossipsub)
+    pub async fn register_rpc_worker(&self, info: RpcWorkerInfo) {
+        info!("📡 Coordinator registering RPC worker: {}:{} (peer: {})",
+              info.host, info.port, info.peer_id);
+        self.rpc_worker_manager.write().await.register_remote_worker(info).await;
+    }
+
+    /// v5.1.0: Remove an RPC worker (peer disconnected or stopped)
+    pub async fn remove_rpc_worker(&self, peer_id: &str) {
+        info!("🛑 Coordinator removing RPC worker: {}", peer_id);
+        let _ = self.rpc_worker_manager.write().await.remove_worker(peer_id).await;
+    }
+
+    /// v5.1.0: Get count of ready RPC workers
+    pub async fn ready_rpc_worker_count(&self) -> usize {
+        self.rpc_worker_manager.read().await.ready_worker_count().await
+    }
+
+    /// v5.1.0: Build the `--rpc` argument for llama.cpp distributed inference
+    pub async fn build_rpc_arg(&self) -> Option<String> {
+        self.rpc_worker_manager.read().await.build_rpc_arg().await
+    }
+
+    /// v5.1.0: Submit proof of inference after successful generation
+    /// Creates a Merkle tree from the generated tokens and submits the proof
+    /// for verification and eventual QUG reward.
+    pub async fn submit_inference_proof(
+        &self,
+        request_id: &str,
+        tokens: &[String],
+        model: &str,
+        start_time_ms: u64,
+        end_time_ms: u64,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            return Ok(()); // No tokens = no proof needed
+        }
+
+        // Build Merkle tree from generated tokens
+        let (merkle_root, leaf_hashes, tree_levels) =
+            ProofOfInferenceVerifier::build_merkle_tree(tokens)?;
+
+        // Generate sample proofs for immediate verification (first 3 tokens)
+        let sample_count = tokens.len().min(3);
+        let mut sample_proofs = Vec::new();
+        for i in 0..sample_count {
+            let merkle_path = ProofOfInferenceVerifier::generate_merkle_proof(i, &tree_levels)?;
+            let token_hash = leaf_hashes[i]; // Leaf hashes already computed by build_merkle_tree
+
+            sample_proofs.push(q_ai_inference::proof_of_inference::TokenProof {
+                index: i,
+                token: tokens[i].clone(),
+                token_hash,
+                merkle_path,
+                timestamp_ms: start_time_ms + (i as u64 * ((end_time_ms - start_time_ms) / tokens.len().max(1) as u64)),
+            });
+        }
+
+        let proof = InferenceProof {
+            request_id: request_id.to_string(),
+            worker_node_id: self.node_id.clone(),
+            merkle_root,
+            token_count: tokens.len(),
+            start_time_ms,
+            end_time_ms,
+            model: model.to_string(),
+            sample_proofs,
+        };
+
+        info!("📝 Submitting inference proof: request={}, tokens={}, merkle_root={}",
+              request_id, tokens.len(), hex::encode(&merkle_root[..8]));
+
+        self.proof_verifier.submit_proof(proof).await?;
+        Ok(())
+    }
+
     /// Check if MistralRs engine is available
     pub async fn has_mistralrs_engine(&self) -> bool {
         self.mistralrs_engine.read().await.is_some()
@@ -514,7 +624,9 @@ impl DistributedAICoordinator {
 
     /// Check if any inference engine is available
     pub async fn has_any_engine(&self) -> bool {
-        self.has_mistralrs_engine().await || self.has_local_engine().await
+        self.inference_engine.read().await.is_some()
+            || self.has_mistralrs_engine().await
+            || self.has_local_engine().await
     }
 
     /// Start heartbeat loop - FLAW #1 FIX: Sends heartbeat every 10 seconds
@@ -968,7 +1080,22 @@ impl DistributedAICoordinator {
             AIMessagePayload::InferenceError { request_id, worker_node_id, code, message: error_msg } => {
                 self.handle_inference_error(request_id, worker_node_id, code, error_msg).await?;
             }
-            _ => {}
+            // v5.1.0: RPC worker pipeline parallelism messages
+            AIMessagePayload::RpcWorkerAvailable { peer_id, host, port, available_memory_gb } => {
+                let info = RpcWorkerInfo {
+                    peer_id: peer_id.clone(),
+                    host,
+                    port,
+                    available_memory_gb,
+                    is_local: false,
+                    status: WorkerStatus::Ready,
+                };
+                self.register_rpc_worker(info).await;
+            }
+            AIMessagePayload::RpcWorkerStopped { peer_id } => {
+                self.remove_rpc_worker(&peer_id).await;
+            }
+            _ => { /* v6.0.0: Decentralized AI messages handled by dedicated protocol */ }
         }
 
         Ok(())
@@ -3324,17 +3451,122 @@ impl DistributedAICoordinator {
         temperature: Option<f64>,
         model: String,
     ) -> Result<(String, mpsc::UnboundedReceiver<StreamEvent>, String)> {
-        // v1.4.4-beta FIX: ALWAYS prefer local inference when engine is available
-        // This prevents blocking on remote workers that may not have AI capability
-        // or may be slow to respond. Local inference is fast and reliable.
+        // v5.1.0: Check for available RPC workers for distributed inference
+        let rpc_worker_count = self.ready_rpc_worker_count().await;
+        if rpc_worker_count > 0 {
+            if let Some(rpc_arg) = self.build_rpc_arg().await {
+                info!("🌐 [RPC-DISTRIBUTED] {} RPC workers available: {}", rpc_worker_count, rpc_arg);
+                // Note: When LlamaCppEngine is constructed with rpc_servers config,
+                // it passes --rpc to llama.cpp which auto-distributes layers.
+                // The actual distributed loading happens at model init time, not per-request.
+                // For now, log and proceed with local engine (which may already have RPC backends).
+            }
+        }
+
+        // v5.1.0: Try unified inference engine first (supports llama-cpp-2 + mistral.rs)
+        let engine_lock = self.inference_engine.read().await;
+        if let Some(ref engine) = *engine_lock {
+            info!("🚀 [LOCAL-FIRST] Using {} for fast inference (+ {} RPC workers)",
+                  engine.engine_name(), rpc_worker_count);
+
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (coord_tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
+            let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<q_ai_inference::StreamEvent>();
+
+            // Send started event
+            let _ = coord_tx.send(StreamEvent {
+                request_id: request_id.clone(),
+                event: StreamEventKind::Started { worker_node_id: self.node_id.clone() },
+            });
+
+            let max_tokens_val = max_tokens.unwrap_or(100);
+            let request_id_clone = request_id.clone();
+            let coord_tx_clone = coord_tx.clone();
+
+            // Spawn token forwarding task (converts InferenceEngine events to coordinator events)
+            // v5.1.0: Also collects tokens for proof-of-inference submission
+            let fwd_handle = tokio::spawn(async move {
+                let mut collected_tokens: Vec<String> = Vec::new();
+                while let Some(event) = token_rx.recv().await {
+                    match event {
+                        q_ai_inference::StreamEvent::Token(token_text) => {
+                            collected_tokens.push(token_text.clone());
+                            let _ = coord_tx_clone.send(StreamEvent {
+                                request_id: request_id_clone.clone(),
+                                event: StreamEventKind::Token { token: token_text, token_index: 0 },
+                            });
+                        }
+                        q_ai_inference::StreamEvent::Progress(msg) => {
+                            debug!("🔄 [LOCAL-FIRST] Progress: {}", msg);
+                        }
+                        q_ai_inference::StreamEvent::Complete(stats) => {
+                            let _ = coord_tx_clone.send(StreamEvent {
+                                request_id: request_id_clone.clone(),
+                                event: StreamEventKind::Complete {
+                                    finish_reason: "stop".to_string(),
+                                    tokens_generated: stats.tokens_generated,
+                                    total_time_ms: stats.total_time_ms as u64,
+                                },
+                            });
+                            info!("✅ [LOCAL-FIRST] Complete: {} tokens at {:.1} tok/s",
+                                  stats.tokens_generated, stats.tokens_per_second);
+                        }
+                        q_ai_inference::StreamEvent::Error(msg) => {
+                            let _ = coord_tx_clone.send(StreamEvent {
+                                request_id: request_id_clone.clone(),
+                                event: StreamEventKind::Error { code: "LOCAL_ERROR".to_string(), message: msg },
+                            });
+                        }
+                    }
+                }
+                collected_tokens
+            });
+
+            let gen_start_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            // Run generation via InferenceEngine trait (channel-based)
+            let result = engine.generate_stream(&prompt, max_tokens_val, token_tx).await;
+            if let Err(e) = result {
+                error!("❌ [LOCAL-FIRST] Generation failed: {}", e);
+            }
+
+            // Collect tokens from forwarding task for proof submission
+            let collected_tokens = fwd_handle.await.unwrap_or_default();
+
+            // v5.1.0: Submit proof of inference for QUG rewards
+            if !collected_tokens.is_empty() {
+                let gen_end_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                if let Err(e) = self.submit_inference_proof(
+                    &request_id,
+                    &collected_tokens,
+                    &model,
+                    gen_start_ms,
+                    gen_end_ms,
+                ).await {
+                    warn!("⚠️ Failed to submit inference proof: {}", e);
+                }
+            }
+
+            drop(engine_lock);
+            return Ok((request_id, rx, self.node_id.clone()));
+        }
+        drop(engine_lock);
+
+        // Fallback: Try legacy mistralrs_engine
         let mistralrs_lock = self.mistralrs_engine.read().await;
         if let Some(ref engine) = *mistralrs_lock {
-            info!("🚀 [LOCAL-FIRST] Using LOCAL MistralRsEngine for fast inference");
+            info!("🚀 [LEGACY-FALLBACK] Using legacy MistralRsEngine for inference");
 
             let request_id = uuid::Uuid::new_v4().to_string();
             let (tx, rx) = mpsc::unbounded_channel::<StreamEvent>();
 
-            // Send started event
             let _ = tx.send(StreamEvent {
                 request_id: request_id.clone(),
                 event: StreamEventKind::Started { worker_node_id: self.node_id.clone() },
@@ -3359,7 +3591,7 @@ impl DistributedAICoordinator {
                                 });
                             }
                             q_ai_inference::StreamEvent::Progress(msg) => {
-                                debug!("🔄 [LOCAL-FIRST] Progress: {}", msg);
+                                debug!("🔄 [LEGACY-FALLBACK] Progress: {}", msg);
                             }
                             q_ai_inference::StreamEvent::Complete(stats) => {
                                 let _ = tx_inner.send(StreamEvent {
@@ -3370,7 +3602,7 @@ impl DistributedAICoordinator {
                                         total_time_ms: stats.total_time_ms as u64,
                                     },
                                 });
-                                info!("✅ [LOCAL-FIRST] Complete: {} tokens at {:.1} tok/s",
+                                info!("✅ [LEGACY-FALLBACK] Complete: {} tokens at {:.1} tok/s",
                                       stats.tokens_generated, stats.tokens_per_second);
                             }
                             q_ai_inference::StreamEvent::Error(msg) => {
@@ -3386,7 +3618,7 @@ impl DistributedAICoordinator {
             ).await;
 
             if let Err(e) = result {
-                error!("❌ [LOCAL-FIRST] Generation failed: {}", e);
+                error!("❌ [LEGACY-FALLBACK] Generation failed: {}", e);
             }
             drop(mistralrs_lock);
             return Ok((request_id, rx, self.node_id.clone()));

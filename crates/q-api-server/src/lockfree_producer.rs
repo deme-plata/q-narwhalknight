@@ -175,6 +175,11 @@ pub enum ProducerCommand {
         tx_status: Arc<dashmap::DashMap<q_types::TxHash, q_types::TxStatus>>,
     },
 
+    /// 💰 v7.1.5: Set configurable dev fee (shared atomic)
+    SetDevFeeBps {
+        dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
+    },
+
     /// Shutdown the producer task gracefully
     Shutdown,
 }
@@ -392,6 +397,10 @@ impl LockFreeProducer {
                         "📦 Producer #{}: Transaction status tracker set for P2P confirmations",
                         producer_id
                     );
+                }
+
+                ProducerCommand::SetDevFeeBps { dev_fee_bps } => {
+                    producer.set_dev_fee_bps(dev_fee_bps);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -647,6 +656,11 @@ impl LockFreeProducer {
                         "📦 Producer #{}: Transaction status tracker set for P2P confirmations (storage loop)",
                         producer_id
                     );
+                }
+
+                ProducerCommand::SetDevFeeBps { dev_fee_bps } => {
+                    producer.set_dev_fee_bps(dev_fee_bps);
+                    info!("💰 Producer #{}: Dev fee BPS updated (storage loop)", producer_id);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -1110,6 +1124,11 @@ impl LockFreeProducer {
         }
     }
 
+    /// 💰 v7.1.5: Set configurable dev fee
+    pub fn set_dev_fee_bps(&self, dev_fee_bps: Arc<std::sync::atomic::AtomicU64>) {
+        let _ = self.command_tx.try_send(ProducerCommand::SetDevFeeBps { dev_fee_bps });
+    }
+
     /// Shutdown producer gracefully
     pub fn shutdown(&self) {
         let _ = self.command_tx.try_send(ProducerCommand::Shutdown);
@@ -1315,8 +1334,18 @@ impl LockFreeProducerPool {
 
         let mut blocks = Vec::new();
 
+        // 🔄 v7.1.4: ROTATE START PRODUCER to prevent producer #0 monopoly
+        // Previous bug: Always iterating from producer #0 meant producer #0 was checked first,
+        // its timer was always elapsed (reset by set_latest_block from P2P blocks), and it
+        // always produced, causing `break` before producer #1 was ever checked.
+        // Fix: Rotate the starting producer each round so both get fair turns.
+        let start_index = self.round_robin_index.fetch_add(0, Ordering::SeqCst) % self.num_producers;
+
         // Query each producer via channel (NO LOCKS!)
-        for (producer_id, producer) in self.producers.iter().enumerate() {
+        for offset in 0..self.num_producers {
+            let producer_id = (start_index + offset) % self.num_producers;
+            let producer = &self.producers[producer_id];
+
             // ✅ v1.0.13-beta: Handle Result type from should_produce()
             match producer.should_produce().await {
                 Ok(true) => {
@@ -1700,7 +1729,21 @@ impl LockFreeProducerPool {
             highest_height
         );
 
-        match storage.get_qblock_by_height(highest_height).await? {
+        // v7.3.4: Handle decompression errors gracefully instead of propagating.
+        // If the block can't be deserialized/decompressed, fall through to height-only mode
+        // rather than aborting the entire sync (which prevents height advancement and stalls production).
+        let block_result = match storage.get_qblock_by_height(highest_height).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    "⚠️  [LOCK-FREE SYNC] Failed to load block at height {}: {} — using height-only mode",
+                    highest_height, e
+                );
+                None
+            }
+        };
+
+        match block_result {
             Some(latest_block) => {
                 let new_height = latest_block.header.height;
                 let new_hash = latest_block.calculate_hash();
@@ -1752,6 +1795,21 @@ impl LockFreeProducerPool {
                     }
                 }
 
+                // 🚨 v7.3.4 CRITICAL FIX: Reset pool_last_produced_height when storage height regresses.
+                // Without this, if block N+1 is produced but save_qblock() fails, storage stays at N
+                // but pool_last_produced_height stays at N+1. The pool-level duplicate check then
+                // permanently blocks all future block N+1 attempts: (N+1) <= pool_height(N+1) → POOL DUPLICATE.
+                // This is the SAME bug pattern as the per-producer STALL-FIX (block_producer.rs line 1992)
+                // but at the pool level.
+                let pool_height = self.pool_last_produced_height.load(Ordering::SeqCst);
+                if new_height < pool_height {
+                    warn!(
+                        "🔧 [POOL-STALL-FIX] Resetting stale pool_last_produced_height {} → {} (storage height regressed, likely unsaved block)",
+                        pool_height, new_height
+                    );
+                    self.pool_last_produced_height.store(new_height, Ordering::SeqCst);
+                }
+
                 info!(
                     "✅ [LOCK-FREE SYNC] All producers synchronized to height {} (ZERO LOCKS!)",
                     new_height
@@ -1777,6 +1835,16 @@ impl LockFreeProducerPool {
                         "   ⚠️  Lock-free producer #{} synchronized to height {} (height-only)",
                         i, highest_height
                     );
+                }
+
+                // 🚨 v7.3.4: Also reset pool_last_produced_height in height-only mode
+                let pool_height = self.pool_last_produced_height.load(Ordering::SeqCst);
+                if highest_height < pool_height {
+                    warn!(
+                        "🔧 [POOL-STALL-FIX] Resetting stale pool_last_produced_height {} → {} (height-only mode)",
+                        pool_height, highest_height
+                    );
+                    self.pool_last_produced_height.store(highest_height, Ordering::SeqCst);
                 }
 
                 info!("✅ [LOCK-FREE SYNC] All producers synchronized to height {} (height-only mode)", highest_height);
@@ -2087,6 +2155,14 @@ impl LockFreeProducerPool {
             producer.set_tx_status(tx_status.clone());
         }
         info!("✅ [TX-STATUS] Transaction status tracker sent to all producers - P2P transactions will be confirmed!");
+    }
+
+    /// 💰 v7.1.5: Set configurable dev fee across all producers
+    pub fn set_dev_fee_bps(&self, dev_fee_bps: Arc<std::sync::atomic::AtomicU64>) {
+        for producer in &self.producers {
+            producer.set_dev_fee_bps(dev_fee_bps.clone());
+        }
+        info!("💰 Dev fee BPS shared with all {} producers", self.num_producers);
     }
 
     /// Shutdown all producers gracefully

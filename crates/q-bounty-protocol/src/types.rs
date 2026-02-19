@@ -50,8 +50,9 @@ pub struct TestnetUser {
 /// Social account bindings for identity verification
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SocialAccounts {
-    /// GitHub username and OAuth token
-    pub github: Option<SocialBinding>,
+    /// code.quillon.xyz username and OAuth token
+    #[serde(alias = "github")]
+    pub code_quillon: Option<SocialBinding>,
 
     /// Twitter/X handle and OAuth token
     pub twitter: Option<SocialBinding>,
@@ -204,7 +205,9 @@ pub struct TransactionActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BugReport {
     pub user_id: Uuid,
-    pub github_issue_url: String,
+    /// URL to issue on code.quillon.xyz or any tracker
+    #[serde(alias = "github_issue_url")]
+    pub issue_url: String,
     pub severity: BugSeverity,
     pub status: BugStatus,
     pub bounty_awarded: u64,
@@ -296,7 +299,8 @@ pub struct SocialActivity {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SocialPlatform {
     Twitter,
-    GitHub,
+    #[serde(alias = "GitHub")]
+    CodeQuillon,
     Discord,
     Medium,
     YouTube,
@@ -310,8 +314,10 @@ pub enum SocialActivityType {
     Article,
     Video,
     DiscordMessage,
-    GitHubPR,
-    GitHubIssue,
+    #[serde(alias = "GitHubPR")]
+    MergeRequest,
+    #[serde(alias = "GitHubIssue")]
+    CodeIssue,
 }
 
 impl SocialActivityType {
@@ -323,8 +329,8 @@ impl SocialActivityType {
             SocialActivityType::Thread => 30.0,
             SocialActivityType::Tweet => 10.0,
             SocialActivityType::DiscordMessage => 5.0,
-            SocialActivityType::GitHubPR => 35.0,
-            SocialActivityType::GitHubIssue => 15.0,
+            SocialActivityType::MergeRequest => 35.0,
+            SocialActivityType::CodeIssue => 15.0,
         }
     }
 }

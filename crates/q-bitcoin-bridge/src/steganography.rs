@@ -127,7 +127,7 @@ async fn encode_distributed(
     let total_fragments = (data.len() + fragment_size - 1) / fragment_size;
 
     let mut fragments = Vec::new();
-    let mut rng = ChaCha20Rng::from_entropy();
+    let mut rng = ChaCha20Rng::from_rng(&mut rand::rng());
 
     for (i, chunk) in data.chunks(fragment_size).enumerate() {
         // Add noise to each fragment
@@ -224,7 +224,7 @@ async fn encode_timing_pattern(
 ) -> Result<SteganographicData> {
     // Use intervals between transactions to encode data
     let mut timing_intervals = Vec::new();
-    let mut rng = ChaCha20Rng::from_entropy();
+    let mut rng = ChaCha20Rng::from_rng(&mut rand::rng());
 
     for byte in data {
         // Map byte value to timing interval
@@ -419,7 +419,7 @@ pub async fn generate_cover_traffic() -> Result<Vec<Transaction>> {
     // This helps hide the real steganographic transactions among normal traffic
 
     let mut cover_transactions = Vec::new();
-    let mut rng = ChaCha20Rng::from_entropy();
+    let mut rng = ChaCha20Rng::from_rng(&mut rand::rng());
 
     // Generate 3-7 cover transactions
     let num_cover = rng.gen_range(3..=7);

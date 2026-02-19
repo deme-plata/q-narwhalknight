@@ -115,6 +115,79 @@ pub struct VaultFulfillRequest {
     pub status: String,
 }
 
+// ============================================================================
+// v5.1.0: FORGE RWA Token — Physical Mining Machine Redemption System
+// ============================================================================
+
+/// A redemption request for a physical Quillon Forge mining machine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgeRedemption {
+    pub redemption_id: String,
+    pub buyer_wallet: String,
+    pub shipping_name: String,
+    pub shipping_address: String,
+    pub city: String,
+    pub state_province: String,
+    pub zip: String,
+    pub country: String,
+    pub phone: String,
+    pub email: String,
+    /// CPU configuration: "epyc-9755-dual" or "xeon-w9-3595x-dual"
+    pub cpu_config: String,
+    /// GPU configuration: "none", "rtx-5090-dual", "a100-dual", "l40-quad"
+    pub gpu_config: String,
+    /// Cooling type: "liquid-copper" (default), "air-cooled"
+    pub cooling_type: String,
+    /// RAM amount in GB: 512, 1024, 2048
+    pub ram_gb: u32,
+    /// Storage configuration: "nvme-4tb-raid1" (default), "nvme-8tb-raid1"
+    pub storage_config: String,
+    /// NIC: "100gbe" (default), "25gbe"
+    pub nic_config: String,
+    /// Chassis color: "titanium-copper" (default), "obsidian-black", "arctic-white"
+    pub chassis_color: String,
+    pub quantity: u32,
+    pub status: String, // "pending", "configured", "assembling", "testing", "shipped", "delivered"
+    pub tracking_number: Option<String>,
+    pub serial_number: Option<String>,
+    /// Unique machine ID burned into firmware
+    pub machine_id: Option<String>,
+    /// Hardware attestation key for proof-of-work validation
+    pub attestation_pubkey: Option<String>,
+    pub created_at: u64,
+    pub fulfilled_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgeRedeemRequest {
+    pub shipping_name: String,
+    pub shipping_address: String,
+    pub city: String,
+    pub state_province: String,
+    pub zip: String,
+    pub country: String,
+    pub phone: String,
+    pub email: String,
+    pub cpu_config: Option<String>,
+    pub gpu_config: Option<String>,
+    pub cooling_type: Option<String>,
+    pub ram_gb: Option<u32>,
+    pub storage_config: Option<String>,
+    pub nic_config: Option<String>,
+    pub chassis_color: Option<String>,
+    pub quantity: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgeFulfillRequest {
+    pub redemption_id: String,
+    pub tracking_number: Option<String>,
+    pub serial_number: Option<String>,
+    pub machine_id: Option<String>,
+    pub attestation_pubkey: Option<String>,
+    pub status: String,
+}
+
 impl<T> ApiResponse<T> {
     pub fn success(data: T) -> Self {
         Self {
@@ -133,6 +206,81 @@ impl<T> ApiResponse<T> {
             timestamp: current_timestamp(),
         }
     }
+}
+
+// ============================================================================
+// v6.5.0: RWA Persistence Helpers (Vault, Forge redemptions → RocksDB)
+// ============================================================================
+
+const VAULT_REDEMPTION_PREFIX: &str = "vault_redemption_";
+const FORGE_REDEMPTION_PREFIX: &str = "forge_redemption_";
+
+async fn persist_vault_redemption(state: &AppState, redemption: &VaultRedemption) {
+    let key = format!("{}{}", VAULT_REDEMPTION_PREFIX, redemption.redemption_id);
+    match serde_json::to_vec(redemption) {
+        Ok(data) => {
+            let kv = state.storage_engine.get_kv();
+            if let Err(e) = kv.put_sync(q_storage::CF_MANIFEST, key.as_bytes(), &data).await {
+                tracing::warn!("Failed to persist vault redemption {}: {}", redemption.redemption_id, e);
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize vault redemption: {}", e),
+    }
+}
+
+async fn persist_forge_redemption(state: &AppState, redemption: &ForgeRedemption) {
+    let key = format!("{}{}", FORGE_REDEMPTION_PREFIX, redemption.redemption_id);
+    match serde_json::to_vec(redemption) {
+        Ok(data) => {
+            let kv = state.storage_engine.get_kv();
+            if let Err(e) = kv.put_sync(q_storage::CF_MANIFEST, key.as_bytes(), &data).await {
+                tracing::warn!("Failed to persist forge redemption {}: {}", redemption.redemption_id, e);
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize forge redemption: {}", e),
+    }
+}
+
+pub async fn load_vault_redemptions_from_db(state: &AppState) -> Vec<VaultRedemption> {
+    let mut redemptions = Vec::new();
+    let prefix = VAULT_REDEMPTION_PREFIX.as_bytes();
+    let kv = state.storage_engine.get_kv();
+
+    match kv.scan_prefix(q_storage::CF_MANIFEST, prefix).await {
+        Ok(entries) => {
+            for (_key, value) in entries {
+                match serde_json::from_slice::<VaultRedemption>(&value) {
+                    Ok(r) => redemptions.push(r),
+                    Err(e) => tracing::warn!("Failed to deserialize vault redemption: {}", e),
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Failed to load vault redemptions from DB: {}", e),
+    }
+
+    redemptions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    redemptions
+}
+
+pub async fn load_forge_redemptions_from_db(state: &AppState) -> Vec<ForgeRedemption> {
+    let mut redemptions = Vec::new();
+    let prefix = FORGE_REDEMPTION_PREFIX.as_bytes();
+    let kv = state.storage_engine.get_kv();
+
+    match kv.scan_prefix(q_storage::CF_MANIFEST, prefix).await {
+        Ok(entries) => {
+            for (_key, value) in entries {
+                match serde_json::from_slice::<ForgeRedemption>(&value) {
+                    Ok(r) => redemptions.push(r),
+                    Err(e) => tracing::warn!("Failed to deserialize forge redemption: {}", e),
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Failed to load forge redemptions from DB: {}", e),
+    }
+
+    redemptions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    redemptions
 }
 
 /// Contract deployment request from frontend
@@ -335,6 +483,18 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/vault/redemptions", get(vault_get_redemptions))
         .route("/vault/fulfill", post(vault_fulfill))
         .route("/vault/stats", get(vault_get_stats))
+        // v5.1.0: FORGE RWA Physical Mining Machine Redemption endpoints
+        .route("/forge/redeem", post(forge_redeem))
+        .route("/forge/redemptions", get(forge_get_redemptions))
+        .route("/forge/fulfill", post(forge_fulfill))
+        .route("/forge/stats", get(forge_get_stats))
+        // v6.5.0: Exchange Listing RWA Package endpoints
+        .route("/listing/packages", get(crate::listing_api::listing_get_packages))
+        .route("/listing/purchase", post(crate::listing_api::listing_purchase))
+        .route("/listing/orders", get(crate::listing_api::listing_get_orders))
+        .route("/listing/fulfill", post(crate::listing_api::listing_fulfill))
+        .route("/listing/stats", get(crate::listing_api::listing_get_stats))
+        .route("/listing/confirm-stripe", post(crate::listing_api::listing_confirm_stripe))
 }
 
 /// Get all available contract templates
@@ -444,9 +604,15 @@ pub async fn get_deployment_form(
     }
 }
 
+/// v5.1.0: Per-wallet deployment rate limit (max 5 deploys per hour)
+static DEPLOY_RATE_LIMITS: once_cell::sync::Lazy<dashmap::DashMap<[u8; 32], (u32, std::time::Instant)>> =
+    once_cell::sync::Lazy::new(|| dashmap::DashMap::new());
+
 /// Deploy a contract from frontend form
+/// v5.1.0: Now requires wallet authentication to prevent unauthorized deployments
 pub async fn deploy_contract(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
     Json(request): Json<DeploymentRequest>,
 ) -> Result<Json<ApiResponse<DeploymentStatusResponse>>, StatusCode> {
     // Parse contract type
@@ -460,6 +626,58 @@ pub async fn deploy_contract(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+
+    // 🔐 v5.1.0: Verify authenticated wallet matches deployer address
+    if auth.address != deployer {
+        tracing::warn!(
+            "🚫 [CONTRACT] Auth mismatch: authenticated as {} but deploying as {}",
+            hex::encode(auth.address),
+            hex::encode(deployer)
+        );
+        return Ok(Json(ApiResponse::error(
+            "Authenticated wallet does not match deployer address".to_string(),
+        )));
+    }
+
+    // 🔐 v5.1.0: Pre-check deployer balance BEFORE deployment (fail fast)
+    const DEPLOYMENT_COST_PRECHECK: u128 = 1_000_000_000_000_000_000_000_000; // 1 QUG
+    {
+        let wallet_balances = state.wallet_balances.read().await;
+        let balance = wallet_balances.get(&deployer).copied().unwrap_or(0);
+        if balance < DEPLOYMENT_COST_PRECHECK {
+            tracing::warn!(
+                "🚫 [CONTRACT] Insufficient balance for deployment: {} has {} QUG, needs 1 QUG",
+                hex::encode(deployer),
+                balance as f64 / 1e24
+            );
+            return Ok(Json(ApiResponse::error(
+                "Insufficient balance: deployment requires 1 QUG".to_string(),
+            )));
+        }
+    }
+
+    // 🔐 v5.1.0: Deployment rate limit - max 5 per wallet per hour
+    {
+        let now = std::time::Instant::now();
+        let mut entry = DEPLOY_RATE_LIMITS.entry(deployer).or_insert((0, now));
+        let (count, window_start) = entry.value_mut();
+        if now.duration_since(*window_start).as_secs() > 3600 {
+            // Reset window
+            *count = 1;
+            *window_start = now;
+        } else if *count >= 5 {
+            tracing::warn!(
+                "🚫 [CONTRACT] Rate limit exceeded: {} has deployed {} times this hour",
+                hex::encode(deployer),
+                count
+            );
+            return Ok(Json(ApiResponse::error(
+                "Deployment rate limit exceeded: max 5 per hour".to_string(),
+            )));
+        } else {
+            *count += 1;
+        }
+    }
 
     // Convert deployment options
     let deployment_options = request
@@ -514,6 +732,46 @@ pub async fn deploy_contract(
                             hex::encode(deployer),
                             *balance as f64 / 1e24
                         );
+
+                        // v7.4.1: Credit deployment fee to founder wallet (previously burned!)
+                        // Split between founder and node operator based on promille setting
+                        {
+                            let operator_promille = state.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed) as u128;
+                            let operator_share = if operator_promille > 0 {
+                                DEPLOYMENT_COST.saturating_mul(operator_promille) / 1000
+                            } else { 0 };
+                            let founder_share = DEPLOYMENT_COST.saturating_sub(operator_share);
+
+                            // Credit founder
+                            if founder_share > 0 {
+                                let founder_addr = {
+                                    let mut addr = [0u8; 32];
+                                    if let Ok(bytes) = hex::decode(crate::aegis_auth_middleware::FOUNDER_WALLET) {
+                                        if bytes.len() == 32 { addr.copy_from_slice(&bytes); }
+                                    }
+                                    addr
+                                };
+                                let old = wallet_balances.get(&founder_addr).copied().unwrap_or(0);
+                                wallet_balances.insert(founder_addr, old + founder_share);
+                                tracing::info!(
+                                    "💰 Deployment fee credited to founder: {} QUG (total: {} QUG)",
+                                    founder_share as f64 / 1e24,
+                                    (old + founder_share) as f64 / 1e24
+                                );
+                            }
+
+                            // Credit node operator
+                            if operator_share > 0 {
+                                if let Ok(op_bytes) = hex::decode(&state.admin_wallet) {
+                                    if op_bytes.len() == 32 {
+                                        let mut op_addr = [0u8; 32];
+                                        op_addr.copy_from_slice(&op_bytes);
+                                        let old = wallet_balances.get(&op_addr).copied().unwrap_or(0);
+                                        wallet_balances.insert(op_addr, old + operator_share);
+                                    }
+                                }
+                            }
+                        }
 
                         // ============================================================================
                         // 📡 v1.0.91-beta: PROPER CONTRACT DEPLOYMENT TRANSACTION HANDLING
@@ -865,7 +1123,7 @@ pub async fn deploy_contract(
 /// Get deployment status
 pub async fn get_deployment_status(
     Path(request_id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DeploymentStatusResponse>>, StatusCode> {
     // For now, return a mock successful deployment
     // In production, this would query the actual deployment status
@@ -969,8 +1227,8 @@ pub async fn get_user_contracts(
 
 /// Get all contracts with optional filtering
 pub async fn get_contracts(
-    Query(query): Query<ContractQuery>,
-    State(state): State<Arc<AppState>>,
+    Query(_query): Query<ContractQuery>,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Vec<ContractInfo>>>, StatusCode> {
     // Implementation would filter based on query parameters
     // For now, return empty list
@@ -1316,8 +1574,8 @@ pub async fn interact_with_contract(
 
 /// Get user's deployment history
 pub async fn get_user_deployments(
-    Path(address): Path<String>,
-    State(state): State<Arc<AppState>>,
+    Path(_address): Path<String>,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Vec<DeploymentStatusResponse>>>, StatusCode> {
     // Implementation would return deployment history
     // For now, return empty list
@@ -2884,7 +3142,7 @@ pub async fn update_social_profile(
 
     // Broadcast via gossipsub to sync across nodes
     if let Some(tx) = &state.libp2p_command_tx {
-        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "testnet-phase16".to_string());
+        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
         let topic = format!("/qnk/{}/token-social", network_id);
 
         let message = serde_json::json!({
@@ -3364,6 +3622,9 @@ pub async fn vault_redeem(
         redemptions.push(redemption.clone());
     }
 
+    // Persist to RocksDB
+    persist_vault_redemption(&state, &redemption).await;
+
     tracing::info!(
         "📦 [VAULT] Redemption {} created: {} device(s), color: {}, wallet: qnk{}",
         redemption_id, quantity, redemption.color_variant, &wallet_hex[..16]
@@ -3444,6 +3705,12 @@ pub async fn vault_fulfill(
             redemption.fulfilled_at = Some(chrono::Utc::now().timestamp() as u64);
         }
 
+        let redemption_clone = redemption.clone();
+        drop(redemptions);
+
+        // Persist updated redemption to RocksDB
+        persist_vault_redemption(&state, &redemption_clone).await;
+
         tracing::info!(
             "📦 [VAULT] Redemption {} updated: status={}, tracking={:?}, serial={:?}",
             request.redemption_id, request.status, request.tracking_number, request.serial_number
@@ -3500,6 +3767,299 @@ pub async fn vault_get_stats(
             "processing": processing,
             "shipped": shipped,
             "delivered": delivered,
+        }
+    }))))
+}
+
+// ============================================================================
+// v5.1.0: FORGE RWA Endpoints — Physical Mining Machine Redemption
+// ============================================================================
+
+/// POST /api/v1/contracts/forge/redeem — Burn 1 FORGE token and create mining machine order
+pub async fn forge_redeem(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ForgeRedeemRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+    let wallet_hex = hex::encode(wallet);
+    let quantity = request.quantity.unwrap_or(1).max(1);
+
+    // Check FORGE token balance
+    let forge_addr = q_types::FORGE_TOKEN_ADDRESS;
+    let balance_key = (wallet, forge_addr);
+
+    {
+        let token_balances = state.token_balances.read().await;
+        let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+        if current_balance < quantity as u128 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Insufficient FORGE balance. You have {}, need {} to redeem.",
+                current_balance, quantity
+            ))));
+        }
+    }
+
+    // Burn the tokens
+    {
+        let mut token_balances = state.token_balances.write().await;
+        if let Some(balance) = token_balances.get_mut(&balance_key) {
+            *balance -= quantity as u128;
+            tracing::info!(
+                "🔥 [FORGE] Burned {} FORGE token(s) from wallet {} (remaining: {})",
+                quantity, &wallet_hex[..16], *balance
+            );
+        }
+    }
+
+    // Persist burned balance
+    {
+        let token_balances = state.token_balances.read().await;
+        let new_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+        drop(token_balances);
+        if let Err(e) = state.storage_engine.save_token_balance(&wallet, &forge_addr, new_balance).await {
+            tracing::warn!("⚠️ [FORGE] Failed to persist burned balance: {}", e);
+        }
+    }
+
+    // Validate and default configuration options
+    let cpu_config = request.cpu_config.unwrap_or_else(|| "epyc-9755-dual".to_string());
+    let gpu_config = request.gpu_config.unwrap_or_else(|| "rtx-5090-dual".to_string());
+    let cooling_type = request.cooling_type.unwrap_or_else(|| "liquid-copper".to_string());
+    let ram_gb = request.ram_gb.unwrap_or(512);
+    let storage_config = request.storage_config.unwrap_or_else(|| "nvme-4tb-raid1".to_string());
+    let nic_config = request.nic_config.unwrap_or_else(|| "100gbe".to_string());
+    let chassis_color = request.chassis_color.unwrap_or_else(|| "titanium-copper".to_string());
+
+    // Validate CPU config
+    let valid_cpus = ["epyc-9755-dual", "epyc-9654-dual", "xeon-w9-3595x-dual"];
+    if !valid_cpus.contains(&cpu_config.as_str()) {
+        return Ok(Json(ApiResponse::error(format!(
+            "Invalid CPU config '{}'. Options: {:?}", cpu_config, valid_cpus
+        ))));
+    }
+
+    // Validate GPU config
+    let valid_gpus = ["none", "rtx-5090-dual", "rtx-5090-quad", "a100-dual", "l40-quad"];
+    if !valid_gpus.contains(&gpu_config.as_str()) {
+        return Ok(Json(ApiResponse::error(format!(
+            "Invalid GPU config '{}'. Options: {:?}", gpu_config, valid_gpus
+        ))));
+    }
+
+    // Create redemption order
+    let redemption_id = format!("FR-{}-{}", chrono::Utc::now().timestamp(), &wallet_hex[..8]);
+    let redemption = ForgeRedemption {
+        redemption_id: redemption_id.clone(),
+        buyer_wallet: format!("qnk{}", wallet_hex),
+        shipping_name: request.shipping_name,
+        shipping_address: request.shipping_address,
+        city: request.city,
+        state_province: request.state_province,
+        zip: request.zip,
+        country: request.country,
+        phone: request.phone,
+        email: request.email,
+        cpu_config: cpu_config.clone(),
+        gpu_config: gpu_config.clone(),
+        cooling_type,
+        ram_gb,
+        storage_config,
+        nic_config,
+        chassis_color,
+        quantity,
+        status: "pending".to_string(),
+        tracking_number: None,
+        serial_number: None,
+        machine_id: None,
+        attestation_pubkey: None,
+        created_at: chrono::Utc::now().timestamp() as u64,
+        fulfilled_at: None,
+    };
+
+    {
+        let mut redemptions = state.forge_redemptions.write().await;
+        redemptions.push(redemption.clone());
+    }
+
+    // Persist to RocksDB
+    persist_forge_redemption(&state, &redemption).await;
+
+    tracing::info!(
+        "⚒️ [FORGE] Redemption {} created: {} unit(s), CPU: {}, GPU: {}, wallet: qnk{}",
+        redemption_id, quantity, cpu_config, gpu_config, &wallet_hex[..16]
+    );
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "redemption_id": redemption_id,
+        "quantity": quantity,
+        "cpu_config": redemption.cpu_config,
+        "gpu_config": redemption.gpu_config,
+        "ram_gb": redemption.ram_gb,
+        "status": "pending",
+        "message": format!("Successfully burned {} FORGE token(s). Your Quillon Forge mining machine order has been placed.", quantity)
+    }))))
+}
+
+/// GET /api/v1/contracts/forge/redemptions — Get all Forge redemptions (admin) or user's own
+pub async fn forge_get_redemptions(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+    let wallet_hex = hex::encode(wallet);
+    let is_admin = wallet == q_types::BANK_MASTER_ACCOUNT;
+
+    let redemptions = state.forge_redemptions.read().await;
+
+    let filtered: Vec<&ForgeRedemption> = if is_admin {
+        redemptions.iter().collect()
+    } else {
+        let full_addr = format!("qnk{}", wallet_hex);
+        redemptions.iter().filter(|r| r.buyer_wallet == full_addr).collect()
+    };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "redemptions": filtered,
+        "total": filtered.len(),
+        "is_admin": is_admin,
+    }))))
+}
+
+/// POST /api/v1/contracts/forge/fulfill — Admin updates Forge redemption status
+pub async fn forge_fulfill(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ForgeFulfillRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+
+    let operator_wallet_hex = "4fff16bc7d825a3d2e3ae0b15c6e70e91dc18dce1c55ec22543a8e4ae9e6c7b2";
+    let is_admin = wallet == q_types::BANK_MASTER_ACCOUNT
+        || hex::encode(wallet) == operator_wallet_hex;
+
+    if !is_admin {
+        return Ok(Json(ApiResponse::error(
+            "Only the FORGE admin can fulfill redemptions".to_string(),
+        )));
+    }
+
+    let valid_statuses = ["pending", "configured", "assembling", "testing", "shipped", "delivered"];
+    if !valid_statuses.contains(&request.status.as_str()) {
+        return Ok(Json(ApiResponse::error(format!(
+            "Invalid status '{}'. Must be one of: {:?}",
+            request.status, valid_statuses
+        ))));
+    }
+
+    let mut redemptions = state.forge_redemptions.write().await;
+    if let Some(redemption) = redemptions.iter_mut().find(|r| r.redemption_id == request.redemption_id) {
+        redemption.status = request.status.clone();
+        if let Some(ref tracking) = request.tracking_number {
+            redemption.tracking_number = Some(tracking.clone());
+        }
+        if let Some(ref serial) = request.serial_number {
+            redemption.serial_number = Some(serial.clone());
+        }
+        if let Some(ref machine_id) = request.machine_id {
+            redemption.machine_id = Some(machine_id.clone());
+        }
+        if let Some(ref attestation_pubkey) = request.attestation_pubkey {
+            redemption.attestation_pubkey = Some(attestation_pubkey.clone());
+        }
+        if request.status == "shipped" || request.status == "delivered" {
+            redemption.fulfilled_at = Some(chrono::Utc::now().timestamp() as u64);
+        }
+
+        let redemption_clone = redemption.clone();
+        drop(redemptions);
+
+        // Persist updated redemption to RocksDB
+        persist_forge_redemption(&state, &redemption_clone).await;
+
+        tracing::info!(
+            "⚒️ [FORGE] Redemption {} updated: status={}, machine_id={:?}, tracking={:?}",
+            request.redemption_id, request.status, request.machine_id, request.tracking_number
+        );
+
+        Ok(Json(ApiResponse::success(serde_json::json!({
+            "redemption_id": request.redemption_id,
+            "status": request.status,
+            "tracking_number": request.tracking_number,
+            "serial_number": request.serial_number,
+            "machine_id": request.machine_id,
+            "attestation_pubkey": request.attestation_pubkey,
+            "message": "Forge redemption updated successfully"
+        }))))
+    } else {
+        Ok(Json(ApiResponse::error(format!(
+            "Forge redemption '{}' not found",
+            request.redemption_id
+        ))))
+    }
+}
+
+/// GET /api/v1/contracts/forge/stats — Get FORGE token supply and machine statistics
+pub async fn forge_get_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let forge_addr = q_types::FORGE_TOKEN_ADDRESS;
+    let total_supply: u128 = 500; // Fixed supply: 500 Forge units
+
+    // Count circulating tokens
+    let token_balances = state.token_balances.read().await;
+    let circulating: u128 = token_balances.iter()
+        .filter(|((_, contract), _)| *contract == forge_addr)
+        .map(|(_, balance)| *balance)
+        .sum();
+
+    let burned = total_supply.saturating_sub(circulating);
+
+    // Count redemptions by status
+    let redemptions = state.forge_redemptions.read().await;
+    let pending = redemptions.iter().filter(|r| r.status == "pending").count();
+    let configured = redemptions.iter().filter(|r| r.status == "configured").count();
+    let assembling = redemptions.iter().filter(|r| r.status == "assembling").count();
+    let testing = redemptions.iter().filter(|r| r.status == "testing").count();
+    let shipped = redemptions.iter().filter(|r| r.status == "shipped").count();
+    let delivered = redemptions.iter().filter(|r| r.status == "delivered").count();
+    let total_redeemed: u32 = redemptions.iter().map(|r| r.quantity).sum();
+
+    // Count by CPU config
+    let epyc_count = redemptions.iter().filter(|r| r.cpu_config.contains("epyc")).count();
+    let xeon_count = redemptions.iter().filter(|r| r.cpu_config.contains("xeon")).count();
+
+    // Count by GPU config
+    let gpu_count = redemptions.iter().filter(|r| r.gpu_config != "none").count();
+    let total_cores: u64 = redemptions.iter().map(|r| {
+        match r.cpu_config.as_str() {
+            "epyc-9755-dual" => 256,
+            "epyc-9654-dual" => 192,
+            "xeon-w9-3595x-dual" => 120,
+            _ => 128,
+        }
+    }).sum();
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "total_supply": total_supply,
+        "circulating": circulating,
+        "burned": burned,
+        "remaining": circulating,
+        "redemptions": {
+            "total_orders": redemptions.len(),
+            "total_machines_redeemed": total_redeemed,
+            "pending": pending,
+            "configured": configured,
+            "assembling": assembling,
+            "testing": testing,
+            "shipped": shipped,
+            "delivered": delivered,
+        },
+        "fleet_stats": {
+            "total_cores_ordered": total_cores,
+            "epyc_configurations": epyc_count,
+            "xeon_configurations": xeon_count,
+            "gpu_equipped": gpu_count,
         }
     }))))
 }

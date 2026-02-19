@@ -3,6 +3,13 @@
 # [build]
 # rustflags = ["--cfg", "tokio_unstable"]
 
+# v7.4.3: target-cpu=native enables AVX2/AVX-512 SIMD for blake3 mining hash
+# This unlocks hardware-accelerated parallel hashing on modern CPUs
+# On AMD EPYC/Ryzen: AVX2 = 8-wide SIMD (2x throughput)
+# On Intel Xeon w/ AVX-512: 16-wide SIMD (4x throughput for blake3)
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
@@ -11,10 +18,13 @@ ar = "x86_64-w64-mingw32-ar"
 linker = "/opt/orobit/shared/q-narwhalknight/.cargo/lld-link-wrapper.sh"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
 [env]
 CC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-gcc"
 CXX_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-g++"
 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "x86_64-w64-mingw32-gcc"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
+CC_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-gcc"
+CXX_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-g++"
+PKG_CONFIG_ALLOW_CROSS = "1"

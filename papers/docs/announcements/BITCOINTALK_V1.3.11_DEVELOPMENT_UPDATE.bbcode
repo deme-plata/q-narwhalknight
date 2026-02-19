@@ -1,0 +1,253 @@
+[center][size=24pt][b][color=#2980b9]Q-NarwhalKnight v1.3.11-beta Development Update[/color][/b][/size]
+[i]December 2025 — Privacy by Default, Post-Quantum Security, and Network Performance[/i]
+
+[img]https://quillon.xyz/logo.png[/img]
+
+[url=https://quillon.xyz]Website[/url] | [url=https://code.quillon.xyz]Source Code[/url] | [url=https://api.quillon.xyz]API Documentation[/url]
+[/center]
+
+[hr]
+
+[size=18pt][b][color=#27ae60]The SEC Privacy Roundtable and Our Position[/color][/b][/size]
+
+On December 15, 2025, the SEC's Crypto Task Force held a historic roundtable on [b]"Financial Surveillance and Privacy"[/b] — the first time U.S. regulators have publicly treated crypto privacy as a legitimate policy discussion rather than just an enforcement target.
+
+[quote]"Protecting one's privacy should be the norm, not an indicator of criminal intent."
+[i]— SEC Commissioner Hester Peirce[/i][/quote]
+
+Q-NarwhalKnight was built on a single axiom:
+
+[center][b][size=14pt]No one should be forced to expose their economic life in order to participate in society.[/size][/b][/center]
+
+We reject "opt-in privacy" — it creates two classes of users: those who are [i]visible[/i] and those who are [i]suspicious[/i]. When privacy is optional, using it becomes a signal. Our approach:
+
+[list]
+[li][color=#2ecc71][b]✓[/b][/color] All transactions are private — no "transparent mode"[/li]
+[li][color=#2ecc71][b]✓[/b][/color] All balances are private — no public ledger exposure[/li]
+[li][color=#2ecc71][b]✓[/b][/color] All metadata is minimized — Tor integration, Dandelion++ gossip[/li]
+[li][color=#2ecc71][b]✓[/b][/color] Post-quantum by default — protecting against future threats[/li]
+[/list]
+
+[url=https://quillon.xyz/downloads/qnk-privacy-philosophy-whitepaper.pdf][b]Read the Privacy Philosophy Whitepaper[/b][/url]
+
+[hr]
+
+[size=18pt][b][color=#8e44ad]Technical Architecture Overview[/color][/b][/size]
+
+[b][color=#3498db]Five-Layer Privacy Architecture[/color][/b]
+
+[table]
+[tr][td][b]Layer[/b][/td][td][b]Protection[/b][/td][td][b]Implementation[/b][/td][/tr]
+[tr][td]1. Ledger[/td][td]Transaction Privacy[/td][td]Zero-knowledge proofs, Pedersen commitments, Ring signatures[/td][/tr]
+[tr][td]2. Network[/td][td]IP Anonymity[/td][td]Native Tor (arti), Dandelion++, Traffic shaping[/td][/tr]
+[tr][td]3. Wallet[/td][td]User Protection[/td][td]Automatic stealth addresses, Background churning[/td][/tr]
+[tr][td]4. Economic[/td][td]Market Privacy[/td][td]Private liquidity pools, Encrypted order books[/td][/tr]
+[tr][td]5. Governance[/td][td]Vote Privacy[/td][td]Anonymous ZK voting, Private delegation[/td][/tr]
+[/table]
+
+[b][color=#3498db]Post-Quantum Cryptography Stack[/color][/b]
+
+[table]
+[tr][td][b]Component[/b][/td][td][b]Algorithm[/b][/td][td][b]Security Level[/b][/td][/tr]
+[tr][td]Signatures[/td][td]SQIsign (204 bytes)[/td][td]NIST Level I[/td][/tr]
+[tr][td]Key Exchange[/td][td]Kyber-1024[/td][td]NIST Level V[/td][/tr]
+[tr][td]Hashing[/td][td]SHA3-256 + BLAKE3[/td][td]256-bit[/td][/tr]
+[tr][td]Commitments[/td][td]Pedersen[/td][td]Discrete Log[/td][/tr]
+[tr][td]Range Proofs[/td][td]Bulletproofs+[/td][td]128-bit[/td][/tr]
+[tr][td]Zero-Knowledge[/td][td]Circle STARKs[/td][td]Post-quantum[/td][/tr]
+[/table]
+
+The transition from Dilithium5 (Phase 1) to SQIsign (Phase 2) represents a [b]95.6% reduction in signature size[/b] while maintaining post-quantum security.
+
+[url=https://quillon.xyz/downloads/cryptography-improvements-whitepaper.pdf][b]Cryptography Whitepaper[/b][/url]
+
+[hr]
+
+[size=18pt][b][color=#e74c3c]Hashpower-Weighted Security Model[/color][/b][/size]
+
+Q-NarwhalKnight introduces a novel relationship between network mining power and cryptographic security:
+
+[b]1. Cumulative Work Security[/b]
+[code]
+Security_bits = log₂(total_network_work × difficulty_factor)
+
+Example at 1 PH/s:
+- log₂(10¹⁵ × 2⁵⁶) ≈ 106 bits of security
+- Comparable to well-established classical security levels
+[/code]
+
+[b]2. Adaptive VDF Complexity[/b]
+Verifiable Delay Function difficulty increases with network hashrate to prevent timing attacks:
+[code]
+VDF_iterations = base_iterations × (1 + hashrate_growth_factor)
+[/code]
+
+[b]3. Mining-Derived Randomness Beacon[/b]
+512-bit NIST-quality entropy from distributed proof-of-work:
+[code]
+beacon = SHA3-512(
+    block_hash₁ || ... || block_hashₙ ||
+    aggregate_nonces ||
+    previous_beacon
+)
+[/code]
+
+[url=https://quillon.xyz/downloads/qnk-hashpower-security-whitepaper.pdf][b]Hashpower Security Whitepaper[/b][/url]
+
+[hr]
+
+[size=18pt][b][color=#f39c12]Byzantine Fault Tolerance & Slashing[/color][/b][/size]
+
+Q-NarwhalKnight's DAG-Knight consensus provides:
+
+[list]
+[li][b]Safety Guarantee[/b]: n ≥ 3f + 1 validators (tolerating f Byzantine faults)[/li]
+[li][b]Finality[/b]: Sub-3-second deterministic finality[/li]
+[li][b]Zero-Message Complexity[/b]: Anchor election via VDF proofs[/li]
+[/list]
+
+[b]Slashing Severity Tiers:[/b]
+
+[table]
+[tr][td][b]Offense[/b][/td][td][b]Slash %[/b][/td][td][b]Cooldown[/b][/td][/tr]
+[tr][td]Double-signing at same height[/td][td]100%[/td][td]Permanent ban[/td][/tr]
+[tr][td]Double-voting in consensus round[/td][td]50%[/td][td]30 days[/td][/tr]
+[tr][td]Extended downtime (>24h)[/td][td]1%[/td][td]7 days[/td][/tr]
+[tr][td]Invalid block proposal[/td][td]5%[/td][td]14 days[/td][/tr]
+[/table]
+
+[b]Equivocation Proof Structure:[/b]
+[code]
+EquivocationProof {
+    validator_id: [u8; 32],
+    message_1: SignedMessage,
+    message_2: SignedMessage,
+    proof_type: DoubleSign | DoubleVote,
+    timestamp: u64,
+}
+[/code]
+
+[url=https://quillon.xyz/downloads/qnk-bft-slashing-whitepaper.pdf][b]BFT & Slashing Whitepaper[/b][/url]
+
+[hr]
+
+[size=18pt][b][color=#1abc9c]Integrated VM and Quantum DEX[/color][/b][/size]
+
+The Q-VM (Q-NarwhalKnight Virtual Machine) and Quantum DEX share unified state:
+
+[b]VM Features:[/b]
+[list]
+[li]Stack-based architecture with 256-bit word size[/li]
+[li]Deterministic gas metering[/li]
+[li]Native post-quantum signature verification opcodes[/li]
+[li]Atomic state transitions with DEX pools[/li]
+[/list]
+
+[b]Quantum DEX Features:[/b]
+[list]
+[li]Physics-inspired AMM with golden ratio optimization[/li]
+[li]Uncertainty-based pricing (Heisenberg model)[/li]
+[li]Private liquidity pools[/li]
+[li]MEV-resistant transaction ordering[/li]
+[/list]
+
+[b]Pricing Formula:[/b]
+[code]
+price = base_price × (1 + φ × volatility_factor) × uncertainty_premium
+
+Where:
+- φ = 1.618... (golden ratio)
+- volatility_factor = σ(recent_trades)
+- uncertainty_premium = quantum_state_contribution
+[/code]
+
+[url=https://quillon.xyz/downloads/q-narwhalknight-vm-dex-whitepaper.pdf][b]VM & DEX Whitepaper[/b][/url]
+
+[hr]
+
+[size=18pt][b][color=#9b59b6]v1.3.11-beta: TurboSync Fix[/color][/b][/size]
+
+[b]Root Cause Identified:[/b] Two competing sync systems were sending block requests simultaneously.
+
+[b]The Problem:[/b]
+[code]
+1. TurboSync (correct) → request_blocks_batch_async → pending_block_requests ✓
+2. Legacy sync (wrong) → request_blocks_from_peer → outstanding_sync_requests ✗
+
+Response handler looks in pending_block_requests
+→ Legacy requests never match
+→ "NO MATCHING REQUEST" warnings
+→ Sync falls back to slow HTTP (1.6 blocks/sec)
+[/code]
+
+[b]The Fix:[/b]
+Disabled all competing sync code paths:
+[list]
+[li][color=#2ecc71]✓[/color] Disabled GAP FILL sync (was calling request_blocks_from_peer)[/li]
+[li][color=#2ecc71]✓[/color] Disabled DISCOVERY sync (was testing peers with wrong function)[/li]
+[li][color=#2ecc71]✓[/color] Disabled FAST SYNC parallel requests[/li]
+[li][color=#2ecc71]✓[/color] Disabled check_and_sync_blocks loop[/li]
+[/list]
+
+[b]Result:[/b] Only TurboSync (sync_to_height) now handles synchronization with proper channel-based response delivery.
+
+[b]Expected Performance:[/b]
+[list]
+[li]P2P sync: ~100+ blocks/second[/li]
+[li]HTTP fallback (last resort): ~1.6 blocks/second[/li]
+[/list]
+
+[hr]
+
+[size=18pt][b][color=#2c3e50]Download & Run[/color][/b][/size]
+
+[b]Linux x86_64:[/b]
+[code]
+wget https://quillon.xyz/downloads/q-api-server-v1.3.11-beta
+chmod +x q-api-server-v1.3.11-beta
+./q-api-server-v1.3.11-beta --port 8080
+[/code]
+
+[b]Build from Source (macOS/Linux):[/b]
+[code]
+git clone https://code.quillon.xyz/repo.git q-narwhalknight
+cd q-narwhalknight
+cargo build --release --package q-api-server
+./target/release/q-api-server --port 8080
+[/code]
+
+[b]System Requirements:[/b]
+[table]
+[tr][td][/td][td][b]Minimum[/b][/td][td][b]Recommended[/b][/td][/tr]
+[tr][td]CPU[/td][td]4 cores @ 2.5GHz[/td][td]8+ cores @ 3.0GHz[/td][/tr]
+[tr][td]RAM[/td][td]8 GB[/td][td]32 GB[/td][/tr]
+[tr][td]Storage[/td][td]50 GB SSD[/td][td]500 GB NVMe[/td][/tr]
+[tr][td]Network[/td][td]10 Mbps[/td][td]100+ Mbps[/td][/tr]
+[/table]
+
+[hr]
+
+[size=18pt][b][color=#34495e]Whitepaper Collection[/color][/b][/size]
+
+[list]
+[li][url=https://quillon.xyz/downloads/qnk-privacy-philosophy-whitepaper.pdf]Privacy Philosophy[/url] — Why privacy is a human right, not a feature[/li]
+[li][url=https://quillon.xyz/downloads/qnk-hashpower-security-whitepaper.pdf]Hashpower Security[/url] — Mining power strengthening cryptographic security[/li]
+[li][url=https://quillon.xyz/downloads/qnk-bft-slashing-whitepaper.pdf]BFT & Slashing[/url] — Byzantine fault tolerance with economic accountability[/li]
+[li][url=https://quillon.xyz/downloads/cryptography-improvements-whitepaper.pdf]Cryptographic Architecture[/url] — Phase 1 through current implementations[/li]
+[li][url=https://quillon.xyz/downloads/q-narwhalknight-vm-dex-whitepaper.pdf]VM & DEX[/url] — Quantum-enhanced virtual machine and exchange[/li]
+[li][url=https://quillon.xyz/downloads/qnk-privacy-layer-whitepaper.pdf]Privacy Layer[/url] — Tor integration and network anonymity[/li]
+[li][url=https://quillon.xyz/downloads/quillon-libp2p-network-whitepaper.pdf]libp2p Networking[/url] — P2P architecture and gossipsub protocols[/li]
+[/list]
+
+[hr]
+
+[center]
+[size=14pt][i]"If privacy disappears, freedom follows.
+Q-NarwhalKnight exists so it does not."[/i][/size]
+
+[b]Website:[/b] [url]https://quillon.xyz[/url]
+[b]Source:[/b] [url]https://code.quillon.xyz[/url]
+[b]API:[/b] [url]https://api.quillon.xyz[/url]
+
+[i]December 2025 — Q-NarwhalKnight Development Team[/i]
+[/center]
